@@ -100,7 +100,33 @@ name): **`YYYY-Qn`** (e.g. `2026-Q2`). Never a bare `Qn`.
 
 invoice_id ↔ bank-feed `row_id`, state `matched` / `proposed` / `rejected`, decision
 author (`auto` / `operator`), rationale, and **`bankfeed_annotated: bool`** (see
-annotation protocol).
+annotation protocol). Alongside the `row_id`, each match snapshots the transaction's
+identifying facts (booking date, amount_minor, currency, direction, counterparty) so
+a match is auditable even if the row it targeted changes.
+
+**Cardinality invariants (server-enforced, not convention):**
+
+- At most one **active** (`matched` or `proposed`) match per transaction row, and at
+  most one active match per invoice, by default. The server rejects a second
+  `record_match`/`propose_match` that would violate either.
+- One-to-many cases (one invoice paid in installments, one payment covering several
+  invoices) are **explicit allocation groups**: a match group whose member
+  allocations must sum to the invoice amount (resp. the transaction amount); the
+  server validates the total and rejects partial or over-allocated groups.
+  Allocation groups are never created by auto-match — only via operator confirmation
+  or an explicit specialist rationale recorded on the group.
+
+**Row-id lifecycle (bank-feed supersession).** Bank-feed rows are not immortal: a
+sync can supersede a row (`state='superseded'`, `superseded_by` → new row; e.g.
+pending → booked), and bank-feed itself migrates tags and notes to the successor
+(verified: bank-feed `store.py` — apply_plan's supersede migration rewrites
+`row_id` on annotations). Match records must follow: the repair sweep's **step 0**
+re-resolves every active match's `row_id` via `get_transaction`; if the row is
+superseded, the match is atomically retargeted to the successor (snapshot facts
+re-verified against the new row — a booked amount correction that breaks the match
+demotes it to `proposed` with a residue line); if the row has `vanished`, the match
+reopens as `unmatched` and is reported. `list_transactions` filters to active rows,
+so without this step a superseded match would silently leave every worklist.
 
 ### Vendor KB
 
@@ -148,6 +174,9 @@ tool-list agreement (server, `provides_tools`, role allow-lists) with a CI check
 The plugin server cannot call bank-feed's tools, so the specialist performs both
 writes; the design makes the pair a tracked transaction rather than a convention:
 
+0. **Row-id re-resolution first**: every active match's `row_id` is re-resolved
+   against bank-feed (`get_transaction`); superseded rows retarget, vanished rows
+   reopen (see “Row-id lifecycle” above). Only then does annotation repair run.
 1. `record_match` / `confirm_match` store the match with `bankfeed_annotated: false`.
 2. The specialist writes the bank-feed side — `tag_transaction`
    (`acct:matched`, `acct:<YYYY-Qn>`; portal cases `acct:portal`; known no-invoice
@@ -169,7 +198,13 @@ Bank-feed may lag by at most one pass; it can never drift silently.
 1. **Repair sweep** (above), then Ellen delegates: “weekly pass, `<YYYY-Qn>` —
    report new transaction state and search plans.”
 2. **Specialist triage** over new DBIT transactions × invoice store × KB, reading
-   PDFs as needed. Returns a structured work order per transaction:
+   PDFs as needed. **Auto-match bar**: exact amount, invoice date within the window,
+   vendor consistent via KB — **and globally unambiguous**: if more than one
+   (transaction, invoice) pairing satisfies the bar within the pass's working set
+   (the classic case: two same-vendor, same-amount charges in one window), *none* of
+   the ambiguous pairings auto-match — all go `proposed` with the ambiguity stated,
+   so cross-matching two look-alike pairs can never happen silently. Returns a
+   structured work order per transaction:
    `matched` (recorded + annotated) / `proposed` / `portal` (tagged, link noted) /
    `none-expected` / `missing` with a **search plan carrying discriminators**, not
    just a query (“want €54.45 within ~10 days of May 6; ignore payment
@@ -203,10 +238,26 @@ with provenance. Every later quarter resolves instantly from the KB.
 ### Quarter-end pass (cron: 10th of Jan / Apr / Jul / Oct)
 
 Weekly-pass mechanics over the **full quarter**, one last residue conversation, then
-`build_quarterly_package("<YYYY-Qn>")`:
+`build_quarterly_package("<YYYY-Qn>")`.
+
+**Package membership is defined by the transaction's booking-date quarter, never by
+where an invoice file happens to be stored.** The invoice-date storage path
+(`invoices/<YYYY-Qn>/…`) is custodial only. The builder selects every transaction
+booked in the quarter and pulls each matched invoice PDF into the package regardless
+of its storage directory — so an invoice dated June 30 that pays a July 1 charge
+ships in the Q3 package (the cross-quarter case both reviewers flagged). An
+unmatched invoice appears in no package's `invoices/`; it is listed in `notes.md` of
+the quarter it was ingested in.
+
+**Every built package carries revision identity.** Builds of the same quarter get a
+monotonic revision (`r1`, `r2`, …) recorded in the workbook together with a content
+digest; the zip is named `<slug>-<YYYY-Qn>-r<N>.zip`, `notes.md` opens with
+`revision rN, supersedes rN-1, built <date>`, and the Telegram caption says the
+same — so a rebuilt-and-resent package is never confusable with the stale one it
+replaces at upload time.
 
 ```
-<slug>-<YYYY-Qn>.zip
+<slug>-<YYYY-Qn>-r<N>.zip
 ├── invoices/          # SnelStart bulk upload: YYYY-MM-DD_vendor_amount.pdf
 ├── ledger.xlsx        # full quarter, both directions: date, amount, currency,
 │                      # direction, counterparty, vendor, status,
@@ -216,8 +267,9 @@ Weekly-pass mechanics over the **full quarter**, one last residue conversation, 
 ```
 
 Missing invoices never block shipping: ledger rows read `MISSING` with the best
-available link; `notes.md` opens with the action list. The package build is
-deterministic and idempotent — “hold it”, supply stragglers, rebuild, resend is free.
+available link; `notes.md` opens with the action list (right after the revision
+line). The package build is deterministic and idempotent — “hold it”, supply
+stragglers, rebuild as `r<N+1>`, resend is free.
 Delivery: atomic write to the plugin outbox → `send_media(kind="zip")`
 (ha-casa-app#482) → operator's Telegram. The outbox copy is consumed on send (or
 reaped at 2 h); the canonical package stays in the data dir.
@@ -237,7 +289,10 @@ reaped at 2 h); the canonical package stays in the data dir.
 
 - Tools fail explicit and loud; no silent fallbacks.
 - Ingest idempotent by content hash; over-ingestion harmless by design.
-- Two-phase bank-feed annotation with start-of-pass repair sweep (above).
+- Two-phase bank-feed annotation with start-of-pass repair sweep, whose step 0
+  re-resolves superseded/vanished bank-feed rows before anything else (above).
+- Server-enforced cardinality: no second active match per invoice or transaction;
+  allocation groups validated by totals.
 - Ask-keyboards die on casa restart / timeout → state decays to `proposed`, never
   lost.
 - Casa restart mid-pass: workbook + store hold everything except the in-flight turn.
@@ -249,10 +304,14 @@ reaped at 2 h); the canonical package stays in the data dir.
   no casa runtime required (bank-feed's model).
 - A **fixture quarter** (synthetic transactions + synthetic PDFs) driving an
   end-to-end `build_quarterly_package` assertion: exact file set, ledger rows,
-  MISSING handling, zip layout.
+  MISSING handling, zip layout — including the red cases from spec review round 1:
+  a cross-quarter match (June invoice, July booking → ships in Q3's package), a
+  superseded `row_id` retargeted by sweep step 0, an ambiguous same-vendor
+  same-amount pair that must stay `proposed`, an allocation group whose totals
+  must validate, and revision monotonicity on rebuild.
 - Matching quality is LLM behavior, not unit-testable here: first real quarter runs
   `proposed`-heavy by design until the KB warms up; the auto-match bar (exact
-  amount + date window + vendor consistency via KB) keeps wrong-match risk asymmetric
+  amount + date window + vendor consistency via KB + global unambiguity) keeps wrong-match risk asymmetric
   in the safe direction (a missed match costs a residue line; a wrong match corrupts
   the books).
 
