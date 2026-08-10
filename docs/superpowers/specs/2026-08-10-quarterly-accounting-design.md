@@ -96,13 +96,39 @@ name): **`YYYY-Qn`** (e.g. `2026-Q2`). Never a bare `Qn`.
   message id / manual), extraction author, status
   (`unmatched` / `matched` / `irrelevant`).
 
-### Match records
+### Match records — a revisioned state machine, all mutations CAS
 
 invoice_id ↔ bank-feed `row_id`, state `matched` / `proposed` / `rejected`, decision
-author (`auto` / `operator`), rationale, and **`bankfeed_annotated: bool`** (see
-annotation protocol). Alongside the `row_id`, each match snapshots the transaction's
-identifying facts (booking date, amount_minor, currency, direction, counterparty) so
-a match is auditable even if the row it targeted changes.
+author (`auto` / `operator`), rationale. Alongside the `row_id`, each match
+snapshots the transaction's identifying facts (booking date, amount_minor, currency,
+direction, counterparty) so a match is auditable even if the row it targeted changes.
+
+**Every match carries a monotonic `revision`, bumped by every state change, and
+every mutating tool call takes `expected_revision` — the server rejects a stale
+mutation outright (compare-and-swap).** This is the single concurrency discipline;
+there are no unversioned flags. Consequences, each closing a reviewed failure path:
+
+- **Operator asks are bound to a revision.** A `[Confirm]` keyboard carries
+  (match_id, revision). If the match changed underneath — retargeted after a
+  bank-feed supersession, demoted on snapshot mismatch, superseded by a better
+  candidate — the stale tap is rejected by CAS and Ellen re-asks with current
+  facts. A confirmation can never land on a match that no longer means what the
+  operator saw. (Round-2 finding: stale Confirm re-confirming a demoted €100→€90
+  match.)
+- **Annotation is a state, not a boolean:** `annotation_state:
+  pending | clean | repair_owed`, part of the same revisioned record. Retarget,
+  demotion, and rejection set `repair_owed` together with the concrete repair
+  action (which tags to remove/replace, what correction note to append) in the
+  same CAS transition. The repair sweep processes `pending` and `repair_owed`
+  alike — migrated bank-feed tags can never silently keep asserting a match the
+  store has demoted. (Round-2 finding: demotion leaving `acct:matched` standing.)
+- **Match creation is preconditioned on a fresh row resolution.** The specialist
+  re-resolves the target row (`get_transaction`, state active) immediately before
+  `record_match`/`propose_match`, and passes the resolved snapshot; if a sweep
+  retarget later collides with a match already created on the successor row, the
+  server demotes **both** contenders to `proposed` with a residue line — never a
+  silent drop, never two matches on one economic transaction. (Round-2 finding:
+  retarget/new-match collision on the successor row.)
 
 **Cardinality invariants (server-enforced, not convention):**
 
@@ -113,8 +139,11 @@ a match is auditable even if the row it targeted changes.
   invoices) are **explicit allocation groups**: a match group whose member
   allocations must sum to the invoice amount (resp. the transaction amount); the
   server validates the total and rejects partial or over-allocated groups.
-  Allocation groups are never created by auto-match — only via operator confirmation
-  or an explicit specialist rationale recorded on the group.
+  Allocation groups are never created by auto-match, and **always require operator
+  confirmation**: a specialist-created group is `proposed` until the operator
+  confirms it — total arithmetic proves sums, not document relationship, so no
+  rationale bypasses review. (Round-2 finding: €40+€60 unrelated invoices passing
+  total validation against a €100 payment.)
 
 **Row-id lifecycle (bank-feed supersession).** Bank-feed rows are not immortal: a
 sync can supersede a row (`state='superseded'`, `superseded_by` → new row; e.g.
@@ -158,9 +187,10 @@ restart mid-pass loses only the in-flight turn.
 Ingest & curation: `ingest_invoice` (agent-extracted metadata as arguments),
 `update_invoice_metadata`, `mark_irrelevant`.
 Query: `list_unmatched_invoices`, `list_quarter_state` (includes repair-sweep view:
-matches with `bankfeed_annotated=false`), `get_vendor`.
+matches with `annotation_state` in `pending`/`repair_owed`), `get_vendor`.
 Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match`,
-`mark_annotated`.
+`mark_annotated` — every mutating match tool takes `expected_revision` (CAS; see
+the match-record state machine).
 KB: `upsert_vendor`.
 Packaging: `build_quarterly_package(quarter)`, `stage_for_delivery(target)` (copies
 an invoice PDF or the built package into casa's plugin outbox for `send_media`).
@@ -175,19 +205,24 @@ The plugin server cannot call bank-feed's tools, so the specialist performs both
 writes; the design makes the pair a tracked transaction rather than a convention:
 
 0. **Row-id re-resolution first**: every active match's `row_id` is re-resolved
-   against bank-feed (`get_transaction`); superseded rows retarget, vanished rows
-   reopen (see “Row-id lifecycle” above). Only then does annotation repair run.
-1. `record_match` / `confirm_match` store the match with `bankfeed_annotated: false`.
+   against bank-feed (`get_transaction`); superseded rows retarget (CAS, revision
+   bump, `annotation_state=repair_owed` with the concrete repair action), vanished
+   rows reopen (see the match-record state machine above). Only then does
+   annotation work run.
+1. `record_match` / `confirm_match` store the match with `annotation_state=pending`.
 2. The specialist writes the bank-feed side — `tag_transaction`
    (`acct:matched`, `acct:<YYYY-Qn>`; portal cases `acct:portal`; known no-invoice
    cases `acct:no-invoice-expected`; open cases `acct:pending`) and `add_note`
-   (`invoice: <filename>` or the portal link) — then calls `mark_annotated`.
-3. Every weekly pass **begins** with a repair sweep: `list_quarter_state` surfaces
-   any match still unannotated (e.g. a turn died between the writes) and the
-   specialist completes it before new work.
-4. `reject_match` / reassignment likewise: correcting tags plus an appended
-   correction note (bank-feed notes are append-only — honest audit trail), tracked
-   the same way.
+   (`invoice: <filename>` or the portal link) — then calls
+   `mark_annotated(match_id, expected_revision)` → `annotation_state=clean`.
+3. Every weekly pass **begins** with the repair sweep: `list_quarter_state`
+   surfaces every match with `annotation_state` in (`pending`, `repair_owed`) —
+   half-completed writes and demotion/retarget corrections alike — and the
+   specialist completes them before new work.
+4. `reject_match` / reassignment / demotion set `repair_owed` in the same CAS
+   transition that changes the state, recording exactly which tags to
+   remove/replace and the correction note to append (bank-feed notes are
+   append-only — honest audit trail).
 
 Bank-feed may lag by at most one pass; it can never drift silently.
 
@@ -199,11 +234,16 @@ Bank-feed may lag by at most one pass; it can never drift silently.
    report new transaction state and search plans.”
 2. **Specialist triage** over new DBIT transactions × invoice store × KB, reading
    PDFs as needed. **Auto-match bar**: exact amount, invoice date within the window,
-   vendor consistent via KB — **and globally unambiguous**: if more than one
-   (transaction, invoice) pairing satisfies the bar within the pass's working set
-   (the classic case: two same-vendor, same-amount charges in one window), *none* of
-   the ambiguous pairings auto-match — all go `proposed` with the ambiguity stated,
-   so cross-matching two look-alike pairs can never happen silently. Returns a
+   vendor consistent via KB — **and globally unambiguous over the QUARTER's working
+   set, not the pass's**: ambiguity is evaluated against all of the quarter's
+   transactions and invoices seen so far, so two same-vendor same-amount pairs
+   arriving in different weekly passes still count as ambiguous (round-2 finding:
+   staggered arrival silently cross-matching). A repeated vendor+amount pair may
+   only auto-match on a **transaction-specific discriminator** (invoice number in
+   the remittance, unique date adjacency); otherwise all candidate pairings go
+   `proposed` with the ambiguity stated. Existing confirmed matches are never
+   reopened by later arrivals — a new look-alike invoice makes the *new* pairing
+   proposed, flagged as a possible cross-match for the operator. Returns a
    structured work order per transaction:
    `matched` (recorded + annotated) / `proposed` / `portal` (tagged, link noted) /
    `none-expected` / `missing` with a **search plan carrying discriminators**, not
@@ -289,10 +329,15 @@ reaped at 2 h); the canonical package stays in the data dir.
 
 - Tools fail explicit and loud; no silent fallbacks.
 - Ingest idempotent by content hash; over-ingestion harmless by design.
+- All match mutations are CAS on the match `revision`; stale operator taps and
+  crossed writes are rejected, never absorbed. Ellen re-asks with current facts on
+  a CAS rejection of a keyboard answer.
 - Two-phase bank-feed annotation with start-of-pass repair sweep, whose step 0
-  re-resolves superseded/vanished bank-feed rows before anything else (above).
+  re-resolves superseded/vanished bank-feed rows before anything else; annotation
+  is a tracked state (`pending`/`clean`/`repair_owed`), never a boolean that
+  demotion could leave stale.
 - Server-enforced cardinality: no second active match per invoice or transaction;
-  allocation groups validated by totals.
+  allocation groups validated by totals and always operator-confirmed.
 - Ask-keyboards die on casa restart / timeout → state decays to `proposed`, never
   lost.
 - Casa restart mid-pass: workbook + store hold everything except the in-flight turn.
@@ -304,11 +349,16 @@ reaped at 2 h); the canonical package stays in the data dir.
   no casa runtime required (bank-feed's model).
 - A **fixture quarter** (synthetic transactions + synthetic PDFs) driving an
   end-to-end `build_quarterly_package` assertion: exact file set, ledger rows,
-  MISSING handling, zip layout — including the red cases from spec review round 1:
-  a cross-quarter match (June invoice, July booking → ships in Q3's package), a
-  superseded `row_id` retargeted by sweep step 0, an ambiguous same-vendor
-  same-amount pair that must stay `proposed`, an allocation group whose totals
-  must validate, and revision monotonicity on rebuild.
+  MISSING handling, zip layout — including the red cases from spec review rounds
+  1–2: a cross-quarter match (June invoice, July booking → ships in Q3's package);
+  a superseded `row_id` retargeted by sweep step 0; an ambiguous same-vendor
+  same-amount pair that must stay `proposed` **including when the pair arrives
+  across two passes**; a stale-revision `confirm_match` that must be rejected by
+  CAS; a demotion that must leave `annotation_state=repair_owed` (never a stale
+  `acct:matched`); a retarget colliding with a successor-row match (both demoted,
+  residue line emitted); an allocation group whose totals must validate and which
+  must stay `proposed` without operator confirmation; and package revision
+  monotonicity on rebuild.
 - Matching quality is LLM behavior, not unit-testable here: first real quarter runs
   `proposed`-heavy by design until the KB warms up; the auto-match bar (exact
   amount + date window + vendor consistency via KB + global unambiguity) keeps wrong-match risk asymmetric
