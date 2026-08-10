@@ -133,8 +133,12 @@ there are no unversioned flags. Consequences, each closing a reviewed failure pa
   retarget later collides with a match already created on the successor row, the
   server atomically moves **both** contenders to `conflicted` — a non-active
   state, so the one-active-match invariant is never violated by the collision
-  itself — with a residue line; the conflict is resolved only by explicit
-  reassignment. Never a silent drop, never two active matches on one economic
+  itself — **and sets both to `annotation_state=repair_owed` with concrete
+  cleanup actions in the same CAS transition** (a previously-`clean` contender's
+  bank-feed tags no longer reflect any active match and must be corrected; a
+  `conflicted`+`clean` record would otherwise be invisible to both worklists,
+  round-4 finding) — with a residue line; the conflict is resolved only by
+  explicit reassignment. Never a silent drop, never two active matches on one economic
   transaction. (Round-2 finding: retarget/new-match collision; round-3 finding:
   two active `proposed` would themselves have violated cardinality.)
 
@@ -373,7 +377,8 @@ reaped at 2 h); the canonical package stays in the data dir.
   across two passes**; a stale-revision `confirm_match` that must be rejected by
   CAS; a demotion that must leave `annotation_state=repair_owed` (never a stale
   `acct:matched`); a retarget colliding with a successor-row match (both moved to
-  non-active `conflicted`, residue line emitted, cardinality invariant intact); a
+  non-active `conflicted` and `repair_owed` in one transition — no
+  `conflicted`+`clean` record — residue line emitted, cardinality intact); a
   rejected match with `repair_owed` whose row is superseded before cleanup (repair
   rewritten to the live successor, stale tags corrected); an allocation group whose
   totals must validate and which must stay `proposed` without operator
