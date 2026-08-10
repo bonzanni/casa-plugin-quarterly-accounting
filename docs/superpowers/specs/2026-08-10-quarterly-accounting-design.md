@@ -98,8 +98,13 @@ name): **`YYYY-Qn`** (e.g. `2026-Q2`). Never a bare `Qn`.
 
 ### Match records — a revisioned state machine, all mutations CAS
 
-invoice_id ↔ bank-feed `row_id`, state `matched` / `proposed` / `rejected`, decision
-author (`auto` / `operator`), rationale. Alongside the `row_id`, each match
+invoice_id ↔ bank-feed `row_id`, state `matched` / `proposed` / `conflicted` /
+`rejected`, decision author (`auto` / `operator`), rationale. `matched` and
+`proposed` are the **active** states (they occupy cardinality slots and feed
+packaging); `conflicted` is non-active — it holds matches that lost a consistency
+race (see collision handling below), is always surfaced as residue, is excluded
+from packaging, and leaves the cardinality slot free; it exits only by explicit
+reassignment (specialist re-proposes or operator decides). Alongside the `row_id`, each match
 snapshots the transaction's identifying facts (booking date, amount_minor, currency,
 direction, counterparty) so a match is auditable even if the row it targeted changes.
 
@@ -126,9 +131,12 @@ there are no unversioned flags. Consequences, each closing a reviewed failure pa
   re-resolves the target row (`get_transaction`, state active) immediately before
   `record_match`/`propose_match`, and passes the resolved snapshot; if a sweep
   retarget later collides with a match already created on the successor row, the
-  server demotes **both** contenders to `proposed` with a residue line — never a
-  silent drop, never two matches on one economic transaction. (Round-2 finding:
-  retarget/new-match collision on the successor row.)
+  server atomically moves **both** contenders to `conflicted` — a non-active
+  state, so the one-active-match invariant is never violated by the collision
+  itself — with a residue line; the conflict is resolved only by explicit
+  reassignment. Never a silent drop, never two active matches on one economic
+  transaction. (Round-2 finding: retarget/new-match collision; round-3 finding:
+  two active `proposed` would themselves have violated cardinality.)
 
 **Cardinality invariants (server-enforced, not convention):**
 
@@ -204,11 +212,15 @@ tool-list agreement (server, `provides_tools`, role allow-lists) with a CI check
 The plugin server cannot call bank-feed's tools, so the specialist performs both
 writes; the design makes the pair a tracked transaction rather than a convention:
 
-0. **Row-id re-resolution first**: every active match's `row_id` is re-resolved
-   against bank-feed (`get_transaction`); superseded rows retarget (CAS, revision
-   bump, `annotation_state=repair_owed` with the concrete repair action), vanished
-   rows reopen (see the match-record state machine above). Only then does
-   annotation work run.
+0. **Row-id re-resolution first — scoped by annotation work, not match state**:
+   every record whose `annotation_state` is `pending` or `repair_owed` — active,
+   `conflicted`, or `rejected` alike — plus every active match, has its `row_id`
+   re-resolved against bank-feed (`get_transaction`). Superseded rows retarget
+   (CAS, revision bump), and any owed repair action is **rewritten to the live
+   successor row in the same CAS transition** — bank-feed refuses annotation
+   writes to a superseded row, so a repair left aimed at a dead row would fail
+   forever while the migrated stale tags keep asserting a match on the live row
+   (round-3 finding). Vanished rows reopen. Only then does annotation work run.
 1. `record_match` / `confirm_match` store the match with `annotation_state=pending`.
 2. The specialist writes the bank-feed side — `tag_transaction`
    (`acct:matched`, `acct:<YYYY-Qn>`; portal cases `acct:portal`; known no-invoice
@@ -289,12 +301,17 @@ ships in the Q3 package (the cross-quarter case both reviewers flagged). An
 unmatched invoice appears in no package's `invoices/`; it is listed in `notes.md` of
 the quarter it was ingested in.
 
-**Every built package carries revision identity.** Builds of the same quarter get a
-monotonic revision (`r1`, `r2`, …) recorded in the workbook together with a content
-digest; the zip is named `<slug>-<YYYY-Qn>-r<N>.zip`, `notes.md` opens with
-`revision rN, supersedes rN-1, built <date>`, and the Telegram caption says the
-same — so a rebuilt-and-resent package is never confusable with the stale one it
-replaces at upload time.
+**Every built package carries revision identity, and revisions are atomically
+reserved.** `build_quarterly_package` opens one store transaction that (a) reserves
+the next per-quarter revision number and (b) freezes the immutable match snapshot
+the build will render — before any file is written. The zip, its content digest,
+and the delivery record are all bound to that reservation, so two overlapping
+builds can never both claim `r2` and a correction landing mid-build can never leak
+into a zip labeled with the pre-correction revision (round-3 finding). The zip is
+named `<slug>-<YYYY-Qn>-r<N>.zip`, `notes.md` opens with `revision rN, supersedes
+rN-1, built <date>, digest <hash>`, and the Telegram caption says the same — a
+rebuilt-and-resent package is never confusable with the stale one it replaces at
+upload time.
 
 ```
 <slug>-<YYYY-Qn>-r<N>.zip
@@ -350,15 +367,18 @@ reaped at 2 h); the canonical package stays in the data dir.
 - A **fixture quarter** (synthetic transactions + synthetic PDFs) driving an
   end-to-end `build_quarterly_package` assertion: exact file set, ledger rows,
   MISSING handling, zip layout — including the red cases from spec review rounds
-  1–2: a cross-quarter match (June invoice, July booking → ships in Q3's package);
+  1–3: a cross-quarter match (June invoice, July booking → ships in Q3's package);
   a superseded `row_id` retargeted by sweep step 0; an ambiguous same-vendor
   same-amount pair that must stay `proposed` **including when the pair arrives
   across two passes**; a stale-revision `confirm_match` that must be rejected by
   CAS; a demotion that must leave `annotation_state=repair_owed` (never a stale
-  `acct:matched`); a retarget colliding with a successor-row match (both demoted,
-  residue line emitted); an allocation group whose totals must validate and which
-  must stay `proposed` without operator confirmation; and package revision
-  monotonicity on rebuild.
+  `acct:matched`); a retarget colliding with a successor-row match (both moved to
+  non-active `conflicted`, residue line emitted, cardinality invariant intact); a
+  rejected match with `repair_owed` whose row is superseded before cleanup (repair
+  rewritten to the live successor, stale tags corrected); an allocation group whose
+  totals must validate and which must stay `proposed` without operator
+  confirmation; and concurrent `build_quarterly_package` calls that must yield
+  distinct reserved revisions with snapshot-consistent contents.
 - Matching quality is LLM behavior, not unit-testable here: first real quarter runs
   `proposed`-heavy by design until the KB warms up; the auto-match bar (exact
   amount + date window + vendor consistency via KB + global unambiguity) keeps wrong-match risk asymmetric
