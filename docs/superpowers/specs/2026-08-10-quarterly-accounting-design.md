@@ -560,8 +560,37 @@ Weekly-pass mechanics over the **full quarter**, then:
    another; corrections apply and `r<N+1>` follows. That round trip is cheaper than any
    question the plugin could have asked beforehand.
 
-A rebuild is available on demand at any time, not only at quarter end — "rebuild Q3"
-is a normal request, and the revision line makes the newer zip unmistakable.
+**Two ways a package is produced, and one rule for repeats.**
+
+- **Automatically**, by the quarter-end trigger, once per quarter.
+- **On demand**, whenever the operator asks — "rebuild Q3", "send me Q3 again", "what
+  does Q4 look like so far". This runs in an ordinary direct DM turn, which has full
+  media rights without any scheduled-delivery marker, so it needs no trigger and no
+  special path. Ellen builds and sends; the specialist may build but structurally
+  cannot deliver.
+
+**A repeat request does not mint a revision unless the inputs changed.** Every build
+first computes an **input digest** over the frozen match snapshot, the imported ledger
+rows and the package options. Then:
+
+| Case | What happens |
+|---|---|
+| Input digest equals the current `r<N>`'s | **No new revision.** The existing `r<N>` is returned and re-sent if asked. The reply says so: “same as r3, sent 12 Oct — nothing has changed since”. |
+| Inputs differ (a correction, a late invoice, a bank change) | A new revision `r<N+1>` is reserved and built, and `notes.md` and the caption say what changed since `r<N>`. |
+| A second build arrives while one is in flight | The reservation transaction serialises them. A concurrent request with an equal input digest joins the in-flight build and receives its result rather than reserving a second number — two identical zips is a worse answer than one. |
+
+This is what "deterministic and idempotent" has to mean to be worth saying: asking
+three times in a row gets you one package three times, not `r2`, `r3` and `r4` each
+claiming to supersede the last. Revision numbers stay scarce, so `supersedes rN-1`
+keeps meaning something.
+
+**A quarter that is still open can be packaged too, and is marked differently.** An
+interim request ("Q4 so far") builds `<slug>-<YYYY-Qn>-interim-<YYYY-MM-DD>.zip`: same
+contents, no revision number, not recorded as the quarter's package, and `notes.md`
+opens with `INTERIM — quarter still open, n transactions so far, not for filing`.
+Interim builds consume no revisions and can never be confused with the package that
+eventually closes the quarter. That keeps “where am I?” cheap without polluting the
+record that goes to the accountant.
 
 **Package membership is defined by the transaction's booking-date quarter, never by
 where an invoice file happens to be stored.** The invoice-date storage path
@@ -615,8 +644,11 @@ competition rather than being handed a uniform-looking set of assertions.
 
 Missing invoices never block shipping: ledger rows read `MISSING` with the best
 available link; `notes.md` opens with the action list (right after the revision
-line). The package build is deterministic and idempotent — “hold it”, supply
-stragglers, rebuild as `r<N+1>`, resend is free.
+line). The build is deterministic — the same inputs produce the same bytes, byte for
+byte (fixed ordering, fixed timestamps, stable serialisation) — which is exactly what
+makes the input-digest rule above safe: "nothing changed" is a computed fact, not a
+judgement. Supply stragglers and the next build is `r<N+1>`; ask again with nothing
+changed and you get `r<N>` back; resending any revision is always free.
 Delivery: atomic write to the plugin outbox → `send_media(kind="zip")` (shipped,
 #482) → operator's Telegram, from the quarter-end cron turn itself. The outbox copy is
 consumed on send (or reaped at 2 h); the canonical package stays in the data dir. Two
@@ -696,8 +728,13 @@ pass offers a one-tap resend of the same revision.
   numbers stay bound to `(match_id, revision)` across a rebuild; a reply naming a line
   whose revision moved is refused on that line and applied on the others (a partial
   reply is normal, not an error); a reply arriving two sheets later resolves against
-  the sheet it names, not the newest; and a rebuild requested after a correction
-  produces `r<N+1>` whose contents differ in exactly the corrected lines.
+  the sheet it names, not the newest; a rebuild requested after a correction produces
+  `r<N+1>` whose contents differ in exactly the corrected lines; **a rebuild requested
+  with nothing changed returns `r<N>` and reserves no number**; two concurrent builds
+  with equal input digests yield one revision and one zip, while two with differing
+  digests yield distinct reserved revisions with snapshot-consistent contents; and an
+  interim build of an open quarter consumes no revision and is never recorded as the
+  quarter's package.
 - The round-5 red cases, from the independent design and its comparison: a material
   change to an ACTIVE row (amount corrected under an unchanged `row_id`) must
   invalidate an accepted match — the case supersession-only revalidation missed; two
