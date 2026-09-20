@@ -4,6 +4,11 @@ Status: draft for operator review · 2026-08-10
 Revised 2026-09-20 — re-verified against casa **v0.323.0**. Both scheduled-turn
 dependencies landed; the contracts they landed with (one attention lane, durable
 asks, background jobs) change the weekly pass. See “Casa baseline”.
+Revised 2026-09-21 after an independent design by Astra (`gpt-6-astra`, medium) and
+its head-to-head comparison round: eight of its factual claims were re-verified here
+against bank-feed, casa and gmail source before folding in. Its verdict was a hybrid —
+this document's execution model, its acceptance and custody model — and it withdrew its
+own three upstream prerequisites as non-blocking under coordination cost.
 
 ## Purpose
 
@@ -16,8 +21,15 @@ progressively annotated.
 
 ## Goals
 
-- Weekly, mostly-autonomous matching of DBIT transactions to invoice PDFs, with
-  operator confirmation only where judgment is genuinely below the auto-match bar.
+- Weekly, mostly-autonomous matching of DBIT transactions to invoice PDFs. The plugin
+  **decides and shows** rather than asking: a loose match that is visible and reversible
+  beats a strict one that hands the work back (see §“The reversibility ladder”).
+- **It must be faster than doing it by hand.** A week's accounting should cost the
+  operator one sheet read and at most one reply; a quarter should cost that plus
+  checking the zip. If using the plugin becomes a chore it has failed, whatever its
+  state machine guarantees.
+- A standing answer to “what am I missing?” — the review sheet leads with it, every
+  week, rather than saving it for quarter end.
 - Quarter-end zip package delivered over Telegram: `invoices/` (bulk-uploadable to
   SnelStart), `ledger.xlsx`, `notes.md`.
 - A lean vendor knowledge base whose primary asset is the **researched invoice
@@ -57,7 +69,7 @@ server.** All document reading and all matching judgment happen in agents via `R
 | Actor | Responsibilities |
 |---|---|
 | Casa core | Fires the weekly / quarter-end triggers at the resident; enforces tool gates. |
-| Resident (Ellen) | Orchestrates passes; all Gmail work (targeted searches, attachment download, ingest); **all** operator conversation (summaries, PDF + keyboard confirmations, residue questions); sends the zip. |
+| Resident (Ellen) | Orchestrates passes; all Gmail work (targeted searches, attachment download, ingest); **all** operator conversation (the review sheet, its free-text replies, the occasional one-line question folded into the sheet); sends the zip. |
 | Finance specialist | All matching judgment, grounded in its own `Read` of the actual PDFs; all bank-feed tagging/notes; portal-link research (WebSearch); returns structured work orders. Never talks to the operator (structurally cannot: `ask_user` requires direct execution). |
 | Plugin MCP server | Invoice store, vendor KB, match records, quarter workbook, filename normalization, package/zip build, outbox staging. |
 | Operator | Taps confirmation buttons; answers occasional one-line residue questions; receives one zip per quarter. |
@@ -84,6 +96,36 @@ Rationale for the split (verified against casa code, 2026-08-10):
   the agent that sees both sides at full fidelity. Ellen's ingest-time extraction is
   provisional, for filing only, never load-bearing.
 
+### The reversibility ladder
+
+**Operator ruling, 2026-09-21, and the spine of the design:** gates go where an action
+cannot be taken back, and nowhere else. A tool that asks permission for things it could
+simply undo becomes a chore, and a chore stops being used — at which point its careful
+correctness properties protect nothing. Three rungs:
+
+| Rung | What is on it | Discipline |
+|---|---|---|
+| **Free** | Everything v1 does: ingest, auto-match, demote, retarget, reject, re-label; bank-feed `acct-*` tags (an `untag_transaction` away from undone); notes (append-only, corrected by appending); **and the quarterly package itself** — the operator receives a zip, checks it, corrects what is wrong and asks for another (operator, 2026-09-21). A rebuild is `r<N+1>` and costs one message. | Act. No question, no confirmation, no ceremony. |
+| **Gated** | Nothing, in v1. | — |
+
+**v1 therefore has no routine gates and no routine button questions.** Every step is
+either undoable in one word or cheap to redo, so a gate would only buy ceremony. Two
+things would put something on the gated rung and are deliberately out of scope: sending
+the package anywhere the operator cannot retract it from (mailing the accountant
+directly, filing with the tax authority), and deleting retained documents — which v1
+never does.
+
+Two consequences worth stating, because they overturn v1's instincts:
+
+- **A wrong auto-match is cheap here and the design should act like it.** It is one line
+  on a sheet, one word in a reply, one tag write to undo — provided it is *visible*. So
+  the effort goes into the review surface and the confidence labels, not into refusing
+  to decide. The expensive failure is not a wrong match; it is a wrong match that
+  nobody was shown.
+- **Speed is a correctness property.** If a pass cannot beat the operator doing it by
+  hand, the plugin has failed on its own terms, regardless of how sound its state
+  machine is. Every proposed mechanism in this document is judged against that too.
+
 ## Casa baseline (re-verified 2026-09-20, casa v0.323.0)
 
 v1 was written against v0.2xx with two scheduled-turn enhancements outstanding. Both
@@ -100,7 +142,10 @@ scheduled question is admitted only into an idle lane; a refused admission answe
 `operator_busy` and asks nothing. A human question — an operator `ask_user`, an
 authorization or consent challenge — retires a live scheduled one once that human
 question is itself delivered; one-way, never the reverse. **So a pass cannot post N
-confirmation keyboards in one turn.** It asks one, and asks the next when that settles.
+confirmation keyboards in one turn.** v1 sidesteps this entirely by not asking button
+questions at all (see §“The reversibility ladder”): a review sheet is a *delivery*, not
+a question, so it never touches the lane. The rule is recorded because it binds any
+future version that wants a keyboard.
 
 **A scheduled ask is a durable obligation, not a message** (INV-JOB-013 / INV-JOB-007).
 The record (`/data/scheduled_asks.json`) is written before the keyboard is posted,
@@ -111,7 +156,8 @@ content, never as its speaker. The guarantee is **at-most-once**: the crash wind
 between "decided" and "dispatched" may lose an outcome, never duplicate it. Three
 consequences:
 
-- v1's "ask-keyboards die on casa restart" is **wrong now** — they survive.
+- v1's "ask-keyboards die on casa restart" is **wrong now** — they survive. (Moot for
+  this plugin, which raises none, but it was a false platform claim.)
 - An outcome may still never arrive, so every pass re-derives its work from the store
   and never waits on a continuation. The workbook already gives us that; the CAS
   revision already makes a late tap safe.
@@ -146,32 +192,54 @@ name): **`YYYY-Qn`** (e.g. `2026-Q2`). Never a bare `Qn`.
 
 ### Invoice store
 
-- Files: `invoices/<YYYY-Qn>/<YYYY-MM-DD>_<vendor>_<amount>.pdf` — **invoice date**,
-  lowercase vendor slug, amount with dot decimal (e.g.
-  `invoices/2026-Q2/2026-05-06_adobe_54.45.pdf`).
-- Index row: id, file path, content hash (dedup — ingest is idempotent, duplicates
-  rejected), vendor, invoice date, invoice number, amount, currency, source (gmail
-  message id / manual), extraction author, status
+- **Custody is by content hash, not by name.** Files live at
+  `invoices/<sha256[:2]>/<sha256>.pdf`. The human-readable
+  `<YYYY-MM-DD>_<vendor>_<amount>.pdf` is a package-time rendering, and carries a short
+  hash suffix when two invoices would otherwise render the same name — two same-day,
+  same-amount purchases from one vendor collide on the v1 scheme, which specified no
+  overwrite, refusal or disambiguation rule.
+- Index row: id, content hash, size, vendor, invoice date, invoice number, amount,
+  currency, recipient-as-read, source (gmail message id / manual), acquisition
+  coordinates for retry, extraction author, status
   (`unmatched` / `matched` / `irrelevant`).
+- **Byte identity is not invoice identity.** A vendor that re-renders or re-sends the
+  same invoice produces different bytes and a second index row; two equal payments
+  could then each take one while every per-file cardinality check passes. The server
+  flags an issuer + invoice-number collision across differing hashes and refuses
+  automatic acceptance on either side until it is resolved.
+- Custody is independent of matching: rejecting a candidate never deletes its PDF, and
+  v1 deletes nothing automatically. A document is `held` only once its complete bytes
+  are written, hashed and atomically installed and the index row commits — a crash may
+  leave an unindexed file to reap, never a row claiming custody of a partial file.
 
 ### Match records — a revisioned state machine, all mutations CAS
 
 invoice_id ↔ bank-feed `row_id`, state `matched` / `proposed` / `conflicted` /
-`rejected`, decision author (`auto` / `operator`), rationale. `matched` and
-`proposed` are the **active** states (they occupy cardinality slots and feed
-packaging); `conflicted` is non-active — it holds matches that lost a consistency
+`rejected`, decision author (`auto` / `operator`), rationale. **`matched` is the only state that feeds packaging** — an unanswered `proposed`
+never reaches `invoices/`. The v1 text made both active states feed the package, which
+turned operator silence into endorsement and contradicted the packaging section three
+pages later. `matched` and `proposed` are both **active for cardinality** (they occupy
+slots); `conflicted` is non-active — it holds matches that lost a consistency
 race (see collision handling below), is always surfaced as residue, is excluded
 from packaging, and leaves the cardinality slot free; it exits only by explicit
 reassignment (specialist re-proposes or operator decides). Alongside the `row_id`, each match
 snapshots the transaction's identifying facts (booking date, amount_minor, currency,
 direction, counterparty) so a match is auditable even if the row it targeted changes.
 
-**Every match carries a monotonic `revision`, bumped by every state change, and
+**The acceptance revision moves only when the proposition moves.** A revision bump
+means the thing the operator was asked about changed — the pairing, its evidence, or
+the transaction facts under it. Annotation delivery progress is separate bookkeeping
+(`annotation_state` and its own attempt counter) and never bumps the acceptance
+revision, because a tap on an unchanged proposal must not be rejected by a CAS bump
+that came from bank-feed write progress.
+
+**Every match carries a monotonic `revision`, bumped by every change to the
+proposition, and
 every mutating tool call takes `expected_revision` — the server rejects a stale
 mutation outright (compare-and-swap).** This is the single concurrency discipline;
 there are no unversioned flags. Consequences, each closing a reviewed failure path:
 
-- **Operator asks are bound to a revision.** A `[Confirm]` keyboard carries
+- **Operator answers are bound to a revision.** A review-sheet line carries
   (match_id, revision). If the match changed underneath — retargeted after a
   bank-feed supersession, demoted on snapshot mismatch, superseded by a better
   candidate — the stale tap is rejected by CAS and Ellen re-asks with current
@@ -205,15 +273,15 @@ there are no unversioned flags. Consequences, each closing a reviewed failure pa
 - At most one **active** (`matched` or `proposed`) match per transaction row, and at
   most one active match per invoice, by default. The server rejects a second
   `record_match`/`propose_match` that would violate either.
-- One-to-many cases (one invoice paid in installments, one payment covering several
-  invoices) are **explicit allocation groups**: a match group whose member
-  allocations must sum to the invoice amount (resp. the transaction amount); the
-  server validates the total and rejects partial or over-allocated groups.
-  Allocation groups are never created by auto-match, and **always require operator
-  confirmation**: a specialist-created group is `proposed` until the operator
-  confirms it — total arithmetic proves sums, not document relationship, so no
-  rationale bypasses review. (Round-2 finding: €40+€60 unrelated invoices passing
-  total validation against a €100 payment.)
+- **No allocation groups in v1** (operator decision, 2026-09-21). One invoice paid in
+  installments, one payment covering several invoices, partial settlements, fees and
+  credit notes are **not modelled**: the documents are retained, the transaction stays
+  unresolved, and `notes.md` explains the relationship for the accountant. This cuts
+  group total arithmetic, group cardinality, group confirmation, group repair and group
+  packaging semantics — machinery for exceptions v1 was never asked to automate. The
+  round-2 finding that motivated the group design (€40 + €60 unrelated invoices passing
+  total validation against a €100 payment) is closed by not having the mechanism.
+  Re-add only if a real quarter produces these.
 
 **Row-id lifecycle (bank-feed supersession).** Bank-feed rows are not immortal: a
 sync can supersede a row (`state='superseded'`, `superseded_by` → new row; e.g.
@@ -227,6 +295,19 @@ demotes it to `proposed` with a residue line); if the row has `vanished`, the ma
 reopens as `unmatched` and is reported. `list_transactions` filters to active rows,
 so without this step a superseded match would silently leave every worklist.
 
+**A row can also change without being superseded, and that is the case v1 missed.**
+bank-feed's update path rewrites `booking_date`, `value_date`, `amount_minor`,
+`currency`, `direction`, `status`, `counterparty` and `remittance` **under the same
+`row_id`** (verified 2026-09-21 against `apply.py`'s hand-written UPDATE column list).
+Supersession-only revalidation therefore leaves an accepted €100 match standing after
+the amount is corrected — the sweep sees neither `superseded` nor `vanished` and moves
+on. So: every pass, and again immediately before packaging, every active match
+re-compares its snapshot fingerprint (account, direction, currency, `amount_minor`,
+status, booking date, counterparty, remittance) **and bank-feed's review flags**
+against the live row, superseded or not. A changed material fact invalidates
+acceptance: the match demotes to `proposed` with `repair_owed` and a residue line.
+Migrated tags and notes on a successor row are not fresh approval either.
+
 ### Vendor KB
 
 Lean, one record per vendor:
@@ -239,8 +320,10 @@ Lean, one record per vendor:
   it broke.
 - search_hint (for email vendors), free-text notes (“invoices post ~3 days after
   charge”)
-- per-field provenance (learned-from-match / operator-said) + last-confirmed date;
-  `notes.md` flags links unverified for more than two quarters.
+- one source note per link (where it was found, when) — **not** per-field provenance,
+  and no scheduled re-verification. A link is re-researched when a retrieval actually
+  fails; an aging policy turns a deep-link notebook into standing upkeep for links that
+  still work. A `[Wrong]` tap records the fact; it does not mandate a follow-up turn.
 
 `none-expected` is load-bearing: it is what stops bank fees, taxes, and receipt-less
 charges from polluting the residue list forever.
@@ -252,7 +335,7 @@ multi-round delegations stateless-safe (each delegation is a fresh ephemeral ses
 state carries in the store, not in return values alone) and crash-safe: a casa
 restart mid-pass loses only the in-flight turn.
 
-## Tool surface (server, 14 tools)
+## Tool surface (server, 16 tools)
 
 Ingest & curation: `ingest_invoice` (agent-extracted metadata as arguments),
 `update_invoice_metadata`, `mark_irrelevant`.
@@ -262,6 +345,13 @@ Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match`,
 `mark_annotated` — every mutating match tool takes `expected_revision` (CAS; see
 the match-record state machine).
 KB: `upsert_vendor`.
+Review: `build_review(scope)` — renders the sheet from store state, assigns stable
+line numbers and persists line → `(match_id, revision)` so a reply two days late still
+resolves; `resolve_review_line(sheet_id, line, verdict, note)` — what Ellen calls per
+named line, CAS on that line's recorded revision.
+Ledger input: `import_ledger_export(path)` — ingests bank-feed's `export_history`
+artifact so the package's ledger can list the full quarter (unmatched DBIT and CRDT
+rows included); the match records alone cannot produce it.
 Packaging: `build_quarterly_package(quarter)`, `stage_for_delivery(target)` (copies
 an invoice PDF or the built package into casa's plugin outbox for `send_media`).
 
@@ -284,11 +374,20 @@ writes; the design makes the pair a tracked transaction rather than a convention
    forever while the migrated stale tags keep asserting a match on the live row
    (round-3 finding). Vanished rows reopen. Only then does annotation work run.
 1. `record_match` / `confirm_match` store the match with `annotation_state=pending`.
+   Tag and note are written together, at match time, including for an `auto` match:
+   deferring the note until confirmation was considered and cut, because it buys only
+   tidiness in the ledger's history and costs a second state dimension. A reversal
+   appends one correction note; two lines on a row is an honest audit trail, which is
+   what append-only notes are for.
 2. The specialist writes the bank-feed side — `tag_transaction`
-   (`acct:matched`, `acct:<YYYY-Qn>`; portal cases `acct:portal`; known no-invoice
-   cases `acct:no-invoice-expected`; open cases `acct:pending`) and `add_note`
-   (`invoice: <filename>` or the portal link) — then calls
-   `mark_annotated(match_id, expected_revision)` → `annotation_state=clean`.
+   (`acct-matched`, `acct-<yyyy-qn>`; portal cases `acct-portal`; known no-invoice
+   cases `acct-no-invoice-expected`; open cases `acct-proposed`) and `add_note`
+   (`invoice: <filename>` or the portal link, plus the decision id and revision) —
+   then calls `mark_annotated(match_id, expected_revision)` → `annotation_state=clean`.
+   **The tag grammar is `^[a-z0-9][a-z0-9-]{0,31}$`, which admits no colon** (verified
+   2026-09-21 against bank-feed `tools_annotate.py`; reproduced: `acct:matched` is
+   refused with "invalid tag … Nothing was changed"). Every `acct:…` tag the v1 spec
+   named was invalid, and every pass would have retried a permanently failing write.
 3. Every weekly pass **begins** with the repair sweep: `list_quarter_state`
    surfaces every match with `annotation_state` in (`pending`, `repair_owed`) —
    half-completed writes and demotion/retarget corrections alike — and the
@@ -298,7 +397,30 @@ writes; the design makes the pair a tracked transaction rather than a convention
    remove/replace and the correction note to append (bank-feed notes are
    append-only — honest audit trail).
 
-Bank-feed may lag by at most one pass; it can never drift silently.
+5. **Drift is detected on clean records too, not only on the repair queue.** A sweep
+   that re-runs owed work alone cannot see the operator removing an `acct-` tag or
+   adding a contradictory note directly in bank-feed: the local record still reads
+   `clean`, and the package keeps endorsing a decision the operator already overturned.
+   Every pass therefore reads the **actual** owned tags and any new notes on every
+   accepted row and compares them against the desired projection. A discrepancy is
+   recorded before it is repaired. A new operator note reopens the match only when the
+   specialist reads it as contradicting or questioning the relationship — an ordinary
+   administrative note ("accountant has a copy") is recorded as seen and changes
+   nothing, because manufacturing questions out of ordinary bookkeeping spends the
+   scarcest asset in the design.
+6. **Classify before annotating.** bank-feed's untagged queue counts any tag outside
+   its workflow set as content classification (verified 2026-09-21 against
+   `tools_read.py`), so an `acct-` tag silently removes the row from tx-classifier's
+   queue. Accounting annotation for a row therefore runs after its classification, and
+   any accounting-tagged row whose classification is still unresolved is revisited
+   explicitly rather than left invisible.
+
+Bank-feed may lag by at most one pass. Note precisely what that buys: there is no
+cross-store transaction and no promise of instantaneous equality. The guarantee is
+**detected, retryable convergence** — desired projection held locally, applied against
+the expected row fingerprint, and verified by readback every pass and again before
+packaging. "It can never drift silently" is only true because of step 5; a dirty-work
+queue alone would not have earned that sentence.
 
 ## Flows
 
@@ -307,22 +429,52 @@ Bank-feed may lag by at most one pass; it can never drift silently.
 1. **Repair sweep** (above), then Ellen delegates: “weekly pass, `<YYYY-Qn>` —
    report new transaction state and search plans.”
 2. **Specialist triage** over new DBIT transactions × invoice store × KB, reading
-   PDFs as needed. **Auto-match bar**: exact amount, invoice date within the window,
-   vendor consistent via KB — **and globally unambiguous over the QUARTER's working
-   set, not the pass's**: ambiguity is evaluated against all of the quarter's
-   transactions and invoices seen so far, so two same-vendor same-amount pairs
-   arriving in different weekly passes still count as ambiguous (round-2 finding:
-   staggered arrival silently cross-matching). A repeated vendor+amount pair may
-   only auto-match on a **transaction-specific discriminator** (invoice number in
-   the remittance, unique date adjacency); otherwise all candidate pairings go
-   `proposed` with the ambiguity stated. Existing confirmed matches are never
-   reopened by later arrivals — a new look-alike invoice makes the *new* pairing
-   proposed, flagged as a possible cross-match for the operator. Returns a
-   structured work order per transaction:
-   `matched` (recorded + annotated) / `proposed` / `portal` (tagged, link noted) /
-   `none-expected` / `missing` with a **search plan carrying discriminators**, not
-   just a query (“want €54.45 within ~10 days of May 6; ignore payment
-   confirmations”).
+   PDFs as needed.
+
+   **Auto-match bar (operator decision, 2026-09-21 — deliberately loose).** The
+   plugin's job is to save the operator work. A bar tuned so tight that it matches
+   almost nothing hands the whole job back and is worse than no plugin, so v1 matches
+   readily and makes every pick **visible and cheap to reverse** (see §“The reversibility ladder”) instead of expensive to establish.
+
+   Auto-match requires:
+
+   - an **eligible** bank observation: active, booked, DBIT, on the configured account;
+   - the invoice is **held** in custody and reads as an invoice, not a quotation, order
+     confirmation or credit note;
+   - **exact money agreement** — equal gross payable, equal currency, integer minor
+     units. This one stays hard: it is the cheapest true signal available, and relaxing
+     it buys nothing a review can catch as easily;
+   - the invoice date within the vendor's window of the booking date (default ~10 days,
+     tunable per vendor).
+
+   Where several candidates fit, the specialist **picks the best one and says so**,
+   preferring a payment-reference or invoice-number match, then closest date adjacency.
+   It does not refuse to choose. It only leaves a transaction `proposed` when it cannot
+   distinguish the candidates at all (two identical invoices against two identical
+   payments), which the review sheet then shows as one line, not two questions.
+
+   Every pick carries a **confidence label**, and the label — not a gate — is what the
+   operator's eye is spent on:
+
+   | Label | Meaning |
+   |---|---|
+   | `clean` | one eligible candidate, no competition anywhere in the quarter or the adjacent periods |
+   | `guessed` | chose among N candidates; the runners-up are named on the line |
+   | `no-ref` | vendor has repeating equal charges and no invoice number or payment reference appeared on both sides |
+   | `partial-search` | the search was truncated or a fetch failed, so "unique" is unproven |
+   | `recipient?` | the invoice does not name the B.V., or names someone else |
+
+   `clean` lines are for skimming. The other four are what the sheet puts in front of
+   the operator. Nothing here blocks: a `guessed` + `recipient?` match still lands as
+   `matched` and still ships if the operator does not object, because the package
+   discloses the label on the row and the whole thing is one reply away from being
+   fixed. Existing matches are not immune from later evidence — a newly arrived
+   competing invoice re-labels an accepted match `guessed` and surfaces it again.
+
+   Returns a structured work order per transaction: `matched` (with label) /
+   `proposed` (indistinguishable candidates) / `portal` (tagged, link noted) /
+   `none-expected` / `missing` with a **search plan carrying discriminators**, not just
+   a query (“want €54.45 within ~10 days of May 6; ignore payment confirmations”).
 3. **Ellen's targeted Gmail round** — roughly one precise search per unresolved
    transaction, never a mailbox sweep (there are far more emails than transactions;
    the bank feed drives the search, not the mailbox). Ambiguity rule: **over-ingest
@@ -330,25 +482,63 @@ Bank-feed may lag by at most one pass; it can never drift silently.
    losers stay available for other transactions or get `mark_irrelevant`. Re-delegate
    for final picks. Hard bound: two search rounds per pass, then the item goes to
    residue.
-4. **Operator report — one question at a time.** The cron turn delivers the summary
-   and, for the first item needing judgment, the invoice PDF plus a
-   `[Confirm] [Wrong] [Later]` keyboard (#485/#573). Casa's attention lane holds one
-   scheduled question, so the remaining items are **queued in the workbook, not
-   posted**: each terminal outcome returns as a machine-authored scheduled turn into
-   the same session, and that turn posts the next question. An `operator_busy` refusal
-   — the operator already has a live question or a consent challenge — is not an error:
-   the item stays `proposed` and is re-offered next pass. A pass posts at most
-   `ASK_BUDGET` questions (default 3, tunable); everything beyond that is residue by
-   design. Unanswered asks decay to `proposed`; nothing is ever lost by silence, and
-   nothing waits on an outcome that may never arrive.
+4. **Operator report — one sheet, not a queue of questions.** The pass ends by
+   delivering a **review sheet**: a compact Markdown document sent with
+   `send_media(kind="text")` (#565; 5 MB cap, no attention lane involved because a
+   delivery is not a question). It is built by `build_review` from store state, and it
+   is designed to be read on a phone in under a minute (vendor names below are
+   illustrative — per §Privacy this document carries no real vendor list):
+
+   ```
+   Q3 · week of 14 Sep · 9 new · €2,481.20
+
+   MISSING (3) — these need you
+     1  04 Sep  €54.45  Adobe          portal → console.adobe.com/invoices
+     2  07 Sep  €120.00 Jansen BV      no invoice found (searched 2 rounds)
+     3  11 Sep  €18.15  unknown        counterparty BCK*XYZ — who is this?
+
+   LOOK (2)
+     4  05 Sep  €99.00  Zapier    guessed among 2 — picked inv 8841 (05 Sep),
+                                  runner-up inv 8712 (28 Aug)
+     5  09 Sep  €12.10  Vercel    no-ref · recipient? invoice names a person,
+                                  not the B.V.
+
+   MATCHED (4) — skim
+     6  02 Sep  €7.99   Backblaze  inv 5521      clean
+     7  ...
+   ```
+
+   The operator replies in free text — “all good”, “4 is wrong”, “4 and 9 wrong, 3 is
+   my accountant” — and Ellen applies the corrections in one turn: `reject_match` on
+   the named lines, `confirm_match` on the rest (author `operator`). Line numbers are
+   stable for the life of one sheet and are stored with it, so a reply that arrives two
+   days later still resolves. **No reply is a valid outcome**: everything stays as the
+   pass left it, labels and all, and the next sheet shows it again.
+
+   **The pass raises no button questions.** A one-line identity question (“who is
+   BCK*XYZ?”) is a line on the sheet like any other, answered in the same reply. This
+   keeps the operator's side of a week's accounting to one message read and at most one
+   message written.
 5. CRDT transactions: classified and annotated only.
 
-Confirmation taps close the loop: `[Confirm]` → `confirm_match` (+ annotation
-phase 2, + KB learning); `[Wrong]` → `reject_match` + one follow-up question whose
-answer lands in the KB; `[Later]` → stays proposed, resurfaces next pass and at
-quarter end. Each tap arrives as the continuation turn's content carrying
-(match_id, revision) — the CAS rejection path is the only thing between a stale tap
-and a corrupted book, and the fixture suite exercises it.
+The review reply closes the loop. Each line the operator names resolves to a
+`(match_id, revision)` recorded with the sheet, so an answer is always bound to the
+proposition it was shown — a CAS rejection means the line changed underneath (a
+retarget, a demotion, a better candidate) and Ellen says so on that line rather than
+applying a stale correction. Corrections are ordinary state transitions: `reject_match`
+frees the slot and returns the transaction to the pool with the rejected candidate
+remembered, `confirm_match` promotes author `auto` → `operator` and writes the permanent
+bank-feed note, and a correction the operator volunteers (“3 is my accountant, no
+invoice ever”) writes a KB fact so the question never recurs.
+
+**v1 raises no button questions at all**, which retires a whole class of problem the
+earlier drafts carried. Worth recording why, in case a later version wants one: casa's
+continuation carries only its own request id and the chosen label — verbatim,
+`[answer to {rid}] the operator tapped: {chosen}` (verified 2026-09-21,
+`scheduled_asks.py:247-252`) — and nothing of ours. The v1 spec's claim that a keyboard
+"carries (match_id, revision)" was false. Any future keyboard must persist
+rid → (match_id, revision, choices) before asking and resolve through that map, and must
+survive Casa's one-question attention lane. A free-text sheet reply has neither problem.
 
 ### New portal vendor
 
@@ -359,8 +549,19 @@ with provenance. Every later quarter resolves instantly from the KB.
 
 ### Quarter-end pass (cron: 10th of Jan / Apr / Jul / Oct)
 
-Weekly-pass mechanics over the **full quarter**, one last residue conversation, then
-`build_quarterly_package("<YYYY-Qn>")`.
+Weekly-pass mechanics over the **full quarter**, then:
+
+1. Final sync, repair sweep and fingerprint revalidation of every active match.
+2. `build_quarterly_package("<YYYY-Qn>")`.
+3. **Send it.** No gate, no keyboard, no confirmation (operator, 2026-09-21): the zip
+   goes out with a caption carrying the headline facts — n invoices, n missing, total,
+   `r<N>`, digest — and `notes.md` opens with what is missing. **The package is the
+   quarter's review surface.** The operator checks it, says what is wrong, and asks for
+   another; corrections apply and `r<N+1>` follows. That round trip is cheaper than any
+   question the plugin could have asked beforehand.
+
+A rebuild is available on demand at any time, not only at quarter end — "rebuild Q3"
+is a normal request, and the revision line makes the newer zip unmistakable.
 
 **Package membership is defined by the transaction's booking-date quarter, never by
 where an invoice file happens to be stored.** The invoice-date storage path
@@ -385,13 +586,32 @@ upload time.
 
 ```
 <slug>-<YYYY-Qn>-r<N>.zip
-├── invoices/          # SnelStart bulk upload: YYYY-MM-DD_vendor_amount.pdf
-├── ledger.xlsx        # full quarter, both directions: date, amount, currency,
-│                      # direction, counterparty, vendor, status,
-│                      # invoice filename OR portal deep-link, notes
-└── notes.md           # action list first (missing items + best links),
-                       # then anomalies, KB changes, commentary
+├── invoices/            # SnelStart bulk upload: YYYY-MM-DD_vendor_amount[_hash8].pdf
+│                        # matched only — a `proposed` line never lands here
+├── ledger.csv           # full quarter, both directions: date, amount, currency,
+│                        # direction, counterparty, vendor, status, confidence label,
+│                        # invoice filename OR portal deep-link, notes
+├── ledger.xlsx          # same rows, for the accountant's tooling (operator decision,
+│                        # 2026-09-21: ship both)
+├── unresolved/          # only when non-empty: retained candidate PDFs for lines that
+│                        # did NOT match, so the accountant has the evidence without
+│                        # another mailbox hunt — deliberately NOT in invoices/, which
+│                        # is the bulk-upload set
+└── notes.md             # what is missing first (with best links), then anomalies,
+                         # unsupported relationships (split/aggregate payments, credit
+                         # notes), KB changes, commentary
 ```
+
+**Both ledger formats ship, and the XLSX costs something — name it.** The server is
+stdlib-only, so `ledger.xlsx` is a minimal hand-written SpreadsheetML workbook
+(`zipfile` + a fixed `xl/worksheets/sheet1.xml` template, inline strings, no styles
+beyond a header row). That is perhaps 100 lines and a pinning test asserting the file
+opens and its cell values equal `ledger.csv`'s. `ledger.csv` is `csv.writer` and is the
+authoritative one: if the two ever disagree, the CSV is right and the XLSX is a bug.
+
+**The confidence label travels with the row.** A `guessed` or `no-ref` match is marked
+as such in both ledgers, so the accountant sees which pairings the machine chose under
+competition rather than being handed a uniform-looking set of assertions.
 
 Missing invoices never block shipping: ledger rows read `MISSING` with the best
 available link; `notes.md` opens with the action list (right after the revision
@@ -404,15 +624,26 @@ edges the shipped tool imposes: a transport timeout is reported as
 `delivery_uncertain` — the send may have landed — so a retry is an operator-visible
 **resend of the same revision**, never a silent rebuild (the revision line in
 `notes.md` and the caption make a duplicate arrival self-evident); and the `zip` kind
-caps at **20 MB**, which a quarter of PDF invoices can approach.
+caps at **20 MB**, which a quarter of PDF invoices can approach, so the build
+**preflights the actual zip size** and an oversize package fails visibly, with the
+canonical zip retained and `notes.md` naming the offenders. v1 does not silently split
+the requested single zip, drop invoices or re-compress the operator's PDFs; if a real
+quarter crosses the cap, the split rule is decided then, with evidence.
+
+After a `delivery_uncertain` the package is NOT re-sent automatically: the send may have
+landed, and a second zip in the accountant's hands is worse than a question. The next
+pass offers a one-tap resend of the same revision.
 
 ## Privacy
 
 - The repo ships **zero** personal or company data: no IBANs (bank-feed owns
   accounts), no company name, no vendor list, no operator identity. This spec
   deliberately says “the operator's B.V.”.
-- The zip filename prefix comes from `CASA_PLUGIN_QA_COMPANY_SLUG`, wired through
-  casa's plugin-env (1Password-referenced), never committed.
+- The zip filename prefix comes from `CASA_PLUGIN_QA_COMPANY_SLUG`, a **plain
+  setting** typed at install — not a vault item, not an `op://` reference. The v1 text
+  called it 1Password-referenced and a plain setting in the same breath; it is the
+  latter. A company slug is not a credential, and routing it through the vault only
+  feeds the install-time exploration noise of ha-casa-app#1024.
 - Everything identifying lives only in the data dir.
 - House publication guards anyway (pre-commit deny-patterns, gitleaks) as
   belt-and-braces for a private repo.
@@ -423,17 +654,21 @@ caps at **20 MB**, which a quarter of PDF invoices can approach.
 - Ingest idempotent by content hash; over-ingestion harmless by design.
 - All match mutations are CAS on the match `revision`; stale operator taps and
   crossed writes are rejected, never absorbed. Ellen re-asks with current facts on
-  a CAS rejection of a keyboard answer.
+  a CAS rejection of a review-sheet answer.
 - Two-phase bank-feed annotation with start-of-pass repair sweep, whose step 0
   re-resolves superseded/vanished bank-feed rows before anything else; annotation
   is a tracked state (`pending`/`clean`/`repair_owed`), never a boolean that
   demotion could leave stale.
 - Server-enforced cardinality: no second active match per invoice or transaction;
   allocation groups validated by totals and always operator-confirmed.
-- Ask-keyboards are durable across a casa restart (#573), and every terminal outcome
-  is delivered back to the asking session — at most once, so a lost outcome is a
-  normal case, not an incident. Timeout, cancellation, trigger rewrite and
-  `operator_busy` all read the same way downstream: the item is still `proposed`.
+- **Silence is a supported answer everywhere.** No review reply leaves every line as
+  the pass left it; the quarter's package ships regardless and can be rebuilt on
+  request. Nothing decays, nothing is lost, and nothing is inferred from silence.
+- With no button questions, the whole durable-ask failure surface (lost outcomes,
+  `operator_busy`, trigger-rewrite cancellation, restart replay) is **out of this
+  plugin's failure model**. That is the main practical dividend of answering by sheet.
+- A review reply that names a line whose revision moved underneath is reported on that
+  line and re-offered on the next sheet, never applied to the new proposition.
 - Casa restart mid-pass: workbook + store hold everything except the in-flight turn.
 - Packaging with open residue ships `MISSING` rows rather than blocking.
 
@@ -457,12 +692,28 @@ caps at **20 MB**, which a quarter of PDF invoices can approach.
   totals must validate and which must stay `proposed` without operator
   confirmation; and concurrent `build_quarterly_package` calls that must yield
   distinct reserved revisions with snapshot-consistent contents.
-- The ask queue is store state, so it is unit-testable and must be tested: a pass with
-  five items needing judgment posts ONE question and leaves four queued; an
-  `operator_busy` refusal posts nothing and leaves the item `proposed`; a terminal
-  outcome that never arrives (at-most-once loss) leaves the item `proposed` and the
-  next pass re-offers it; and an answer arriving after the trigger was rewritten is
-  rejected by CAS rather than applied.
+- The review sheet is store state, so it is unit-testable and must be tested: line
+  numbers stay bound to `(match_id, revision)` across a rebuild; a reply naming a line
+  whose revision moved is refused on that line and applied on the others (a partial
+  reply is normal, not an error); a reply arriving two sheets later resolves against
+  the sheet it names, not the newest; and a rebuild requested after a correction
+  produces `r<N+1>` whose contents differ in exactly the corrected lines.
+- The round-5 red cases, from the independent design and its comparison: a material
+  change to an ACTIVE row (amount corrected under an unchanged `row_id`) must
+  invalidate an accepted match — the case supersession-only revalidation missed; two
+  different PDFs carrying one issuer + invoice number must refuse automatic acceptance
+  on both sides; an order confirmation and a net-vs-gross amount must not read as an
+  invoice; an invoice naming a person rather than the B.V. must land `recipient?`; a
+  truncated search must label `partial-search` and must never be rendered as `clean`;
+  an operator's `acct-` tag removal on a clean record must be detected by the next
+  pass; a row must be classified before it is accounting-tagged, or it vanishes from
+  tx-classifier's untagged queue; and every tag the plugin writes must satisfy
+  `^[a-z0-9][a-z0-9-]{0,31}$` (a pinning test, since the v1 spec's whole tag vocabulary
+  was invalid).
+- An **install smoke test**, because shared plugin storage is asserted rather than
+  proven by casa's code: the resident ingests a synthetic document, the specialist
+  reads that same record and those same bytes, and the resident stages it for delivery.
+  It is a release check, not a reason to build a transfer service.
 - Matching quality is LLM behavior, not unit-testable here: first real quarter runs
   `proposed`-heavy by design until the KB warms up; the auto-match bar (exact
   amount + date window + vendor consistency via KB + global unambiguity) keeps wrong-match risk asymmetric
@@ -473,10 +724,10 @@ caps at **20 MB**, which a quarter of PDF invoices can approach.
 
 | Repo | Change | Status |
 |---|---|---|
-| casa-specialist-finance | Role bump: `max_turns` 10 → ~40; allow the new plugin's tools in `role/role.yaml`. | Small release, needed for v1. |
+| casa-specialist-finance | Add the new plugin's tools to `role/role.yaml`'s allow-list. **Do not touch `max_turns`** — it is already **70** (verified 2026-09-21, `role/role.yaml:13`); the v1 spec's "bump 10 → ~40" was both wrong and a reduction. | Small release, needed for v1. |
 | ha-casa-app | [#482](https://github.com/bonzanni/ha-casa-app/issues/482) zip media kind. | **Shipped** — closed 2026-08-14. |
 | ha-casa-app | [#485](https://github.com/bonzanni/ha-casa-app/issues/485) scheduled-turn `send_media`. | **Shipped** — closed 2026-08-14. |
-| ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485, and the one the confirmation flow actually needs. | **Shipped** — closed 2026-08-15. |
+| ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485. | **Shipped** — closed 2026-08-15. No longer needed by v1 (no button questions), kept here because the v1 spec was built on its absence. |
 | ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area, [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | Still open, still not dependencies: gmail→store custody stays an agent-passed path, specialist asks stay structured work orders. |
 | Resident config | Two reminders (weekly; quarter-end on the 10th), plugin assignment to both roles. | Operator/configurator action at install time. |
 
@@ -487,7 +738,7 @@ None blocks v1. Each costs a plugin-side line rather than a wait (open as of
 
 | Issue | Bite | Plugin-side answer |
 |---|---|---|
-| [#990](https://github.com/bonzanni/ha-casa-app/issues/990) — `send_message` reports "sent" when the channel delivered nothing (bug, medium) | A pass's summary can vanish while the turn believes it delivered, and the closing-silence convention then suppresses the only other output. | A pass's operator-visible output is never a bare `send_message`: the report rides `send_media`/`ask_user`, whose failures are loud (`delivery_uncertain`, `operator_busy`). |
+| [#990](https://github.com/bonzanni/ha-casa-app/issues/990) — `send_message` reports "sent" when the channel delivered nothing (bug, medium) | A pass's summary can vanish while the turn believes it delivered, and the closing-silence convention then suppresses the only other output. | A pass's operator-visible output is never a bare `send_message`: the review sheet and the package both ride `send_media`, whose failure modes are loud (`delivery_uncertain`, `channel_unavailable`). |
 | [#960](https://github.com/bonzanni/ha-casa-app/issues/960) / [#932](https://github.com/bonzanni/ha-casa-app/issues/932) — a scheduled turn that delivers with a tool and then ends in prose delivers twice (bug, low) | Two DMs per pass. Nothing enforces the clause; only documentation asks for it. | Both trigger prompts this plugin ships carry the closing `<silent/>` clause verbatim, in the install notes. |
 | [#975](https://github.com/bonzanni/ha-casa-app/issues/975) — bundle compensation writes an emptied tuple over a refused transaction's files (bug, high, `operator-decision`) | Hits the `casa-specialist-finance` role bump (`upgrade_specialist`), not the runtime: a refused upgrade can take the specialist's saved settings 1 → 0. | Capture the specialist's settings before the bump and verify after. The issue is blocked on an operator decision, so it will not clear on its own. |
 | [#1024](https://github.com/bonzanni/ha-casa-app/issues/1024) — install-time vault exploration searches variables no recipe may wire from a vault item (bug, low) | `CASA_PLUGIN_QA_COMPANY_SLUG` is exactly that class; install will hunt 1Password for it and offer candidates the recipes forbid using. | Install notes state it plainly: a plain setting, typed at install, never a vault item. |
@@ -501,19 +752,31 @@ an s6 name). If the implementation adds any of those, re-check them.
 
 ## Open items
 
-- Exact auto-match thresholds (date window ~10 days, amount tolerance for FX/fees)
-  to be tuned during the first real quarter; start strict.
+- Exact auto-match thresholds (date window ~10 days per vendor) to be tuned during the
+  first real quarter — **start loose and tighten only where the review sheet shows the
+  machine guessing badly**, which is the opposite of the v1 instruction and follows
+  from the reversibility ladder.
+- **The match rate is the product metric.** After the first real quarter, the number to
+  look at is what fraction of DBIT transactions landed `matched` without the operator
+  touching them, and how many of those the operator reversed. A high reversal rate is a
+  tuning problem; a low match rate means the plugin is not earning its keep, which is
+  the failure mode that matters most.
 - Ledger column set to be reviewed with the accountant after the first delivered
   package.
 - Weekly reminder day/time: operator preference at install (proposal: Monday
   morning).
-- **Should the matching pass run as a `casa.jobs` background job?** (New since v1.)
-  For: a long pass stops blocking a resident turn, gets progress lines in its own
-  topic, survives a restart, and is `/cancel`-able. Against: a job worker cannot ask
-  the operator, so every confirmation returns to Ellen either way; it adds a second
-  engagement to reason about; and the batch machinery is three weeks old with one open
-  defect (#1033). Proposal: v1 ships without jobs, and the quarter-end pass — the long
-  one — is the first candidate to move if a pass ever runs out of turns.
-- **Package size against the 20 MB `zip` cap.** A quarter of PDF invoices can approach
-  it. Decide the split rule (per-month parts, `invoices/` only + separate ledger) before
-  the first real delivery rather than during it.
+- **Background jobs: decided — not in v1.** A `casa.jobs` job buys progress lines, a
+  topic and restart resume for a pass that handles 2–6 new transactions a week; against
+  that it adds a second engagement, a batch protocol, and a dependency on machinery
+  three weeks old with one open defect (#1033). The independent design proposed jobs and
+  its own comparison round then cut them, on the same workload arithmetic. Revisit if an
+  observed pass actually runs out of turns — that is the evidence that would change it.
+- **Package size: decided — preflight and fail visibly.** The build checks the real zip
+  against the 20 MB cap; oversize keeps the canonical package, names the offenders in
+  `notes.md`, and tells the operator. No silent splitting, dropping or re-compressing.
+  If a real quarter crosses the cap, the split rule gets decided then, against a real
+  file list rather than a guess.
+- **The weekly sheet's shape is a v1 experiment.** Grouping (`MISSING` / `LOOK` /
+  `MATCHED`), line count and how much of each match is shown are tuned from the first
+  few real sheets. The test is whether the operator can act on one in under a minute on
+  a phone.
