@@ -1,6 +1,9 @@
 # casa-plugin-quarterly-accounting — design
 
 Status: draft for operator review · 2026-08-10
+Revised 2026-09-20 — re-verified against casa **v0.323.0**. Both scheduled-turn
+dependencies landed; the contracts they landed with (one attention lane, durable
+asks, background jobs) change the weekly pass. See “Casa baseline”.
 
 ## Purpose
 
@@ -62,19 +65,74 @@ server.** All document reading and all matching judgment happen in agents via `R
 Rationale for the split (verified against casa code, 2026-08-10):
 
 - Scheduled triggers are **resident-only** — `triggers.yaml` is in the forbidden file
-  set for specialist and executor tiers (`agent_loader.py:83-97`). Ellen being the
+  set for specialist and executor tiers (`agent_loader.py:79-97`, re-verified v0.323.0). Ellen being the
   scheduled entry point is structural.
-- A delegated specialist cannot use `ask_user` (gate requires
-  `execution == "direct"`, `tools.py:635`), and the two-turn ask shape cannot outlive
-  an ephemeral delegation anyway. Operator UX therefore belongs to the resident.
-- `send_media` gates on **origin**, not executor (`tools.py:352` area): delegated
-  turns inherit origin. Scheduled turns currently carry a synthetic chat id
-  (`trigger_registry.py:249`), which blocks media/keyboards in the cron turn itself —
-  see “casa dependencies” for the enhancement and the degradation path.
+- A delegated specialist cannot use `ask_user`: the gate demands a direct, genuine
+  inbound-DM turn (`tools.py:939-999`, re-verified at v0.323.0), and the two-turn ask
+  shape cannot outlive an ephemeral delegation anyway. Operator UX therefore belongs
+  to the resident.
+- `send_media` and `ask_user` now reach the operator **from the cron turn itself**
+  (#485, #573) — but through an eligibility rule that re-states the same split. It
+  requires all of: the reserved `_scheduled_delivery` marker, stamped only by Casa's
+  own time-based dispatch sites and stripped from every external ingress
+  (`tools.py:405-465`, `provenance.py:66`); the telegram channel; a configured
+  operator; and genuinely **direct** execution — no engagement bound, executing role
+  equal to the origin's role. A delegated specialist inherits the parent origin,
+  marker included, and deliberately does **not** inherit the delivery target.
 - The specialist reads PDFs itself rather than receiving curated extractions:
   matching judgment ("does this document explain this transaction?") must be made by
   the agent that sees both sides at full fidelity. Ellen's ingest-time extraction is
   provisional, for filing only, never load-bearing.
+
+## Casa baseline (re-verified 2026-09-20, casa v0.323.0)
+
+v1 was written against v0.2xx with two scheduled-turn enhancements outstanding. Both
+landed, and each brought contracts this plugin must design against, not merely enjoy.
+
+**Both dependencies are in.** `send_media(kind="zip")` ships (#482 — a `send_document`
+kind with a magic-signature head test and a **20 MB** cap, `media_policies.py:163-171`);
+#565 added a `text` kind (UTF-8 `.txt/.md/.csv/…`, 5 MB) that can deliver `notes.md` on
+its own. Scheduled turns may deliver media (#485) and raise button questions (#573). The
+two-beat degradation v1 described is **deleted, not deprecated**.
+
+**One attention lane, and it holds one question** (INV-JOB-008 / INV-JOB-014). A
+scheduled question is admitted only into an idle lane; a refused admission answers
+`operator_busy` and asks nothing. A human question — an operator `ask_user`, an
+authorization or consent challenge — retires a live scheduled one once that human
+question is itself delivered; one-way, never the reverse. **So a pass cannot post N
+confirmation keyboards in one turn.** It asks one, and asks the next when that settles.
+
+**A scheduled ask is a durable obligation, not a message** (INV-JOB-013 / INV-JOB-007).
+The record (`/data/scheduled_asks.json`) is written before the keyboard is posted,
+survives a restart with its remaining timeout, and **every** terminal outcome — answered,
+expired, cancelled, or settled `operator_busy` by the boot reconciler — is delivered back
+to the asking session as a machine-authored scheduled turn that reports the tap in its
+content, never as its speaker. The guarantee is **at-most-once**: the crash window
+between "decided" and "dispatched" may lose an outcome, never duplicate it. Three
+consequences:
+
+- v1's "ask-keyboards die on casa restart" is **wrong now** — they survive.
+- An outcome may still never arrive, so every pass re-derives its work from the store
+  and never waits on a continuation. The workbook already gives us that; the CAS
+  revision already makes a late tap safe.
+- Rewriting or removing the weekly trigger **cancels its pending asks**. A configurator
+  edit to `triggers.yaml` mid-week costs the open confirmations (they decay to
+  `proposed`). Acceptable, but it belongs in the install notes.
+
+**Background jobs exist now** (#1023, v0.321.0; batch-progress fix v0.323.0). A plugin
+declares a job under `casa.jobs` naming one of its own skills; any specialist whose
+resolved plugin set includes that plugin can host it; `start_job` runs it as batches in
+its own topic, with per-batch progress lines, operator messages between batches,
+`/cancel`, and restart resume. `start_job` carries no direct-execution gate, so a cron
+turn can start one. A job worker cannot ask the operator. This is a real option for the
+matching pass — see “Open items”.
+
+**Unchanged, re-verified at v0.323.0:** scheduled triggers are resident-only
+(`agent_loader.py:79-97`); `CLAUDE_PLUGIN_DATA` is CLI-managed and survives a plugin
+uninstall (`tools.py:12659-12692`); the outbox keeps atomic-claim semantics, destructive
+consumption and a 2 h orphan reap (`plugin_outbox.py:42`); a specialist role's
+`max_turns` is a `role.yaml` knob defaulting to 10 (`agent_loader.py:1215`); and there is
+still no sanctioned cross-plugin file handoff (#486 open).
 
 ## Data model
 
@@ -272,17 +330,25 @@ Bank-feed may lag by at most one pass; it can never drift silently.
    losers stay available for other transactions or get `mark_irrelevant`. Re-delegate
    for final picks. Hard bound: two search rounds per pass, then the item goes to
    residue.
-4. **Operator report.** With ha-casa-app#485: PDF + `[Confirm] [Wrong] [Later]`
-   ask-keyboards directly in the cron turn. Until then, two beats: text summary
-   (“2 items need your eyes — say ‘review’”), and the media/keyboards flow in the
-   DM turn the operator's reply creates. Unanswered asks decay to `proposed`;
-   nothing is ever lost by silence.
+4. **Operator report — one question at a time.** The cron turn delivers the summary
+   and, for the first item needing judgment, the invoice PDF plus a
+   `[Confirm] [Wrong] [Later]` keyboard (#485/#573). Casa's attention lane holds one
+   scheduled question, so the remaining items are **queued in the workbook, not
+   posted**: each terminal outcome returns as a machine-authored scheduled turn into
+   the same session, and that turn posts the next question. An `operator_busy` refusal
+   — the operator already has a live question or a consent challenge — is not an error:
+   the item stays `proposed` and is re-offered next pass. A pass posts at most
+   `ASK_BUDGET` questions (default 3, tunable); everything beyond that is residue by
+   design. Unanswered asks decay to `proposed`; nothing is ever lost by silence, and
+   nothing waits on an outcome that may never arrive.
 5. CRDT transactions: classified and annotated only.
 
 Confirmation taps close the loop: `[Confirm]` → `confirm_match` (+ annotation
 phase 2, + KB learning); `[Wrong]` → `reject_match` + one follow-up question whose
 answer lands in the KB; `[Later]` → stays proposed, resurfaces next pass and at
-quarter end.
+quarter end. Each tap arrives as the continuation turn's content carrying
+(match_id, revision) — the CAS rejection path is the only thing between a stale tap
+and a corrupted book, and the fixture suite exercises it.
 
 ### New portal vendor
 
@@ -331,9 +397,14 @@ Missing invoices never block shipping: ledger rows read `MISSING` with the best
 available link; `notes.md` opens with the action list (right after the revision
 line). The package build is deterministic and idempotent — “hold it”, supply
 stragglers, rebuild as `r<N+1>`, resend is free.
-Delivery: atomic write to the plugin outbox → `send_media(kind="zip")`
-(ha-casa-app#482) → operator's Telegram. The outbox copy is consumed on send (or
-reaped at 2 h); the canonical package stays in the data dir.
+Delivery: atomic write to the plugin outbox → `send_media(kind="zip")` (shipped,
+#482) → operator's Telegram, from the quarter-end cron turn itself. The outbox copy is
+consumed on send (or reaped at 2 h); the canonical package stays in the data dir. Two
+edges the shipped tool imposes: a transport timeout is reported as
+`delivery_uncertain` — the send may have landed — so a retry is an operator-visible
+**resend of the same revision**, never a silent rebuild (the revision line in
+`notes.md` and the caption make a duplicate arrival self-evident); and the `zip` kind
+caps at **20 MB**, which a quarter of PDF invoices can approach.
 
 ## Privacy
 
@@ -359,8 +430,10 @@ reaped at 2 h); the canonical package stays in the data dir.
   demotion could leave stale.
 - Server-enforced cardinality: no second active match per invoice or transaction;
   allocation groups validated by totals and always operator-confirmed.
-- Ask-keyboards die on casa restart / timeout → state decays to `proposed`, never
-  lost.
+- Ask-keyboards are durable across a casa restart (#573), and every terminal outcome
+  is delivered back to the asking session — at most once, so a lost outcome is a
+  normal case, not an incident. Timeout, cancellation, trigger rewrite and
+  `operator_busy` all read the same way downstream: the item is still `proposed`.
 - Casa restart mid-pass: workbook + store hold everything except the in-flight turn.
 - Packaging with open residue ships `MISSING` rows rather than blocking.
 
@@ -384,6 +457,12 @@ reaped at 2 h); the canonical package stays in the data dir.
   totals must validate and which must stay `proposed` without operator
   confirmation; and concurrent `build_quarterly_package` calls that must yield
   distinct reserved revisions with snapshot-consistent contents.
+- The ask queue is store state, so it is unit-testable and must be tested: a pass with
+  five items needing judgment posts ONE question and leaves four queued; an
+  `operator_busy` refusal posts nothing and leaves the item `proposed`; a terminal
+  outcome that never arrives (at-most-once loss) leaves the item `proposed` and the
+  next pass re-offers it; and an answer arriving after the trigger was rewritten is
+  rejected by CAS rather than applied.
 - Matching quality is LLM behavior, not unit-testable here: first real quarter runs
   `proposed`-heavy by design until the KB warms up; the auto-match bar (exact
   amount + date window + vendor consistency via KB + global unambiguity) keeps wrong-match risk asymmetric
@@ -395,10 +474,30 @@ reaped at 2 h); the canonical package stays in the data dir.
 | Repo | Change | Status |
 |---|---|---|
 | casa-specialist-finance | Role bump: `max_turns` 10 → ~40; allow the new plugin's tools in `role/role.yaml`. | Small release, needed for v1. |
-| ha-casa-app | [#482](https://github.com/bonzanni/ha-casa-app/issues/482) zip media kind. | **Needed for delivery.** |
-| ha-casa-app | [#485](https://github.com/bonzanni/ha-casa-app/issues/485) scheduled-turn operator interaction. | UX improvement; graceful two-beat degradation without it. |
-| ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area, [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | Not dependencies; flow converts naturally if/when they land. |
+| ha-casa-app | [#482](https://github.com/bonzanni/ha-casa-app/issues/482) zip media kind. | **Shipped** — closed 2026-08-14. |
+| ha-casa-app | [#485](https://github.com/bonzanni/ha-casa-app/issues/485) scheduled-turn `send_media`. | **Shipped** — closed 2026-08-14. |
+| ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485, and the one the confirmation flow actually needs. | **Shipped** — closed 2026-08-15. |
+| ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area, [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | Still open, still not dependencies: gmail→store custody stays an agent-passed path, specialist asks stay structured work orders. |
 | Resident config | Two reminders (weekly; quarter-end on the 10th), plugin assignment to both roles. | Operator/configurator action at install time. |
+
+### Open casa issues this plugin designs around
+
+None blocks v1. Each costs a plugin-side line rather than a wait (open as of
+2026-09-20):
+
+| Issue | Bite | Plugin-side answer |
+|---|---|---|
+| [#990](https://github.com/bonzanni/ha-casa-app/issues/990) — `send_message` reports "sent" when the channel delivered nothing (bug, medium) | A pass's summary can vanish while the turn believes it delivered, and the closing-silence convention then suppresses the only other output. | A pass's operator-visible output is never a bare `send_message`: the report rides `send_media`/`ask_user`, whose failures are loud (`delivery_uncertain`, `operator_busy`). |
+| [#960](https://github.com/bonzanni/ha-casa-app/issues/960) / [#932](https://github.com/bonzanni/ha-casa-app/issues/932) — a scheduled turn that delivers with a tool and then ends in prose delivers twice (bug, low) | Two DMs per pass. Nothing enforces the clause; only documentation asks for it. | Both trigger prompts this plugin ships carry the closing `<silent/>` clause verbatim, in the install notes. |
+| [#975](https://github.com/bonzanni/ha-casa-app/issues/975) — bundle compensation writes an emptied tuple over a refused transaction's files (bug, high, `operator-decision`) | Hits the `casa-specialist-finance` role bump (`upgrade_specialist`), not the runtime: a refused upgrade can take the specialist's saved settings 1 → 0. | Capture the specialist's settings before the bump and verify after. The issue is blocked on an operator decision, so it will not clear on its own. |
+| [#1024](https://github.com/bonzanni/ha-casa-app/issues/1024) — install-time vault exploration searches variables no recipe may wire from a vault item (bug, low) | `CASA_PLUGIN_QA_COMPANY_SLUG` is exactly that class; install will hunt 1Password for it and offer candidates the recipes forbid using. | Install notes state it plainly: a plain setting, typed at install, never a vault item. |
+| [#1033](https://github.com/bonzanni/ha-casa-app/issues/1033) — a progress report made while answering the operator is credited to the previous batch (bug, medium) | Only if a pass becomes a `casa.jobs` job. | Settled by the jobs decision below; v1 does not declare a job. |
+| [#480](https://github.com/bonzanni/ha-casa-app/issues/480) — apply the per-engagement uid and capability drop to in-process (`in_casa`) engagements too (enhancement) | Would change this plugin's file-access assumptions: the gmail→store custody hop and the specialist's `Read` of the invoice store both rely today on delegated turns sharing the process user. INV-CONT-004 already requires a pinned plugin directory to be owned by the dropped uid or world-readable and traversable. | Watch it. If it lands, the store's directory modes and the ingest hop need a re-read — and the case for [#486](https://github.com/bonzanni/ha-casa-app/issues/486) stops being a convenience argument. |
+
+Checked and **not** reachable for this plugin as specified: the plugin-setup and consent
+issues (#1012, #1005, #1014 — it declares no setup tool and no credentials) and #987
+(it declares no `systemRequirements`, so it publishes no `verify_bin` that could shadow
+an s6 name). If the implementation adds any of those, re-check them.
 
 ## Open items
 
@@ -408,3 +507,13 @@ reaped at 2 h); the canonical package stays in the data dir.
   package.
 - Weekly reminder day/time: operator preference at install (proposal: Monday
   morning).
+- **Should the matching pass run as a `casa.jobs` background job?** (New since v1.)
+  For: a long pass stops blocking a resident turn, gets progress lines in its own
+  topic, survives a restart, and is `/cancel`-able. Against: a job worker cannot ask
+  the operator, so every confirmation returns to Ellen either way; it adds a second
+  engagement to reason about; and the batch machinery is three weeks old with one open
+  defect (#1033). Proposal: v1 ships without jobs, and the quarter-end pass — the long
+  one — is the first candidate to move if a pass ever runs out of turns.
+- **Package size against the 20 MB `zip` cap.** A quarter of PDF invoices can approach
+  it. Decide the split rule (per-month parts, `invoices/` only + separate ledger) before
+  the first real delivery rather than during it.
