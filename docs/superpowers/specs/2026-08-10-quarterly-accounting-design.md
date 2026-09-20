@@ -351,7 +351,7 @@ multi-round delegations stateless-safe (each delegation is a fresh ephemeral ses
 state carries in the store, not in return values alone) and crash-safe: a casa
 restart mid-pass loses only the in-flight turn.
 
-## Tool surface (server, 18 tools)
+## Tool surface (server, 19 tools)
 
 Ingest & curation: `ingest_invoice` (agent-extracted metadata as arguments),
 `update_invoice_metadata`, `mark_irrelevant`.
@@ -362,9 +362,10 @@ Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match`,
 the match-record state machine).
 KB: `upsert_vendor`.
 Setup: `check_setup()` — what the pass can actually reach (bank-feed tools, bound
-account, gmail tools, slug, last sync), one branch at the top of every pass;
+account, gmail tools, last sync), one branch at the top of every pass;
 `bind_account(account_id)` — records the business account and its ledger instance on
-first run.
+first run; `set_package_name(name)` — changes the zip filename prefix, which otherwise
+defaults and is never asked about.
 Review: `build_review(scope)` — renders the sheet from store state, assigns stable
 line numbers and persists line → `(match_id, revision)` so a reply two days late still
 resolves; `resolve_review_line(sheet_id, line, verdict, note)` — what Ellen calls per
@@ -444,7 +445,9 @@ queue alone would not have earned that sentence.
 
 ## Setup (install day, once)
 
-**The whole of it is one sentence to the configurator, one answer, and two triggers.**
+**The whole of it is one sentence to the configurator and two triggers. It asks the
+operator nothing** (operator ruling, 2026-09-21: never block setup on a choice that has
+a reasonable default; default it, say what was defaulted, and let it be changed later).
 Everything else the plugin works out for itself. Verified against casa v0.323.0's own
 install path (`recipes/plugin/add.md`, `plugin_add`, `agent.py:2664`).
 
@@ -463,11 +466,7 @@ call. **Its tools are granted by that assignment** — "installed ⇒ granted, b
 construction" (`agent.py:2664-2668`: every server-level plugin grant is appended to the
 agent's allowed tools). No role file is edited, by anyone.
 
-**Step 2 — one question.** The configurator asks for `CASA_PLUGIN_QA_COMPANY_SLUG`,
-by meaning: *"what short name should the quarterly zip files carry?"*. It is a plain
-setting, typed, never searched for in a vault (§Privacy; ha-casa-app#1024).
-
-**Step 3 — two triggers on Ellen**, created through the trigger recipe. This spec ships
+**Step 2 — two triggers on Ellen**, created through the trigger recipe. This spec ships
 the exact prompt text so nobody composes it at install time, because the closing clause
 is what stops every pass delivering twice (ha-casa-app#960/#932):
 
@@ -487,17 +486,38 @@ prompt:   Run the quarterly-accounting quarter-end pass for the quarter that
 
 The weekly day and time are the operator's preference; Monday 09:00 is the proposal.
 
-**That is the end of install.** No account selection, no vendor list, no KB seeding, no
-category setup, no historical import.
+**That is the end of install.** No questions, no account selection, no vendor list, no
+KB seeding, no category setup, no historical import.
+
+**The plugin declares no required environment variables at all.** The package-name
+setting that v1 wired through `CASA_PLUGIN_QA_COMPANY_SLUG` is now stored in the data
+dir with a default (below), which is both better UX — the operator can change it by
+saying so, instead of needing a configurator edit — and the cleanest possible answer to
+ha-casa-app#1024: a plugin with no required variables triggers no install-time vault
+exploration whatsoever.
 
 ### What the plugin works out for itself
 
-**Which bank account.** Asked of bank-feed on the first pass, not of the operator at
-install. Exactly one eligible business account ⇒ bound, and the first sheet says which
-(`Bound to <account label> · first review`). More than one ⇒ the first sheet's first
-line asks, answered in the same free-text reply as anything else. The binding records
-the account and the ledger instance, so a recreated bank database cannot silently
-inherit the old row handles.
+**Which bank account — defaulted when it can be, asked only when it genuinely cannot.**
+The first pass asks bank-feed for its accounts. bank-feed categorises every account
+`personal` or `company` (`rules.py:44`, written by `label_account`), so:
+
+| What bank-feed shows | What happens |
+|---|---|
+| Exactly one `company` account | **Bound, silently.** The first sheet's scope line says which: `Bound to <account label> · first review`. No question. |
+| Several `company` accounts | The first sheet's first line asks which, answered in the same free-text reply as anything else. |
+| No `company` account | The sheet asks, listing what bank-feed does have, and mentions that `label_account` is how an account becomes a company one. |
+
+The binding records both the account and the ledger instance, so a recreated bank
+database cannot silently inherit the old row handles.
+
+**What the zip files are called — defaulted, never asked.** The package name defaults to
+a slug of the bound account's label, or to `books` when that yields nothing usable, and
+it is stored (changeable) rather than configured. The first package says so in one line:
+`Files are named "books-2026-Q3-r1.zip" — say "call the zips <name>" to change that.`
+Said once, on the first package only. A default nobody minds costs one line; a question
+at install costs a decision at the worst possible moment, when the operator wants the
+thing installed and has no opinion yet.
 
 **No `casa.setupTool` is declared, deliberately.** Casa would run it automatically after
 a consent round, which sounds like the house pattern — but the only thing this plugin
@@ -531,8 +551,10 @@ Nothing else to do until then.
 The conditions it distinguishes, each with its own sentence: bank-feed tools not
 reachable · no account bound and none offered · the bound account gone from bank-feed ·
 gmail tools not reachable (matching still runs on documents already held; the sheet says
-searching is off) · the company slug unset (everything works; only packaging is blocked,
-and it says so at quarter end rather than weekly) · bank-feed reachable but never synced.
+searching is off) · bank-feed reachable but never synced. **Nothing in that list is a
+missing setting**, because there are no settings to miss: everything the plugin needs is
+either defaulted or asked in the sheet, so the self-check only ever reports things
+outside the plugin that are genuinely broken.
 
 This is one `check_setup` tool reading state the server already has, and one branch at
 the top of the pass. It is the difference between an operator who fixes a wiring mistake
@@ -918,11 +940,12 @@ pass offers a resend of the same revision, in words, like everything else.
 - The repo ships **zero** personal or company data: no IBANs (bank-feed owns
   accounts), no company name, no vendor list, no operator identity. This spec
   deliberately says “the operator's B.V.”.
-- The zip filename prefix comes from `CASA_PLUGIN_QA_COMPANY_SLUG`, a **plain
-  setting** typed at install — not a vault item, not an `op://` reference. The v1 text
-  called it 1Password-referenced and a plain setting in the same breath; it is the
-  latter. A company slug is not a credential, and routing it through the vault only
-  feeds the install-time exploration noise of ha-casa-app#1024.
+- The zip filename prefix is a **stored setting in the data dir**, defaulted from the
+  bound account's label (or `books`) and changeable by asking. It is not an environment
+  variable, not a vault item and not an `op://` reference — the v1 text called it
+  1Password-referenced and a plain setting in the same breath, and it is now neither.
+  A company name is not a credential, and the plugin declares no required environment
+  variables at all.
 - Everything identifying lives only in the data dir.
 - House publication guards anyway (pre-commit deny-patterns, gitleaks) as
   belt-and-braces for a private repo.
@@ -1045,7 +1068,7 @@ None blocks v1. Each costs a plugin-side line rather than a wait (open as of
 | ~~[#990](https://github.com/bonzanni/ha-casa-app/issues/990) — `send_message` reports "sent" when the channel delivered nothing~~ | — | **Fixed** (verified 2026-09-21 in `tools.py`: a proven negative is now an error result). This is what lets the weekly sheet ride `send_message` inline instead of always being an attachment — the fix changed the UX, not just the failure mode. |
 | [#960](https://github.com/bonzanni/ha-casa-app/issues/960) / [#932](https://github.com/bonzanni/ha-casa-app/issues/932) — a scheduled turn that delivers with a tool and then ends in prose delivers twice (bug, low) | Two DMs per pass. Nothing enforces the clause; only documentation asks for it. | Both trigger prompts this plugin ships carry the closing `<silent/>` clause verbatim, in the install notes. |
 | [#975](https://github.com/bonzanni/ha-casa-app/issues/975) — bundle compensation writes an emptied tuple over a refused transaction's files (bug, high, `operator-decision`) | Hits the `casa-specialist-finance` role bump (`upgrade_specialist`), not the runtime: a refused upgrade can take the specialist's saved settings 1 → 0. | Capture the specialist's settings before the bump and verify after. The issue is blocked on an operator decision, so it will not clear on its own. |
-| [#1024](https://github.com/bonzanni/ha-casa-app/issues/1024) — install-time vault exploration searches variables no recipe may wire from a vault item (bug, low) | `CASA_PLUGIN_QA_COMPANY_SLUG` is exactly that class; install will hunt 1Password for it and offer candidates the recipes forbid using. | Install notes state it plainly: a plain setting, typed at install, never a vault item. |
+| ~~[#1024](https://github.com/bonzanni/ha-casa-app/issues/1024) — install-time vault exploration searches variables no recipe may wire from a vault item~~ | — | **Not reachable.** The plugin declares no required environment variables (the package name is a defaulted stored setting), so no exploration runs for it. |
 | [#1033](https://github.com/bonzanni/ha-casa-app/issues/1033) — a progress report made while answering the operator is credited to the previous batch (bug, medium) | Only if a pass becomes a `casa.jobs` job. | Settled by the jobs decision below; v1 does not declare a job. |
 | [#480](https://github.com/bonzanni/ha-casa-app/issues/480) — apply the per-engagement uid and capability drop to in-process (`in_casa`) engagements too (enhancement) | Would change this plugin's file-access assumptions: the gmail→store custody hop and the specialist's `Read` of the invoice store both rely today on delegated turns sharing the process user. INV-CONT-004 already requires a pinned plugin directory to be owned by the dropped uid or world-readable and traversable. | Watch it. If it lands, the store's directory modes and the ingest hop need a re-read — and the case for [#486](https://github.com/bonzanni/ha-casa-app/issues/486) stops being a convenience argument. |
 
