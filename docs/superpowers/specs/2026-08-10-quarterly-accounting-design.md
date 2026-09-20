@@ -652,7 +652,8 @@ in week one and an operator who concludes after a month that the plugin does not
 
    MISSING
    1 Adobe · EUR 54.45 · 14 Sep
-   Get invoice:
+   Get invoice, then email it to
+   yourself:
    https://adobe.example/invoices
 
    2 Jansen BV · EUR 120.00 · 15 Sep
@@ -776,6 +777,73 @@ continuation carries only its own request id and the chosen label — verbatim,
 "carries (match_id, revision)" was false. Any future keyboard must persist
 rid → (match_id, revision, choices) before asking and resolve through that map, and must
 survive Casa's one-question attention lane. A free-text sheet reply has neither problem.
+
+### Getting a document back in — the one path that exists
+
+**You cannot send a file to Casa.** Verified 2026-09-21: `filters.TEXT` is the only
+inbound filter registered in the entire channel layer (`telegram.py:1057`), and nothing
+anywhere reads `message.document` or `message.photo`. A PDF sent to Ellen in Telegram
+does not fail — **no handler fires at all**, so it is silently dropped. Any design that
+assumed "just send me the invoice" was assuming a capability that does not exist.
+
+So the return path for a portal invoice, or any PDF the operator obtains by hand, is
+**email it to yourself**. The plugin already searches the operator's Gmail; a self-sent
+message with the PDF attached lands exactly where it is already looking. Consequences,
+all small:
+
+- **Every portal line on the sheet carries the instruction, not just the link:**
+  `Get invoice: <link> — then email it to yourself.` A link with no return path is half
+  an instruction.
+- The pass additionally runs one targeted search for **recent self-addressed mail
+  carrying attachments** whenever any item is in the portal/missing state, so a forwarded
+  PDF is found even when its subject line matches nothing about the transaction.
+- Those arrive with `source=manual-email` rather than a vendor message id, which is
+  recorded but changes nothing about matching: the document is read and judged like any
+  other.
+
+If casa ever accepts inbound documents, this becomes one line shorter and nothing else
+changes.
+
+### Recognising a reply, without reply metadata
+
+Ellen is a general assistant having ordinary conversations; the sheet reply arrives in
+the same DM as everything else, and casa hands her no indication of what a message
+replied to (see §Flows, weekly step 4). The recognition rule is therefore explicit, and
+it fails toward *not* claiming the message:
+
+- A message naming a **live line number for the current quarter** is a sheet reply.
+  Numbers are unique per quarter, so this is unambiguous.
+- `all good`, `rebuild it`, `send it again` and their kin are sheet replies **only while
+  a sheet or package is the most recent thing the plugin sent** and nothing else is
+  pending.
+- Everything else is ordinary conversation. **The plugin never claims a message it
+  cannot bind**, and a number that is not a live line is not a sheet reply — it is
+  someone talking about a number.
+- Genuinely ambiguous? One short question, which is rare enough to be affordable and
+  always cheaper than acting on the wrong reading.
+
+### A quiet week, and coming back after a gap
+
+**A quiet week still speaks, in one line.** `Nothing new this week. 2 invoices still
+missing.` — or just `Nothing new this week.` Silence would be indistinguishable from a
+broken pass, and the liveness signal costs three seconds to read.
+
+**A sheet is always current state, never a replay of missed weeks.** After six ignored
+sheets the seventh is not six sheets long: it shows what is missing *now* and what is
+still unreviewed *now*, oldest first, capped at a readable length with the remainder
+counted (`+14 older uncertain pairings — say "show older"`). Nothing accumulates into a
+wall, nothing is lost by having been skipped, and the sheet never remarks on the gap.
+The operator who returns after a month gets the same page they would have got anyway,
+which is the entire reason state lives in the store rather than in the conversation.
+
+### Asking between passes
+
+The plugin is also a thing to ask, not only a thing that reports. "What am I missing for
+Q3?", "did the Adobe invoice ever arrive?", "how much software spend this quarter?" are
+answered from the store through the read tools Ellen already holds — no new mechanism,
+no new tool, nothing to build beyond saying so in the skill. Two rules: the answer comes
+from the store and never from the last sheet's text, and a question is never treated as
+a correction (asking "is 4 right?" changes nothing about line 4).
 
 ### New portal vendor
 
@@ -1028,6 +1096,14 @@ pass offers a resend of the same revision, in words, like everything else.
   redirected; a reply naming a line from an older sheet in the same quarter still
   resolves, because numbers are unique per quarter; and the receipt is generated from
   committed results, so a test that stubs the commit sees the receipt change.
+- **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
+  targeted sweep and matched like any other document; a message naming a number that is
+  not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
+  while a sheet is the most recent thing sent; and a question ("is 4 right?") never
+  mutates line 4.
+- **Gap re-entry**: with six unanswered sheets behind it, the next sheet is bounded, is
+  built from current state rather than replayed, and carries a count of what it did not
+  print.
 - **Coverage states render differently**: missing, not-searched and not-checked must be
   distinguishable in the rendered sheet, and a pass that failed must lead with its own
   condition rather than with accounting results.
