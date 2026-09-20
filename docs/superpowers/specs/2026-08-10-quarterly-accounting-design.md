@@ -24,10 +24,17 @@ progressively annotated.
 - Weekly, mostly-autonomous matching of DBIT transactions to invoice PDFs. The plugin
   **decides and shows** rather than asking: a loose match that is visible and reversible
   beats a strict one that hands the work back (see §“The reversibility ladder”).
-- **It must be faster than doing it by hand.** A week's accounting should cost the
-  operator one sheet read and at most one reply; a quarter should cost that plus
-  checking the zip. If using the plugin becomes a chore it has failed, whatever its
-  state machine guarantees.
+- **It must be faster than doing it by hand.** The *review* of a week should cost one
+  sheet read and at most one reply — modelled at roughly 55 seconds for a normal week:
+  two incoming messages, one outgoing, two taps, six typed words, no attachment opened.
+  If using the plugin becomes a chore it has failed, whatever its state machine
+  guarantees.
+- **Stated honestly, because the difference matters**: that budget covers reviewing the
+  machine's work. It does not cover *collecting* the invoices it could not find — if
+  three are missing, fetching them is still three errands, and no presentation trick
+  makes twelve manual acquisitions fit in a minute. The plugin's claim is that it finds
+  what it can, tells you exactly what it could not, and never makes you re-derive that
+  list yourself. Deferred missing invoices are never counted as work saved.
 - A standing answer to “what am I missing?” — the review sheet leads with it, every
   week, rather than saving it for quarter end.
 - Quarter-end zip package delivered over Telegram: `invoices/` (bulk-uploadable to
@@ -125,6 +132,15 @@ Two consequences worth stating, because they overturn v1's instincts:
 - **Speed is a correctness property.** If a pass cannot beat the operator doing it by
   hand, the plugin has failed on its own terms, regardless of how sound its state
   machine is. Every proposed mechanism in this document is judged against that too.
+
+**What the operator never has to learn.** `proposed`, `conflicted`, `matched`, CAS,
+`expected_revision`, `annotation_state`, acceptance revisions, content hashes, the
+confidence labels, quarter identifiers in tool form. None of it appears on a sheet, in a
+caption or in a receipt. The operator's entire vocabulary is: a line number while a
+sheet is in front of them, a vendor name, "wrong", "good", "needs no invoice", "rebuild
+it", "send it again". Package revision numbers surface only when choosing between two
+delivered files. Everything else is machinery, and machinery that leaks onto the sheet
+is a defect.
 
 ## Casa baseline (re-verified 2026-09-20, casa v0.323.0)
 
@@ -482,54 +498,153 @@ queue alone would not have earned that sentence.
    losers stay available for other transactions or get `mark_irrelevant`. Re-delegate
    for final picks. Hard bound: two search rounds per pass, then the item goes to
    residue.
-4. **Operator report — one sheet, not a queue of questions.** The pass ends by
-   delivering a **review sheet**: a compact Markdown document sent with
-   `send_media(kind="text")` (#565; 5 MB cap, no attention lane involved because a
-   delivery is not a question). It is built by `build_review` from store state, and it
-   is designed to be read on a phone in under a minute (vendor names below are
-   illustrative — per §Privacy this document carries no real vendor list):
+4. **Operator report — one sheet, delivered inline.** The pass ends by sending a
+   **review sheet**. Every rule here is load-bearing (UX round, 2026-09-21):
+
+   - **Inline whenever it fits.** A sheet under Telegram's 4096 UTF-16 units goes as an
+     ordinary `send_message` — no tap, no download, nothing to open. Only a sheet that
+     genuinely does not fit becomes a `.txt` via `send_media(kind="text")`, captioned
+     with the missing count and as many names as fit. A forty-line sheet that fits still
+     goes inline: scrolling is cheaper than opening. It is never split across numbered
+     messages and never silently truncated. (`send_message` is trustworthy again now
+     that ha-casa-app#990 reports proven non-delivery.)
+   - **What is missing comes first, always**, before anything reassuring. A sheet whose
+     first screen reads "9 matched" teaches the operator that opening it reveals nothing.
+   - **Phone width is ~32 characters.** Short wrapping blocks, not aligned columns: a
+     74-character row inside a fenced block is still 74 characters wide, and its
+     continuation text begins off-screen.
+   - **Evidence, not label codes.** The sheet never prints `clean`, `guessed`, `no-ref`
+     or `partial-search`; it prints what they mean — "picked invoice 8841; invoice 8712
+     also fits", "no shared reference", "invoice names a person, not the B.V.", "search
+     incomplete". The labels stay internal, where they drive sorting.
+   - **Diff-first.** Each sheet carries what is new or changed, every still-missing
+     invoice, and every still-unreviewed uncertain pairing. An unchanged pairing the
+     operator already reviewed does not come back — repetition is what turns a sheet
+     into wallpaper.
+
+   A normal week (illustrative; per §Privacy no real vendor list appears here):
 
    ```
-   Q3 · week of 14 Sep · 9 new · €2,481.20
+   3 invoices missing · 2 pairings to check
+   14-20 Sep · 9 new payments
 
-   MISSING (3) — these need you
-     1  04 Sep  €54.45  Adobe          portal → console.adobe.com/invoices
-     2  07 Sep  €120.00 Jansen BV      no invoice found (searched 2 rounds)
-     3  11 Sep  €18.15  unknown        counterparty BCK*XYZ — who is this?
+   MISSING
+   1 Adobe · EUR 54.45 · 14 Sep
+   Get invoice:
+   https://adobe.example/invoices
 
-   LOOK (2)
-     4  05 Sep  €99.00  Zapier    guessed among 2 — picked inv 8841 (05 Sep),
-                                  runner-up inv 8712 (28 Aug)
-     5  09 Sep  €12.10  Vercel    no-ref · recipient? invoice names a person,
-                                  not the B.V.
+   2 Jansen BV · EUR 120.00 · 15 Sep
+   No invoice found in email.
 
-   MATCHED (4) — skim
-     6  02 Sep  €7.99   Backblaze  inv 5521      clean
-     7  ...
+   3 BCK*XYZ · EUR 180.00 · 16 Sep
+   Who was this payment to?
+
+   CHECK THESE
+   Included unless you correct them.
+   4 Zapier · EUR 99.00 · 17 Sep
+   Picked invoice 8841 · 17 Sep.
+   Invoice 8712 · 10 Sep also fits.
+
+   5 Vercel · EUR 12.10 · 18 Sep
+   Invoice V-918 names a person,
+   not the B.V.
+
+   MATCHED
+   6 Backblaze · EUR 7.99 · inv B5521
+   7 Hetzner · EUR 24.20 · inv H9017
    ```
 
-   The operator replies in free text — “all good”, “4 is wrong”, “4 and 9 wrong, 3 is
-   my accountant” — and Ellen applies the corrections in one turn: `reject_match` on
-   the named lines, `confirm_match` on the rest (author `operator`). Line numbers are
-   stable for the life of one sheet and are stored with it, so a reply that arrives two
-   days later still resolves. **No reply is a valid outcome**: everything stays as the
-   pass left it, labels and all, and the next sheet shows it again.
+   **Line numbers are unique within a quarter and never reused.** Casa's inbound
+   Telegram context carries the incoming message's own id and **not** the message it
+   replied to (verified 2026-09-21, `telegram.py:1647`), so a native reply gesture
+   cannot tell the plugin which sheet the operator meant. Unique numbers make that
+   plumbing unnecessary: "4" resolves to exactly one proposition for the whole quarter,
+   whichever sheet printed it. An unrecognised number is reported, never resolved
+   against the newest sheet.
 
-   **The pass raises no button questions.** A one-line identity question (“who is
-   BCK*XYZ?”) is a line on the sheet like any other, answered in the same reply. This
-   keeps the operator's side of a week's accounting to one message read and at most one
-   message written.
+   **The pass raises no button questions.** A one-line identity question ("who is
+   BCK*XYZ?") is a line on the sheet like any other, answered in the same reply.
+
 5. CRDT transactions: classified and annotated only.
 
-The review reply closes the loop. Each line the operator names resolves to a
-`(match_id, revision)` recorded with the sheet, so an answer is always bound to the
-proposition it was shown — a CAS rejection means the line changed underneath (a
-retarget, a demotion, a better candidate) and Ellen says so on that line rather than
-applying a stale correction. Corrections are ordinary state transitions: `reject_match`
-frees the slot and returns the transaction to the pool with the rejected candidate
-remembered, `confirm_match` promotes author `auto` → `operator` and writes the permanent
-bank-feed note, and a correction the operator volunteers (“3 is my accountant, no
-invoice ever”) writes a KB fact so the question never recurs.
+**A broken pass must not read as deficient books.** "No invoice found" when Gmail was
+unavailable, or "nothing new" when the bank feed was stale, tells the operator something
+false about their own accounting. Three states stay distinct and render differently:
+**missing** (searched, not found), **not searched** (the pass could not look), and **not
+checked** (the pass stopped before reaching it). A degraded pass leads with its own
+condition, ahead of any accounting result:
+
+```
+Review incomplete - Gmail unavailable.
+Bank checked through 20 Sep.
+3 invoices already missing.
+6 new payments not searched.
+No reply needed; I'll retry next pass.
+```
+
+```
+Review interrupted.
+18 of 30 new payments checked.
+12 not checked yet. Saved.
+```
+
+Coverage comes from the run record's actual completed work, never inferred from the
+latest transaction date as a proxy for sync health. If Casa itself is down nothing can
+be sent at all, and this design does not pretend otherwise.
+
+**Week one carries one extra line and no configuration ritual.** An empty KB is not the
+operator's problem to solve first: the pass researches links itself, uses the evidence
+already in the bank line and the PDFs, and asks identity questions only for genuinely
+unidentified payments. Same sheet, preceded by
+`First review · bank checked through 20 Sep`. There is no vendor-classification exercise
+standing between install and useful work.
+
+**The review reply closes the loop, and it touches only what the operator named.**
+This is the round's most important correction to the previous draft, which applied
+`confirm_match` to every unnamed line. "4 and 9 are wrong" would then have recorded
+seven other pairings as *operator-reviewed decisions* the operator never looked at —
+silent corruption of review intent, and worse than the wrong match it was meant to
+catch, because it launders a guess into a human decision. So:
+
+- **A correction affects the lines it names. Nothing else moves.** Unnamed lines keep
+  their author (`auto`) and their label and reappear later if still uncertain.
+- **Only explicit approval approves.** "all good" confirms the pairings shown on that
+  sheet; it resolves no missing invoice and picks no winner among alternatives. "4 good"
+  confirms exactly line 4.
+- **Facts are distinct from verdicts.** "3 is my accountant" records an identity; it
+  does **not** mean "no invoice expected" (that is "3 needs no invoice"), and it
+  certainly does not mean "never for this vendor" (that is "no invoices ever for X").
+  The plugin never manufactures "ever" out of a one-off answer.
+
+Each named line resolves to a `(match_id, revision)` recorded with the sheet — or, for a
+missing item, to the transaction, since there is no match record to point at. A CAS
+rejection means the line changed underneath, and Ellen reports that line with its
+current facts instead of applying a stale correction.
+
+**The reply grammar is an executable contract, not "Ellen understands free text":**
+
+| Rule | Behaviour |
+|---|---|
+| Unique target | A displayed number, a list of them, or an exact displayed vendor name within the quarter. Case and whitespace normalised; **no fuzzy vendor matching** — two Adobe charges need a number. |
+| Whole clauses | A supported clause must consume all its text. "4 and 9" is a target list with no verb: nothing applies, and the reply asks whether they are wrong. Never extract a convenient command from prose that did not parse. |
+| Negative verdicts unpair, and only that | "4 wrong", "no to 4", "wrong: 4, 9" remove the pairing and keep both payment and document. On a missing or identity-only line there is no pairing to remove: nothing mutates, and the reply says what it could do instead. |
+| Ambiguous bulk clauses apply nothing | "all good except the Zapier" does not say whether Zapier is wrong or merely unchecked. Nothing applies; the reply names the two phrasings that work. Input-error handling, not a gate. |
+| Validate against the saved proposition | An unknown number is reported, never redirected to a nearby one. Independent valid clauses still apply; the exceptions ride in the same receipt. |
+| Instructions separate from corrections | "4 wrong; rebuild it" unpairs, then rebuilds that sheet's quarter. An unresolved correction blocks its dependent rebuild and says so. Unsupported wording is reported, never swallowed into a note. |
+
+**One receipt, generated from what actually committed**, naming vendor and effect — not
+"Done":
+
+```
+Unpaired 4 Zapier.
+3 BCK*XYZ: accountant; invoice still missing.
+```
+
+The receipt is what makes a misread reply visible and therefore reversible — the same
+bargain the rest of the design makes. No follow-up question trails it. These rules make
+wrong-sheet application, implicit approval and identity-to-no-invoice inference
+unreachable; they cannot make arbitrary natural-language misunderstanding unreachable,
+which is why unsupported wording fails visibly instead of guessing.
 
 **v1 raises no button questions at all**, which retires a whole class of problem the
 earlier drafts carried. Worth recording why, in case a later version wants one: casa's
@@ -553,12 +668,44 @@ Weekly-pass mechanics over the **full quarter**, then:
 
 1. Final sync, repair sweep and fingerprint revalidation of every active match.
 2. `build_quarterly_package("<YYYY-Qn>")`.
-3. **Send it.** No gate, no keyboard, no confirmation (operator, 2026-09-21): the zip
-   goes out with a caption carrying the headline facts — n invoices, n missing, total,
-   `r<N>`, digest — and `notes.md` opens with what is missing. **The package is the
+3. **Send it.** No gate, no keyboard, no confirmation (operator, 2026-09-21). The
+   caption is short enough to read without opening anything and leads with what is
+   missing, not with build metadata:
+
+   ```
+   3 invoices missing · 2 uncertain pairings
+   2026 Q3 · revision 1 · 108 invoice PDFs
+   Open notes.md first.
+   Reply with corrections and "rebuild it".
+   ```
+
+   No digest, no internal build vocabulary, no request to acknowledge receipt — the
+   digest lives at the END of `notes.md`, for diagnostics. `notes.md` opens with the
+   actual missing items, numbered the same way the review sheets number them so a
+   correction can be written against either, then the uncertain pairings that were
+   included anyway, then unsupported relationships, and only then inventory and
+   commentary. **The package is the
    quarter's review surface.** The operator checks it, says what is wrong, and asks for
    another; corrections apply and `r<N+1>` follows. That round trip is cheaper than any
    question the plugin could have asked beforehand.
+
+**The replacement package's caption doubles as the receipt**, keeping a correction and
+its result in one exchange. The operator replies `17 wrong; rebuild it` and the next zip
+arrives captioned:
+
+```
+Unpaired 17 Zapier.
+4 invoices missing · 1 uncertain pairing
+2026 Q3 · revision 2 · 107 invoice PDFs
+Replaces ...-Q3-r1.zip. Use ...-Q3-r2.zip.
+```
+
+"rebuild it" means the quarter of the package being replied to; "rebuild Q3" resolves
+only when the year is unambiguous — the plugin never silently picks among years; "send
+it again" resends the existing revision, labelled as a resend. What stays annoying is
+real, and no gate fixes it: downloading, extracting, switching between `notes.md` and
+the PDFs, and an obsolete zip still sitting in the phone's downloads. Naming the
+replaced file reduces that confusion; it does not remove the burden.
 
 **Two ways a package is produced, and one rule for repeats.**
 
@@ -664,7 +811,7 @@ quarter crosses the cap, the split rule is decided then, with evidence.
 
 After a `delivery_uncertain` the package is NOT re-sent automatically: the send may have
 landed, and a second zip in the accountant's hands is worse than a question. The next
-pass offers a one-tap resend of the same revision.
+pass offers a resend of the same revision, in words, like everything else.
 
 ## Privacy
 
@@ -747,15 +894,35 @@ pass offers a one-tap resend of the same revision.
   tx-classifier's untagged queue; and every tag the plugin writes must satisfy
   `^[a-z0-9][a-z0-9-]{0,31}$` (a pinning test, since the v1 spec's whole tag vocabulary
   was invalid).
+- **The sheet and the reply grammar are testable and must be pinned**: a sheet that
+  fits goes inline and one that does not becomes exactly one attachment with a leading
+  missing-count caption (never split, never truncated); no line of a rendered sheet
+  exceeds the phone-width budget; a correction naming two lines leaves every other
+  line's author untouched (the round-6 defect — implicit approval — gets its own red
+  case); "all good" confirms only the pairings shown; "3 is my accountant" does not set
+  no-invoice-expected; "4 and 9" and "all good except the Zapier" apply nothing and
+  answer with the phrasing that works; an unknown number is reported and never
+  redirected; a reply naming a line from an older sheet in the same quarter still
+  resolves, because numbers are unique per quarter; and the receipt is generated from
+  committed results, so a test that stubs the commit sees the receipt change.
+- **Coverage states render differently**: missing, not-searched and not-checked must be
+  distinguishable in the rendered sheet, and a pass that failed must lead with its own
+  condition rather than with accounting results.
 - An **install smoke test**, because shared plugin storage is asserted rather than
   proven by casa's code: the resident ingests a synthetic document, the specialist
   reads that same record and those same bytes, and the resident stages it for delivery.
   It is a release check, not a reason to build a transfer service.
-- Matching quality is LLM behavior, not unit-testable here: first real quarter runs
-  `proposed`-heavy by design until the KB warms up; the auto-match bar (exact
-  amount + date window + vendor consistency via KB + global unambiguity) keeps wrong-match risk asymmetric
-  in the safe direction (a missed match costs a residue line; a wrong match corrupts
-  the books).
+- Matching quality is LLM behavior, not unit-testable here, and the v1 expectation that
+  the first quarter would run `proposed`-heavy is **obsolete** — it belonged to the
+  strict bar that the loose-matching ruling replaced. The first quarter should match
+  readily and be wrong sometimes, with the sheet catching it. What protects the books is
+  not the bar's tightness but the loop: every pick is shown, labelled with its actual
+  doubt, and one word away from being undone. A wrong match that reaches the accountant
+  is a review-surface failure before it is a matching failure.
+- A small labelled corpus of hard invoices (ambiguous period, order confirmation, net vs
+  gross, personal recipient) can catch regressions in PDF reading between plugin
+  versions. A passing corpus is not evidence that live matches are correct, and its
+  score never becomes an automatic confidence threshold.
 
 ## Changes in other repos
 
@@ -775,7 +942,7 @@ None blocks v1. Each costs a plugin-side line rather than a wait (open as of
 
 | Issue | Bite | Plugin-side answer |
 |---|---|---|
-| [#990](https://github.com/bonzanni/ha-casa-app/issues/990) — `send_message` reports "sent" when the channel delivered nothing (bug, medium) | A pass's summary can vanish while the turn believes it delivered, and the closing-silence convention then suppresses the only other output. | A pass's operator-visible output is never a bare `send_message`: the review sheet and the package both ride `send_media`, whose failure modes are loud (`delivery_uncertain`, `channel_unavailable`). |
+| ~~[#990](https://github.com/bonzanni/ha-casa-app/issues/990) — `send_message` reports "sent" when the channel delivered nothing~~ | — | **Fixed** (verified 2026-09-21 in `tools.py`: a proven negative is now an error result). This is what lets the weekly sheet ride `send_message` inline instead of always being an attachment — the fix changed the UX, not just the failure mode. |
 | [#960](https://github.com/bonzanni/ha-casa-app/issues/960) / [#932](https://github.com/bonzanni/ha-casa-app/issues/932) — a scheduled turn that delivers with a tool and then ends in prose delivers twice (bug, low) | Two DMs per pass. Nothing enforces the clause; only documentation asks for it. | Both trigger prompts this plugin ships carry the closing `<silent/>` clause verbatim, in the install notes. |
 | [#975](https://github.com/bonzanni/ha-casa-app/issues/975) — bundle compensation writes an emptied tuple over a refused transaction's files (bug, high, `operator-decision`) | Hits the `casa-specialist-finance` role bump (`upgrade_specialist`), not the runtime: a refused upgrade can take the specialist's saved settings 1 → 0. | Capture the specialist's settings before the bump and verify after. The issue is blocked on an operator decision, so it will not clear on its own. |
 | [#1024](https://github.com/bonzanni/ha-casa-app/issues/1024) — install-time vault exploration searches variables no recipe may wire from a vault item (bug, low) | `CASA_PLUGIN_QA_COMPANY_SLUG` is exactly that class; install will hunt 1Password for it and offer candidates the recipes forbid using. | Install notes state it plainly: a plain setting, typed at install, never a vault item. |
