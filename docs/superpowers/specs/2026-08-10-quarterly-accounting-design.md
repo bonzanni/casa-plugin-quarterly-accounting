@@ -351,7 +351,7 @@ multi-round delegations stateless-safe (each delegation is a fresh ephemeral ses
 state carries in the store, not in return values alone) and crash-safe: a casa
 restart mid-pass loses only the in-flight turn.
 
-## Tool surface (server, 16 tools)
+## Tool surface (server, 18 tools)
 
 Ingest & curation: `ingest_invoice` (agent-extracted metadata as arguments),
 `update_invoice_metadata`, `mark_irrelevant`.
@@ -361,6 +361,10 @@ Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match`,
 `mark_annotated` — every mutating match tool takes `expected_revision` (CAS; see
 the match-record state machine).
 KB: `upsert_vendor`.
+Setup: `check_setup()` — what the pass can actually reach (bank-feed tools, bound
+account, gmail tools, slug, last sync), one branch at the top of every pass;
+`bind_account(account_id)` — records the business account and its ledger instance on
+first run.
 Review: `build_review(scope)` — renders the sheet from store state, assigns stable
 line numbers and persists line → `(match_id, revision)` so a reply two days late still
 resolves; `resolve_review_line(sheet_id, line, verdict, note)` — what Ellen calls per
@@ -437,6 +441,102 @@ cross-store transaction and no promise of instantaneous equality. The guarantee 
 the expected row fingerprint, and verified by readback every pass and again before
 packaging. "It can never drift silently" is only true because of step 5; a dirty-work
 queue alone would not have earned that sentence.
+
+## Setup (install day, once)
+
+**The whole of it is one sentence to the configurator, one answer, and two triggers.**
+Everything else the plugin works out for itself. Verified against casa v0.323.0's own
+install path (`recipes/plugin/add.md`, `plugin_add`, `agent.py:2664`).
+
+**Prerequisites — things that must already be true, and are not this plugin's job:**
+bank-feed installed on the finance specialist with the business account linked and
+synced; the gmail plugin on Ellen; the finance specialist wired as Ellen's delegate.
+If they are not, the plugin says so on its first pass rather than producing an empty
+sheet (see the self-check below).
+
+**Step 1 — one sentence.** "Install the quarterly accounting plugin from
+`<owner>/casa-plugin-quarterly-accounting`, for Ellen and the finance specialist." The
+configurator calls
+`plugin_add(name="quarterly-accounting", repo=…, ref="latest", targets=["resident:<ellen>", "specialist:finance"])`,
+which publishes the artifact, assigns it to both targets, reloads and verifies in one
+call. **Its tools are granted by that assignment** — "installed ⇒ granted, by
+construction" (`agent.py:2664-2668`: every server-level plugin grant is appended to the
+agent's allowed tools). No role file is edited, by anyone.
+
+**Step 2 — one question.** The configurator asks for `CASA_PLUGIN_QA_COMPANY_SLUG`,
+by meaning: *"what short name should the quarterly zip files carry?"*. It is a plain
+setting, typed, never searched for in a vault (§Privacy; ha-casa-app#1024).
+
+**Step 3 — two triggers on Ellen**, created through the trigger recipe. This spec ships
+the exact prompt text so nobody composes it at install time, because the closing clause
+is what stops every pass delivering twice (ha-casa-app#960/#932):
+
+```
+name:     quarterly_accounting_weekly
+type:     cron        schedule: 0 9 * * 1        channel: telegram
+prompt:   Run the quarterly-accounting weekly pass for the current quarter
+          and send me the review sheet it produces.
+          After the send, output the sentinel `<silent/>` and nothing else.
+
+name:     quarterly_accounting_quarter_end
+type:     cron        schedule: 0 9 10 1,4,7,10  channel: telegram
+prompt:   Run the quarterly-accounting quarter-end pass for the quarter that
+          just closed, build its package and send it to me.
+          After the send, output the sentinel `<silent/>` and nothing else.
+```
+
+The weekly day and time are the operator's preference; Monday 09:00 is the proposal.
+
+**That is the end of install.** No account selection, no vendor list, no KB seeding, no
+category setup, no historical import.
+
+### What the plugin works out for itself
+
+**Which bank account.** Asked of bank-feed on the first pass, not of the operator at
+install. Exactly one eligible business account ⇒ bound, and the first sheet says which
+(`Bound to <account label> · first review`). More than one ⇒ the first sheet's first
+line asks, answered in the same free-text reply as anything else. The binding records
+the account and the ledger instance, so a recreated bank database cannot silently
+inherit the old row handles.
+
+**No `casa.setupTool` is declared, deliberately.** Casa would run it automatically after
+a consent round, which sounds like the house pattern — but the only thing this plugin
+needs at first use is a choice between accounts, and a setup tool cannot ask the
+operator anything. Declaring one would buy nothing and would make three open casa
+defects reachable (#1012 setup obligations consumed on tool availability, #1005 consent
+re-arming, #1014 lost retirement notes), none of which can touch a plugin that declares
+no setup tool and no credentials. The first-run binding above covers the same ground in
+the surface the operator is already reading.
+
+**No trigger or callback consent round.** The plugin declares no triggers of its own —
+the two above live on Ellen's `triggers.yaml` — and no callbacks, so there is no consent
+verdict for its setup to wait on.
+
+### The self-check, so a mis-wired install is never silent
+
+**The failure this closes:** a skipped or half-finished install produces a pass that
+finds nothing, and "nothing to report" is indistinguishable from "everything is fine"
+(UX round finding). So every pass begins by checking what it can actually reach, and a
+pass that cannot work says so in place of a sheet:
+
+```
+Not set up yet.
+No bank account is bound, and I can't
+see bank-feed's tools from here.
+Check that bank-feed is installed on
+the finance specialist.
+Nothing else to do until then.
+```
+
+The conditions it distinguishes, each with its own sentence: bank-feed tools not
+reachable · no account bound and none offered · the bound account gone from bank-feed ·
+gmail tools not reachable (matching still runs on documents already held; the sheet says
+searching is off) · the company slug unset (everything works; only packaging is blocked,
+and it says so at quarter end rather than weekly) · bank-feed reachable but never synced.
+
+This is one `check_setup` tool reading state the server already has, and one branch at
+the top of the pass. It is the difference between an operator who fixes a wiring mistake
+in week one and an operator who concludes after a month that the plugin does nothing.
 
 ## Flows
 
@@ -928,7 +1028,7 @@ pass offers a resend of the same revision, in words, like everything else.
 
 | Repo | Change | Status |
 |---|---|---|
-| casa-specialist-finance | Add the new plugin's tools to `role/role.yaml`'s allow-list. **Do not touch `max_turns`** — it is already **70** (verified 2026-09-21, `role/role.yaml:13`); the v1 spec's "bump 10 → ~40" was both wrong and a reduction. | Small release, needed for v1. |
+| ~~casa-specialist-finance~~ | ~~Role bump and tool grants.~~ **Nothing is needed.** `max_turns` is already 70 (`role/role.yaml:13`), and plugin tools are granted by assignment — "installed ⇒ granted, by construction" (`agent.py:2664-2668`), so no allow-list is edited. Both halves of the v1 row were wrong. | **Struck 2026-09-21.** v1 needs no change in any other repo. |
 | ha-casa-app | [#482](https://github.com/bonzanni/ha-casa-app/issues/482) zip media kind. | **Shipped** — closed 2026-08-14. |
 | ha-casa-app | [#485](https://github.com/bonzanni/ha-casa-app/issues/485) scheduled-turn `send_media`. | **Shipped** — closed 2026-08-14. |
 | ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485. | **Shipped** — closed 2026-08-15. No longer needed by v1 (no button questions), kept here because the v1 spec was built on its absence. |
@@ -967,8 +1067,8 @@ an s6 name). If the implementation adds any of those, re-check them.
   the failure mode that matters most.
 - Ledger column set to be reviewed with the accountant after the first delivered
   package.
-- Weekly reminder day/time: operator preference at install (proposal: Monday
-  morning).
+- Weekly reminder day/time: operator preference at install (proposal: Monday 09:00,
+  now written into the trigger text in §Setup).
 - **Background jobs: decided — not in v1.** A `casa.jobs` job buys progress lines, a
   topic and restart resume for a pass that handles 2–6 new transactions a week; against
   that it adds a second engagement, a batch protocol, and a dependency on machinery
