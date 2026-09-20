@@ -778,31 +778,40 @@ continuation carries only its own request id and the chosen label — verbatim,
 rid → (match_id, revision, choices) before asking and resolve through that map, and must
 survive Casa's one-question attention lane. A free-text sheet reply has neither problem.
 
-### Getting a document back in — the one path that exists
+### Portal invoices: offered, never demanded
 
-**You cannot send a file to Casa.** Verified 2026-09-21: `filters.TEXT` is the only
-inbound filter registered in the entire channel layer (`telegram.py:1057`), and nothing
-anywhere reads `message.document` or `message.photo`. A PDF sent to Ellen in Telegram
-does not fail — **no handler fires at all**, so it is silently dropped. Any design that
-assumed "just send me the invoice" was assuming a capability that does not exist.
+Most invoices involve no file handling at all — an email vendor's PDF is found, fetched
+and filed without the operator's involvement. This section is only about the minority
+that live behind a portal login, which this plugin deliberately does not scrape (§Non-goals).
 
-So the return path for a portal invoice, or any PDF the operator obtains by hand, is
-**email it to yourself**. The plugin already searches the operator's Gmail; a self-sent
-message with the PDF attached lands exactly where it is already looking. Consequences,
-all small:
+**Operator ruling, 2026-09-21: supplying a portal PDF is optional, and not supplying it
+is a normal outcome — not an outstanding task.** The plugin researches the deep link,
+offers it, accepts the document by whatever path exists, and never escalates, nags or
+treats its absence as a failure. The ledger row carries `MISSING` with the best link, the
+package ships, and the accountant has what they need to act. So:
 
-- **Every portal line on the sheet carries the instruction, not just the link:**
-  `Get invoice: <link> — then email it to yourself.` A link with no return path is half
-  an instruction.
-- The pass additionally runs one targeted search for **recent self-addressed mail
-  carrying attachments** whenever any item is in the portal/missing state, so a forwarded
-  PDF is found even when its subject line matches nothing about the transaction.
-- Those arrive with `source=manual-email` rather than a vendor message id, which is
-  recorded but changes nothing about matching: the document is read and judged like any
-  other.
+- The sheet's missing section is **informational, not a demand**: it is the standing
+  answer to "what am I missing?", which is a stated goal — and it is phrased as
+  availability ("get it if you want it in the package"), never as a chore list.
+- A portal item that keeps being offered and never supplied does not escalate. It stays
+  a line, at the same weight, for as long as it is true.
 
-If casa ever accepts inbound documents, this becomes one line shorter and nothing else
-changes.
+**If the operator does want the PDF in the package, the path that works today is email
+to self.** Verified 2026-09-21: `filters.TEXT` is the only inbound filter registered in
+the entire channel layer (`telegram.py:1057`), and nothing anywhere reads
+`message.document` or `message.photo` — a PDF sent to Ellen fires no handler at all and
+is silently dropped. So the sheet's portal lines name the path that exists:
+`Get invoice, then email it to yourself: <link>`. The pass runs one targeted search for
+recent self-addressed mail carrying attachments whenever anything is in the
+portal/missing state, so a forwarded PDF is found even when its subject matches nothing
+about the transaction. Such documents carry `source=manual-email`, which is recorded and
+changes nothing about how they are read or judged.
+
+**Filed upstream, deliberately not depended on:**
+[ha-casa-app#1036](https://github.com/bonzanni/ha-casa-app/issues/1036) asks casa to
+accept inbound Telegram documents, which would make "send me the invoice" the obvious
+gesture it ought to be. v1 does not wait for it, and the design does not change if it
+lands — one line on the sheet gets shorter.
 
 ### Recognising a reply, without reply metadata
 
