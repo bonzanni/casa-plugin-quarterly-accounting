@@ -24,11 +24,11 @@ progressively annotated.
 - Weekly, mostly-autonomous matching of DBIT transactions to invoice PDFs. The plugin
   **decides and shows** rather than asking: a loose match that is visible and reversible
   beats a strict one that hands the work back (see §“The reversibility ladder”).
-- **It must be faster than doing it by hand.** The *review* of a week should cost one
-  sheet read and at most one reply — modelled at roughly 55 seconds for a normal week:
-  two incoming messages, one outgoing, two taps, six typed words, no attachment opened.
-  If using the plugin becomes a chore it has failed, whatever its state machine
-  guarantees.
+- **It must be faster than doing it by hand, and it must cost nothing when ignored.**
+  The plugin sends nothing on a schedule; asking it for the picture and correcting one
+  pairing is a message out and a message back, modelled at under a minute. A week the
+  operator never thinks about costs them zero messages, which is the real bar: if the
+  plugin becomes a chore it has failed, whatever its state machine guarantees.
 - **Stated honestly, because the difference matters**: that budget covers reviewing the
   machine's work. It does not cover *collecting* the invoices it could not find — if
   three are missing, fetching them is still three errands, and no presentation trick
@@ -137,9 +137,10 @@ Two consequences worth stating, because they overturn v1's instincts:
 **What the operator never has to learn.** `proposed`, `conflicted`, `matched`, CAS,
 `expected_revision`, `annotation_state`, acceptance revisions, content hashes, the
 confidence labels, quarter identifiers in tool form. None of it appears on a sheet, in a
-caption or in a receipt. The operator's entire vocabulary is: a line number while a
-sheet is in front of them, a vendor name, "wrong", "good", "needs no invoice", "rebuild
-it", "send it again". Package revision numbers surface only when choosing between two
+caption or in a receipt — and neither do line numbers, which an earlier draft invented
+and this one removed. The operator's entire vocabulary is what they can already see: a
+vendor name, an amount, a date, and "wrong", "good", "needs no invoice", "rebuild it",
+"send it again". Package revision numbers surface only when choosing between two
 delivered files. Everything else is machinery, and machinery that leaks onto the sheet
 is a defect.
 
@@ -367,10 +368,11 @@ account, gmail tools, last sync), one branch at the top of every pass;
 `bind_account(account_id)` — records the business account and its ledger instance on
 first run; `set_package_name(name)` — changes the zip filename prefix, which otherwise
 defaults and is never asked about.
-Review: `build_review(scope)` — renders the sheet from store state, assigns stable
-line numbers and persists line → `(match_id, revision)` so a reply two days late still
-resolves; `resolve_review_line(sheet_id, line, verdict, note)` — what Ellen calls per
-named line, CAS on that line's recorded revision.
+Review: `build_review(scope)` — renders the current view (missing first, then guessed)
+from store state, and records what it showed and when, for audit rather than for
+addressing. Corrections go through the ordinary match tools with `expected_revision`;
+Ellen resolves the operator's description to an item by reading `list_quarter_state`,
+and an ambiguous description is a question, never a pick.
 Ledger input: `import_ledger_export(path)` — ingests bank-feed's `export_history`
 artifact so the package's ledger can list the full quarter (unmatched DBIT and CRDT
 rows included); the match records alone cannot produce it.
@@ -472,11 +474,11 @@ the exact prompt text so nobody composes it at install time, because the closing
 is what stops every pass delivering twice (ha-casa-app#960/#932):
 
 ```
-name:     quarterly_accounting_weekly
+name:     quarterly_accounting_pass
 type:     cron        schedule: 0 9 * * 1        channel: telegram
-prompt:   Run the quarterly-accounting weekly pass for the current quarter
-          and send me the review sheet it produces.
-          After the send, output the sentinel `<silent/>` and nothing else.
+prompt:   Run the quarterly-accounting background pass for the current
+          quarter. Send me nothing: output the sentinel `<silent/>` and
+          nothing else.
 
 name:     quarterly_accounting_quarter_end
 type:     cron        schedule: 0 9 10 1,4,7,10  channel: telegram
@@ -643,91 +645,18 @@ in week one and an operator who concludes after a month that the plugin does not
    **`search incomplete` and resumes next pass from where it stopped** rather than being
    abandoned to residue. The only real ceiling is the specialist's `max_turns` (70) and
    the pass's own wall-clock, and both are facts to report, never silently absorbed.
-4. **Operator report — one sheet, delivered inline.**
+4. **Record, and say nothing.** The pass ends by writing its results — matches,
+   labels, coverage, what it searched and what it could not finish. It delivers no
+   message (operator ruling, 2026-09-21: the job stays, the announcement goes). Casa's
+   own reproduction table confirms a scheduled turn ending in `<silent/>` with no
+   delivery tool call delivers zero messages (ha-casa-app#960, arm D), so a pass that
+   runs weekly costs the operator nothing at all until they ask.
 
-   **What "the sheet" is, precisely.** It is not a document and not a message format: it
-   is a **stored review snapshot, rendered as a message**. `build_review` writes a row —
-   sheet id, the moment it was taken, and an ordered list of lines, each binding a
-   number to one proposition (`match_id` + `revision`, or a transaction for a missing
-   item) — and then renders it. The message the operator sees is a *view* of that row.
-   The row is the thing that matters: it outlives the message, the conversation and the
-   session, and it is what a reply is resolved against. If the message is deleted,
-   scrolled past or never read, nothing is lost; the next sheet renders current state
-   again.
-
-   Every rule below is load-bearing (UX round, 2026-09-21):
-
-   - **Inline whenever it fits.** A sheet under Telegram's 4096 UTF-16 units goes as an
-     ordinary `send_message` — no tap, no download, nothing to open. Only a sheet that
-     genuinely does not fit becomes a `.txt` via `send_media(kind="text")`, captioned
-     with the missing count and as many names as fit. A forty-line sheet that fits still
-     goes inline: scrolling is cheaper than opening. It is never split across numbered
-     messages and never silently truncated. (`send_message` is trustworthy again now
-     that ha-casa-app#990 reports proven non-delivery.)
-   - **What is missing comes first, always**, before anything reassuring. A sheet whose
-     first screen reads "9 matched" teaches the operator that opening it reveals nothing.
-   - **Phone width is ~32 characters.** Short wrapping blocks, not aligned columns: a
-     74-character row inside a fenced block is still 74 characters wide, and its
-     continuation text begins off-screen.
-   - **Evidence, not label codes.** The sheet never prints `clean`, `guessed`, `no-ref`
-     or `partial-search`; it prints what they mean — "picked invoice 8841; invoice 8712
-     also fits", "no shared reference", "invoice names a person, not the B.V.", "search
-     incomplete". The labels stay internal, where they drive sorting.
-   - **Diff-first, and push-scoped.** The pushed message carries what is **new or
-     changed** — the machine's fresh decisions and their evidence. Still-missing
-     invoices and still-unreviewed older pairings are **not** repeated in it; they live
-     in the pull view, one phrase away, because repeating an errand at an hour nobody
-     can act on it is exactly how a weekly message becomes wallpaper. An unchanged
-     pairing never comes back on its own.
-
-   A normal week (illustrative; per §Privacy no real vendor list appears here):
-
-   ```
-   3 invoices missing · 2 pairings to check
-   14-20 Sep · 9 new payments
-
-   MISSING
-   1 Adobe · EUR 54.45 · 14 Sep
-   Get invoice, then email it to
-   yourself:
-   https://adobe.example/invoices
-
-   2 Jansen BV · EUR 120.00 · 15 Sep
-   No invoice found in email.
-
-   3 BCK*XYZ · EUR 180.00 · 16 Sep
-   Who was this payment to?
-
-   CHECK THESE
-   Included unless you correct them.
-   4 Zapier · EUR 99.00 · 17 Sep
-   Picked invoice 8841 · 17 Sep.
-   Invoice 8712 · 10 Sep also fits.
-
-   5 Vercel · EUR 12.10 · 18 Sep
-   Invoice V-918 names a person,
-   not the B.V.
-
-   MATCHED
-   6 Backblaze · EUR 7.99 · inv B5521
-   7 Hetzner · EUR 24.20 · inv H9017
-   ```
-
-   **Line numbers come from one monotonic counter per bound account and are never
-   reused** — not per sheet, and not per quarter. Casa's inbound Telegram context
-   carries the incoming message's own id and **not** the message it replied to
-   (verified 2026-09-21, `telegram.py:1647`), so a native reply gesture cannot tell the
-   plugin which sheet the operator meant; a never-reused number makes that plumbing
-   unnecessary, because "4" resolves to exactly one proposition for the life of the
-   install. Per-quarter numbering would have been enough until the first week that spans
-   a quarter boundary, when one sheet carries lines from two quarters and two of them
-   are called 4. An unrecognised number is reported, never resolved against the newest
-   sheet. Numbers are a pointing device, not an identifier the operator retains:
-   they climb, nobody is expected to notice, and the sheet in front of them always
-   carries the ones that matter.
-
-   **The pass raises no button questions.** A one-line identity question ("who is
-   BCK*XYZ?") is a line on the sheet like any other, answered in the same reply.
+   Everything the earlier drafts pushed on a Monday — missing invoices with links,
+   guessed pairings wanting a second opinion, coverage — is rendered on demand instead
+   (§"Pull only"). The rendering rules still hold wherever a view is produced: inline
+   when it fits Telegram's 4096 UTF-16 units, missing first, phone-width blocks rather
+   than aligned columns, evidence instead of label codes, and no numbering.
 
 5. CRDT transactions: classified and annotated only.
 
@@ -765,8 +694,9 @@ standing between install and useful work.
 
 **The review reply closes the loop, and it touches only what the operator named.**
 This is the round's most important correction to the previous draft, which applied
-`confirm_match` to every unnamed line. "4 and 9 are wrong" would then have recorded
-seven other pairings as *operator-reviewed decisions* the operator never looked at —
+`confirm_match` to every item the operator did not name. "Zapier and Vercel are wrong"
+would then have recorded seven other pairings as *operator-reviewed decisions* the
+operator never looked at —
 silent corruption of review intent, and worse than the wrong match it was meant to
 catch, because it launders a guess into a human decision. So:
 
@@ -790,11 +720,11 @@ current facts instead of applying a stale correction.
 | Rule | Behaviour |
 |---|---|
 | Unique target | A displayed number, a list of them, or an exact displayed vendor name within the quarter. Case and whitespace normalised; **no fuzzy vendor matching** — two Adobe charges need a number. |
-| Whole clauses | A supported clause must consume all its text. "4 and 9" is a target list with no verb: nothing applies, and the reply asks whether they are wrong. Never extract a convenient command from prose that did not parse. |
-| Negative verdicts unpair, and only that | "4 wrong", "no to 4", "wrong: 4, 9" remove the pairing and keep both payment and document. On a missing or identity-only line there is no pairing to remove: nothing mutates, and the reply says what it could do instead. |
+| Whole clauses | A supported clause must consume all its text. "Zapier and Vercel" is a target list with no verb: nothing applies, and the reply asks whether they are wrong. Never extract a convenient command from prose that did not parse. |
+| Negative verdicts unpair, and only that | "the Zapier one is wrong", "no to Zapier", "Zapier and Vercel are wrong" remove the pairing and keep both payment and document. On a missing or identity-only item there is no pairing to remove: nothing mutates, and the reply says what it could do instead. |
 | Ambiguous bulk clauses apply nothing | "all good except the Zapier" does not say whether Zapier is wrong or merely unchecked. Nothing applies; the reply names the two phrasings that work. Input-error handling, not a gate. |
 | Validate against the saved proposition | An unknown number is reported, never redirected to a nearby one. Independent valid clauses still apply; the exceptions ride in the same receipt. |
-| Instructions separate from corrections | "4 wrong; rebuild it" unpairs, then rebuilds that sheet's quarter. An unresolved correction blocks its dependent rebuild and says so. Unsupported wording is reported, never swallowed into a note. |
+| Instructions separate from corrections | "Zapier is wrong; rebuild it" unpairs, then rebuilds that quarter. An unresolved correction blocks its dependent rebuild and says so. Unsupported wording is reported, never swallowed into a note. |
 
 **One receipt, generated from what actually committed**, naming vendor and effect — not
 "Done":
@@ -832,7 +762,7 @@ store through the same tools; none of them is a mode.
 | **A reply lands after the quarter shipped** | The correction applies normally, and the receipt adds one line: the delivered package no longer matches, say "rebuild it" for a fresh one. Never rebuilt automatically — a new zip nobody asked for is worse than a stale one they know about. |
 | **The operator asks something** ("what am I missing for Q3?", "accounting list", "I'm doing accounting now") | The pull view: the collection list with links, rendered from the store, no pass and no mutation. This is the entry point for work done at a time of the operator's choosing (§"Push tells, pull works"). |
 | **The operator supplies a document** (self-addressed mail) | The next pass collects it by default, and its message names the successful intake. If they want it recorded now, `accounting: check emailed invoices` runs the sweep immediately and answers with a receipt (§"Recording Saturday's work on Saturday"). Either way, no obligation and no countdown. |
-| **The operator corrects something unprompted** ("the Adobe one is wrong") | Ordinary conversation resolves it: Adobe is missing rather than paired, so there is nothing to unpair, and Ellen says what she can do instead. Only a live line number binds silently. |
+| **The operator corrects something unprompted** ("the Adobe one is wrong") | Resolved against the store's open items like any other correction. Here Adobe is missing rather than paired, so there is nothing to unpair, and Ellen says what she can do instead. |
 | **The first run after install** | Same pass, plus account binding and one scope line. §Setup. |
 | **A pass could not finish, or Casa restarted mid-pass** | The store holds everything except the in-flight turn. The next pass resumes from durable state and its sheet opens with the coverage it actually achieved, never a silent partial. |
 | **Both triggers fire on one day** (the 10th falls on a Monday) | The quarter-end pass subsumes the weekly one: the weekly pass sees a quarter-end pass has already run for today and does nothing. Two sheets on one morning is noise, and the quarter-end one is a superset. |
@@ -844,119 +774,128 @@ grouped as always by what needs doing rather than by quarter, with the affected 
 named on each line only where it is not obvious. Quarters decide packaging; they do not
 decide what a Monday looks like.
 
-### Push tells, pull works
+### Pull only: the work runs quietly, the plugin speaks when asked
 
-**The problem, named** (operator, 2026-09-21; Astra async round): the moment the
-operator is *told* is not the moment the operator can *act*, and every earlier draft
-quietly assumed they were the same moment. The cron fires Monday 09:00 and they are
-driving. The work it describes — open a laptop, log into a vendor portal, download a
-PDF, mail it to yourself — happens Saturday evening if it happens at all. By then the
-message has scrolled away under every other conversation with Ellen, and reconstructing
-where they were costs more than the work. So it slips a week, and the next message shows
-*more* missing items, which makes it worse rather than better. Nothing logs any of this;
-the plugin believes it is working perfectly.
+**Operator ruling, 2026-09-21, and it replaces the weekly announcement entirely.** Once
+the collection errands moved to a pull, the Monday message was a log of machine
+decisions arriving at an hour nobody chose — read, filed as "later", and never returned
+to. That is noise, and noise is what turns a weekly message into wallpaper. **So there
+is no weekly announcement. The job stays; the announcement goes.**
 
-**The fix is a split of purpose, not a new mechanism.** The two things the plugin has to
-say have different audiences in time:
+| | What happens |
+|---|---|
+| **The scheduled pass** | Runs as before — sync, repair sweep, triage, searches, matching, bank-feed annotation — and **delivers nothing**. Its trigger prompt ends with the `<silent/>` sentinel, which Casa's own reproduction table confirms delivers zero messages (ha-casa-app#960, arm D). The operator's ledger still gets annotated; their phone stays quiet. |
+| **The operator asks** | "What's the status of the quarterly accounting?" — and gets the current picture, rendered from the store. This is now the primary interaction, not a fallback. |
+| **The operator hands over a document** | "This is the Twitter invoice for September." Filed, matched if it can be, honestly reported if it cannot (§"Handing it a document"). |
+| **Quarter end** | The package. The one thing still delivered unasked, because it is the deliverable rather than a notification. |
 
-| | What it is for | When it arrives |
-|---|---|---|
-| **The weekly push** | Showing what the machine *decided* — new and changed pairings with their evidence. Loose matching only stays honest if its picks are visible, so this must be pushed. | Monday, unasked. Short. |
-| **The pull** | The *collection errands* — what is missing, with links. Only useful when the operator has chosen to do them. | Whenever they ask. |
+**How Ellen answers without remembering anything.** She does not rely on conversational
+memory and must not: her session can end, be reset, or be started fresh by a capability
+change (casa v0.322.0). The skill — loaded per session, so present even in a session
+that has never discussed accounting — says that any question about accounting is
+answered by **calling the plugin's read tools**, never from recollection:
 
-So the weekly message stops carrying acquisition errands and carries one advertised line
-instead. Monday, after a successful pass:
+- `check_setup()` — can it reach bank-feed and Gmail, is an account bound, how stale is
+  the data;
+- `list_quarter_state(quarter)` — every transaction's state, the repair queue, coverage;
+- `build_review(scope)` — renders the current view and records what was shown.
+
+The store is the single source of truth, and the answer is computed at the moment of
+asking. A question is never a mutation: asking "is the Zapier one right?" changes
+nothing.
+
+**Nothing is numbered, and nothing needs to be.** An earlier draft made line numbers
+the addressing scheme, because a reply might arrive days later at an Ellen who no longer
+remembered the sheet. Pull-only dissolves that problem: **a correction resolves against
+the store's current open items, not against a remembered list**, so there is no list to
+have forgotten and no identifier for the operator to carry. They say what they see —
+"the Zapier one is wrong", "Adobe, I'll get it later", "the 54.45 one is my accountant"
+— and the line they are looking at already prints the three things that discriminate:
+vendor, amount, date.
+
+Resolution rules, which are the reply grammar's targeting half:
+
+| Case | Behaviour |
+|---|---|
+| The description matches exactly one open item | Apply it, echo what was resolved. |
+| It matches several (two Adobe charges) | **Ask, showing the candidates with their dates and amounts.** Never pick the most recent, the first, or the closest. |
+| It matches nothing | Say so, with what is open for that vendor if anything. Never redirect to a near miss. |
+| The item changed since it was rendered | Report it with current facts; the change is what the operator needs to see, not a silently applied correction. |
+
+**The receipt is what makes this safe**, exactly as before: it names what was resolved —
+`Unpaired Zapier EUR 99.00, 17 Sep.` — so a wrong resolution is visible in the same
+breath and one sentence from being undone. Genuinely identical lines (same vendor, same
+amount, same date) are the one case description cannot separate, and that is precisely
+the case the matcher leaves `proposed` rather than guessing, so the operator is asked
+about it rather than expected to address it.
+
+**What the answer looks like.** Missing items first, because that is what the question
+usually means, then anything the machine guessed at and would like challenged:
 
 ```
-Accounting · bank checked through 20 Sep
-For invoice links whenever you're ready, say
-"accounting list" here — laptop included.
+Accounting · Q3 2026
+Bank checked through 20 Sep · 41 payments, 3 without an invoice.
 
-New pairings · included unless corrected:
-104 Zapier · EUR 99.00 · 17 Sep
-Picked invoice 8841 (17 Sep); 8712 (10 Sep) also fits.
-105 Vercel · EUR 12.10 · 18 Sep
-Invoice V-918 names a person, not the B.V.
-106 Backblaze · EUR 7.99 · invoice B5521
-
-To correct one: "accounting: 104 wrong".
-No reply needed.
-```
-
-**"accounting list" is an advertised example, not a command.** The skill recognises the
-intent, not a syntax: "what am I missing", "I'm doing accounting now", "accounting
-list", "send me the invoice links" all reach the same place. One phrase is printed so
-the operator has something concrete to type; nothing requires them to remember it.
-There is no work-session to start, nothing to acknowledge and nothing to close.
-
-**The pulled list is the collection view — links, not machine decisions.** Somebody who
-has sat down to fetch invoices should not have to read the machine's reasoning again:
-
-```
-Accounting · Q3 2026 · missing invoices
-From records checked 21 Sep, 09:00.
-
-101 Adobe · EUR 54.45 · 14 Sep
+MISSING
+Adobe · EUR 54.45 · 14 Sep
 https://adobe.example/invoices
 
-102 Figma · EUR 18.15 · 15 Sep
+Figma · EUR 18.15 · 15 Sep
 https://figma.example/invoices
 
-For any you want: download the PDFs and email
-them to yourself. One email can carry several.
-Then say "accounting: check emailed invoices"
-for a receipt now — otherwise I'll collect them
-on the next pass.
+BCK*XYZ · EUR 180.00 · 16 Sep
+Who was this payment to?
+
+I GUESSED THESE
+Zapier · EUR 99.00 · 17 Sep
+Picked invoice 8841 (17 Sep); 8712 (10 Sep) also fits.
+Vercel · EUR 12.10 · 18 Sep
+Invoice V-918 names a person, not the B.V.
+
+Everything else matched cleanly.
+Tell me if one is wrong — "the Zapier one is wrong".
+Download the PDFs and email them to yourself, then
+say "check emailed invoices" to file them now.
 ```
 
-Two details that are easy to get wrong: the date names **when the records were last
-checked, not when the list was rendered** — pulling on Saturday must not make Monday's
-coverage look fresher than it is; and links are printed bare, never inside code
-formatting, so they stay tappable on both phone and laptop. Telegram's own device sync
-is the entire answer to "the links are on the wrong device".
+The coverage line is load-bearing: it is the only way the operator learns the plugin has
+stopped working, now that nothing arrives on its own. `Bank checked through 20 Sep` read
+on 14 October says more than any status notification would have.
 
-### Recording Saturday's work on Saturday
+### Handing it a document
 
-**`accounting: check emailed invoices`** runs the self-addressed intake sweep and
-matching immediately, instead of waiting for Monday. This is the one substantive
-addition the async round recommended, and it exists to kill a specific worry: *did the
-files arrive?* It reuses intake, custody, matching and annotation exactly as a pass does
-— no new channel, no completion flag, no second code path.
+**"This is the Twitter invoice for September."** The operator supplies a PDF — attached
+directly once [ha-casa-app#1036](https://github.com/bonzanni/ha-casa-app/issues/1036)
+lands, by self-addressed mail until then — usually with a sentence about what it is.
+That sentence is **evidence, not instruction**: it helps identify the vendor and period
+when the document is unclear, and it never overrides what the document says.
 
-The receipt distinguishes three states that are easy to blur, because claiming the wrong
-one is how trust is lost: **emailed is not filed, and filed is not matched.**
+What happens, in order, stopping at the first that resolves:
 
-```
-Filed and matched: Adobe (14 Sep), Figma (15 Sep).
-Still missing: Microsoft · EUR 12.10 · 16 Sep.
-https://microsoft.example/invoices
-```
+1. **File it first, always.** Hash, store, index, extract. Custody is never contingent on
+   matching succeeding — a document that cannot be matched today matches next month when
+   the charge posts.
+2. **Match against what is already pending.** The usual bar, the usual labels. The common
+   case is a one-line answer: `Matched to the EUR 12.10 payment of 18 Sep. Q3.`
+3. **If nothing fits, suspect the data before the document.** Sync bank-feed and retry —
+   an invoice frequently arrives before its charge posts, and a stale feed is the most
+   likely reason a real pairing is invisible.
+4. **If it still does not fit, say so plainly, and say which case it is.** These are
+   different situations and the operator can act on the difference:
 
-If a PDF was filed but could not be matched, it says so — "Adobe PDF saved; not yet
-matched to the EUR 54.45 payment" — and if the mail has not arrived it says that,
-without claiming completion and without scheduling a follow-up.
+   - `Filed. No payment matches EUR 12.10 yet — the charge may not have posted. It'll
+     match when it appears.`
+   - `Filed. I see a EUR 12.10 Twitter payment on 18 Sep, but it's already matched to
+     invoice V-918. Which one is right?`
+   - `Filed, but I can't read an amount from it — is it EUR 12.10?`
+   - `Filed. Nothing in Q3 is close to EUR 340.00. Is this for a different quarter?`
 
-**Progress is acknowledged factually, once, and never celebrated.** A later pull opens
-with what has since been filed:
+**Never silently discard, never guess-match to make the question go away, and never
+claim a match it did not make.** "I don't know how to match this" is a complete and
+acceptable answer, and it always comes with the document safely filed — which is the
+part that would actually have cost the operator something to redo.
 
-```
-Accounting · Q3 2026 · missing invoices
-Already filed: Adobe (14 Sep), Figma (15 Sep).
-
-103 Microsoft · EUR 12.10 · 16 Sep
-https://microsoft.example/invoices
-```
-
-No praise, no percentage, no streak, no separate progress notification. Two completed
-errands must never disappear behind two new charges, which is why filed items are named
-rather than merely subtracted from a count. If PDFs arrive with no check request, the
-next pass's ordinary message names the successful intake — acknowledging Saturday on
-Monday without adding a message.
-
-**And an interrupted session needs no closing.** Fetch two of three, shut the laptop,
-come back next week: the next pull renders current state with the same "already filed"
-line. Nothing counts down, nothing expires, nothing asks whether they are still working.
-
+### Portal invoices: offered, never demanded
 ### Portal invoices: offered, never demanded
 
 Most invoices involve no file handling at all — an email vendor's PDF is found, fetched
@@ -1026,15 +965,11 @@ work anyway:
    eager rule that claims ambiguous messages — whose failure mode is silently mutating
    the books from a sentence about something else.
 
-**The escape hatch is printed on the sheet**, once, as its last line:
-
-```
-Reply "4 wrong" — or "accounting: 4 wrong"
-if we've talked about other things since.
-```
-
-That costs one line and removes the operator's uncertainty about whether a bare number
-will land. An explicit `accounting:` prefix always binds, whatever else has happened.
+**The escape hatch is one word.** Saying "accounting" anywhere in the message always
+binds it to this plugin — "accounting: the Zapier one is wrong" — which matters when the
+conversation has moved on since the view was rendered. In practice it is rarely needed,
+because pull-only means the correction usually follows the operator's own question by
+seconds.
 
 **What still cannot be promised.** Recognition is model judgment, and model judgment is
 not a guarantee. The design bounds the damage (nothing mutates unless a line resolves,
@@ -1051,11 +986,11 @@ arrives.
 
 ### A quiet week, and coming back after a gap
 
-**A quiet week still speaks, in one line:** `Nothing new this week · bank checked
-through 20 Sep.` Silence would be indistinguishable from a broken pass, and the liveness
-signal costs three seconds to read. It does **not** restate what is still missing — a
-quiet status has no business reciting the operator's unfinished errands, which are one
-pull away whenever they want them.
+**A quiet week is simply quiet**, because every week is: the pass never speaks. What
+would have been the liveness signal now rides the answer to the operator's own question,
+as the coverage line (`Bank checked through 20 Sep`). That is strictly better —
+it arrives when they are actually reading, and it tells them how stale the picture is
+rather than merely that something ran.
 
 **A sheet is always current state, never a replay of missed weeks.** After six ignored
 sheets the seventh is not six sheets long: it shows what is missing *now* and what is
@@ -1320,11 +1255,11 @@ pass offers a resend of the same revision, in words, like everything else.
   exceeds the phone-width budget; a correction naming two lines leaves every other
   line's author untouched (the round-6 defect — implicit approval — gets its own red
   case); "all good" confirms only the pairings shown; "3 is my accountant" does not set
-  no-invoice-expected; "4 and 9" and "all good except the Zapier" apply nothing and
-  answer with the phrasing that works; an unknown number is reported and never
-  redirected; a reply naming a line from an older sheet in the same quarter still
-  resolves, because numbers are unique per quarter; and the receipt is generated from
-  committed results, so a test that stubs the commit sees the receipt change.
+  no-invoice-expected; "Zapier and Vercel" and "all good except the Zapier" apply
+  nothing and answer with the phrasing that works; a description matching two open items
+  asks rather than picking; a description matching none is reported and never redirected
+  to a near miss; and the receipt is generated from committed results, so a test that
+  stubs the commit sees the receipt change.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
@@ -1333,9 +1268,9 @@ pass offers a resend of the same revision, in words, like everything else.
 - **Entry points**: a reply arriving mid-pass applies against the sheet's recorded
   propositions and reports exactly the lines the pass moved; a reply after the package
   shipped applies and offers a rebuild without performing one; a week spanning the
-  quarter boundary produces ONE sheet whose line numbers do not collide (the
-  per-quarter numbering this replaced would have); and a weekly pass does nothing when
-  a quarter-end pass has already run that day.
+  quarter boundary produces ONE view; a description matching two open items asks rather
+  than picking, and a description matching none says so rather than redirecting; and a
+  scheduled pass does nothing when a quarter-end pass has already run that day.
 - **Gap re-entry**: with six unanswered sheets behind it, the next sheet is bounded, is
   built from current state rather than replayed, and carries a count of what it did not
   print.
@@ -1381,7 +1316,7 @@ None blocks v1. Each costs a plugin-side line rather than a wait (open as of
 | [#975](https://github.com/bonzanni/ha-casa-app/issues/975) — bundle compensation writes an emptied tuple over a refused transaction's files (bug, high, `operator-decision`) | Hits the `casa-specialist-finance` role bump (`upgrade_specialist`), not the runtime: a refused upgrade can take the specialist's saved settings 1 → 0. | Capture the specialist's settings before the bump and verify after. The issue is blocked on an operator decision, so it will not clear on its own. |
 | ~~[#1024](https://github.com/bonzanni/ha-casa-app/issues/1024) — install-time vault exploration searches variables no recipe may wire from a vault item~~ | — | **Not reachable.** The plugin declares no required environment variables (the package name is a defaulted stored setting), so no exploration runs for it. |
 | [#1036](https://github.com/bonzanni/ha-casa-app/issues/1036) — casa cannot receive an inbound Telegram document (enhancement, filed by this work; in progress) | A portal PDF has no direct path into custody. | Email-to-self works today and the sheet says so; a document the operator never supplies is a normal outcome, so nothing waits on this. |
-| [#1037](https://github.com/bonzanni/ha-casa-app/issues/1037) — the inbound `reply_to_message_id` is discarded (enhancement, filed by this work) | A reply made with Telegram's reply gesture cannot be bound to the sheet it answers. | Never-reused line numbers plus store-backed resolution close it without the field; if it lands, binding becomes exact. |
+| [#1037](https://github.com/bonzanni/ha-casa-app/issues/1037) — the inbound `reply_to_message_id` is discarded (enhancement, filed by this work) | A reply made with Telegram's reply gesture cannot be bound to the message it answers. | Resolving descriptions against live store state removes the need entirely; the field would only be a convenience now. |
 | [#1033](https://github.com/bonzanni/ha-casa-app/issues/1033) — a progress report made while answering the operator is credited to the previous batch (bug, medium) | Only if a pass becomes a `casa.jobs` job. | Settled by the jobs decision below; v1 does not declare a job. |
 | [#480](https://github.com/bonzanni/ha-casa-app/issues/480) — apply the per-engagement uid and capability drop to in-process (`in_casa`) engagements too (enhancement) | Would change this plugin's file-access assumptions: the gmail→store custody hop and the specialist's `Read` of the invoice store both rely today on delegated turns sharing the process user. INV-CONT-004 already requires a pinned plugin directory to be owned by the dropped uid or world-readable and traversable. | Watch it. If it lands, the store's directory modes and the ingest hop need a re-read — and the case for [#486](https://github.com/bonzanni/ha-casa-app/issues/486) stops being a convenience argument. |
 
