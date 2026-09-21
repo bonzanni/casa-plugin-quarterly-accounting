@@ -222,8 +222,19 @@ matching pass — see “Open items”.
 (`agent_loader.py:79-97`); `CLAUDE_PLUGIN_DATA` is CLI-managed and survives a plugin
 uninstall (`tools.py:12659-12692`); the outbox keeps atomic-claim semantics, destructive
 consumption and a 2 h orphan reap (`plugin_outbox.py:42`); a specialist role's
-`max_turns` is a `role.yaml` knob defaulting to 10 (`agent_loader.py:1215`); and there is
-still no sanctioned cross-plugin file handoff (#486 open).
+`max_turns` is a `role.yaml` knob defaulting to 10 (`agent_loader.py:1215`).
+
+**Cross-plugin files: Casa 0.326.0 floor ([#486](https://github.com/bonzanni/ha-casa-app/issues/486)).**
+Casa owns a handoff folder, `/data/handoff/<producer>/<id>/<filename>` (`CASA_HANDOFF_DIR`).
+A producer publishes a file and returns its path; a consumer takes it with the vendored
+`casa_handoff.capture(path)`, which returns `(filename, bytes)` only for a single-link
+regular file in that exact layout, so the consumer never opens the path itself. Reading
+never deletes; Casa removes a file 7 days after publication. Limits: 25 MB per file, 2 GB
+for the folder. When the folder is full, the next publish is refused and nothing is
+evicted. gmail 0.9.0's `download_attachment` publishes there, and its `send_email`
+attaches handoff files. bank-feed's `export_history` publishes its ledger export there.
+Casa's `share_inbound_file` copies a file the operator sent in Telegram there. This
+plugin vendors `casa_handoff.py` verbatim.
 
 **bank-feed floor: 0.9.0** (casa-specialist-finance component 0.10.0,
 [casa-specialist-finance#31](https://github.com/bonzanni/casa-specialist-finance/issues/31)).
@@ -393,11 +404,14 @@ restart mid-pass loses only the in-flight turn.
 ## Tool surface (server, 19 tools)
 
 Ingest & curation: `ingest_invoice(source_path, vendor, invoice_date, invoice_number,
-amount, currency, recipient, source_ref)` — **the server copies the file at
-`source_path` into its own store, hashes it and indexes it, in that order**, and returns
-the content hash. This is the only way bytes enter custody, and it is a copy rather than
-a reference on purpose: a Gmail attachment lives in the gmail plugin's own cache, which
-expires (7 days), so a record pointing at it would be custody in name only. The metadata
+amount, currency, recipient, source_ref)` — **the server takes `source_path` from
+Casa's handoff folder with `casa_handoff.capture`, and copies those bytes into its own
+store, hashes them and indexes them, in that order**. It returns the content hash.
+`source_path` is the path gmail's `download_attachment` returned, or the path
+`share_inbound_file` returned for a document the operator sent. Any other path is refused.
+This is the only way bytes enter custody. It is a copy rather than a reference on
+purpose: a handoff file is removed after 7 days, so a record pointing at it would be
+custody in name only. The metadata
 arguments are the agent's provisional reading, for filing; the bytes are the fact.
 `update_invoice_metadata`, `mark_irrelevant`,
 `update_invoice_metadata`, `mark_irrelevant`.
@@ -425,8 +439,8 @@ arrived, and a design that only advanced on delivery with no way to record deliv
 would leave corrections re-rendering forever. Corrections go through the ordinary match tools with `expected_revision`;
 Ellen resolves the operator's description to an item by reading `list_quarter_state`,
 and an ambiguous description is a question, never a pick.
-Ledger input: `import_ledger_export(path)` — ingests bank-feed's `export_history`
-artifact so the package's ledger can list the full quarter (unmatched DBIT and CRDT rows
+Ledger input: `import_ledger_export(path)` — takes (via `casa_handoff.capture`) the
+file bank-feed's `export_history` published to the handoff folder so the package's ledger can list the full quarter (unmatched DBIT and CRDT rows
 included); the match records alone cannot produce it. **It filters to the bound account
 and to ACTIVE rows.** `export_history` runs `SELECT … FROM transactions ORDER BY …` with
 no state predicate (verified 2026-09-21, `tools_refresh.py:914`), so it returns
@@ -435,7 +449,8 @@ transaction booked in the quarter" turns one €99 payment that went pending →
 €198 (round-5 finding). Superseded and vanished observations are kept as history and
 disclosed in `notes.md` where they explain something, never summed into the ledger.
 Packaging: `build_quarterly_package(quarter)`, `stage_for_delivery(target)` (copies
-an invoice PDF or the built package into casa's plugin outbox for `send_media`).
+an invoice PDF or the built package into casa's plugin outbox for `send_media`, or
+publishes it to the handoff folder so gmail's `send_email` can attach it).
 
 House disciplines copied from bank-feed: explicit loud failures, numeric caps and
 truncation notices on reads, provider text fenced as untrusted on output, three-way
@@ -1311,9 +1326,10 @@ an external write that already landed. Two consequences, both required:
 
 ### Handing it a document
 
-**"This is the Twitter invoice for September."** The operator supplies a PDF — attached
-directly once [ha-casa-app#1036](https://github.com/bonzanni/ha-casa-app/issues/1036)
-lands, by self-addressed mail until then — usually with a sentence about what it is.
+**"This is the Twitter invoice for September."** The operator supplies a PDF — sent
+to the assistant directly (Casa 0.325.0 keeps it; Ellen passes it to `ingest_invoice`
+through `share_inbound_file` without asking again), or by self-addressed mail — usually
+with a sentence about what it is.
 That sentence is **evidence, not instruction**: it helps identify the vendor and period
 when the document is unclear, and it never overrides what the document says.
 
@@ -1378,11 +1394,11 @@ portal/missing state, so a forwarded PDF is found even when its subject matches 
 about the transaction. Such documents carry `source=manual-email`, which is recorded and
 changes nothing about how they are read or judged.
 
-**Filed upstream, deliberately not depended on:**
-[ha-casa-app#1036](https://github.com/bonzanni/ha-casa-app/issues/1036) asks casa to
-accept inbound Telegram documents, which would make "send me the invoice" the obvious
-gesture it ought to be. v1 does not wait for it, and the design does not change if it
-lands — one line on the sheet gets shorter.
+**Shipped upstream:** [ha-casa-app#1036](https://github.com/bonzanni/ha-casa-app/issues/1036)
+(Casa 0.325.0) accepts an inbound Telegram document, and
+[#486](https://github.com/bonzanni/ha-casa-app/issues/486) (Casa 0.326.0) lets it reach
+this plugin. So "send me the invoice" is the obvious gesture it ought to be. The sheet's
+portal line can offer it beside email-to-self; nothing else in the design changes.
 
 ### Recognising a reply, when nothing guarantees the context survived
 
@@ -1782,7 +1798,7 @@ pass offers to resend that exact file, in words, like everything else.
 | ha-casa-app | [#482](https://github.com/bonzanni/ha-casa-app/issues/482) zip media kind. | **Shipped** — closed 2026-08-14. |
 | ha-casa-app | [#485](https://github.com/bonzanni/ha-casa-app/issues/485) scheduled-turn `send_media`. | **Shipped** — closed 2026-08-14. |
 | ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485. | **Shipped** — closed 2026-08-15. No longer needed by v1 (no button questions), kept here because the v1 spec was built on its absence. |
-| ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area, [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | Still open, still not dependencies: gmail→store custody stays an agent-passed path, specialist asks stay structured work orders. |
+| ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area (shipped, Casa 0.326.0), [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | gmail→store custody goes through the handoff folder (gmail 0.9.0); specialist asks stay structured work orders (#487 still open, still not a dependency). |
 | Resident config | **One** weekly trigger (§Setup), plugin assignment to both roles. No quarter-end trigger: packaging happens only when the operator asks. | Operator/configurator action at install time. |
 
 ### Open casa issues this plugin designs around
@@ -1796,10 +1812,10 @@ None blocks v1. Each costs a plugin-side line rather than a wait (open as of
 | [#960](https://github.com/bonzanni/ha-casa-app/issues/960) / [#932](https://github.com/bonzanni/ha-casa-app/issues/932) — a scheduled turn that delivers with a tool and then ends in prose delivers twice (bug, low) | Two DMs per pass. Nothing enforces the clause; only documentation asks for it. | Both trigger prompts this plugin ships carry the closing `<silent/>` clause verbatim, in the install notes. |
 | [#975](https://github.com/bonzanni/ha-casa-app/issues/975) — bundle compensation writes an emptied tuple over a refused transaction's files (bug, high, `operator-decision`) | Hits the `casa-specialist-finance` role bump (`upgrade_specialist`), not the runtime: a refused upgrade can take the specialist's saved settings 1 → 0. | Capture the specialist's settings before the bump and verify after. The issue is blocked on an operator decision, so it will not clear on its own. |
 | ~~[#1024](https://github.com/bonzanni/ha-casa-app/issues/1024) — install-time vault exploration searches variables no recipe may wire from a vault item~~ | — | **Not reachable.** The plugin declares no required environment variables (the package name is a defaulted stored setting), so no exploration runs for it. |
-| [#1036](https://github.com/bonzanni/ha-casa-app/issues/1036) — casa cannot receive an inbound Telegram document (enhancement, filed by this work; in progress) | A portal PDF has no direct path into custody. | Email-to-self works today and the sheet says so; a document the operator never supplies is a normal outcome, so nothing waits on this. |
+| [#1036](https://github.com/bonzanni/ha-casa-app/issues/1036) — casa cannot receive an inbound Telegram document (shipped, Casa 0.325.0; reaches this plugin via #486, Casa 0.326.0) | — | Resolved. Email-to-self still works; a document the operator never supplies is still a normal outcome. |
 | [#1037](https://github.com/bonzanni/ha-casa-app/issues/1037) — the inbound `reply_to_message_id` is discarded (enhancement, filed by this work) | A reply made with Telegram's reply gesture cannot be bound to the message it answers. | Resolving descriptions against live store state removes the need entirely; the field would only be a convenience now. |
 | [#1033](https://github.com/bonzanni/ha-casa-app/issues/1033) — a progress report made while answering the operator is credited to the previous batch (bug, medium) | Only if a pass becomes a `casa.jobs` job. | Settled by the jobs decision below; v1 does not declare a job. |
-| [#480](https://github.com/bonzanni/ha-casa-app/issues/480) — apply the per-engagement uid and capability drop to in-process (`in_casa`) engagements too (enhancement) | Would change this plugin's file-access assumptions: the gmail→store custody hop and the specialist's `Read` of the invoice store both rely today on delegated turns sharing the process user. INV-CONT-004 already requires a pinned plugin directory to be owned by the dropped uid or world-readable and traversable. | Watch it. If it lands, the store's directory modes and the ingest hop need a re-read — and the case for [#486](https://github.com/bonzanni/ha-casa-app/issues/486) stops being a convenience argument. |
+| [#480](https://github.com/bonzanni/ha-casa-app/issues/480) — apply the per-engagement uid and capability drop to in-process (`in_casa`) engagements too (enhancement) | Would change this plugin's file-access assumptions: the gmail→store custody hop (now through Casa's handoff folder, `0770` and root-owned) and the specialist's `Read` of the invoice store both rely today on plugins sharing the process user; a uid-dropped plugin could reach neither. INV-CONT-004 already requires a pinned plugin directory to be owned by the dropped uid or world-readable and traversable. | Watch it. If it lands, the store's directory modes and the ingest hop need a re-read. |
 
 Checked and **not** reachable for this plugin as specified: the plugin-setup and consent
 issues (#1012, #1005, #1014 — it declares no setup tool and no credentials) and #987
