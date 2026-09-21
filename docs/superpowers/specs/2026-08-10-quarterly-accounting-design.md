@@ -823,10 +823,42 @@ the specialist's; if it requires reading a row, it is Ellen's.** "What's the sta
 "what am I missing?", "the Zapier one is wrong", "rebuild Q3" are all Ellen's, alone.
 "Here's the Twitter invoice" is Ellen filing it and the specialist judging it.
 
-**The server renders the view, not the model.** `build_review` returns rendered text —
-the same bytes whoever asked and whenever — so the picture cannot drift between turns
-and no model composes amounts, dates or coverage out of what it remembers. Ellen
-delivers what the tool returned; she does not retell it.
+### Ellen never invents the state of the ledger
+
+**This is the invariant the entire pull model rests on.** Every guarantee above it —
+loose matching is safe because guesses are shown, the coverage line is how you learn the
+plugin broke, corrections resolve against live state — is decorative if the agent
+answering can improvise a plausible picture instead of reading one. A hallucinated "3
+invoices missing" is worse than an error: it is indistinguishable from the truth, and
+the operator acts on it.
+
+So it is not a matter of instruction alone. Five mechanisms, each doing real work:
+
+1. **The server renders; Ellen relays.** `build_review` returns finished text — the same
+   bytes whoever asked and whenever. Ellen delivers what the tool returned. She does not
+   retell it, summarise it, reorder it or "tidy it up", because each of those is a place
+   a number can change.
+2. **Every state answer is a fresh read.** Not once per conversation, not cached across
+   turns: a second question re-reads, because a pass may have run between the two and
+   "as I said earlier" is how a stale answer gets laundered into a current one.
+3. **A failed read is an answer, and the answer is not a guess.** If
+   `list_quarter_state` or `check_setup` errors, the reply is *"I can't read the
+   accounting right now"* plus the error — never a fallback to what was said earlier,
+   never a reconstruction from the conversation. **This is the single most likely
+   hallucination path in the whole design**: a tool fails, and a helpful model fills the
+   gap from context. The skill names it explicitly as forbidden.
+4. **Arithmetic belongs to the server.** A follow-up like "how much is that altogether?"
+   is a new tool call, not a sum of the figures in the previous message. Ellen may
+   phrase, never compute — counts, totals, coverage dates and ordering all arrive
+   already calculated.
+5. **Provenance is printed, so an invented answer has to forge it.** Every view carries
+   `bank checked through <date>` from the run record. It is there for the operator, and
+   it also means a fabricated status has to fabricate a coverage date that the next real
+   answer will contradict.
+
+This is the same discipline the packaging step already applies — the model does not
+compose the ledger — carried into conversation, where it is easier to forget precisely
+because the output looks like talking rather than like a document.
 
 **Nothing is numbered, and nothing needs to be.** An earlier draft made line numbers
 the addressing scheme, because a reply might arrive days later at an Ellen who no longer
@@ -1352,6 +1384,13 @@ pass offers a resend of the same revision, in words, like everything else.
   asks rather than picking; a description matching none is reported and never redirected
   to a near miss; and the receipt is generated from committed results, so a test that
   stubs the commit sees the receipt change.
+- **The no-invention invariant is testable and must be pinned**: given a tool returning
+  a known rendering, the delivered message contains it verbatim rather than a paraphrase;
+  a tool ERROR produces an "I can't read it right now" reply and never a state claim,
+  including when the conversation already contains an earlier successful answer; a second
+  question in the same conversation issues a second read rather than reusing the first;
+  and a "how much altogether" follow-up calls the tool rather than summing the numbers
+  printed in the previous message.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
