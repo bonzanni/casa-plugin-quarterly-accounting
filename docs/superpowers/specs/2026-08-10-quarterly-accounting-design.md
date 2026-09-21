@@ -923,9 +923,15 @@ will land. An explicit `accounting:` prefix always binds, whatever else has happ
 **What still cannot be promised.** Recognition is model judgment, and model judgment is
 not a guarantee. The design bounds the damage (nothing mutates unless a line resolves,
 and every applied change is echoed in a receipt) rather than claiming the judgment is
-reliable. If [ha-casa-app#1036](https://github.com/bonzanni/ha-casa-app/issues/1036)'s
-neighbour — propagating the inbound `reply_to_message_id` — ever lands, a reply to the
-sheet message becomes exact and rule 2 becomes a fallback rather than the primary path.
+reliable.
+
+**Filed upstream, not depended on:**
+[ha-casa-app#1037](https://github.com/bonzanni/ha-casa-app/issues/1037) asks casa to
+propagate the inbound `reply_to_message_id`. If it lands, a reply made with Telegram's
+own reply gesture binds exactly — the operator's gesture already said which message they
+meant, and today it is discarded — and the trigger rule above becomes a fallback rather
+than the primary path. Nothing here waits for it, and nothing changes if it never
+arrives.
 
 ### A quiet week, and coming back after a gap
 
@@ -1256,6 +1262,8 @@ None blocks v1. Each costs a plugin-side line rather than a wait (open as of
 | [#960](https://github.com/bonzanni/ha-casa-app/issues/960) / [#932](https://github.com/bonzanni/ha-casa-app/issues/932) — a scheduled turn that delivers with a tool and then ends in prose delivers twice (bug, low) | Two DMs per pass. Nothing enforces the clause; only documentation asks for it. | Both trigger prompts this plugin ships carry the closing `<silent/>` clause verbatim, in the install notes. |
 | [#975](https://github.com/bonzanni/ha-casa-app/issues/975) — bundle compensation writes an emptied tuple over a refused transaction's files (bug, high, `operator-decision`) | Hits the `casa-specialist-finance` role bump (`upgrade_specialist`), not the runtime: a refused upgrade can take the specialist's saved settings 1 → 0. | Capture the specialist's settings before the bump and verify after. The issue is blocked on an operator decision, so it will not clear on its own. |
 | ~~[#1024](https://github.com/bonzanni/ha-casa-app/issues/1024) — install-time vault exploration searches variables no recipe may wire from a vault item~~ | — | **Not reachable.** The plugin declares no required environment variables (the package name is a defaulted stored setting), so no exploration runs for it. |
+| [#1036](https://github.com/bonzanni/ha-casa-app/issues/1036) — casa cannot receive an inbound Telegram document (enhancement, filed by this work; in progress) | A portal PDF has no direct path into custody. | Email-to-self works today and the sheet says so; a document the operator never supplies is a normal outcome, so nothing waits on this. |
+| [#1037](https://github.com/bonzanni/ha-casa-app/issues/1037) — the inbound `reply_to_message_id` is discarded (enhancement, filed by this work) | A reply made with Telegram's reply gesture cannot be bound to the sheet it answers. | Never-reused line numbers plus store-backed resolution close it without the field; if it lands, binding becomes exact. |
 | [#1033](https://github.com/bonzanni/ha-casa-app/issues/1033) — a progress report made while answering the operator is credited to the previous batch (bug, medium) | Only if a pass becomes a `casa.jobs` job. | Settled by the jobs decision below; v1 does not declare a job. |
 | [#480](https://github.com/bonzanni/ha-casa-app/issues/480) — apply the per-engagement uid and capability drop to in-process (`in_casa`) engagements too (enhancement) | Would change this plugin's file-access assumptions: the gmail→store custody hop and the specialist's `Read` of the invoice store both rely today on delegated turns sharing the process user. INV-CONT-004 already requires a pinned plugin directory to be owned by the dropped uid or world-readable and traversable. | Watch it. If it lands, the store's directory modes and the ingest hop need a re-read — and the case for [#486](https://github.com/bonzanni/ha-casa-app/issues/486) stops being a convenience argument. |
 
