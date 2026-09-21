@@ -163,10 +163,18 @@ vendor name, an amount, a date, and "wrong", "good", "needs no invoice", "rebuil
 only package-identity concept the operator ever meets. Everything else is machinery, and machinery that leaks onto the sheet
 is a defect.
 
-## Casa baseline (re-verified 2026-09-20, casa v0.323.0)
+## Casa baseline (re-verified 2026-09-21, casa **v0.324.0**)
 
 v1 was written against v0.2xx with two scheduled-turn enhancements outstanding. Both
 landed, and each brought contracts this plugin must design against, not merely enjoy.
+
+**The required floor is v0.324.0, not v0.323.0** (round-5 finding). ha-casa-app#990 —
+`send_message` reporting success when the channel delivered nothing — is fixed in
+**v0.324.0** (`23c44160`, "send_message reports a message that reached nobody"), one
+commit after the v0.323.0 tag. The distinction is not pedantry: on v0.323.0 a fault
+notification — now one of only two messages this plugin ever sends unprompted — can
+vanish while the turn records success and ends silently, which is the exact failure the
+notification exists to prevent.
 
 **Both dependencies are in.** `send_media(kind="zip")` ships (#482 — a `send_document`
 kind with a magic-signature head test and a **20 MB** cap, `media_policies.py:163-171`);
@@ -374,7 +382,14 @@ restart mid-pass loses only the in-flight turn.
 
 ## Tool surface (server, 19 tools)
 
-Ingest & curation: `ingest_invoice` (agent-extracted metadata as arguments),
+Ingest & curation: `ingest_invoice(source_path, vendor, invoice_date, invoice_number,
+amount, currency, recipient, source_ref)` — **the server copies the file at
+`source_path` into its own store, hashes it and indexes it, in that order**, and returns
+the content hash. This is the only way bytes enter custody, and it is a copy rather than
+a reference on purpose: a Gmail attachment lives in the gmail plugin's own cache, which
+expires (7 days), so a record pointing at it would be custody in name only. The metadata
+arguments are the agent's provisional reading, for filing; the bytes are the fact.
+`update_invoice_metadata`, `mark_irrelevant`,
 `update_invoice_metadata`, `mark_irrelevant`.
 Query: `list_unmatched_invoices`, `list_quarter_state` (includes repair-sweep view:
 matches with `annotation_state` in `pending`/`repair_owed`), `get_vendor`.
@@ -393,8 +408,14 @@ addressing. Corrections go through the ordinary match tools with `expected_revis
 Ellen resolves the operator's description to an item by reading `list_quarter_state`,
 and an ambiguous description is a question, never a pick.
 Ledger input: `import_ledger_export(path)` — ingests bank-feed's `export_history`
-artifact so the package's ledger can list the full quarter (unmatched DBIT and CRDT
-rows included); the match records alone cannot produce it.
+artifact so the package's ledger can list the full quarter (unmatched DBIT and CRDT rows
+included); the match records alone cannot produce it. **It filters to the bound account
+and to ACTIVE rows.** `export_history` runs `SELECT … FROM transactions ORDER BY …` with
+no state predicate (verified 2026-09-21, `tools_refresh.py:914`), so it returns
+superseded predecessors beside their successors: importing it raw and selecting "every
+transaction booked in the quarter" turns one €99 payment that went pending → booked into
+€198 (round-5 finding). Superseded and vanished observations are kept as history and
+disclosed in `notes.md` where they explain something, never summed into the ledger.
 Packaging: `build_quarterly_package(quarter)`, `stage_for_delivery(target)` (copies
 an invoice PDF or the built package into casa's plugin outbox for `send_media`).
 
@@ -499,13 +520,12 @@ prompt:   Run the quarterly-accounting background pass for the current
           quarter. If it reports something that needs me, send me that
           and nothing else; then output the sentinel `<silent/>`. If it
           reports nothing, output `<silent/>` and nothing else.
-
-name:     quarterly_accounting_quarter_end
-type:     cron        schedule: 0 9 10 1,4,7,10  channel: telegram
-prompt:   Run the quarterly-accounting quarter-end pass for the quarter that
-          just closed, build its package and send it to me.
-          After the send, output the sentinel `<silent/>` and nothing else.
 ```
+
+**One trigger, not two.** There is no quarter-end trigger: packaging happens only when
+the operator asks (§Packaging). An install that creates a second cron reintroduces
+automatic delivery of a package nobody reviewed, which is the behaviour the operator
+removed.
 
 The weekly day and time are the operator's preference; Monday 09:00 is the proposal.
 
@@ -554,6 +574,22 @@ the surface the operator is already reading.
 **No trigger or callback consent round.** The plugin declares no triggers of its own —
 the two above live on Ellen's `triggers.yaml` — and no callbacks, so there is no consent
 verdict for its setup to wait on.
+
+### Health is observed, never inferred
+
+**The server cannot check this on its own** (round-5 finding). It is deterministic local
+custody: it cannot call bank-feed, cannot see whether Gmail is still authorised, and
+cannot know which tools are reachable from Ellen or from the specialist. A
+`check_setup()` that "reads state it already has" would answer today's question with
+yesterday's inputs — after Gmail loses authorisation, a local-only check has exactly the
+inputs it had while everything worked, and would report health.
+
+So **each pass performs the real probes** — a bank-feed read, a Gmail read, the bound
+account's existence — and records each result with the time it was observed.
+`check_setup()` then reports observations **as observations**, timestamped, and
+distinguishes "healthy when last checked, 9 days ago" from "healthy now". The operator's
+coverage line carries the same distinction, which is what makes it a usable health
+signal rather than a reassuring one.
 
 ### The self-check, so a mis-wired install is never silent
 
@@ -730,10 +766,22 @@ catch, because it launders a guess into a human decision. So:
   certainly does not mean "never for this vendor" (that is "no invoices ever for X").
   The plugin never manufactures "ever" out of a one-off answer.
 
-Each named line resolves to a `(match_id, revision)` recorded with the sheet — or, for a
-missing item, to the transaction, since there is no match record to point at. A CAS
-rejection means the line changed underneath, and Ellen reports that line with its
-current facts instead of applying a stale correction.
+**Descriptions choose the target; the revision the operator was SHOWN is what binds.**
+These are two different jobs and an earlier draft conflated them (round-5 finding).
+Resolving "the Zapier one" against live state and then passing live state's *current*
+revision would make CAS a no-op: a pass that replaced invoice A with invoice B between
+the rendering and the reply would have the operator's "that's wrong" silently reject B,
+a pairing they never saw. So:
+
+- the **description** resolves against the store's current open items, as above;
+- the **`expected_revision`** comes from the render log — the revision of that item in
+  the most recent view Ellen actually showed the operator;
+- a CAS rejection therefore means *"this changed since you looked"*, which is exactly
+  what the operator needs told, with the current facts, rather than a correction applied
+  to a proposition they never saw.
+
+For a missing item there is no match record, so the target is the transaction and the
+same rule applies to its state.
 
 **The reply grammar is an executable contract, not "Ellen understands free text":**
 
@@ -776,8 +824,8 @@ store through the same tools; none of them is a mode.
 
 | Entry | What happens |
 |---|---|
-| **The weekly cron fires** (Mon 09:00) | The full pass: self-check, repair sweep, sync, triage, targeted searches, then the sheet. The path everything else is a variation of. |
-| **A reply arrives** — hours or days later, possibly after unrelated conversation, possibly in a session that never saw the sheet | Resolved against the STORE, never against memory (§"Recognising a reply"): `get_open_sheet()` answers what the lines are, Ellen applies exactly what the message names, and sends the receipt. No pass runs — a correction is a store write, not a reason to re-derive the week. If she fails to recognise it as a sheet reply at all, nothing is applied and the line simply reappears next sheet. |
+| **The weekly cron fires** (Mon 09:00) | The full pass: probes, repair sweep, sync, triage, targeted searches, matching, annotation — then **nothing is sent** unless it found one of the two faults (§"When the plugin may speak first"). |
+| **A correction arrives** — possibly after unrelated conversation, possibly in a session that never rendered a view | Resolved against the STORE, never against memory (§"Recognising a reply"): Ellen re-reads state, matches the operator's description to an open item, and applies it bound to the revision she last showed for it (below). No pass runs. If she does not recognise it as a correction at all, nothing is applied and the item simply appears in the next view. |
 | **A reply arrives while a pass is running** | It applies to the propositions the sheet recorded. If the running pass has already moved one of them, that line's CAS check refuses and the receipt reports it with current facts. Nothing blocks and nothing queues. |
 | **A reply lands after the quarter shipped** | The correction applies normally, and the receipt adds one line: the delivered package no longer matches, say "rebuild it" for a fresh one. Never rebuilt automatically — a new zip nobody asked for is worse than a stale one they know about. |
 | **The operator asks something** ("what am I missing for Q3?", "accounting list", "I'm doing accounting now") | The pull view: the collection list with links, rendered from the store, no pass and no mutation. This is the entry point for work done at a time of the operator's choosing (§"Push tells, pull works"). |
@@ -785,7 +833,6 @@ store through the same tools; none of them is a mode.
 | **The operator corrects something unprompted** ("the Adobe one is wrong") | Resolved against the store's open items like any other correction. Here Adobe is missing rather than paired, so there is nothing to unpair, and Ellen says what she can do instead. |
 | **The first run after install** | Same pass, plus account binding and one scope line. §Setup. |
 | **A pass could not finish, or Casa restarted mid-pass** | The store holds everything except the in-flight turn. The next pass resumes from durable state and its sheet opens with the coverage it actually achieved, never a silent partial. |
-| **Both triggers fire on one day** (the 10th falls on a Monday) | The quarter-end pass subsumes the weekly one: the weekly pass sees a quarter-end pass has already run for today and does nothing. Two sheets on one morning is noise, and the quarter-end one is a superset. |
 | **The operator asks for a package** — any quarter, at any time | §Packaging: built from what is known now, named by date, `partial` in the name when the quarter is still open. |
 
 **A week that spans the quarter boundary is one sheet, not two.** The first Monday of
@@ -843,16 +890,31 @@ the specialist's; if it requires reading a row, it is Ellen's.** "What's the sta
 "what am I missing?", "the Zapier one is wrong", "rebuild Q3" are all Ellen's, alone.
 "Here's the Twitter invoice" is Ellen filing it and the specialist judging it.
 
-### Ellen never invents the state of the ledger
+### Ellen must not invent the state of the ledger
 
-**This is the invariant the entire pull model rests on.** Every guarantee above it —
+**Stated honestly after round 5: this is a discipline with mechanisms, not an enforced
+invariant.** Both reviewers reproduced the same thing — casa's `send_message` accepts
+any string a model produces, and nothing in the platform binds a delivered reply to
+`build_review` output or requires that a read happened at all. An earlier draft called
+this an invariant; it is not one, and calling it one would be the same class of error it
+is trying to prevent. What follows are mechanisms that make invention unlikely and
+detectable, plus the residual risk, which stays.
+
+**The residual risk, named:** a turn that skips the read, or that answers from context
+after a tool error, can produce a plausible status that no mechanism below will catch at
+runtime. The plugin cannot close this from its own side; closing it would need a
+platform path that renders and delivers without passing through model-authored text.
+Until then the honest position is that this defence depends on model compliance, and the
+mechanisms below reduce rather than eliminate the exposure.
+
+**Why it matters more here than in most designs.** Every guarantee in the pull model —
 loose matching is safe because guesses are shown, the coverage line is how you learn the
-plugin broke, corrections resolve against live state — is decorative if the agent
-answering can improvise a plausible picture instead of reading one. A hallucinated "3
-invoices missing" is worse than an error: it is indistinguishable from the truth, and
-the operator acts on it.
+plugin broke, corrections resolve against live state — weakens if the agent answering
+can improvise a plausible picture instead of reading one. A hallucinated "3 invoices
+missing" is worse than an error: it is indistinguishable from the truth, and the operator
+acts on it.
 
-So it is not a matter of instruction alone. Five mechanisms, each doing real work:
+Five mechanisms, each doing real work:
 
 1. **The server renders; Ellen relays.** `build_review` returns finished text — the same
    bytes whoever asked and whenever. Ellen delivers what the tool returned. She does not
@@ -878,7 +940,10 @@ So it is not a matter of instruction alone. Five mechanisms, each doing real wor
 
 This is the same discipline the packaging step already applies — the model does not
 compose the ledger — carried into conversation, where it is easier to forget precisely
-because the output looks like talking rather than like a document.
+because the output looks like talking rather than like a document. The difference is
+that packaging can enforce it (the server writes the file) and conversation cannot (the
+model writes the message), which is why this section is a discipline and the packaging
+rule is a guarantee.
 
 **Nothing is numbered, and nothing needs to be.** An earlier draft made line numbers
 the addressing scheme, because a reply might arrive days later at an Ellen who no longer
@@ -1069,12 +1134,30 @@ Already checking — started a minute ago.
 I'll have the answer shortly.
 ```
 
-A marker older than a generous threshold is stale (the process died) and is reclaimed
-rather than trusted. This is deliberately not a lease protocol with fencing tokens: two
-low-rate writers on one box need a marker, and an earlier round cut exactly that
-machinery as oversized for the workload. What makes it safe rather than merely small is
-that every write underneath is already CAS'd on the record it touches, so the worst a
-duplicated pass can do is waste effort, never corrupt a match.
+A marker older than a generous threshold is treated as a dead process and reclaimed —
+**and reclaiming it bumps a generation counter that the marker carries.** A pass whose
+generation is no longer current is refused at every write, including the writes that are
+not CAS'd on a match record: `upsert_vendor`, the search bookkeeping, the delivery log
+and the setup/binding state. An earlier draft claimed "every write underneath is already
+CAS'd, so a duplicated pass can only waste effort". **That claim was false** (round-5
+review): match mutations are CAS'd, but vendor, bookkeeping and log writes are not, so a
+revived stale pass could overwrite newer state with older. The generation check is what
+makes the marker sufficient; it is one integer, not a lease protocol.
+
+**And the CAS discipline stops at this plugin's own store.** bank-feed's
+`tag_transaction` and `add_note` take row ids and content, with **no revision or
+fingerprint precondition** (verified: `tools_annotate.py` — the tool signature is
+`row_ids` + `tags`). So a stale pass that resumes after the operator has rejected a
+pairing can still assert `acct-matched` on that row, and no local CAS rejection can undo
+an external write that already landed. Two consequences, both required:
+
+- The generation check above must be made **before the bank-feed write**, not only
+  before the local one, since the external write is the unrecoverable half.
+- **Projection reconciliation covers `rejected` records too**, not only accepted ones.
+  The earlier text swept accepted rows for drift and owed repairs; a rejected record
+  whose annotation was already cleaned was excluded from both, which is exactly the
+  record a stale writer resurrects. Every record the plugin has ever annotated stays in
+  the reconciliation set until its owned tags are observed absent.
 
 ### Handing it a document
 
@@ -1169,15 +1252,16 @@ assumed a reply arrives with the sheet still in mind. It often does not:
 work anyway:
 
 1. **The sheet lives in the store, not the chat.** An open sheet row survives session
-   loss, `/new`, restarts and a month of other conversation. `get_open_sheet()` answers
-   "is there a sheet, and what are its lines" from disk in one call.
+   loss, `/new`, restarts and a month of other conversation. `list_quarter_state` answers
+   what is open, and the render log answers what the operator was last shown for each of
+   those items — both from disk, neither from memory.
 2. **The skill carries a standing trigger rule**, and a skill is loaded per session — so
    it is present even in a session that has never seen a sheet. It says: before treating
    a message as ordinary conversation, if it contains a bare small integer, or reads as
    an approval/correction/rebuild ("all good", "wrong", "rebuild it", a vendor name with
-   a verdict), **call `get_open_sheet()` first**. The store answers; memory is not
-   consulted. A number that matches no live line is not a sheet reply, and the message
-   is handled as whatever else it is.
+   a verdict), **read the store first**. It answers; memory is not consulted. A
+   description that matches no open item is not a correction, and the message is handled
+   as whatever else it is.
 3. **Missing a recognition is cheap, and that is what makes this acceptable.** If Ellen
    fails to spot a sheet reply, nothing is applied, nothing is corrupted and nothing is
    lost: the line keeps its existing state and reappears on the next sheet. The failure
@@ -1286,7 +1370,13 @@ books-2026-Q3-partial-2026-08-14.zip  a quarter still open, built 14 Aug
 `partial` is in the name because it is a fact about the **period**, not a version: a Q3
 package built in August is not a draft of the final one, it is a picture of an
 unfinished quarter, and an accountant must never mistake it for a filing set. A same-day
-rebuild appends a time (`-1412`) rather than inventing a counter.
+rebuild appends a time rather than inventing a counter — **and the build reserves its
+filename by exclusive create**, widening to seconds and then to a short suffix until the
+name is unused. Minute precision alone is not enough: two rebuilds at 14:12:10 and
+14:12:45 with a correction between them would otherwise write different contents under
+one name (round-5 finding). Every delivered build is retained under the exact name it
+was delivered as, and the delivery log points at that file rather than at a recomputed
+name.
 
 **The caption says what changed**, computed by diffing against the delivery log rather
 than asserted by a numbering rule:
@@ -1400,8 +1490,9 @@ pass offers a resend of the same revision, in words, like everything else.
   re-resolves superseded/vanished bank-feed rows before anything else; annotation
   is a tracked state (`pending`/`clean`/`repair_owed`), never a boolean that
   demotion could leave stale.
-- Server-enforced cardinality: no second active match per invoice or transaction;
-  allocation groups validated by totals and always operator-confirmed.
+- Server-enforced cardinality: no second active match per invoice or transaction.
+  Split and aggregate payments are not modelled at all in v1 (§Cardinality); they are
+  retained as documents and explained in `notes.md`.
 - **Silence is a supported answer everywhere.** No review reply leaves every line as
   the pass left it; the quarter's package ships regardless and can be rebuilt on
   request. Nothing decays, nothing is lost, and nothing is inferred from silence.
@@ -1429,9 +1520,8 @@ pass offers a resend of the same revision, in words, like everything else.
   non-active `conflicted` and `repair_owed` in one transition — no
   `conflicted`+`clean` record — residue line emitted, cardinality intact); a
   rejected match with `repair_owed` whose row is superseded before cleanup (repair
-  rewritten to the live successor, stale tags corrected); an allocation group whose
-  totals must validate and which must stay `proposed` without operator
-  confirmation; and concurrent `build_quarterly_package` calls that must yield
+  rewritten to the live successor, stale tags corrected); and concurrent package builds
+  that must yield
   distinct reserved revisions with snapshot-consistent contents.
 - The review sheet is store state, so it is unit-testable and must be tested: line
   numbers stay bound to `(match_id, revision)` across a rebuild; a reply naming a line
@@ -1468,7 +1558,9 @@ pass offers a resend of the same revision, in words, like everything else.
   asks rather than picking; a description matching none is reported and never redirected
   to a near miss; and the receipt is generated from committed results, so a test that
   stubs the commit sees the receipt change.
-- **The no-invention invariant is testable and must be pinned**: given a tool returning
+- **The no-invention mechanisms are testable at the fixture level and must be pinned —
+  while noting that fixture tests cannot establish runtime enforcement over model
+  output**: given a tool returning
   a known rendering, the delivered message contains it verbatim rather than a paraphrase;
   a tool ERROR produces an "I can't read it right now" reply and never a state claim,
   including when the conversation already contains an earlier successful answer; a second
@@ -1485,7 +1577,8 @@ pass offers a resend of the same revision, in words, like everything else.
   shipped applies and offers a rebuild without performing one; a week spanning the
   quarter boundary produces ONE view; a description matching two open items asks rather
   than picking, and a description matching none says so rather than redirecting; and a
-  scheduled pass does nothing when a quarter-end pass has already run that day.
+  a stale pass whose generation was reclaimed is refused at every write, including
+  `upsert_vendor` and the delivery log, not merely at the CAS'd match writes.
 - **Gap re-entry**: with six unanswered sheets behind it, the next sheet is bounded, is
   built from current state rather than replayed, and carries a count of what it did not
   print.
