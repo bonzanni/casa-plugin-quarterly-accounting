@@ -512,8 +512,8 @@ One object, owned by the plugin server, per **transaction lineage**:
   (`rules.py`, `tools_read.py`). An accounting status would silently complete somebody
   else's workflow. The projection still exists, is still enumerated and still
   reconciled — only the assertion waits. It can be restored the day
-  casa-specialist-finance excludes the reserved accounting namespace from those
-  predicates; ordering classification first is **not** an adequate fix, since it does
+  [casa-specialist-finance#31](https://github.com/bonzanni/casa-specialist-finance/issues/31)
+  gives the tag space an ownership concept; ordering classification first is **not** an adequate fix, since it does
   not cover overlapping passes or deferred rows.
 - **`owned_tags` is a fixed, reserved vocabulary**, not a prefix rule: exactly
   `acct-matched`, `acct-proposed`, `acct-portal`, `acct-no-invoice-expected`. Anything
@@ -588,6 +588,14 @@ one loop.
 - **Identity tracking is real work.** Successor chains, merges, vanished rows and changed
   fingerprints still need handling; this centralises those obligations rather than
   erasing them.
+- **A lineage can be broken upstream**, and then annotations sit where no lineage walk
+  reaches them. Two overlapping bank-feed syncs can supersede one predecessor in turn,
+  the second overwriting the first's `superseded_by`, leaving the first successor holding
+  migrated tags and notes
+  ([casa-specialist-finance#30](https://github.com/bonzanni/casa-specialist-finance/issues/30),
+  reproduced against the real apply path). Not closable from this side: the projection
+  cannot retain an alias for a successor no specialist ever observed. Recorded because a
+  stranded `acct-matched` keeps asserting a pairing the operator may have rejected.
 
 
 ## Setup (install day, once)
