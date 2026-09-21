@@ -462,9 +462,27 @@ the part this document previously got wrong:
 | The bank ledger never shows an obsolete assertion | **Impossible on this platform.** `tag_transaction` has no fingerprint, revision or idempotency precondition; the writer is an ephemeral specialist session that can pause indefinitely; two passes can overlap. No placement of a local check closes the window. |
 
 Claiming the first as a solution to the second is exactly the error of rounds 5 and 6.
-What is offered instead, stated as the guarantee: **once decisions, row identity and
-stale writes stop changing, the next complete successful reconciliation restores the
-current projection.**
+What is offered instead, stated as the guarantee with the qualifiers round 9 proved are
+required: **once decisions, row identity and stale writes stop changing, the next
+complete successful reconciliation restores the current projection — provided the row has
+tag capacity, its owned tags have not been renamed out from under us, and the traversal
+completes.** Each qualifier is a reproduced failure, not a hedge:
+
+- **Capacity.** `tag_transaction` refuses at 32 tags per row, all-or-nothing. A row
+  already carrying 32 foreign tags can never take a desired accounting tag, and every
+  sweep repeats the same refusal. "Reached from any starting tag set" is false; the
+  desired set is budgeted within reserved capacity, and a row that cannot take it is
+  **reported as unprojectable**, not retried forever.
+- **Renames.** `rename_tag` renames globally with no record of origin, so an operator
+  renaming `acct-matched` to `invoice-confirmed` moves that assertion outside our
+  vocabulary: the reducer then satisfies its set equation while a contradictory
+  assertion survives, including across a later rejection. v1 does not chase it — a
+  renamed accounting tag is reported as an assertion we no longer own.
+- **Completeness.** A complete traversal is defined over a full **cycle**, not one
+  session. `get_transaction` reads one row per call and the specialist's ceiling is 70
+  turns, so with a few hundred retained projections one session cannot finish. The
+  traversal therefore carries a **durable cursor** and resumes across passes; "the next
+  complete reconciliation" means the next completed cycle.
 
 ### The projection
 
@@ -486,8 +504,22 @@ One object, owned by the plugin server, per **transaction lineage**:
   instruction to erase an accepted replacement's tags. That is finding 4, closed by
   construction.
 - **"Managed" includes transactions with no match at all** — one still awaiting an
-  invoice has a desired projection (`acct-open`), because the operator's ledger is
-  supposed to show it.
+  invoice has a projection, because coverage must not depend on a match existing.
+  **Its desired EXTERNAL tag set is empty in v1, however** (round-9 finding, reproduced
+  independently by both reviewers): writing `acct-open` on an unclassified row removes
+  it from bank-feed's only classifier queue, because `classification_state` and the
+  queue predicate treat every non-workflow tag as content classification
+  (`rules.py`, `tools_read.py`). An accounting status would silently complete somebody
+  else's workflow. The projection still exists, is still enumerated and still
+  reconciled — only the assertion waits. It can be restored the day
+  casa-specialist-finance excludes the reserved accounting namespace from those
+  predicates; ordering classification first is **not** an adequate fix, since it does
+  not cover overlapping passes or deferred rows.
+- **`owned_tags` is a fixed, reserved vocabulary**, not a prefix rule: exactly
+  `acct-matched`, `acct-proposed`, `acct-portal`, `acct-no-invoice-expected`. Anything
+  else — including an `acct-`-looking tag the operator added by hand — is foreign and is
+  never removed. A prefix reading would have the sweep silently deleting the operator's
+  own tags, which is the failure this whole mechanism exists to prevent.
 - **Registered before its first external write**, retained after rejection, and retained
   after its tags are observed absent.
 - **Fan-in merges.** Two projections that resolve to one successor merge their aliases
@@ -509,6 +541,11 @@ Unconditional enumeration replaces every selection rule:
 5. Append a current snapshot when the visible accounting note is missing or differs.
 6. Read back and record what was observed. **An observation never exempts a projection
    from future sweeps** — that exemption is what let a stale writer escape in round 7.
+
+The enumeration is **resumable**: it advances a durable cursor and picks up where the
+last session stopped, so a cycle spans as many passes as it needs. A projection whose
+repair is refused — tag cap reached, a persistent API failure — is recorded with the
+refusal and surfaced, never silently retried into an infinite loop.
 
 ### Notes are versioned assertions, not a field
 
