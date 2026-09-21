@@ -403,8 +403,14 @@ account, gmail tools, last sync), one branch at the top of every pass;
 first run; `set_package_name(name)` — changes the zip filename prefix, which otherwise
 defaults and is never asked about.
 Review: `build_review(scope)` — renders the current view (missing first, then guessed)
-from store state, and records what it showed and when, for audit rather than for
-addressing. Corrections go through the ordinary match tools with `expected_revision`;
+from store state and persists it as an **unshown rendering**: an id, the moment, and the
+revision of every item in it. `mark_rendering_delivered(render_id)` — called by Ellen
+**after** the send succeeds — is what promotes it to shown and advances the
+shown-revision pointers. Without that second call the rendering stays unshown, because
+`send_message` returns its outcome to Ellen and cannot write to this store (round-7
+finding): rendering alone could otherwise advance a pointer for a view that never
+arrived, and a design that only advanced on delivery with no way to record delivery
+would leave corrections re-rendering forever. Corrections go through the ordinary match tools with `expected_revision`;
 Ellen resolves the operator's description to an item by reading `list_quarter_state`,
 and an ambiguous description is a question, never a pick.
 Ledger input: `import_ledger_export(path)` — ingests bank-feed's `export_history`
@@ -1478,7 +1484,7 @@ Delivery: atomic write to the plugin outbox → `send_media(kind="zip")` (shippe
 #482) → operator's Telegram, from the direct turn in which they asked. The outbox copy
 is consumed on send (or reaped at 2 h); the canonical package stays in the data dir. Two
 edges the shipped tool imposes: a transport timeout is reported as
-`delivery_uncertain` — the send may have landed — so a retry resends **that same built
+`delivery_uncertain` — the send may have landed — so a retry resends **that exact built
 file** rather than building a new one, and the date in the filename makes a duplicate
 arrival self-evident; and the `zip` kind
 caps at **20 MB**, which a quarter of PDF invoices can approach, so the build
@@ -1489,7 +1495,7 @@ quarter crosses the cap, the split rule is decided then, with evidence.
 
 After a `delivery_uncertain` the package is NOT re-sent automatically: the send may have
 landed, and a second zip in the accountant's hands is worse than a question. The next
-pass offers a resend of the same revision, in words, like everything else.
+pass offers to resend that exact file, in words, like everything else.
 
 ## Privacy
 
@@ -1549,7 +1555,7 @@ pass offers a resend of the same revision, in words, like everything else.
   rejected match with `repair_owed` whose row is superseded before cleanup (repair
   rewritten to the live successor, stale tags corrected); and concurrent package builds
   that must yield
-  distinct reserved revisions with snapshot-consistent contents.
+  distinct reserved filenames with snapshot-consistent contents.
 - The review sheet is store state, so it is unit-testable and must be tested: line
   a correction is bound to the revision the operator was SHOWN, so a pass that moved
   the proposition between rendering and reply refuses on that item and applies the
