@@ -613,15 +613,48 @@ in week one and an operator who concludes after a month that the plugin does not
    `proposed` (indistinguishable candidates) / `portal` (tagged, link noted) /
    `none-expected` / `missing` with a **search plan carrying discriminators**, not just
    a query (“want €54.45 within ~10 days of May 6; ignore payment confirmations”).
-3. **Ellen's targeted Gmail round** — roughly one precise search per unresolved
-   transaction, never a mailbox sweep (there are far more emails than transactions;
-   the bank feed drives the search, not the mailbox). Ambiguity rule: **over-ingest
-   all plausible candidates and let the specialist pick** — ingest is idempotent and
-   losers stay available for other transactions or get `mark_irrelevant`. Re-delegate
-   for final picks. Hard bound: two search rounds per pass, then the item goes to
-   residue.
-4. **Operator report — one sheet, delivered inline.** The pass ends by sending a
-   **review sheet**. Every rule here is load-bearing (UX round, 2026-09-21):
+3. **Ellen's targeted Gmail round — searching is where the match rate is won, so it is
+   budgeted generously.** The v1 rule ("roughly one precise search per transaction;
+   hard bound of two rounds, then residue") was written under the strict-matching
+   assumption and is **cut**: it starves the very step that decides whether the plugin
+   finds anything (operator, 2026-09-21). The bank feed still drives the search — never
+   a mailbox sweep, since there are orders of magnitude more emails than transactions —
+   but an unresolved transaction gets as many *different* queries as the specialist can
+   think of discriminators for.
+
+   **Gmail's own limits force this, verified 2026-09-21.** `search_emails` caps at 100
+   results, and it **discards `nextPageToken`** (`gmail_client.py:156-166`), so a query
+   returning more hits than the cap has no continuation: the extra results are
+   unreachable by any means. One broad query is therefore strictly worse than several
+   narrow ones — breadth is not merely expensive, it is *lossy*. The search plan is
+   consequently a ladder of narrowing queries (sender, amount string, invoice-number
+   fragment, date window, `has:attachment`, known vendor aliases), each cheap, and it
+   stops when it finds the document or runs out of distinct ideas — not when a round
+   counter expires.
+
+   Ambiguity rule unchanged: **over-ingest all plausible candidates and let the
+   specialist pick** — ingest is idempotent, losers stay available for other
+   transactions or get `mark_irrelevant`.
+
+   What replaces the hard bound is **bookkeeping, not a cliff**: each transaction
+   records which queries ran and whether the space was exhausted. An item whose ideas
+   are exhausted is `missing`; an item the pass ran out of room for is
+   **`search incomplete` and resumes next pass from where it stopped** rather than being
+   abandoned to residue. The only real ceiling is the specialist's `max_turns` (70) and
+   the pass's own wall-clock, and both are facts to report, never silently absorbed.
+4. **Operator report — one sheet, delivered inline.**
+
+   **What "the sheet" is, precisely.** It is not a document and not a message format: it
+   is a **stored review snapshot, rendered as a message**. `build_review` writes a row —
+   sheet id, the moment it was taken, and an ordered list of lines, each binding a
+   number to one proposition (`match_id` + `revision`, or a transaction for a missing
+   item) — and then renders it. The message the operator sees is a *view* of that row.
+   The row is the thing that matters: it outlives the message, the conversation and the
+   session, and it is what a reply is resolved against. If the message is deleted,
+   scrolled past or never read, nothing is lost; the next sheet renders current state
+   again.
+
+   Every rule below is load-bearing (UX round, 2026-09-21):
 
    - **Inline whenever it fits.** A sheet under Telegram's 4096 UTF-16 units goes as an
      ordinary `send_message` — no tap, no download, nothing to open. Only a sheet that
@@ -791,7 +824,7 @@ store through the same tools; none of them is a mode.
 | Entry | What happens |
 |---|---|
 | **The weekly cron fires** (Mon 09:00) | The full pass: self-check, repair sweep, sync, triage, targeted searches, then the sheet. The path everything else is a variation of. |
-| **A reply arrives** — hours or days later | Ellen applies exactly what it names against the sheet's recorded propositions and sends the receipt. No pass runs: a correction is a store write, not a reason to re-derive the week. |
+| **A reply arrives** — hours or days later, possibly after unrelated conversation, possibly in a session that never saw the sheet | Resolved against the STORE, never against memory (§"Recognising a reply"): `get_open_sheet()` answers what the lines are, Ellen applies exactly what the message names, and sends the receipt. No pass runs — a correction is a store write, not a reason to re-derive the week. If she fails to recognise it as a sheet reply at all, nothing is applied and the line simply reappears next sheet. |
 | **A reply arrives while a pass is running** | It applies to the propositions the sheet recorded. If the running pass has already moved one of them, that line's CAS check refuses and the receipt reports it with current facts. Nothing blocks and nothing queues. |
 | **A reply lands after the quarter shipped** | The correction applies normally, and the receipt adds one line: the delivered package no longer matches, say "rebuild it" for a fresh one. Never rebuilt automatically — a new zip nobody asked for is worse than a stale one they know about. |
 | **The operator asks something** ("what am I missing for Q3?") | Answered from the store, no pass, no mutation. |
@@ -843,23 +876,56 @@ accept inbound Telegram documents, which would make "send me the invoice" the ob
 gesture it ought to be. v1 does not wait for it, and the design does not change if it
 lands — one line on the sheet gets shorter.
 
-### Recognising a reply, without reply metadata
+### Recognising a reply, when nothing guarantees the context survived
 
-Ellen is a general assistant having ordinary conversations; the sheet reply arrives in
-the same DM as everything else, and casa hands her no indication of what a message
-replied to (see §Flows, weekly step 4). The recognition rule is therefore explicit, and
-it fails toward *not* claiming the message:
+**This is the weakest joint in the design and it is stated as such.** The earlier draft
+assumed a reply arrives with the sheet still in mind. It often does not:
 
-- A message naming a **live line number for the current quarter** is a sheet reply.
-  Numbers are unique per quarter, so this is unambiguous.
-- `all good`, `rebuild it`, `send it again` and their kin are sheet replies **only while
-  a sheet or package is the most recent thing the plugin sent** and nothing else is
-  pending.
-- Everything else is ordinary conversation. **The plugin never claims a message it
-  cannot bind**, and a number that is not a live line is not a sheet reply — it is
-  someone talking about a number.
-- Genuinely ambiguous? One short question, which is rare enough to be affordable and
-  always cheaper than acting on the wrong reading.
+- days can pass, and a dozen unrelated conversations with Ellen can happen in between;
+- Ellen's session can end, be reset with `/new`, be recycled by a reload, or be started
+  fresh by a capability change (casa v0.322.0 deliberately starts a NEW session when an
+  agent's delegate/job/executor set changes) — so her conversational memory of the sheet
+  may simply not exist;
+- Telegram's own reply-to gesture *looks* like it disambiguates, and does not: casa's
+  inbound context carries the incoming message's id and not the message it replied to
+  (`telegram.py:1647`), so that metadata never reaches Ellen at all.
+
+**Therefore recognition may never depend on the conversation.** Three things make it
+work anyway:
+
+1. **The sheet lives in the store, not the chat.** An open sheet row survives session
+   loss, `/new`, restarts and a month of other conversation. `get_open_sheet()` answers
+   "is there a sheet, and what are its lines" from disk in one call.
+2. **The skill carries a standing trigger rule**, and a skill is loaded per session — so
+   it is present even in a session that has never seen a sheet. It says: before treating
+   a message as ordinary conversation, if it contains a bare small integer, or reads as
+   an approval/correction/rebuild ("all good", "wrong", "rebuild it", a vendor name with
+   a verdict), **call `get_open_sheet()` first**. The store answers; memory is not
+   consulted. A number that matches no live line is not a sheet reply, and the message
+   is handled as whatever else it is.
+3. **Missing a recognition is cheap, and that is what makes this acceptable.** If Ellen
+   fails to spot a sheet reply, nothing is applied, nothing is corrupted and nothing is
+   lost: the line keeps its existing state and reappears on the next sheet. The failure
+   mode is a repeated question, not a wrong decision. Compare the alternative — an
+   eager rule that claims ambiguous messages — whose failure mode is silently mutating
+   the books from a sentence about something else.
+
+**The escape hatch is printed on the sheet**, once, as its last line:
+
+```
+Reply "4 wrong" — or "accounting: 4 wrong"
+if we've talked about other things since.
+```
+
+That costs one line and removes the operator's uncertainty about whether a bare number
+will land. An explicit `accounting:` prefix always binds, whatever else has happened.
+
+**What still cannot be promised.** Recognition is model judgment, and model judgment is
+not a guarantee. The design bounds the damage (nothing mutates unless a line resolves,
+and every applied change is echoed in a receipt) rather than claiming the judgment is
+reliable. If [ha-casa-app#1036](https://github.com/bonzanni/ha-casa-app/issues/1036)'s
+neighbour — propagating the inbound `reply_to_message_id` — ever lands, a reply to the
+sheet message becomes exact and rule 2 becomes a fallback rather than the primary path.
 
 ### A quiet week, and coming back after a gap
 
