@@ -132,7 +132,7 @@ correctness properties protect nothing. Three rungs:
 
 | Rung | What is on it | Discipline |
 |---|---|---|
-| **Free** | Everything v1 does: ingest, auto-match, demote, retarget, reject, re-label; bank-feed `acct-*` tags (an `untag_transaction` away from undone); notes (append-only, corrected by appending); **and the quarterly package itself** — the operator asks for a zip, checks it, corrects what is wrong and asks again (operator, 2026-09-21). A rebuild costs one message. | Act. No question, no confirmation, no ceremony. |
+| **Free** | Everything v1 does: ingest, auto-match, demote, retarget, reject, re-label; bank-feed `acct::*` tags (an `untag_transaction` away from undone); notes (append-only, corrected by appending); **and the quarterly package itself** — the operator asks for a zip, checks it, corrects what is wrong and asks again (operator, 2026-09-21). A rebuild costs one message. | Act. No question, no confirmation, no ceremony. |
 | **Gated** | Nothing, in v1. | — |
 
 **v1 therefore has no routine gates and no routine button questions.** Every step is
@@ -224,6 +224,18 @@ uninstall (`tools.py:12659-12692`); the outbox keeps atomic-claim semantics, des
 consumption and a 2 h orphan reap (`plugin_outbox.py:42`); a specialist role's
 `max_turns` is a `role.yaml` knob defaulting to 10 (`agent_loader.py:1215`); and there is
 still no sanctioned cross-plugin file handoff (#486 open).
+
+**bank-feed floor: 0.9.0** (casa-specialist-finance component 0.10.0,
+[casa-specialist-finance#31](https://github.com/bonzanni/casa-specialist-finance/issues/31)).
+A tag written `owner::name` belongs to another workflow: bank-feed never counts it as
+content classification (the classifier's untagged queue keeps the row), gives it its own
+per-row budget (16 per namespace, 64 namespaced in all, apart from the 32 classification
+tags), refuses it on either side of `rename_tag` (merge included) and refuses it in
+auto-tagging rules. `delete_tag` still removes one; supersession carries it to the booked
+successor and erasure removes it, as with notes. Below 0.9.0, `acct::` names are refused
+by the tag grammar outright, so the plugin fails closed rather than mis-tagging. An
+un-namespaced `acct-matched` would be content classification on every version — which is
+why the whole vocabulary below is namespaced.
 
 ## Data model
 
@@ -465,19 +477,22 @@ Claiming the first as a solution to the second is exactly the error of rounds 5 
 What is offered instead, stated as the guarantee with the qualifiers round 9 proved are
 required: **once decisions, row identity and stale writes stop changing, the next
 complete successful reconciliation restores the current projection — provided the row has
-tag capacity, its owned tags have not been renamed out from under us, and the traversal
-completes.** Each qualifier is a reproduced failure, not a hedge:
+`acct::` capacity and the traversal completes.** Each qualifier is a reproduced failure,
+not a hedge:
 
-- **Capacity.** `tag_transaction` refuses at 32 tags per row, all-or-nothing. A row
-  already carrying 32 foreign tags can never take a desired accounting tag, and every
-  sweep repeats the same refusal. "Reached from any starting tag set" is false; the
-  desired set is budgeted within reserved capacity, and a row that cannot take it is
+- **Capacity.** `tag_transaction` is all-or-nothing against per-row budgets. Since
+  bank-feed 0.9.0 the `acct::` namespace has its own budget of 16 per row, which
+  classification and other workflows' tags cannot consume, and our whole vocabulary is
+  five names. It can still be filled by hand-written `acct::` tags outside our
+  vocabulary (foreign, never removed), so a row whose desired set is refused is
   **reported as unprojectable**, not retried forever.
-- **Renames.** `rename_tag` renames globally with no record of origin, so an operator
-  renaming `acct-matched` to `invoice-confirmed` moves that assertion outside our
-  vocabulary: the reducer then satisfies its set equation while a contradictory
-  assertion survives, including across a later rejection. v1 does not chase it — a
-  renamed accounting tag is reported as an assertion we no longer own.
+- **Renames — closed by bank-feed 0.9.0.** `rename_tag` renamed globally with no record
+  of origin, so renaming an accounting tag moved the assertion outside our vocabulary
+  and it survived every later reconciliation, including across a rejection. bank-feed
+  now refuses any rename with a namespaced tag on either side, so an `acct::` assertion
+  can only be written, removed (`untag_transaction`, `delete_tag`) or carried by
+  supersession — each of which the reducer's fixed point already absorbs. An operator's
+  `delete_tag` of an owned tag is repaired by the next sweep, like any removal.
 - **Completeness.** A complete traversal is defined over a full **cycle**, not one
   session. `get_transaction` reads one row per call and the specialist's ceiling is 70
   turns, so with a few hundred retained projections one session cannot finish. The
@@ -505,21 +520,25 @@ One object, owned by the plugin server, per **transaction lineage**:
   construction.
 - **"Managed" includes transactions with no match at all** — one still awaiting an
   invoice has a projection, because coverage must not depend on a match existing.
-  **Its desired EXTERNAL tag set is empty in v1, however** (round-9 finding, reproduced
-  independently by both reviewers): writing `acct-open` on an unclassified row removes
+  **Its desired EXTERNAL tag set was empty in v1** (round-9 finding, reproduced
+  independently by both reviewers): writing `acct-open` on an unclassified row removed
   it from bank-feed's only classifier queue, because `classification_state` and the
-  queue predicate treat every non-workflow tag as content classification
-  (`rules.py`, `tools_read.py`). An accounting status would silently complete somebody
-  else's workflow. The projection still exists, is still enumerated and still
-  reconciled — only the assertion waits. It can be restored the day
+  queue predicate treated every non-workflow tag as content classification. Ordering
+  classification first is **not** an adequate fix, since it does not cover overlapping
+  passes or deferred rows.
   [casa-specialist-finance#31](https://github.com/bonzanni/casa-specialist-finance/issues/31)
-  gives the tag space an ownership concept; ordering classification first is **not** an adequate fix, since it does
-  not cover overlapping passes or deferred rows.
-- **`owned_tags` is a fixed, reserved vocabulary**, not a prefix rule: exactly
-  `acct-matched`, `acct-proposed`, `acct-portal`, `acct-no-invoice-expected`. Anything
-  else — including an `acct-`-looking tag the operator added by hand — is foreign and is
-  never removed. A prefix reading would have the sweep silently deleting the operator's
-  own tags, which is the failure this whole mechanism exists to prevent.
+  closed that in bank-feed 0.9.0 (see the bank-feed floor above): `acct::open` leaves the
+  row in the queue. **Whether v1 restores the `acct::open` assertion is an open operator
+  decision**; until it is taken the desired external set stays empty and the projection
+  is still enumerated and reconciled.
+- **`owned_tags` is a fixed, reserved vocabulary inside the `acct::` namespace**, not a
+  prefix rule: exactly `acct::matched`, `acct::proposed`, `acct::portal`,
+  `acct::no-invoice-expected` (plus `acct::open` if the decision above restores it).
+  The namespace is what tells bank-feed these are not classifications; the fixed list is
+  what tells the sweep what it may remove. Anything else — an `acct::`-namespaced tag the
+  operator added by hand, or an un-namespaced `acct-matched` — is foreign and is never
+  removed. A prefix reading would have the sweep silently deleting the operator's own
+  tags, which is the failure this whole mechanism exists to prevent.
 - **Registered before its first external write**, retained after rejection, and retained
   after its tags are observed absent.
 - **Fan-in merges.** Two projections that resolve to one successor merge their aliases
@@ -595,7 +614,7 @@ one loop.
   ([casa-specialist-finance#30](https://github.com/bonzanni/casa-specialist-finance/issues/30),
   reproduced against the real apply path). Not closable from this side: the projection
   cannot retain an alias for a successor no specialist ever observed. Recorded because a
-  stranded `acct-matched` keeps asserting a pairing the operator may have rejected.
+  stranded `acct::matched` keeps asserting a pairing the operator may have rejected.
 
 
 ## Setup (install day, once)
@@ -1272,7 +1291,7 @@ makes the marker sufficient; it is one integer, not a lease protocol.
 `tag_transaction` and `add_note` take row ids and content, with **no revision or
 fingerprint precondition** (verified: `tools_annotate.py` — the tool signature is
 `row_ids` + `tags`). So a stale pass that resumes after the operator has rejected a
-pairing can still assert `acct-matched` on that row, and no local CAS rejection can undo
+pairing can still assert `acct::matched` on that row, and no local CAS rejection can undo
 an external write that already landed. Two consequences, both required:
 
 - **A generation check cannot fence an external write, and this document no longer
@@ -1651,7 +1670,7 @@ pass offers to resend that exact file, in words, like everything else.
   across two passes**; a stale-revision `confirm_match` that must be rejected by
   CAS; a demotion after which the transaction's recomputed projection no longer asserts
   a match (never a stale
-  `acct:matched`); a retarget colliding with a successor-row match (both moved to
+  `acct::matched`); a retarget colliding with a successor-row match (both moved to
   non-active `conflicted` and `repair_owed` in one transition — no
   `conflicted`+`clean` record — residue line emitted, cardinality intact); a
   rejected match with `repair_owed` whose row is superseded before cleanup (repair
@@ -1679,11 +1698,14 @@ pass offers to resend that exact file, in words, like everything else.
   on both sides; an order confirmation and a net-vs-gross amount must not read as an
   invoice; an invoice naming a person rather than the B.V. must land `recipient?`; a
   truncated search must label `partial-search` and must never be rendered as `clean`;
-  an operator's `acct-` tag removal on a clean record must be detected by the next
-  pass; a row must be classified before it is accounting-tagged, or it vanishes from
-  tx-classifier's untagged queue; and every tag the plugin writes must satisfy
-  `^[a-z0-9][a-z0-9-]{0,31}$` (a pinning test, since the v1 spec's whole tag vocabulary
-  was invalid).
+  an operator's `acct::` tag removal on a clean record must be detected by the next
+  pass; an accounting tag on an unclassified row must leave it in tx-classifier's
+  untagged queue (pinned against bank-feed 0.9.0's real `list_transactions(untagged_only=true)`
+  and `queue_totals`, not a double); and every tag the plugin writes must be in
+  `owned_tags` and satisfy bank-feed's grammar
+  `^(?:[a-z][a-z0-9-]{0,15}::)?[a-z0-9][a-z0-9-]{0,31}$` with the `acct::` prefix present
+  (a pinning test, since the v1 spec's whole tag vocabulary was invalid and the round-9
+  one was un-namespaced).
 - **The rendered view and the reply grammar are testable and must be pinned**: a view
   goes inline, and one that would exceed the message limit **caps** — largest amounts
   first, with a counted remainder the operator can ask for — rather than becoming an
@@ -1709,13 +1731,13 @@ pass offers to resend that exact file, in words, like everything else.
   printed in the previous message.
 - **The projection sweep gets the four reproduced failures as pinned red cases**, since
   each one is now supposed to be unreachable rather than handled: a stale writer that
-  lands `acct-matched` after a rejection has been cleaned up (next sweep restores the
+  lands `acct::matched` after a rejection has been cleaned up (next sweep restores the
   desired empty set); a rejected projection whose row is superseded between the stale
   write and the sweep (the lineage, not the row id, keeps it enumerable, and the tags are
   found on the successor); a rejected match and an accepted replacement on ONE
   transaction (one desired set computed from both, reaching the same fixed point from
   either write order — the oscillation case); and a transaction with no match at all
-  (still enumerated, desired `acct-open`). Plus the reducer itself:
+  (still enumerated; desired set empty, or `acct::open` if restored). Plus the reducer itself:
   `actual := (actual − owned) ∪ desired` must reach the same result from an arbitrary
   starting tag set, including one containing foreign tags it must not touch.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
