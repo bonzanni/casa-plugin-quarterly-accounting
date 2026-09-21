@@ -22,8 +22,8 @@ progressively annotated.
 ## How it works, in three sentences
 
 **1. The work runs on its own, weekly, and says nothing.** A scheduled pass syncs the
-bank feed, matches new payments to invoices, annotates the operator's own ledger, and
-delivers no message. The only thing it ever sends unprompted is a fault that would
+bank feed, matches new payments to invoices, chases whatever is still open from earlier
+quarters, annotates the operator's own ledger, and delivers no message. The only thing it ever sends unprompted is a fault that would
 otherwise go unnoticed (§"When the plugin may speak first").
 
 **2. The operator interrogates it whenever they have time.** How does the quarter stand,
@@ -999,6 +999,46 @@ the tap this design spent a whole round removing.
 **Ellen may phrase, never compute.** Counts, sums, coverage dates and the ordering come
 from the tool already calculated; she chooses the words around them. The moment she adds
 figures herself, an answer can drift from the store and nothing would reveal it.
+
+### What a pass works on — open items, not a quarter
+
+**A pass is not scoped to a quarter, and this is a correction to an assumption every
+earlier draft carried** (operator question, 2026-09-21). "The pass works the current
+quarter" fails at precisely the moment it matters: on 3 October, September's invoices are
+still arriving, several September payments are still unmatched, and a pass that has moved
+on to Q4 abandons them exactly when they would have been found.
+
+**Quarters are a packaging concept, not a work-scheduling one.** The pass's unit of work
+is the open item. Concretely, every pass does four things with four different scopes:
+
+| Step | Scope |
+|---|---|
+| **Ingest new payments** | Whatever bank-feed has that we have not seen. Each lands in its own booking-date quarter, which is usually the current one but is decided by the row, never by the calendar on the day of the pass. |
+| **Search and match open items** | **Every unresolved payment, whatever quarter it belongs to** — subject to the search age-out below. September's stragglers keep being chased through October and beyond. |
+| **Repair sweep and fingerprint revalidation** | **Every active match, in every quarter, including quarters already delivered.** This is what makes "a delivered quarter changed underneath" detectable at all (§"When the plugin may speak first"); it is also why the sweep reads the account's rows in bulk and compares locally rather than asking bank-feed per match. |
+| **Annotate** | Whatever it just decided. |
+
+**Search effort ages out; the item never does.** An unresolved payment stops being
+actively searched after a few passes with no new candidate found — there is no point
+re-running the same fruitless Gmail queries every week for a receipt that was never
+emailed. It stays listed as missing, still appears in "what am I missing", still ships
+as `MISSING` in its package, and **revives instantly** if the operator hands over a
+document, if a matching candidate turns up for something else, or if they say "have
+another look at the Adobe one". The distinction is between *spending effort* and
+*keeping a fact*: effort is rationed, facts are not.
+
+**Nothing closes a quarter.** Not the calendar, not the package. A quarter whose package
+shipped in October still accepts a late invoice in November — the item matches, the
+package rebuilds as `r<N+1>`, and the operator decides whether their accountant needs it.
+If they want to stop chasing an old quarter, they say so ("stop chasing Q2") and its
+remaining open items become accepted-missing: still listed, still shipped as `MISSING`,
+never searched for again.
+
+**Views default to the current quarter but never hide older work.** "What am I missing?"
+answers for the current quarter and, when anything older is still open, ends with one
+line: `+2 older still missing (Q2) — say "show older"`. A default that silently dropped
+a EUR 4,000 invoice from June because it is now October would be the worst kind of
+tidiness.
 
 ### Running the pass on demand
 
