@@ -154,7 +154,7 @@ Two consequences worth stating, because they overturn v1's instincts:
   machine is. Every proposed mechanism in this document is judged against that too.
 
 **What the operator never has to learn.** `proposed`, `conflicted`, `matched`, CAS,
-`expected_revision`, `annotation_state`, acceptance revisions, content hashes, the
+`expected_revision`, projections, acceptance revisions, content hashes, the
 confidence labels, quarter identifiers in tool form. None of it appears on a sheet, in a
 caption or in a receipt — and neither do line numbers, which an earlier draft invented
 and this one removed. The operator's entire vocabulary is what they can already see: a
@@ -273,10 +273,10 @@ direction, counterparty) so a match is auditable even if the row it targeted cha
 
 **The acceptance revision moves only when the proposition moves.** A revision bump
 means the thing the operator was asked about changed — the pairing, its evidence, or
-the transaction facts under it. Annotation delivery progress is separate bookkeeping
-(`annotation_state` and its own attempt counter) and never bumps the acceptance
-revision, because a tap on an unchanged proposal must not be rejected by a CAS bump
-that came from bank-feed write progress.
+the transaction facts under it. Annotation delivery lives entirely outside the match
+record now (§"Mirroring decisions into bank-feed"), so it cannot bump an acceptance
+revision at all: a correction to an unchanged proposal can never be refused because of
+bank-feed write progress.
 
 **Every match carries a monotonic `revision`, bumped by every change to the
 proposition, and
@@ -291,24 +291,22 @@ there are no unversioned flags. Consequences, each closing a reviewed failure pa
   facts. A confirmation can never land on a match that no longer means what the
   operator saw. (Round-2 finding: stale Confirm re-confirming a demoted €100→€90
   match.)
-- **Annotation is a state, not a boolean:** `annotation_state:
-  pending | clean | repair_owed`, part of the same revisioned record. Retarget,
-  demotion, and rejection set `repair_owed` together with the concrete repair
-  action (which tags to remove/replace, what correction note to append) in the
-  same CAS transition. The repair sweep processes `pending` and `repair_owed`
-  alike — migrated bank-feed tags can never silently keep asserting a match the
-  store has demoted. (Round-2 finding: demotion leaving `acct:matched` standing.)
+- **A match carries no annotation state at all** (round-8 generalization). Retarget,
+  demotion and rejection change the decision; what the bank ledger should then show is
+  recomputed for the whole transaction from every current decision about it, and
+  reconciled by the projection sweep. A match cannot attest that shared bank state is
+  clean, which is the mistake that produced four reproduced failures — see §"Mirroring
+  decisions into bank-feed".
 - **Match creation is preconditioned on a fresh row resolution.** The specialist
   re-resolves the target row (`get_transaction`, state active) immediately before
   `record_match`/`propose_match`, and passes the resolved snapshot; if a sweep
   retarget later collides with a match already created on the successor row, the
   server atomically moves **both** contenders to `conflicted` — a non-active
   state, so the one-active-match invariant is never violated by the collision
-  itself — **and sets both to `annotation_state=repair_owed` with concrete
-  cleanup actions in the same CAS transition** (a previously-`clean` contender's
-  bank-feed tags no longer reflect any active match and must be corrected; a
-  `conflicted`+`clean` record would otherwise be invisible to both worklists,
-  round-4 finding) — with a residue line; the conflict is resolved only by
+  itself — with a residue line. Neither contender needs a cleanup instruction attached:
+  both transactions' projections are recomputed from their new state, and the sweep
+  enumerates every projection unconditionally, so the round-4 hazard (a record invisible
+  to both worklists) cannot exist when there are no worklists to be invisible to; the conflict is resolved only by
   explicit reassignment. Never a silent drop, never two active matches on one economic
   transaction. (Round-2 finding: retarget/new-match collision; round-3 finding:
   two active `proposed` would themselves have violated cardinality.)
@@ -391,11 +389,13 @@ expires (7 days), so a record pointing at it would be custody in name only. The 
 arguments are the agent's provisional reading, for filing; the bytes are the fact.
 `update_invoice_metadata`, `mark_irrelevant`,
 `update_invoice_metadata`, `mark_irrelevant`.
-Query: `list_unmatched_invoices`, `list_quarter_state` (includes repair-sweep view:
-matches with `annotation_state` in `pending`/`repair_owed`), `get_vendor`.
-Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match`,
-`mark_annotated` — every mutating match tool takes `expected_revision` (CAS; see
-the match-record state machine).
+Query: `list_unmatched_invoices`, `list_quarter_state`, `get_vendor`.
+Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match` — every
+mutating match tool takes `expected_revision` (CAS; see the match-record state machine).
+Projection: `list_projections()` — every transaction lineage with its desired tag set and
+snapshot, which is what the specialist reconciles against bank-feed;
+`record_observation(projection_id, observed_tags, observed_snapshot, error)` — what it
+saw, recorded without exempting the projection from later sweeps.
 KB: `upsert_vendor`.
 Setup: `check_setup()` — what the pass can actually reach (bank-feed tools, bound
 account, gmail tools, last sync), one branch at the top of every pass;
@@ -429,75 +429,129 @@ House disciplines copied from bank-feed: explicit loud failures, numeric caps an
 truncation notices on reads, provider text fenced as untrusted on output, three-way
 tool-list agreement (server, `provides_tools`, role allow-lists) with a CI check.
 
-## Bank-feed annotation protocol (two-phase, tracked)
+## Mirroring decisions into bank-feed — one projection per transaction lineage
 
-The plugin server cannot call bank-feed's tools, so the specialist performs both
-writes; the design makes the pair a tracked transaction rather than a convention:
+**This mechanism was rebuilt in round 8 after producing four reproduced failures across
+three rounds.** Both reviewers had recommended cutting it; the deep reviewer withdrew
+that recommendation once asked to generalize rather than to sharpen or remove. What
+follows is the generalization, and it is smaller than the patchwork it replaces.
 
-0. **The reconciliation set is every record this plugin has ever annotated** — not the
-   repair queue, and not only active matches. A record leaves the set only when its
-   owned tags have been observed absent **and** no writer that could reassert them can
-   still return; one observation of absence is not proof, because a paused pass can
-   resume after it (round-6 finding). Within that set, row-id re-resolution runs first:
-   every record whose `annotation_state` is `pending` or `repair_owed` — active,
-   `conflicted`, or `rejected` alike — plus every active match, has its `row_id`
-   re-resolved against bank-feed (`get_transaction`). Superseded rows retarget
-   (CAS, revision bump), and any owed repair action is **rewritten to the live
-   successor row in the same CAS transition** — bank-feed refuses annotation
-   writes to a superseded row, so a repair left aimed at a dead row would fail
-   forever while the migrated stale tags keep asserting a match on the live row
-   (round-3 finding). Vanished rows reopen. Only then does annotation work run.
-1. `record_match` / `confirm_match` store the match with `annotation_state=pending`.
-   Tag and note are written together, at match time, including for an `auto` match:
-   deferring the note until confirmation was considered and cut, because it buys only
-   tidiness in the ledger's history and costs a second state dimension. A reversal
-   appends one correction note; two lines on a row is an honest audit trail, which is
-   what append-only notes are for.
-2. The specialist writes the bank-feed side — `tag_transaction`
-   (`acct-matched`, `acct-<yyyy-qn>`; portal cases `acct-portal`; known no-invoice
-   cases `acct-no-invoice-expected`; open cases `acct-proposed`) and `add_note`
-   (`invoice: <filename>` or the portal link, plus the decision id and revision) —
-   then calls `mark_annotated(match_id, expected_revision)` → `annotation_state=clean`.
-   **The tag grammar is `^[a-z0-9][a-z0-9-]{0,31}$`, which admits no colon** (verified
-   2026-09-21 against bank-feed `tools_annotate.py`; reproduced: `acct:matched` is
-   refused with "invalid tag … Nothing was changed"). Every `acct:…` tag the v1 spec
-   named was invalid, and every pass would have retried a permanently failing write.
-3. Every weekly pass **begins** with the repair sweep: `list_quarter_state`
-   surfaces every match with `annotation_state` in (`pending`, `repair_owed`) —
-   half-completed writes and demotion/retarget corrections alike — and the
-   specialist completes them before new work.
-4. `reject_match` / reassignment / demotion set `repair_owed` in the same CAS
-   transition that changes the state, recording exactly which tags to
-   remove/replace and the correction note to append (bank-feed notes are
-   append-only — honest audit trail).
+### Why the four failures were one failure
 
-5. **Drift is detected on every annotated record, whatever its state** — clean ones,
-   rejected ones, and ones whose match was retargeted or demoted. A sweep restricted to
-   the repair queue cannot see the operator removing an `acct-` tag in bank-feed; a
-   sweep restricted to *accepted* rows cannot see a stale writer reasserting
-   `acct-matched` on a pairing the operator rejected, which is the reachable sequence
-   both round-5 and round-6 reviewers reproduced. Every pass therefore reads the
-   **actual** owned tags and notes for every record in the reconciliation set above and
-   compares them against that record's desired projection, which is derived from its
-   *current* state — for a rejected record the desired projection is "no owned tags". A discrepancy is
-   recorded before it is repaired. A new operator note reopens the match only when the
-   specialist reads it as contradicting or questioning the relationship — an ordinary
-   administrative note ("accountant has a copy") is recorded as seen and changes
-   nothing, because manufacturing questions out of ordinary bookkeeping spends the
-   scarcest asset in the design.
-6. **Classify before annotating.** bank-feed's untagged queue counts any tag outside
-   its workflow set as content classification (verified 2026-09-21 against
-   `tools_read.py`), so an `acct-` tag silently removes the row from tx-classifier's
-   queue. Accounting annotation for a row therefore runs after its classification, and
-   any accounting-tagged row whose classification is still unresolved is revisited
-   explicitly rather than left invisible.
+A stale writer reasserting a rejected pairing; a sweep whose selection excluded clean
+`rejected` records; the same records escaping successor re-resolution; and per-match
+desired values fighting over one transaction's tags. One sentence covers all four:
 
-Bank-feed may lag by at most one pass. Note precisely what that buys: there is no
-cross-store transaction and no promise of instantaneous equality. The guarantee is
-**detected, retryable convergence** — desired projection held locally, applied against
-the expected row fingerprint, and verified by readback every pass and again before
-packaging. "It can never drift silently" is only true because of step 5; a dirty-work
-queue alone would not have earned that sentence.
+> **The old design treated annotation as a completed side effect of a match, when the
+> thing being maintained is shared transaction state whose writers and whose bank-row
+> identity both outlive that match.**
+
+Four dimensions of one ownership mismatch — time, coverage, identity, and competing
+claims — which is why patching a selection rule fixed one and exposed the next.
+
+### The missing property
+
+**One authoritative desired value per external mutation domain, with responsibility
+retained for that domain's whole lifetime.** That gives a unique repair target and total
+coverage. It does **not** make stale external writes impossible, and the distinction is
+the part this document previously got wrong:
+
+| Claim | Status |
+|---|---|
+| Unique, complete reconciliation of what we assert | **Achievable locally**, and this design achieves it. |
+| The bank ledger never shows an obsolete assertion | **Impossible on this platform.** `tag_transaction` has no fingerprint, revision or idempotency precondition; the writer is an ephemeral specialist session that can pause indefinitely; two passes can overlap. No placement of a local check closes the window. |
+
+Claiming the first as a solution to the second is exactly the error of rounds 5 and 6.
+What is offered instead, stated as the guarantee: **once decisions, row identity and
+stale writes stop changing, the next complete successful reconciliation restores the
+current projection.**
+
+### The projection
+
+One object, owned by the plugin server, per **transaction lineage**:
+
+- **Identity is the lineage, not the row.** Logically `(bank-feed instance, account,
+  supersession lineage)`, implemented as a local projection id plus retained row-id
+  aliases. **The live row id is an address, not the identity** — which is what the old
+  design had backwards, and why a superseded row took its record out of every worklist.
+  Lineage is established only by bank-feed's explicit `superseded_by` links, never by
+  resemblance.
+- **It holds** its row aliases and current destination; **one** desired owned-tag set;
+  **one** self-contained annotation snapshot (accounting status, current document
+  reference, projection revision); and its last observation plus last delivery error as
+  diagnostics.
+- **The server computes it from every current decision and classification fact about
+  that transaction**, in the same local transaction as the decision change. Not per
+  match: a rejected match contributes no accepted relationship, and issues no
+  instruction to erase an accepted replacement's tags. That is finding 4, closed by
+  construction.
+- **"Managed" includes transactions with no match at all** — one still awaiting an
+  invoice has a desired projection (`acct-open`), because the operator's ledger is
+  supposed to show it.
+- **Registered before its first external write**, retained after rejection, and retained
+  after its tags are observed absent.
+- **Fan-in merges.** Two projections that resolve to one successor merge their aliases
+  and recompute a single projection atomically.
+
+**Invariant:** every managed lineage has exactly one current desired annotation, and
+every row its annotations can migrate to is reachable from that projection.
+
+### The sweep
+
+Unconditional enumeration replaces every selection rule:
+
+1. Enumerate **all** projections — no filter on match state, annotation state or
+   delivery state.
+2. Resolve destinations, merge collisions, revalidate transaction facts.
+3. Read the current tags and notes; take the server's freshly computed desired value.
+4. Remove owned tags outside the desired set; add missing desired tags. The fixed point
+   is `actual := (actual − owned_tags) ∪ desired`, reached from any starting state.
+5. Append a current snapshot when the visible accounting note is missing or differs.
+6. Read back and record what was observed. **An observation never exempts a projection
+   from future sweeps** — that exemption is what let a stale writer escape in round 7.
+
+### Notes are versioned assertions, not a field
+
+An append-only store cannot converge to a value, so notes are not treated as one. Each
+snapshot reads *"Accounting revision N: …"*, carries the document reference, and
+explicitly supersedes earlier accounting assertions. Revisions come from one store-wide
+sequence so they compare across merges; **a lower revision appended late is historical,
+not current**, and a later sweep restates the current snapshot.
+
+### What this replaces
+
+| Current piece | Disposition |
+|---|---|
+| Per-match `annotation_state` (`pending`/`clean`/`repair_owed`) | **Removed.** A match cannot attest that shared bank state is clean. |
+| Two-phase protocol and `mark_annotated` | **Removed as a protocol.** Desired state then reconciliation; an acknowledgement is only an observation. |
+| The concrete repair queue | **Removed.** Differences are recomputed from current desired versus actual; stored cleanup instructions are never replayed. |
+| Sweep selection rules | **Replaced** by unconditional enumeration. |
+| Reconciliation-set membership rules | **Absorbed** into projection existence. |
+| Successor re-resolution | **Survives**, once per lineage, independent of match state. |
+| The generation marker | **Survives** for local writes and duplicate-work avoidance. It fences nothing external, and no longer claims to. |
+| Match CAS and fingerprint revalidation | **Survive**, as accounting-correctness rules, separate from annotation delivery. |
+
+Several overlapping state machines and worklists become one registry, one reducer and
+one loop.
+
+### What it still does not close, stated plainly
+
+- **A stale writer still wins temporarily.** It can land after resolution, after
+  cleanup, or after a successful readback. The guarantee above is the honest one.
+- **Wrong note text is permanent.** Revisions make duplicates interpretable, not
+  preventable: two specialists can both observe a missing snapshot and append it, and a
+  crash after an append leaves the same ambiguity.
+- **Absence from a note read is not proof of non-delivery.** `get_transaction` returns
+  only the newest 20 notes (verified 2026-09-21: `tools_read.py` — `ORDER BY note_id
+  DESC LIMIT 20`). Restating the current snapshot preserves visibility at the cost of
+  more duplicates.
+- **Projections accumulate.** Every sweep revisits every one, and safe retirement is
+  unavailable without evidence that old writers cannot return. Tag caps or a persistently
+  failing API can block repair, which is then reported rather than absorbed.
+- **Identity tracking is real work.** Successor chains, merges, vanished rows and changed
+  fingerprints still need handling; this centralises those obligations rather than
+  erasing them.
+
 
 ## Setup (install day, once)
 
@@ -1519,10 +1573,12 @@ pass offers to resend that exact file, in words, like everything else.
 - All match mutations are CAS on the match `revision`; stale operator taps and
   crossed writes are rejected, never absorbed. Ellen re-asks with current facts on
   a CAS rejection of a review-sheet answer.
-- Two-phase bank-feed annotation with start-of-pass repair sweep, whose step 0
-  re-resolves superseded/vanished bank-feed rows before anything else; annotation
-  is a tracked state (`pending`/`clean`/`repair_owed`), never a boolean that
-  demotion could leave stale.
+- Bank-feed mirroring is one projection per transaction lineage, reconciled by an
+  unconditional sweep: no per-match annotation state, no repair queue, no selection
+  rules to get wrong. Its guarantee is stated as what the platform can actually support —
+  once decisions, row identity and stale writes settle, the next complete reconciliation
+  restores the current projection — and not as "the ledger never shows an obsolete
+  assertion", which bank-feed's unconditional write API cannot deliver.
 - Server-enforced cardinality: no second active match per invoice or transaction.
   Split and aggregate payments are not modelled at all in v1 (§Cardinality); they are
   retained as documents and explained in `notes.md`.
@@ -1548,7 +1604,8 @@ pass offers to resend that exact file, in words, like everything else.
   a superseded `row_id` retargeted by sweep step 0; an ambiguous same-vendor
   same-amount pair that must stay `proposed` **including when the pair arrives
   across two passes**; a stale-revision `confirm_match` that must be rejected by
-  CAS; a demotion that must leave `annotation_state=repair_owed` (never a stale
+  CAS; a demotion after which the transaction's recomputed projection no longer asserts
+  a match (never a stale
   `acct:matched`); a retarget colliding with a successor-row match (both moved to
   non-active `conflicted` and `repair_owed` in one transition — no
   `conflicted`+`clean` record — residue line emitted, cardinality intact); a
@@ -1605,6 +1662,17 @@ pass offers to resend that exact file, in words, like everything else.
   question in the same conversation issues a second read rather than reusing the first;
   and a "how much altogether" follow-up calls the tool rather than summing the numbers
   printed in the previous message.
+- **The projection sweep gets the four reproduced failures as pinned red cases**, since
+  each one is now supposed to be unreachable rather than handled: a stale writer that
+  lands `acct-matched` after a rejection has been cleaned up (next sweep restores the
+  desired empty set); a rejected projection whose row is superseded between the stale
+  write and the sweep (the lineage, not the row id, keeps it enumerable, and the tags are
+  found on the successor); a rejected match and an accepted replacement on ONE
+  transaction (one desired set computed from both, reaching the same fixed point from
+  either write order — the oscillation case); and a transaction with no match at all
+  (still enumerated, desired `acct-open`). Plus the reducer itself:
+  `actual := (actual − owned) ∪ desired` must reach the same result from an arbitrary
+  starting tag set, including one containing foreign tags it must not touch.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
