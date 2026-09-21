@@ -804,6 +804,29 @@ The store is the single source of truth, and the answer is computed at the momen
 asking. A question is never a mutation: asking "is the Zapier one right?" changes
 nothing.
 
+**Ellen answers it herself. She does not delegate a lookup.** The plugin is assigned to
+both roles, so its read tools are hers by construction (`agent.py:2664`), and a status
+question is one tool call plus a rendering. Delegating it would spin up an ephemeral
+specialist session — seconds of latency and a session's worth of tokens — to fetch a row
+Ellen can read directly, and the answer would still have to come back through her, since
+a specialist structurally cannot address the operator. The line between the roles is
+therefore **not** "accounting things go to the specialist" but:
+
+| Work | Who | Why |
+|---|---|---|
+| Reading state, rendering a view, applying a correction the operator dictated, filing a document | **Ellen, directly** | Deterministic work over stored facts: no judgment, no PDF interpretation. Fast and cheap. |
+| Deciding whether a document explains a payment — a pass, a handed-over invoice, a re-examination the operator asks for | **The finance specialist** | The judgment this whole design protects. It must be made by the agent that reads both sides at full fidelity, and Ellen's own extraction stays provisional and never load-bearing (§Division of labor). |
+
+The practical test: **if answering requires opening a PDF and forming an opinion, it is
+the specialist's; if it requires reading a row, it is Ellen's.** "What's the status?",
+"what am I missing?", "the Zapier one is wrong", "rebuild Q3" are all Ellen's, alone.
+"Here's the Twitter invoice" is Ellen filing it and the specialist judging it.
+
+**The server renders the view, not the model.** `build_review` returns rendered text —
+the same bytes whoever asked and whenever — so the picture cannot drift between turns
+and no model composes amounts, dates or coverage out of what it remembers. Ellen
+delivers what the tool returned; she does not retell it.
+
 **Nothing is numbered, and nothing needs to be.** An earlier draft made line numbers
 the addressing scheme, because a reply might arrive days later at an Ellen who no longer
 remembered the sheet. Pull-only dissolves that problem: **a correction resolves against
@@ -872,11 +895,17 @@ when the document is unclear, and it never overrides what the document says.
 
 What happens, in order, stopping at the first that resolves:
 
-1. **File it first, always.** Hash, store, index, extract. Custody is never contingent on
-   matching succeeding — a document that cannot be matched today matches next month when
-   the charge posts.
-2. **Match against what is already pending.** The usual bar, the usual labels. The common
-   case is a one-line answer: `Matched to the EUR 12.10 payment of 18 Sep. Q3.`
+1. **File it first, always — Ellen does this herself**, because custody is deterministic
+   and must not wait on a delegation that could fail. Hash, store, index, extract.
+   Custody is never contingent on matching succeeding: a document that cannot be matched
+   today matches next month when the charge posts. Her extraction here is provisional,
+   for filing only, exactly as at Gmail ingest.
+2. **Match against what is already pending — this part is delegated**, because it is
+   judgment about whether a document explains a payment. One short delegation, not a
+   full pass: the specialist re-reads the filed PDF against the candidate payments and
+   answers. The common case is a one-line reply to the operator: `Matched to the EUR
+   12.10 payment of 18 Sep. Q3.` A few seconds of latency on an action the operator
+   explicitly asked for is the right place to spend it.
 3. **If nothing fits, suspect the data before the document.** Sync bank-feed and retry —
    an invoice frequently arrives before its charge posts, and a stale feed is the most
    likely reason a real pairing is invisible.
