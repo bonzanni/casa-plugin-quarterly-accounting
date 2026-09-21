@@ -35,8 +35,9 @@ progressively annotated.
   makes twelve manual acquisitions fit in a minute. The plugin's claim is that it finds
   what it can, tells you exactly what it could not, and never makes you re-derive that
   list yourself. Deferred missing invoices are never counted as work saved.
-- A standing answer to “what am I missing?” — the review sheet leads with it, every
-  week, rather than saving it for quarter end.
+- A standing answer to “what am I missing?”, **retrievable at the moment the operator
+  chooses**, with the links in it. Not a list repeated every Monday at an hour when
+  nobody can act on it (§“Push tells, pull works”).
 - Quarter-end zip package delivered over Telegram: `invoices/` (bulk-uploadable to
   SnelStart), `ledger.xlsx`, `notes.md`.
 - A lean vendor knowledge base whose primary asset is the **researched invoice
@@ -79,7 +80,7 @@ server.** All document reading and all matching judgment happen in agents via `R
 | Resident (Ellen) | Orchestrates passes; all Gmail work (targeted searches, attachment download, ingest); **all** operator conversation (the review sheet, its free-text replies, the occasional one-line question folded into the sheet); sends the zip. |
 | Finance specialist | All matching judgment, grounded in its own `Read` of the actual PDFs; all bank-feed tagging/notes; portal-link research (WebSearch); returns structured work orders. Never talks to the operator (structurally cannot: `ask_user` requires direct execution). |
 | Plugin MCP server | Invoice store, vendor KB, match records, quarter workbook, filename normalization, package/zip build, outbox staging. |
-| Operator | Taps confirmation buttons; answers occasional one-line residue questions; receives one zip per quarter. |
+| Operator | Reads a short weekly message; corrects a line in free text when they disagree; pulls the collection list when they sit down to do it; supplies invoices if they feel like it; receives one zip per quarter. Every one of those is optional. |
 
 Rationale for the split (verified against casa code, 2026-08-10):
 
@@ -672,10 +673,12 @@ in week one and an operator who concludes after a month that the plugin does not
      or `partial-search`; it prints what they mean — "picked invoice 8841; invoice 8712
      also fits", "no shared reference", "invoice names a person, not the B.V.", "search
      incomplete". The labels stay internal, where they drive sorting.
-   - **Diff-first.** Each sheet carries what is new or changed, every still-missing
-     invoice, and every still-unreviewed uncertain pairing. An unchanged pairing the
-     operator already reviewed does not come back — repetition is what turns a sheet
-     into wallpaper.
+   - **Diff-first, and push-scoped.** The pushed message carries what is **new or
+     changed** — the machine's fresh decisions and their evidence. Still-missing
+     invoices and still-unreviewed older pairings are **not** repeated in it; they live
+     in the pull view, one phrase away, because repeating an errand at an hour nobody
+     can act on it is exactly how a weekly message becomes wallpaper. An unchanged
+     pairing never comes back on its own.
 
    A normal week (illustrative; per §Privacy no real vendor list appears here):
 
@@ -827,8 +830,8 @@ store through the same tools; none of them is a mode.
 | **A reply arrives** — hours or days later, possibly after unrelated conversation, possibly in a session that never saw the sheet | Resolved against the STORE, never against memory (§"Recognising a reply"): `get_open_sheet()` answers what the lines are, Ellen applies exactly what the message names, and sends the receipt. No pass runs — a correction is a store write, not a reason to re-derive the week. If she fails to recognise it as a sheet reply at all, nothing is applied and the line simply reappears next sheet. |
 | **A reply arrives while a pass is running** | It applies to the propositions the sheet recorded. If the running pass has already moved one of them, that line's CAS check refuses and the receipt reports it with current facts. Nothing blocks and nothing queues. |
 | **A reply lands after the quarter shipped** | The correction applies normally, and the receipt adds one line: the delivered package no longer matches, say "rebuild it" for a fresh one. Never rebuilt automatically — a new zip nobody asked for is worse than a stale one they know about. |
-| **The operator asks something** ("what am I missing for Q3?") | Answered from the store, no pass, no mutation. |
-| **The operator supplies a document** (self-addressed mail) | Nothing happens until the next pass, which finds it in its targeted sweep. Worth stating plainly on the sheet's portal lines, so the absence of an instant reaction is expected rather than read as failure. |
+| **The operator asks something** ("what am I missing for Q3?", "accounting list", "I'm doing accounting now") | The pull view: the collection list with links, rendered from the store, no pass and no mutation. This is the entry point for work done at a time of the operator's choosing (§"Push tells, pull works"). |
+| **The operator supplies a document** (self-addressed mail) | The next pass collects it by default, and its message names the successful intake. If they want it recorded now, `accounting: check emailed invoices` runs the sweep immediately and answers with a receipt (§"Recording Saturday's work on Saturday"). Either way, no obligation and no countdown. |
 | **The operator corrects something unprompted** ("the Adobe one is wrong") | Ordinary conversation resolves it: Adobe is missing rather than paired, so there is nothing to unpair, and Ellen says what she can do instead. Only a live line number binds silently. |
 | **The first run after install** | Same pass, plus account binding and one scope line. §Setup. |
 | **A pass could not finish, or Casa restarted mid-pass** | The store holds everything except the in-flight turn. The next pass resumes from durable state and its sheet opens with the coverage it actually achieved, never a silent partial. |
@@ -840,6 +843,119 @@ October carries late-September payments (Q3) and early-October ones (Q4) togethe
 grouped as always by what needs doing rather than by quarter, with the affected quarter
 named on each line only where it is not obvious. Quarters decide packaging; they do not
 decide what a Monday looks like.
+
+### Push tells, pull works
+
+**The problem, named** (operator, 2026-09-21; Astra async round): the moment the
+operator is *told* is not the moment the operator can *act*, and every earlier draft
+quietly assumed they were the same moment. The cron fires Monday 09:00 and they are
+driving. The work it describes — open a laptop, log into a vendor portal, download a
+PDF, mail it to yourself — happens Saturday evening if it happens at all. By then the
+message has scrolled away under every other conversation with Ellen, and reconstructing
+where they were costs more than the work. So it slips a week, and the next message shows
+*more* missing items, which makes it worse rather than better. Nothing logs any of this;
+the plugin believes it is working perfectly.
+
+**The fix is a split of purpose, not a new mechanism.** The two things the plugin has to
+say have different audiences in time:
+
+| | What it is for | When it arrives |
+|---|---|---|
+| **The weekly push** | Showing what the machine *decided* — new and changed pairings with their evidence. Loose matching only stays honest if its picks are visible, so this must be pushed. | Monday, unasked. Short. |
+| **The pull** | The *collection errands* — what is missing, with links. Only useful when the operator has chosen to do them. | Whenever they ask. |
+
+So the weekly message stops carrying acquisition errands and carries one advertised line
+instead. Monday, after a successful pass:
+
+```
+Accounting · bank checked through 20 Sep
+For invoice links whenever you're ready, say
+"accounting list" here — laptop included.
+
+New pairings · included unless corrected:
+104 Zapier · EUR 99.00 · 17 Sep
+Picked invoice 8841 (17 Sep); 8712 (10 Sep) also fits.
+105 Vercel · EUR 12.10 · 18 Sep
+Invoice V-918 names a person, not the B.V.
+106 Backblaze · EUR 7.99 · invoice B5521
+
+To correct one: "accounting: 104 wrong".
+No reply needed.
+```
+
+**"accounting list" is an advertised example, not a command.** The skill recognises the
+intent, not a syntax: "what am I missing", "I'm doing accounting now", "accounting
+list", "send me the invoice links" all reach the same place. One phrase is printed so
+the operator has something concrete to type; nothing requires them to remember it.
+There is no work-session to start, nothing to acknowledge and nothing to close.
+
+**The pulled list is the collection view — links, not machine decisions.** Somebody who
+has sat down to fetch invoices should not have to read the machine's reasoning again:
+
+```
+Accounting · Q3 2026 · missing invoices
+From records checked 21 Sep, 09:00.
+
+101 Adobe · EUR 54.45 · 14 Sep
+https://adobe.example/invoices
+
+102 Figma · EUR 18.15 · 15 Sep
+https://figma.example/invoices
+
+For any you want: download the PDFs and email
+them to yourself. One email can carry several.
+Then say "accounting: check emailed invoices"
+for a receipt now — otherwise I'll collect them
+on the next pass.
+```
+
+Two details that are easy to get wrong: the date names **when the records were last
+checked, not when the list was rendered** — pulling on Saturday must not make Monday's
+coverage look fresher than it is; and links are printed bare, never inside code
+formatting, so they stay tappable on both phone and laptop. Telegram's own device sync
+is the entire answer to "the links are on the wrong device".
+
+### Recording Saturday's work on Saturday
+
+**`accounting: check emailed invoices`** runs the self-addressed intake sweep and
+matching immediately, instead of waiting for Monday. This is the one substantive
+addition the async round recommended, and it exists to kill a specific worry: *did the
+files arrive?* It reuses intake, custody, matching and annotation exactly as a pass does
+— no new channel, no completion flag, no second code path.
+
+The receipt distinguishes three states that are easy to blur, because claiming the wrong
+one is how trust is lost: **emailed is not filed, and filed is not matched.**
+
+```
+Filed and matched: Adobe (14 Sep), Figma (15 Sep).
+Still missing: Microsoft · EUR 12.10 · 16 Sep.
+https://microsoft.example/invoices
+```
+
+If a PDF was filed but could not be matched, it says so — "Adobe PDF saved; not yet
+matched to the EUR 54.45 payment" — and if the mail has not arrived it says that,
+without claiming completion and without scheduling a follow-up.
+
+**Progress is acknowledged factually, once, and never celebrated.** A later pull opens
+with what has since been filed:
+
+```
+Accounting · Q3 2026 · missing invoices
+Already filed: Adobe (14 Sep), Figma (15 Sep).
+
+103 Microsoft · EUR 12.10 · 16 Sep
+https://microsoft.example/invoices
+```
+
+No praise, no percentage, no streak, no separate progress notification. Two completed
+errands must never disappear behind two new charges, which is why filed items are named
+rather than merely subtracted from a count. If PDFs arrive with no check request, the
+next pass's ordinary message names the successful intake — acknowledging Saturday on
+Monday without adding a message.
+
+**And an interrupted session needs no closing.** Fetch two of three, shut the laptop,
+come back next week: the next pull renders current state with the same "already filed"
+line. Nothing counts down, nothing expires, nothing asks whether they are still working.
 
 ### Portal invoices: offered, never demanded
 
@@ -935,9 +1051,11 @@ arrives.
 
 ### A quiet week, and coming back after a gap
 
-**A quiet week still speaks, in one line.** `Nothing new this week. 2 invoices still
-missing.` — or just `Nothing new this week.` Silence would be indistinguishable from a
-broken pass, and the liveness signal costs three seconds to read.
+**A quiet week still speaks, in one line:** `Nothing new this week · bank checked
+through 20 Sep.` Silence would be indistinguishable from a broken pass, and the liveness
+signal costs three seconds to read. It does **not** restate what is still missing — a
+quiet status has no business reciting the operator's unfinished errands, which are one
+pull away whenever they want them.
 
 **A sheet is always current state, never a replay of missed weeks.** After six ignored
 sheets the seventh is not six sheets long: it shows what is missing *now* and what is
