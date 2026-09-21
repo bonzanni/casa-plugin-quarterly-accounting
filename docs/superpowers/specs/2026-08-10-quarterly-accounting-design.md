@@ -19,6 +19,25 @@ single zip containing a SnelStart-ready invoice folder, a ledger, and a notes fi
 Along the way, keep bank-feed tags and notes authoritative so the bank ledger itself is
 progressively annotated.
 
+## How it works, in three sentences
+
+**1. The work runs on its own, weekly, and says nothing.** A scheduled pass syncs the
+bank feed, matches new payments to invoices, annotates the operator's own ledger, and
+delivers no message. The only thing it ever sends unprompted is a fault that would
+otherwise go unnoticed (§"When the plugin may speak first").
+
+**2. The operator interrogates it whenever they have time.** How does the quarter stand,
+what is missing, what did the machine guess at, did a particular invoice ever arrive —
+and, in the same conversation, they close gaps: hand over a PDF, say who an unknown
+counterparty was, correct a wrong pairing. Answers are read from the store, never
+recalled (§"Ellen never invents the state of the ledger").
+
+**3. The operator can run the pass itself, on demand.** "Go and check now" does exactly
+what the cron does, at a moment of their choosing — before sitting down to do accounting,
+after a burst of spending, or whenever the coverage line looks older than they like.
+
+Everything else in this document is the detail under those three.
+
 ## Goals
 
 - Weekly, mostly-autonomous matching of DBIT transactions to invoice PDFs. The plugin
@@ -788,6 +807,7 @@ is no weekly announcement. The job stays; the announcement goes.**
 | **The scheduled pass** | Runs as before — sync, repair sweep, triage, searches, matching, bank-feed annotation — and **delivers nothing**. Its trigger prompt ends with the `<silent/>` sentinel, which Casa's own reproduction table confirms delivers zero messages (ha-casa-app#960, arm D). The operator's ledger still gets annotated; their phone stays quiet. |
 | **The operator asks** | "What's the status of the quarterly accounting?" — and gets the current picture, rendered from the store. This is now the primary interaction, not a fallback. |
 | **The operator hands over a document** | "This is the Twitter invoice for September." Filed, matched if it can be, honestly reported if it cannot (§"Handing it a document"). |
+| **The operator runs the pass** | "Go and check now", "sync and see what's new". The same pass the cron runs, in a direct turn, on demand (below). |
 | **Quarter end** | The package. **Pending change (operator, 2026-09-21): this too becomes operator-triggered rather than automatic — to be specified.** Until that discussion lands, the rest of this document still describes automatic quarter-end delivery, and §Quarter-end is the section that will change. |
 
 **How Ellen answers without remembering anything.** She does not rely on conversational
@@ -979,6 +999,42 @@ the tap this design spent a whole round removing.
 **Ellen may phrase, never compute.** Counts, sums, coverage dates and the ordering come
 from the tool already calculated; she chooses the words around them. The moment she adds
 figures herself, an answer can drift from the store and nothing would reveal it.
+
+### Running the pass on demand
+
+**"Go and check now" is a first-class entry, not a special case** (operator,
+2026-09-21). It is the same pass the schedule runs: sync bank-feed, repair sweep,
+triage, targeted searches, matching, annotation. The differences are only in how it
+ends — a scheduled pass is silent, an operator-triggered one reports, because somebody
+is waiting for it.
+
+- **It says what it did**, in the shape of whatever they asked next: usually the status
+  view, refreshed. `Checked through today · 3 new payments · 1 matched, 2 without an
+  invoice yet.`
+- **A long pass says so at the start** rather than leaving a silence: a first run over a
+  whole quarter, or a catch-up after weeks, is minutes of Gmail searching and PDF
+  reading. One line before, one answer after.
+- **It can end incomplete, and says which**, exactly as a scheduled pass does: what was
+  searched, what was not reached, and that the rest resumes. Partial work is kept.
+
+**One consequence, and it is the reason this needed writing down.** Until now the only
+writer was a weekly cron — a rate at which concurrency is theoretical. An
+operator-triggered pass makes two passes at once genuinely reachable: they ask at 21:04
+on the Monday the cron fires, or twice in quick succession because the first felt slow.
+So a pass takes a **simple in-progress marker** — start time, what triggered it — and a
+second pass that finds a live one does not duplicate the work:
+
+```
+Already checking — started a minute ago.
+I'll have the answer shortly.
+```
+
+A marker older than a generous threshold is stale (the process died) and is reclaimed
+rather than trusted. This is deliberately not a lease protocol with fencing tokens: two
+low-rate writers on one box need a marker, and an earlier round cut exactly that
+machinery as oversized for the workload. What makes it safe rather than merely small is
+that every write underneath is already CAS'd on the record it touches, so the worst a
+duplicated pass can do is waste effort, never corrupt a match.
 
 ### Handing it a document
 
