@@ -132,7 +132,7 @@ correctness properties protect nothing. Three rungs:
 
 | Rung | What is on it | Discipline |
 |---|---|---|
-| **Free** | Everything v1 does: ingest, auto-match, demote, retarget, reject, re-label; bank-feed `acct-*` tags (an `untag_transaction` away from undone); notes (append-only, corrected by appending); **and the quarterly package itself** — the operator receives a zip, checks it, corrects what is wrong and asks for another (operator, 2026-09-21). A rebuild is `r<N+1>` and costs one message. | Act. No question, no confirmation, no ceremony. |
+| **Free** | Everything v1 does: ingest, auto-match, demote, retarget, reject, re-label; bank-feed `acct-*` tags (an `untag_transaction` away from undone); notes (append-only, corrected by appending); **and the quarterly package itself** — the operator asks for a zip, checks it, corrects what is wrong and asks again (operator, 2026-09-21). A rebuild costs one message. | Act. No question, no confirmation, no ceremony. |
 | **Gated** | Nothing, in v1. | — |
 
 **v1 therefore has no routine gates and no routine button questions.** Every step is
@@ -159,8 +159,8 @@ confidence labels, quarter identifiers in tool form. None of it appears on a she
 caption or in a receipt — and neither do line numbers, which an earlier draft invented
 and this one removed. The operator's entire vocabulary is what they can already see: a
 vendor name, an amount, a date, and "wrong", "good", "needs no invoice", "rebuild it",
-"send it again". Package revision numbers surface only when choosing between two
-delivered files. Everything else is machinery, and machinery that leaks onto the sheet
+"send it again". Packages are told apart by the date in their filename, which is the
+only package-identity concept the operator ever meets. Everything else is machinery, and machinery that leaks onto the sheet
 is a defect.
 
 ## Casa baseline (re-verified 2026-09-20, casa v0.323.0)
@@ -786,7 +786,7 @@ store through the same tools; none of them is a mode.
 | **The first run after install** | Same pass, plus account binding and one scope line. §Setup. |
 | **A pass could not finish, or Casa restarted mid-pass** | The store holds everything except the in-flight turn. The next pass resumes from durable state and its sheet opens with the coverage it actually achieved, never a silent partial. |
 | **Both triggers fire on one day** (the 10th falls on a Monday) | The quarter-end pass subsumes the weekly one: the weekly pass sees a quarter-end pass has already run for today and does nothing. Two sheets on one morning is noise, and the quarter-end one is a superset. |
-| **The operator asks for an interim zip mid-quarter** | §Quarter-end: built, marked `INTERIM`, consumes no revision. |
+| **The operator asks for a package** — any quarter, at any time | §Packaging: built from what is known now, named by date, `partial` in the name when the quarter is still open. |
 
 **A week that spans the quarter boundary is one sheet, not two.** The first Monday of
 October carries late-September payments (Q3) and early-October ones (Q4) together,
@@ -1236,82 +1236,75 @@ First classification of a vendor as portal-only triggers the one-time link resea
 (`console.vendor.tld/invoices`) over the marketing domain. Filed via `upsert_vendor`
 with provenance. Every later quarter resolves instantly from the KB.
 
-### Quarter-end pass (cron: 10th of Jan / Apr / Jul / Oct)
+### Packaging (there is no quarter-end event)
 
-Weekly-pass mechanics over the **full quarter**, then:
+**Operator ruling, 2026-09-21: packaging is a thing the operator asks for, and nothing
+else.** There is no quarter-end pass, no quarter-end trigger and no automatic delivery.
+This follows from §"What a pass works on": if passes already chase open items across
+quarter boundaries, already revalidate delivered quarters, and a late invoice already
+rebuilds a package, then "quarter end" was never a state transition in this system. It
+was only ever the moment somebody wanted a zip.
 
-1. Final sync, repair sweep and fingerprint revalidation of every active match.
-2. `build_quarterly_package("<YYYY-Qn>")`.
-3. **Send it.** No gate, no keyboard, no confirmation (operator, 2026-09-21). The
-   caption is short enough to read without opening anything and leads with what is
-   missing, not with build metadata:
+**One cron remains in the whole design** — the weekly pass. The `quarterly_accounting_
+quarter_end` trigger in §Setup is deleted.
 
-   ```
-   3 invoices missing · 2 uncertain pairings
-   2026 Q3 · revision 1 · 108 invoice PDFs
-   Open notes.md first.
-   Reply with corrections and "rebuild it".
-   ```
+**"Give me the accounting for Q1" packages Q1 as currently known and sends it.** Any
+quarter, at any time, as many times as the operator likes:
 
-   No digest, no internal build vocabulary, no request to acknowledge receipt — the
-   digest lives at the END of `notes.md`, for diagnostics. `notes.md` opens with the
-   actual missing items, numbered the same way the review sheets number them so a
-   correction can be written against either, then the uncertain pairings that were
-   included anyway, then unsupported relationships, and only then inventory and
-   commentary. **The package is the
-   quarter's review surface.** The operator checks it, says what is wrong, and asks for
-   another; corrections apply and `r<N+1>` follows. That round trip is cheaper than any
-   question the plugin could have asked beforehand.
+- Asking in October for **Q1** builds Q1 from what is known today — including every late
+  invoice that arrived since the last time they asked.
+- Asking in August for **Q3**, the quarter they are standing in, builds what is known so
+  far. That is a legitimate thing to want; it is simply incomplete, and says so.
+- Asking twice in a row builds twice. The second build is cheap and nobody has to decide
+  whether it was "necessary".
 
-**The replacement package's caption doubles as the receipt**, keeping a correction and
-its result in one exchange. The operator replies `17 wrong; rebuild it` and the next zip
-arrives captioned:
+**What this deletes, and it is the point.** The per-quarter revision counter, the atomic
+reservation of a revision number, the `supersedes rN-1` vocabulary, and the input-digest
+rule that existed only to stop revision inflation — all gone. They were machinery
+serving a numbering scheme, and the numbering scheme existed because packages arrived
+unasked and had to be told apart. Packages the operator asked for, by date, need none of
+it.
+
+**What survives the deletion, because it was never about revisions:**
+
+- **The build still freezes a snapshot in one transaction and renders from it.** This is
+  what stops a correction landing mid-build from producing a zip that is half
+  pre-correction and half post (the round-3 finding). Same discipline, no numbering.
+- **A delivery log** — what was sent, when, and what it contained. Not version
+  semantics: it is how the next package can say what changed, and how the operator can
+  ask "what did I send my accountant in October?".
+
+**Naming carries what revisions used to.** A date is better than a revision number for
+the one person who has to act on it — the accountant — because they can order two files
+without knowing anything about the scheme:
 
 ```
-Unpaired 17 Zapier.
-4 invoices missing · 1 uncertain pairing
-2026 Q3 · revision 2 · 107 invoice PDFs
-Replaces ...-Q3-r1.zip. Use ...-Q3-r2.zip.
+books-2026-Q1-2026-10-14.zip          a closed quarter, built 14 Oct
+books-2026-Q3-partial-2026-08-14.zip  a quarter still open, built 14 Aug
 ```
 
-"rebuild it" means the quarter of the package being replied to; "rebuild Q3" resolves
-only when the year is unambiguous — the plugin never silently picks among years; "send
-it again" resends the existing revision, labelled as a resend. What stays annoying is
-real, and no gate fixes it: downloading, extracting, switching between `notes.md` and
-the PDFs, and an obsolete zip still sitting in the phone's downloads. Naming the
-replaced file reduces that confusion; it does not remove the burden.
+`partial` is in the name because it is a fact about the **period**, not a version: a Q3
+package built in August is not a draft of the final one, it is a picture of an
+unfinished quarter, and an accountant must never mistake it for a filing set. A same-day
+rebuild appends a time (`-1412`) rather than inventing a counter.
 
-**Two ways a package is produced, and one rule for repeats.**
+**The caption says what changed**, computed by diffing against the delivery log rather
+than asserted by a numbering rule:
 
-- **Automatically**, by the quarter-end trigger, once per quarter.
-- **On demand**, whenever the operator asks — "rebuild Q3", "send me Q3 again", "what
-  does Q4 look like so far". This runs in an ordinary direct DM turn, which has full
-  media rights without any scheduled-delivery marker, so it needs no trigger and no
-  special path. Ellen builds and sends; the specialist may build but structurally
-  cannot deliver.
+```
+Accounting Q1 2026 · 47 payments · 44 with invoices
+2 invoices added since the package from 14 Oct.
+3 still missing — listed in notes.md.
+```
 
-**A repeat request does not mint a revision unless the inputs changed.** Every build
-first computes an **input digest** over the frozen match snapshot, the imported ledger
-rows and the package options. Then:
+If nothing has changed since the last one, it says that too, and sends the zip anyway.
+The operator asked; they get it.
 
-| Case | What happens |
-|---|---|
-| Input digest equals the current `r<N>`'s | **No new revision.** The existing `r<N>` is returned and re-sent if asked. The reply says so: “same as r3, sent 12 Oct — nothing has changed since”. |
-| Inputs differ (a correction, a late invoice, a bank change) | A new revision `r<N+1>` is reserved and built, and `notes.md` and the caption say what changed since `r<N>`. |
-| A second build arrives while one is in flight | The reservation transaction serialises them. A concurrent request with an equal input digest joins the in-flight build and receives its result rather than reserving a second number — two identical zips is a worse answer than one. |
-
-This is what "deterministic and idempotent" has to mean to be worth saying: asking
-three times in a row gets you one package three times, not `r2`, `r3` and `r4` each
-claiming to supersede the last. Revision numbers stay scarce, so `supersedes rN-1`
-keeps meaning something.
-
-**A quarter that is still open can be packaged too, and is marked differently.** An
-interim request ("Q4 so far") builds `<slug>-<YYYY-Qn>-interim-<YYYY-MM-DD>.zip`: same
-contents, no revision number, not recorded as the quarter's package, and `notes.md`
-opens with `INTERIM — quarter still open, n transactions so far, not for filing`.
-Interim builds consume no revisions and can never be confused with the package that
-eventually closes the quarter. That keeps “where am I?” cheap without polluting the
-record that goes to the accountant.
+**Accepted consequence, stated rather than discovered later: nothing will remind the
+operator to send their accountant anything.** Quarter-close notifications were considered
+and declined (§"When the plugin may speak first"), so the filing rhythm is entirely
+theirs. This is the right trade for someone who knows their own deadlines, and it is a
+deliberate risk rather than an oversight.
 
 **Package membership is defined by the transaction's booking-date quarter, never by
 where an invoice file happens to be stored.** The invoice-date storage path
@@ -1322,20 +1315,15 @@ ships in the Q3 package (the cross-quarter case both reviewers flagged). An
 unmatched invoice appears in no package's `invoices/`; it is listed in `notes.md` of
 the quarter it was ingested in.
 
-**Every built package carries revision identity, and revisions are atomically
-reserved.** `build_quarterly_package` opens one store transaction that (a) reserves
-the next per-quarter revision number and (b) freezes the immutable match snapshot
-the build will render — before any file is written. The zip, its content digest,
-and the delivery record are all bound to that reservation, so two overlapping
-builds can never both claim `r2` and a correction landing mid-build can never leak
-into a zip labeled with the pre-correction revision (round-3 finding). The zip is
-named `<slug>-<YYYY-Qn>-r<N>.zip`, `notes.md` opens with `revision rN, supersedes
-rN-1, built <date>, digest <hash>`, and the Telegram caption says the same — a
-rebuilt-and-resent package is never confusable with the stale one it replaces at
-upload time.
+**The build is one transaction and deterministic.** `build_package(quarter)` freezes
+the match snapshot and the imported ledger rows before writing any file, so the zip is
+internally consistent even if a correction lands while it renders, and the same frozen
+inputs produce the same bytes (fixed ordering, fixed timestamps, stable serialisation).
+`notes.md` opens with what is missing and closes with `built <date>, covers <period>,
+bank data through <date>, digest <hash>` for diagnostics.
 
 ```
-<slug>-<YYYY-Qn>-r<N>.zip
+<slug>-<YYYY-Qn>[-partial]-<YYYY-MM-DD>.zip
 ├── invoices/            # SnelStart bulk upload: YYYY-MM-DD_vendor_amount[_hash8].pdf
 │                        # matched only — a `proposed` line never lands here
 ├── ledger.csv           # full quarter, both directions: date, amount, currency,
@@ -1369,14 +1357,13 @@ line). The build is deterministic — the same inputs produce the same bytes, by
 byte (fixed ordering, fixed timestamps, stable serialisation) — which is exactly what
 makes the input-digest rule above safe: "nothing changed" is a computed fact, not a
 judgement. Supply stragglers and the next build is `r<N+1>`; ask again with nothing
-changed and you get `r<N>` back; resending any revision is always free.
 Delivery: atomic write to the plugin outbox → `send_media(kind="zip")` (shipped,
-#482) → operator's Telegram, from the quarter-end cron turn itself. The outbox copy is
-consumed on send (or reaped at 2 h); the canonical package stays in the data dir. Two
+#482) → operator's Telegram, from the direct turn in which they asked. The outbox copy
+is consumed on send (or reaped at 2 h); the canonical package stays in the data dir. Two
 edges the shipped tool imposes: a transport timeout is reported as
-`delivery_uncertain` — the send may have landed — so a retry is an operator-visible
-**resend of the same revision**, never a silent rebuild (the revision line in
-`notes.md` and the caption make a duplicate arrival self-evident); and the `zip` kind
+`delivery_uncertain` — the send may have landed — so a retry resends **that same built
+file** rather than building a new one, and the date in the filename makes a duplicate
+arrival self-evident; and the `zip` kind
 caps at **20 MB**, which a quarter of PDF invoices can approach, so the build
 **preflights the actual zip size** and an oversize package fails visibly, with the
 canonical zip retained and `notes.md` naming the offenders. v1 does not silently split
@@ -1453,10 +1440,11 @@ pass offers a resend of the same revision, in words, like everything else.
   the sheet it names, not the newest; a rebuild requested after a correction produces
   `r<N+1>` whose contents differ in exactly the corrected lines; **a rebuild requested
   with nothing changed returns `r<N>` and reserves no number**; two concurrent builds
-  with equal input digests yield one revision and one zip, while two with differing
-  digests yield distinct reserved revisions with snapshot-consistent contents; and an
-  interim build of an open quarter consumes no revision and is never recorded as the
-  quarter's package.
+  two concurrent builds of one quarter do not interleave into one zip (each renders
+  from its own frozen snapshot); a build of an open quarter is named `partial` and says
+  so on the first line of `notes.md`; a same-day rebuild does not overwrite the earlier
+  file; and the caption's "what changed since" line is computed from the delivery log
+  rather than asserted.
 - The round-5 red cases, from the independent design and its comparison: a material
   change to an ACTIVE row (amount corrected under an unchanged `row_id`) must
   invalidate an accepted match — the case supersession-only revalidation missed; two
