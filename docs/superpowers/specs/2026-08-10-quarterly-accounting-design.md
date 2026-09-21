@@ -428,7 +428,11 @@ tool-list agreement (server, `provides_tools`, role allow-lists) with a CI check
 The plugin server cannot call bank-feed's tools, so the specialist performs both
 writes; the design makes the pair a tracked transaction rather than a convention:
 
-0. **Row-id re-resolution first — scoped by annotation work, not match state**:
+0. **The reconciliation set is every record this plugin has ever annotated** — not the
+   repair queue, and not only active matches. A record leaves the set only when its
+   owned tags have been observed absent **and** no writer that could reassert them can
+   still return; one observation of absence is not proof, because a paused pass can
+   resume after it (round-6 finding). Within that set, row-id re-resolution runs first:
    every record whose `annotation_state` is `pending` or `repair_owed` — active,
    `conflicted`, or `rejected` alike — plus every active match, has its `row_id`
    re-resolved against bank-feed (`get_transaction`). Superseded rows retarget
@@ -461,12 +465,15 @@ writes; the design makes the pair a tracked transaction rather than a convention
    remove/replace and the correction note to append (bank-feed notes are
    append-only — honest audit trail).
 
-5. **Drift is detected on clean records too, not only on the repair queue.** A sweep
-   that re-runs owed work alone cannot see the operator removing an `acct-` tag or
-   adding a contradictory note directly in bank-feed: the local record still reads
-   `clean`, and the package keeps endorsing a decision the operator already overturned.
-   Every pass therefore reads the **actual** owned tags and any new notes on every
-   accepted row and compares them against the desired projection. A discrepancy is
+5. **Drift is detected on every annotated record, whatever its state** — clean ones,
+   rejected ones, and ones whose match was retargeted or demoted. A sweep restricted to
+   the repair queue cannot see the operator removing an `acct-` tag in bank-feed; a
+   sweep restricted to *accepted* rows cannot see a stale writer reasserting
+   `acct-matched` on a pairing the operator rejected, which is the reachable sequence
+   both round-5 and round-6 reviewers reproduced. Every pass therefore reads the
+   **actual** owned tags and notes for every record in the reconciliation set above and
+   compares them against that record's desired projection, which is derived from its
+   *current* state — for a rejected record the desired projection is "no owned tags". A discrepancy is
    recorded before it is repaired. A new operator note reopens the match only when the
    specialist reads it as contradicting or questioning the relationship — an ordinary
    administrative note ("accountant has a copy") is recorded as seen and changes
@@ -488,7 +495,7 @@ queue alone would not have earned that sentence.
 
 ## Setup (install day, once)
 
-**The whole of it is one sentence to the configurator and two triggers. It asks the
+**The whole of it is one sentence to the configurator and one trigger. It asks the
 operator nothing** (operator ruling, 2026-09-21: never block setup on a choice that has
 a reasonable default; default it, say what was defaulted, and let it be changed later).
 Everything else the plugin works out for itself. Verified against casa v0.323.0's own
@@ -509,15 +516,16 @@ call. **Its tools are granted by that assignment** — "installed ⇒ granted, b
 construction" (`agent.py:2664-2668`: every server-level plugin grant is appended to the
 agent's allowed tools). No role file is edited, by anyone.
 
-**Step 2 — two triggers on Ellen**, created through the trigger recipe. This spec ships
+**Step 2 — one trigger on Ellen**, created through the trigger recipe. This spec ships
 the exact prompt text so nobody composes it at install time, because the closing clause
-is what stops every pass delivering twice (ha-casa-app#960/#932):
+is what stops a pass delivering twice (ha-casa-app#960/#932):
 
 ```
 name:     quarterly_accounting_pass
 type:     cron        schedule: 0 9 * * 1        channel: telegram
-prompt:   Run the quarterly-accounting background pass for the current
-          quarter. If it reports something that needs me, send me that
+prompt:   Run the quarterly-accounting background pass. It covers every
+          open item, not just the current quarter. If it reports
+          something that needs me, send me that
           and nothing else; then output the sentinel `<silent/>`. If it
           reports nothing, output `<silent/>` and nothing else.
 ```
@@ -572,7 +580,7 @@ no setup tool and no credentials. The first-run binding above covers the same gr
 the surface the operator is already reading.
 
 **No trigger or callback consent round.** The plugin declares no triggers of its own —
-the two above live on Ellen's `triggers.yaml` — and no callbacks, so there is no consent
+the one above lives on Ellen's `triggers.yaml` — and no callbacks, so there is no consent
 verdict for its setup to wait on.
 
 ### Health is observed, never inferred
@@ -775,7 +783,18 @@ a pairing they never saw. So:
 
 - the **description** resolves against the store's current open items, as above;
 - the **`expected_revision`** comes from the render log — the revision of that item in
-  the most recent view Ellen actually showed the operator;
+  the most recent view that **actually reached the operator**. Rendering is not showing:
+  `build_review` produces text, and the send can still fail (`send_message` reports a
+  proven non-delivery as an error since casa v0.324.0). The shown-revision pointer
+  therefore advances **only on established delivery**; a failed or uncertain send leaves
+  it where it was, so a correction can never be bound to a proposition the operator
+  never saw (round-6 finding);
+- if the resolved item has **no shown revision at all** — created by a silent pass,
+  omitted by a capped view, or replaced by a match with a new identity — there is
+  nothing to bind to, and the correct behaviour is to **show the current proposition and
+  apply nothing yet**. The operator then corrects what they have just been shown. A
+  current revision is never substituted for a shown one: that would make the CAS check a
+  no-op precisely where it is doing the most work;
 - a CAS rejection therefore means *"this changed since you looked"*, which is exactly
   what the operator needs told, with the current facts, rather than a correction applied
   to a proposition they never saw.
@@ -787,7 +806,7 @@ same rule applies to its state.
 
 | Rule | Behaviour |
 |---|---|
-| Unique target | A displayed number, a list of them, or an exact displayed vendor name within the quarter. Case and whitespace normalised; **no fuzzy vendor matching** — two Adobe charges need a number. |
+| Unique target | A description that resolves to exactly one open item: a vendor name, or a vendor plus any discriminator already printed on it (amount, date). Case and whitespace normalised; **no fuzzy vendor matching** — two Adobe charges need the date or the amount, and if the description still fits both, it asks. |
 | Whole clauses | A supported clause must consume all its text. "Zapier and Vercel" is a target list with no verb: nothing applies, and the reply asks whether they are wrong. Never extract a convenient command from prose that did not parse. |
 | Negative verdicts unpair, and only that | "the Zapier one is wrong", "no to Zapier", "Zapier and Vercel are wrong" remove the pairing and keep both payment and document. On a missing or identity-only item there is no pairing to remove: nothing mutates, and the reply says what it could do instead. |
 | Ambiguous bulk clauses apply nothing | "all good except the Zapier" does not say whether Zapier is wrong or merely unchecked. Nothing applies; the reply names the two phrasings that work. Input-error handling, not a gate. |
@@ -855,7 +874,7 @@ is no weekly announcement. The job stays; the announcement goes.**
 | **The operator asks** | "What's the status of the quarterly accounting?" — and gets the current picture, rendered from the store. This is now the primary interaction, not a fallback. |
 | **The operator hands over a document** | "This is the Twitter invoice for September." Filed, matched if it can be, honestly reported if it cannot (§"Handing it a document"). |
 | **The operator runs the pass** | "Go and check now", "sync and see what's new". The same pass the cron runs, in a direct turn, on demand (below). |
-| **Quarter end** | The package. **Pending change (operator, 2026-09-21): this too becomes operator-triggered rather than automatic — to be specified.** Until that discussion lands, the rest of this document still describes automatic quarter-end delivery, and §Quarter-end is the section that will change. |
+| **A package** | Built and sent only when the operator asks, for whatever quarter they name (§Packaging). Nothing is delivered on a schedule. |
 
 **How Ellen answers without remembering anything.** She does not rely on conversational
 memory and must not: her session can end, be reset, or be started fresh by a capability
@@ -1080,7 +1099,7 @@ is the open item. Concretely, every pass does four things with four different sc
 |---|---|
 | **Ingest new payments** | Whatever bank-feed has that we have not seen. Each lands in its own booking-date quarter, which is usually the current one but is decided by the row, never by the calendar on the day of the pass. |
 | **Search and match open items** | **Every unresolved payment, whatever quarter it belongs to** — subject to the search age-out below. September's stragglers keep being chased through October and beyond. |
-| **Repair sweep and fingerprint revalidation** | **Every active match, in every quarter, including quarters already delivered.** This is what makes "a delivered quarter changed underneath" detectable at all (§"When the plugin may speak first"); it is also why the sweep reads the account's rows in bulk and compares locally rather than asking bank-feed per match. |
+| **Repair sweep and fingerprint revalidation** | **Every active match in every quarter, AND every row of every delivered package** — the two sets are not the same, and an earlier draft used only the first (round-6 finding). A payment that shipped as `MISSING` has no match; so does every CRDT row; a change to either still makes the accountant's copy wrong, which is precisely what "a delivered quarter changed underneath" promises to catch. The sweep therefore compares the stored fingerprint of every delivered ledger row against current bank-feed state, independent of whether an invoice was ever matched to it. It reads the account's rows in bulk and compares locally rather than querying per row. |
 | **Annotate** | Whatever it just decided. |
 
 **Search effort ages out; the item never does.** An unresolved payment stops being
@@ -1094,7 +1113,7 @@ another look at the Adobe one". The distinction is between *spending effort* and
 
 **Nothing closes a quarter.** Not the calendar, not the package. A quarter whose package
 shipped in October still accepts a late invoice in November — the item matches, the
-package rebuilds as `r<N+1>`, and the operator decides whether their accountant needs it.
+the operator asks for a fresh package, and decides whether their accountant needs it.
 If they want to stop chasing an old quarter, they say so ("stop chasing Q2") and its
 remaining open items become accepted-missing: still listed, still shipped as `MISSING`,
 never searched for again.
@@ -1136,9 +1155,9 @@ I'll have the answer shortly.
 
 A marker older than a generous threshold is treated as a dead process and reclaimed —
 **and reclaiming it bumps a generation counter that the marker carries.** A pass whose
-generation is no longer current is refused at every write, including the writes that are
-not CAS'd on a match record: `upsert_vendor`, the search bookkeeping, the delivery log
-and the setup/binding state. An earlier draft claimed "every write underneath is already
+generation is no longer current is refused at every write **into this plugin's own
+store**, including the ones not CAS'd on a match record: `upsert_vendor`, the search
+bookkeeping, the delivery log and the setup/binding state. An earlier draft claimed "every write underneath is already
 CAS'd, so a duplicated pass can only waste effort". **That claim was false** (round-5
 review): match mutations are CAS'd, but vendor, bookkeeping and log writes are not, so a
 revived stale pass could overwrite newer state with older. The generation check is what
@@ -1151,13 +1170,20 @@ fingerprint precondition** (verified: `tools_annotate.py` — the tool signature
 pairing can still assert `acct-matched` on that row, and no local CAS rejection can undo
 an external write that already landed. Two consequences, both required:
 
-- The generation check above must be made **before the bank-feed write**, not only
-  before the local one, since the external write is the unrecoverable half.
-- **Projection reconciliation covers `rejected` records too**, not only accepted ones.
-  The earlier text swept accepted rows for drift and owed repairs; a rejected record
-  whose annotation was already cleaned was excluded from both, which is exactly the
-  record a stale writer resurrects. Every record the plugin has ever annotated stays in
-  the reconciliation set until its owned tags are observed absent.
+- **A generation check cannot fence an external write, and this document no longer
+  claims it can** (round-6 finding, reproduced by both reviewers). Checking the
+  generation before calling `tag_transaction` does not serialise that call's
+  *completion*: a pass can pass the check, pause, and land its write long after another
+  pass reclaimed the marker, processed a rejection and cleaned the tags. Bank-feed
+  accepts it, because it has no precondition to refuse on. A precheck narrows the window
+  and is worth doing; it does not close it.
+- **What actually closes it is convergence, not exclusion.** Every record the plugin has
+  ever annotated stays in the reconciliation set (§Bank-feed annotation protocol,
+  step 0), its desired projection is derived from its *current* state, and each pass
+  re-observes and repairs. A stale write therefore survives until the next pass and no
+  longer: the guarantee this design offers over the bank ledger is **detected,
+  retryable convergence**, which is what it says everywhere else, and the round-5 text
+  briefly promised something stronger that the platform cannot support.
 
 ### Handing it a document
 
@@ -1442,11 +1468,12 @@ as such in both ledgers, so the accountant sees which pairings the machine chose
 competition rather than being handed a uniform-looking set of assertions.
 
 Missing invoices never block shipping: ledger rows read `MISSING` with the best
-available link; `notes.md` opens with the action list (right after the revision
-line). The build is deterministic — the same inputs produce the same bytes, byte for
-byte (fixed ordering, fixed timestamps, stable serialisation) — which is exactly what
-makes the input-digest rule above safe: "nothing changed" is a computed fact, not a
-judgement. Supply stragglers and the next build is `r<N+1>`; ask again with nothing
+available link, and `notes.md` opens with them. The build is deterministic — the same
+frozen inputs produce the same bytes (fixed ordering, fixed timestamps, stable
+serialisation) — which is what lets a caption say "identical to the package from 14 Oct"
+as a computed fact rather than a judgement. Supply stragglers and ask again: the next
+build is a new file under a new name, the earlier one is retained, and resending any
+built file is always free.
 Delivery: atomic write to the plugin outbox → `send_media(kind="zip")` (shipped,
 #482) → operator's Telegram, from the direct turn in which they asked. The outbox copy
 is consumed on send (or reaped at 2 h); the canonical package stays in the data dir. Two
@@ -1524,17 +1551,19 @@ pass offers a resend of the same revision, in words, like everything else.
   that must yield
   distinct reserved revisions with snapshot-consistent contents.
 - The review sheet is store state, so it is unit-testable and must be tested: line
-  numbers stay bound to `(match_id, revision)` across a rebuild; a reply naming a line
-  whose revision moved is refused on that line and applied on the others (a partial
-  reply is normal, not an error); a reply arriving two sheets later resolves against
-  the sheet it names, not the newest; a rebuild requested after a correction produces
-  `r<N+1>` whose contents differ in exactly the corrected lines; **a rebuild requested
-  with nothing changed returns `r<N>` and reserves no number**; two concurrent builds
-  two concurrent builds of one quarter do not interleave into one zip (each renders
-  from its own frozen snapshot); a build of an open quarter is named `partial` and says
-  so on the first line of `notes.md`; a same-day rebuild does not overwrite the earlier
-  file; and the caption's "what changed since" line is computed from the delivery log
-  rather than asserted.
+  a correction is bound to the revision the operator was SHOWN, so a pass that moved
+  the proposition between rendering and reply refuses on that item and applies the
+  others (a partial reply is normal, not an error); a correction naming an item that was
+  never shown re-renders and mutates nothing;
+  two concurrent builds of one quarter do not interleave into one zip (each renders from
+  its own frozen snapshot); a build of an open quarter is named `partial` and says so on
+  the first line of `notes.md`; **two rebuilds within one minute both survive under
+  distinct names** (exclusive create, widening precision), and neither overwrites the
+  other or an earlier build; a rebuild with nothing changed still produces a file and
+  says so in the caption, reserving no revision because there are none; the caption's
+  "what changed since" line is computed from the delivery log rather than asserted; and
+  the ledger of a quarter containing a superseded predecessor and its active successor
+  totals the payment ONCE.
 - The round-5 red cases, from the independent design and its comparison: a material
   change to an ACTIVE row (amount corrected under an unchanged `row_id`) must
   invalidate an accepted match — the case supersession-only revalidation missed; two
@@ -1547,17 +1576,20 @@ pass offers a resend of the same revision, in words, like everything else.
   tx-classifier's untagged queue; and every tag the plugin writes must satisfy
   `^[a-z0-9][a-z0-9-]{0,31}$` (a pinning test, since the v1 spec's whole tag vocabulary
   was invalid).
-- **The sheet and the reply grammar are testable and must be pinned**: a sheet that
-  fits goes inline and one that does not becomes exactly one attachment with a leading
-  missing-count caption (never split, never truncated); no line of a rendered sheet
-  exceeds the phone-width budget; a correction naming two lines leaves every other
-  line's author untouched (the round-6 defect — implicit approval — gets its own red
-  case); "all good" confirms only the pairings shown; "3 is my accountant" does not set
+- **The rendered view and the reply grammar are testable and must be pinned**: a view
+  goes inline, and one that would exceed the message limit **caps** — largest amounts
+  first, with a counted remainder the operator can ask for — rather than becoming an
+  attachment or being split across messages; no rendered line exceeds the phone-width
+  budget; nothing rendered carries a line number; a correction naming two items leaves
+  every other item's author untouched (implicit approval gets its own red case); "all
+  good" confirms only what was shown; "the BCK*XYZ one is my accountant" does not set
   no-invoice-expected; "Zapier and Vercel" and "all good except the Zapier" apply
   nothing and answer with the phrasing that works; a description matching two open items
   asks rather than picking; a description matching none is reported and never redirected
-  to a near miss; and the receipt is generated from committed results, so a test that
-  stubs the commit sees the receipt change.
+  to a near miss; **an item with no shown revision produces a re-render and no
+  mutation**; **a view that was rendered but whose delivery failed does not advance the
+  shown-revision pointer**; and the receipt is generated from committed results, so a
+  test that stubs the commit sees the receipt change.
 - **The no-invention mechanisms are testable at the fixture level and must be pinned —
   while noting that fixture tests cannot establish runtime enforcement over model
   output**: given a tool returning
@@ -1610,7 +1642,7 @@ pass offers a resend of the same revision, in words, like everything else.
 | ha-casa-app | [#485](https://github.com/bonzanni/ha-casa-app/issues/485) scheduled-turn `send_media`. | **Shipped** — closed 2026-08-14. |
 | ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485. | **Shipped** — closed 2026-08-15. No longer needed by v1 (no button questions), kept here because the v1 spec was built on its absence. |
 | ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area, [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | Still open, still not dependencies: gmail→store custody stays an agent-passed path, specialist asks stay structured work orders. |
-| Resident config | Two reminders (weekly; quarter-end on the 10th), plugin assignment to both roles. | Operator/configurator action at install time. |
+| Resident config | **One** weekly trigger (§Setup), plugin assignment to both roles. No quarter-end trigger: packaging happens only when the operator asks. | Operator/configurator action at install time. |
 
 ### Open casa issues this plugin designs around
 
