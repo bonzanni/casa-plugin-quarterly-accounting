@@ -677,13 +677,18 @@ in week one and an operator who concludes after a month that the plugin does not
    7 Hetzner · EUR 24.20 · inv H9017
    ```
 
-   **Line numbers are unique within a quarter and never reused.** Casa's inbound
-   Telegram context carries the incoming message's own id and **not** the message it
-   replied to (verified 2026-09-21, `telegram.py:1647`), so a native reply gesture
-   cannot tell the plugin which sheet the operator meant. Unique numbers make that
-   plumbing unnecessary: "4" resolves to exactly one proposition for the whole quarter,
-   whichever sheet printed it. An unrecognised number is reported, never resolved
-   against the newest sheet.
+   **Line numbers come from one monotonic counter per bound account and are never
+   reused** — not per sheet, and not per quarter. Casa's inbound Telegram context
+   carries the incoming message's own id and **not** the message it replied to
+   (verified 2026-09-21, `telegram.py:1647`), so a native reply gesture cannot tell the
+   plugin which sheet the operator meant; a never-reused number makes that plumbing
+   unnecessary, because "4" resolves to exactly one proposition for the life of the
+   install. Per-quarter numbering would have been enough until the first week that spans
+   a quarter boundary, when one sheet carries lines from two quarters and two of them
+   are called 4. An unrecognised number is reported, never resolved against the newest
+   sheet. Numbers are a pointing device, not an identifier the operator retains:
+   they climb, nobody is expected to notice, and the sheet in front of them always
+   carries the ones that matter.
 
    **The pass raises no button questions.** A one-line identity question ("who is
    BCK*XYZ?") is a line on the sheet like any other, answered in the same reply.
@@ -777,6 +782,31 @@ continuation carries only its own request id and the chosen label — verbatim,
 "carries (match_id, revision)" was false. Any future keyboard must persist
 rid → (match_id, revision, choices) before asking and resolve through that map, and must
 survive Casa's one-question attention lane. A free-text sheet reply has neither problem.
+
+### How a week can start
+
+The weekly cron is the usual entry, not the only one. Every entry below reaches the same
+store through the same tools; none of them is a mode.
+
+| Entry | What happens |
+|---|---|
+| **The weekly cron fires** (Mon 09:00) | The full pass: self-check, repair sweep, sync, triage, targeted searches, then the sheet. The path everything else is a variation of. |
+| **A reply arrives** — hours or days later | Ellen applies exactly what it names against the sheet's recorded propositions and sends the receipt. No pass runs: a correction is a store write, not a reason to re-derive the week. |
+| **A reply arrives while a pass is running** | It applies to the propositions the sheet recorded. If the running pass has already moved one of them, that line's CAS check refuses and the receipt reports it with current facts. Nothing blocks and nothing queues. |
+| **A reply lands after the quarter shipped** | The correction applies normally, and the receipt adds one line: the delivered package no longer matches, say "rebuild it" for a fresh one. Never rebuilt automatically — a new zip nobody asked for is worse than a stale one they know about. |
+| **The operator asks something** ("what am I missing for Q3?") | Answered from the store, no pass, no mutation. |
+| **The operator supplies a document** (self-addressed mail) | Nothing happens until the next pass, which finds it in its targeted sweep. Worth stating plainly on the sheet's portal lines, so the absence of an instant reaction is expected rather than read as failure. |
+| **The operator corrects something unprompted** ("the Adobe one is wrong") | Ordinary conversation resolves it: Adobe is missing rather than paired, so there is nothing to unpair, and Ellen says what she can do instead. Only a live line number binds silently. |
+| **The first run after install** | Same pass, plus account binding and one scope line. §Setup. |
+| **A pass could not finish, or Casa restarted mid-pass** | The store holds everything except the in-flight turn. The next pass resumes from durable state and its sheet opens with the coverage it actually achieved, never a silent partial. |
+| **Both triggers fire on one day** (the 10th falls on a Monday) | The quarter-end pass subsumes the weekly one: the weekly pass sees a quarter-end pass has already run for today and does nothing. Two sheets on one morning is noise, and the quarter-end one is a superset. |
+| **The operator asks for an interim zip mid-quarter** | §Quarter-end: built, marked `INTERIM`, consumes no revision. |
+
+**A week that spans the quarter boundary is one sheet, not two.** The first Monday of
+October carries late-September payments (Q3) and early-October ones (Q4) together,
+grouped as always by what needs doing rather than by quarter, with the affected quarter
+named on each line only where it is not obvious. Quarters decide packaging; they do not
+decide what a Monday looks like.
 
 ### Portal invoices: offered, never demanded
 
@@ -1110,6 +1140,12 @@ pass offers a resend of the same revision, in words, like everything else.
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
   while a sheet is the most recent thing sent; and a question ("is 4 right?") never
   mutates line 4.
+- **Entry points**: a reply arriving mid-pass applies against the sheet's recorded
+  propositions and reports exactly the lines the pass moved; a reply after the package
+  shipped applies and offers a rebuild without performing one; a week spanning the
+  quarter boundary produces ONE sheet whose line numbers do not collide (the
+  per-quarter numbering this replaced would have); and a weekly pass does nothing when
+  a quarter-end pass has already run that day.
 - **Gap re-entry**: with six unanswered sheets behind it, the next sheet is bounded, is
   built from current state rather than replayed, and carries a count of what it did not
   print.
