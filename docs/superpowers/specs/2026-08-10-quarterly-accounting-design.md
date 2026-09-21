@@ -477,8 +477,9 @@ is what stops every pass delivering twice (ha-casa-app#960/#932):
 name:     quarterly_accounting_pass
 type:     cron        schedule: 0 9 * * 1        channel: telegram
 prompt:   Run the quarterly-accounting background pass for the current
-          quarter. Send me nothing: output the sentinel `<silent/>` and
-          nothing else.
+          quarter. If it reports something that needs me, send me that
+          and nothing else; then output the sentinel `<silent/>`. If it
+          reports nothing, output `<silent/>` and nothing else.
 
 name:     quarterly_accounting_quarter_end
 type:     cron        schedule: 0 9 10 1,4,7,10  channel: telegram
@@ -787,7 +788,7 @@ is no weekly announcement. The job stays; the announcement goes.**
 | **The scheduled pass** | Runs as before — sync, repair sweep, triage, searches, matching, bank-feed annotation — and **delivers nothing**. Its trigger prompt ends with the `<silent/>` sentinel, which Casa's own reproduction table confirms delivers zero messages (ha-casa-app#960, arm D). The operator's ledger still gets annotated; their phone stays quiet. |
 | **The operator asks** | "What's the status of the quarterly accounting?" — and gets the current picture, rendered from the store. This is now the primary interaction, not a fallback. |
 | **The operator hands over a document** | "This is the Twitter invoice for September." Filed, matched if it can be, honestly reported if it cannot (§"Handing it a document"). |
-| **Quarter end** | The package. The one thing still delivered unasked, because it is the deliverable rather than a notification. |
+| **Quarter end** | The package. **Pending change (operator, 2026-09-21): this too becomes operator-triggered rather than automatic — to be specified.** Until that discussion lands, the rest of this document still describes automatic quarter-end delivery, and §Quarter-end is the section that will change. |
 
 **How Ellen answers without remembering anything.** She does not rely on conversational
 memory and must not: her session can end, be reset, or be started fresh by a capability
@@ -884,6 +885,68 @@ say "check emailed invoices" to file them now.
 The coverage line is load-bearing: it is the only way the operator learns the plugin has
 stopped working, now that nothing arrives on its own. `Bank checked through 20 Sep` read
 on 14 October says more than any status notification would have.
+
+### When the plugin may speak first
+
+**The rule (operator, 2026-09-21): unprompted messages are reserved for things where
+staying silent takes an option away from the operator.** If waiting until they next ask
+costs them nothing — the information will be identical whenever they read it — it waits.
+That covers almost everything this plugin knows: errands, guessed pairings, progress,
+coverage, counts. None of it expires.
+
+Two conditions qualify, and they were chosen rather than assumed:
+
+| Condition | Why silence costs something |
+|---|---|
+| **Collection has stopped working** — bank consent expired (PSD2 consents die roughly every 90 days), Gmail auth failed, the bound account vanished from bank-feed | Without a message the operator finds out the next time they ask, and by then weeks of payments may never have been searched. The message names exactly what to re-authorise. |
+| **A delivered quarter changed underneath** — a bank row inside a shipped package was corrected or superseded after delivery | Their accountant is holding numbers that are now wrong, and only the operator can decide whether to send a rebuild. Rare; genuinely urgent. |
+
+**Deliberately NOT notified**, each considered and declined: the quarter approaching its
+close; a guessed pairing, however large; progress on invoices the operator supplied;
+anything resembling liveness, a weekly digest, a reminder, or a count of what is
+outstanding. The operator asks when they want those, and they will be there.
+
+Mechanics, so this cannot drift into nagging:
+
+- **Once per occurrence, never repeated while the condition persists, never escalated.**
+  A condition that clears and recurs is a new occurrence and may speak again.
+- **No "all better" message** when a fault clears. The next answer the operator asks for
+  shows the restored coverage, which is where they will look anyway.
+- **The staleness safety net is the coverage line**, not repetition. Every answer carries
+  `bank checked through <date>`, so an ignored fault stays visible in the one place the
+  operator actually reads.
+- **The scheduled pass is what notices and sends.** Its trigger prompt therefore reads:
+  *"Run the quarterly-accounting background pass. If it reports something that needs me,
+  send me that and nothing else; then output the sentinel `<silent/>`. If it reports
+  nothing, output `<silent/>` and nothing else."* The sentinel keeps the ordinary case
+  at zero messages and prevents the fault case being delivered twice
+  (ha-casa-app#960/#932).
+
+### What the operator can ask for
+
+Views are **intent-shaped** (operator, 2026-09-21): a question returns what it asked
+for, not everything the plugin knows. The same store, a different scope, rendered by the
+server:
+
+| The ask | What comes back |
+|---|---|
+| "What's the status of the quarterly accounting?" | The whole picture: coverage, counts, what is missing, what was guessed. |
+| "What am I missing?" / "accounting list" | The errand list only — payments without invoices, with links and the email-to-self instruction. No machine reasoning in the way. |
+| "Anything I should check?" | The guessed pairings only, each with the evidence that made it uncertain. |
+| "Did the Adobe invoice arrive?" / "what did I pay Zapier this quarter?" | A direct answer about one thing. |
+| "How did Q2 go?" | A closed quarter: what shipped, what shipped incomplete, and how to rebuild it. |
+| "Rebuild Q3" / "Q4 so far" | The package (§Quarter-end). |
+
+Scope defaults to the current quarter; naming another ("Q2", "last quarter") moves it.
+
+**A long list caps rather than floods.** Beyond roughly eight items the view shows the
+largest amounts first and ends with `+17 more — say "all of them"`. The rest stays one
+word away and still inline; it does not become an attachment, because an attachment is
+the tap this design spent a whole round removing.
+
+**Ellen may phrase, never compute.** Counts, sums, coverage dates and the ordering come
+from the tool already calculated; she chooses the words around them. The moment she adds
+figures herself, an answer can drift from the store and nothing would reveal it.
 
 ### Handing it a document
 
