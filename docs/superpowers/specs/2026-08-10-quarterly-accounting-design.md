@@ -1396,8 +1396,13 @@ So **the store being written mints its own restore point, on the first write, in
 same lock as that write.** Every `acct::` tag write and every accounting note this plugin
 causes carries a **workflow string**, `acct@<plugin version>`; bank-feed, on the first
 write carrying a workflow string it has not registered, takes the backup **before applying
-that write, under the write lock the write itself holds**, registers the string in the
-ledger, and only then commits. Two passes serialize on that lock; the loser finds the string
+that write, under the write lock the write itself holds** — the copy is made through a
+separate read connection while the writer holds `BEGIN IMMEDIATE`, since a same-connection
+`VACUUM INTO` or backup call fails inside an open transaction (round 32, reproduced on
+bank-feed's real `open_db`) — registers the string in the ledger, and only then commits.
+**A backup failure aborts the write**: disk full during the copy rolls back the
+registration and the annotation together, and the tool reports it; a write never lands
+without its restore point. Two passes serialize on that lock; the loser finds the string
 registered and writes without a second backup. The restore point therefore precedes the
 first write of every plugin version by construction, and nothing in this plugin has to
 remember to do anything. The fence is mechanical for tags (a namespaced tag without a
@@ -1413,19 +1418,43 @@ runs in write-ahead mode, and its existing pre-migration snapshot (`VACUUM INTO`
 consistent copy is available, but this is a **new subsystem**, not that routine: it adds a
 reason and a timestamp, retention, a durable event index kept **beside** the database
 rather than in it (so a restore cannot erase the record of itself, and the restore
-generation stays monotonic across rollbacks), and a restore protocol. Reasons: `weekly`
+generation stays monotonic across rollbacks), and a restore protocol. **The index and the
+in-ledger registration need a crash protocol between them** (round-32 finding): the index
+is an append-only file, each line fsynced, and every operation writes a `pending` line
+before it acts and a `committed` line after. A **mint** copies to a temporary file and
+fsyncs it, appends `mint <id> pending`, renames the copy into place, then registers and
+commits the write in the ledger transaction, then appends `mint <id> committed`. A
+**restore** appends `restore <id> pending`, performs the transactional replacement — which
+also writes the restored backup's id into a `ledger_meta` row **inside that same
+transaction** — then appends `restore <id> committed`. Recovery at every `open_db` walks
+the index: a `mint pending` with no `committed` and no matching registration in the ledger
+is an orphan backup — kept, since it is consistent, relabelled `orphan`; a registration
+whose backup file is missing fails that workflow's writes closed until the operator
+restores or re-mints; a `restore pending` with no `committed` is settled by the ledger's
+own marker — marker equal to the id means the replacement committed, and recovery appends
+`committed`; otherwise it appends `aborted`. **The restore generation is the count of
+`restore … committed` lines**, so it is monotonic by construction and never read from the
+ledger. Reasons: `weekly`
 (taken from the finance pass, since neither plugin can schedule), `install:<workflow
 string>` (the mint above), `manual`. Retention: a bounded number of weekly ones, every
 install one until the operator deletes it. `restore_backup` is a protected tool — Casa
-asks the operator for one tap naming the backup — performed **in place** through SQLite's
-backup facility into the live database under `BEGIN IMMEDIATE`, so other specialist server
-processes on the same file (Casa spawns one per session) see the restored pages at their
-next transaction rather than writing into a replaced file. Its preflight compares the
-**consent bindings** (bank-feed's `sessions` and account session references) between the
-live ledger and the backup and, when they differ — a consent was renewed since the backup —
-refuses until the operator resolves it or carries the live bindings forward explicitly,
-because a consent that was revoked at the bank cannot be brought back by restoring its
-rows (round-31 finding). A restore also unregisters every workflow string whose install
+asks the operator for one tap naming the backup — performed **in place, as ordinary SQL
+inside one `BEGIN IMMEDIATE`**: the backup file is attached, every table's rows are
+replaced from it, and the transaction commits; the consent preflight below runs inside the
+same transaction, so no other specialist's write can land between the check and the
+replacement, and other specialist server processes on the same file (Casa spawns one per
+session) see the restored rows at their next transaction rather than writing into a
+replaced file. Round 32 reproduced why it is not SQLite's backup API: that API refuses a
+destination that holds an open transaction ("destination database is in use"), and
+releasing the lock to use it would separate the preflight from the replacement. **Consent bindings are never taken from a backup** (rounds 31–32): a consent is a fact
+about the bank, not about the ledger's history, and a consent that was revoked at the bank
+cannot be brought back by restoring its rows. So the replacement keeps the live `sessions`
+rows and every live account's current `session_id` and provider `uid`, and restores
+everything else — transactions, tags, notes, rules, registrations — from the backup. An
+account present in the backup but no longer linked live is restored with its rows and
+flagged `needs-relink`; an account linked live but absent from the backup keeps its live
+binding and an empty history the next sync refills. The protected approval shows the
+backup's id, time and reason and the line "consent bindings: kept live (N accounts)". A restore also unregisters every workflow string whose install
 backup is at or after the restored point, since those writes are gone.
 
 **"Fresh" is a fact bank-feed reports, not a claim this plugin makes.** `check_setup`
@@ -2734,7 +2763,11 @@ and is resent only when the operator asks, as that exact file.
   `set_exemption` on that item rejects the pairing and produces a receipt naming both
   effects.
 - **Test install and reset** (operator, 2026-09-22), against bank-feed's real backup
-  subsystem once it exists and a double until then, stated as such: every tag and note
+  subsystem once it exists — and, for the mint and the restore protocol, against **real
+  SQLite in WAL mode with two connections from the start**, never a double, since round 32
+  showed a double would have concealed that the backup API cannot restore into a database
+  with an open transaction; the rest against a double until the subsystem exists, stated as
+  such: every tag and note
   write the skill prescribes carries `workflow="acct@<version>"`, pinned by a grammar test
   on the work orders; two specialist processes writing concurrently on a fresh ledger
   produce exactly one `install:acct@<version>` backup, taken before either write, and
@@ -2746,7 +2779,14 @@ and is resent only when the operator asks, as that exact file.
   that finds the restore generation advanced under an unreset store stops before any write
   and never "continues"; a version upgrade without a restore mints a second install backup
   and `check_setup` reports the older version's writes still present; a restore across a
-  renewed consent is refused by preflight; and after restore + reset the ledger carries no
+  renewed consent keeps the live `sessions` and account bindings and restores everything
+  else, and the next sync succeeds against the live consent; a crash between `mint pending`
+  and the ledger commit leaves an `orphan` backup and no registration, and the next write
+  mints again; a crash between the restore's commit and its `committed` line is settled by
+  the in-ledger marker at the next open, and the generation counts it once; a restore performed as attach-and-replace inside
+  `BEGIN IMMEDIATE` while a second process holds a read transaction leaves that process
+  seeing the restored rows on its next write transaction; a disk-full failure during the
+  mint's copy rolls back both the registration and the write; and after restore + reset the ledger carries no
   `acct::` tag and no accounting note, which is the property the whole loop exists for.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
@@ -2791,7 +2831,7 @@ and is resent only when the operator asks, as that exact file.
 | ha-casa-app | [#485](https://github.com/bonzanni/ha-casa-app/issues/485) scheduled-turn `send_media`. | **Shipped** — closed 2026-08-14. |
 | ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485. | **Shipped** — closed 2026-08-15. No longer needed by v1 (no button questions), kept here because the v1 spec was built on its absence. |
 | ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area (shipped, Casa 0.326.0), [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | gmail→store custody goes through the handoff folder (gmail 0.9.0); specialist asks stay structured work orders (#487 still open, still not a dependency). |
-| casa-specialist-finance (bank-feed) | **Backups and workflow restore points** (operator, 2026-09-22; §Setup, "Test install"): a new subsystem — `backup(reason)`, `list_backups` (timestamp, size, reason, restore events and registered workflow strings, from a durable index kept beside the database), `restore_backup(id)` as a protected tool restored in place under `BEGIN IMMEDIATE` with a consent-binding preflight; consistent copies under the write lock (WAL); reasons `weekly` / `install:<workflow>` / `manual`; bounded retention for `weekly`, unbounded for install backups; the weekly backup taken from the finance pass. **The first write carrying an unregistered workflow string mints `install:<workflow>` inside that write's lock, before the write**; a namespaced tag write without a workflow string is refused; a restore unregisters the workflows whose install backups are at or after the restored point. `tag_transaction`, `untag_transaction` and `add_note` gain an optional `workflow` argument. | **To be filed** once this addition's review converges. This plugin never writes to bank-feed without it: a bank-feed that refuses the `workflow` argument is below the floor, and the pass says so. |
+| casa-specialist-finance (bank-feed) | **Backups and workflow restore points** (operator, 2026-09-22; §Setup, "Test install"): a new subsystem — `backup(reason)`, `list_backups` (timestamp, size, reason, restore events and registered workflow strings, from a durable index kept beside the database), `restore_backup(id)` as a protected tool restored in place as transactional SQL (attach the backup, replace every table's rows) inside one `BEGIN IMMEDIATE` with the consent-binding preflight in the same transaction — not the backup API, which refuses a destination with an open transaction; consistent copies under the write lock (WAL); reasons `weekly` / `install:<workflow>` / `manual`; bounded retention for `weekly`, unbounded for install backups; the weekly backup taken from the finance pass. **The first write carrying an unregistered workflow string mints `install:<workflow>` inside that write's lock, before the write**; a namespaced tag write without a workflow string is refused; a restore unregisters the workflows whose install backups are at or after the restored point. `tag_transaction`, `untag_transaction` and `add_note` gain an optional `workflow` argument. | **To be filed** once this addition's review converges. This plugin never writes to bank-feed without it: a bank-feed that refuses the `workflow` argument is below the floor, and the pass says so. |
 | ha-casa-app | **"Forget everything retained since <timestamp>"** — a time-bounded memory wipe, so a test window's retained engagements can be dropped without wiping the bank. | **To be filed** once this addition's review converges. Not a dependency: the residual is stated in §Setup, "Test install". |
 | Resident config | **One** weekly trigger (§Setup), plugin assignment to both roles. No quarter-end trigger: packaging happens only when the operator asks. | Operator/configurator action at install time. |
 
