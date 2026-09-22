@@ -563,12 +563,16 @@ One object, owned by the plugin server, per **transaction lineage**:
   passes or deferred rows.
   [casa-specialist-finance#31](https://github.com/bonzanni/casa-specialist-finance/issues/31)
   closed that in bank-feed 0.9.0 (see the bank-feed floor above): `acct::open` leaves the
-  row in the queue. **Whether v1 restores the `acct::open` assertion is an open operator
-  decision**; until it is taken the desired external set stays empty and the projection
-  is still enumerated and reconciled.
+  row in the queue. **Restored (operator, 2026-09-22):** a managed transaction with no
+  accepted or proposed pairing desires `{acct::open}`. That is the concrete goal the
+  mirroring exists for — the operator's own ledger shows which payments still lack an
+  invoice, filterable by tag, without asking the plugin anything. The desired value is
+  computed per transaction like every other, so `acct::open` and `acct::matched` can
+  never be desired together: a match landing replaces one with the other in a single
+  reduction.
 - **`owned_tags` is a fixed, reserved vocabulary inside the `acct::` namespace**, not a
   prefix rule: exactly `acct::matched`, `acct::proposed`, `acct::portal`,
-  `acct::no-invoice-expected` (plus `acct::open` if the decision above restores it).
+  `acct::no-invoice-expected`, `acct::open`.
   The namespace is what tells bank-feed these are not classifications; the fixed list is
   what tells the sweep what it may remove. Anything else — an `acct::`-namespaced tag the
   operator added by hand, or an un-namespaced `acct-matched` — is foreign and is never
@@ -1794,7 +1798,9 @@ pass offers to resend that exact file, in words, like everything else.
   found on the successor); a rejected match and an accepted replacement on ONE
   transaction (one desired set computed from both, reaching the same fixed point from
   either write order — the oscillation case); and a transaction with no match at all
-  (still enumerated; desired set empty, or `acct::open` if restored). Plus the reducer itself:
+  (still enumerated, desired `{acct::open}`, and — the regression this round exists to
+  pin — **the row stays in bank-feed's untagged classifier queue while carrying it**).
+  Plus the reducer itself:
   `actual := (actual − owned) ∪ desired` must reach the same result from an arbitrary
   starting tag set, including one containing foreign tags it must not touch.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
