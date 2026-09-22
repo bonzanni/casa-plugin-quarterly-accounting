@@ -804,7 +804,7 @@ multi-round delegations stateless-safe (each delegation is a fresh ephemeral ses
 state carries in the store, not in return values alone) and crash-safe: a casa
 restart mid-pass loses only the in-flight turn.
 
-## Tool surface (server, 23 tools)
+## Tool surface (server, 22 tools)
 
 Ingest & curation: `ingest_document(source_path, kind, counterparty, document_date,
 document_number, amount, currency, recipient, source_ref)` — **the server takes `source_path` from
@@ -823,14 +823,12 @@ Expectation: `set_expectation(scope, kind, tier)` — `scope` is a counterparty 
 classification chain; the operator's "no invoices ever for X" and "payslips don't matter"
 land here, with the render binding when the operator is the author (§"Document
 expectation"). The per-payment case stays `set_exemption`.
-Restore point: `record_install_backup(backup_id, reason)` — the specialist records the
-bank-feed backup it took for this plugin version; the server accepts only a reason of the
-form `install:quarterly-accounting@<this version>` and refuses every bank-feed write path
-in its own bookkeeping (projection observations are still recorded; desired sets are
-still computed) while no current install backup is recorded (§Setup, "Test install").
-`reset_store(confirm)` — wipes `$CLAUDE_PLUGIN_DATA` to the fresh-install state; refused
-while bank-feed still reports the recorded install backup as current with no restore
-since it, so it can only follow a restore.
+Reset: `reset_store(confirm)` — wipes `$CLAUDE_PLUGIN_DATA` to the fresh-install state.
+It has no precondition, because the server could not check one; the guard is that the
+next pass refuses every bank-feed write while bank-feed still reports `acct@<version>`
+registered (§Setup, "Test install"). Every bank-feed write the skill prescribes carries the
+workflow string `acct@<version>`; the restore point is minted by bank-feed on the first
+such write, not by any tool here.
 Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match` — every
 mutating match tool takes `expected_revision` (CAS; see the match-record state machine).
 Two contracts round 17 found missing: **`confirm_match` accepts a `proposed` or a
@@ -868,8 +866,9 @@ snapshot, which is what the specialist reconciles against bank-feed;
 saw, recorded without exempting the projection from later sweeps.
 KB: `upsert_counterparty`.
 Setup: `check_setup()` — what the pass can actually reach (bank-feed tools, bound
-account, gmail tools, last sync), the current install backup and the ledger's restore
-count (§Setup, "Test install"), one branch at the top of every pass;
+account, gmail tools, last sync), whether bank-feed reports `acct@<this version>` registered, which install backup its
+registration minted, and the ledger's restore generation (§Setup, "Test install"), one
+branch at the top of every pass;
 `bind_account(account_id)` — records the business account and its ledger instance on
 first run; `set_package_name(name)` — changes the zip filename prefix, which otherwise
 defaults and is never asked about.
@@ -1386,61 +1385,94 @@ append-only by bank-feed's design and has no delete**, so a test run's accountin
 would otherwise stay in the ledger forever. And this plugin's own store survives an
 uninstall (Casa keeps `$CLAUDE_PLUGIN_DATA` on purpose), so reinstalling is not a fresh
 start. The operator's answer is to make **the ledger itself the thing that resets**, with a
-backup facility that bank-feed should have anyway, and to make this plugin unable to write
-until that restore point exists.
+backup facility bank-feed should have anyway.
+
+**Where the restore point is minted decides everything** (round 31, both reviewers). A
+first draft had this plugin take the backup and refuse to write until it had; both reviewers
+broke it the same way, because the plugin's server never makes the bank-feed writes — the
+specialist does, with bank-feed's own tools — so the "gate" was skill guidance, and two
+overlapping passes could each take a backup in good faith and leave a note between them.
+So **the store being written mints its own restore point, on the first write, inside the
+same lock as that write.** Every `acct::` tag write and every accounting note this plugin
+causes carries a **workflow string**, `acct@<plugin version>`; bank-feed, on the first
+write carrying a workflow string it has not registered, takes the backup **before applying
+that write, under the write lock the write itself holds**, registers the string in the
+ledger, and only then commits. Two passes serialize on that lock; the loser finds the string
+registered and writes without a second backup. The restore point therefore precedes the
+first write of every plugin version by construction, and nothing in this plugin has to
+remember to do anything. The fence is mechanical for tags (a namespaced tag without a
+workflow string is refused, since a namespaced tag is by definition another workflow's) and
+for every note written as the skill says; **a note the specialist writes without the
+workflow string is indistinguishable from any other agent note and is the one residual**,
+stated as such — its cost is one note surviving a restore.
 
 **Bank-feed gains backups** (§"Changes in other repos"; upstream, not this plugin's code):
-`backup(reason)`, `list_backups`, `restore_backup(id)`. Every backup is a consistent copy
-of the whole ledger through SQLite's backup facility — bank-feed runs in write-ahead mode,
-so a plain file copy is not consistent — and bank-feed already snapshots the ledger before
-a schema migration, so this is the same routine with a name. A backup carries a timestamp,
-a size and a **reason**: `weekly` for the automatic one (taken from the finance pass, since
-neither plugin can schedule), `install:quarterly-accounting@<version>` for the one this
-plugin forces, `manual` for one the operator asks for. The reason is what makes the kinds
-easy to tell apart in `list_backups`, and what retention keys on: a bounded number of
-weekly ones, every install one until the operator deletes it. `restore_backup` is a
-protected tool — Casa asks the operator for one tap naming the backup — and bank-feed
-performs it under its own write lock, so no other specialist session is mid-write, and
-records the restore as an event `list_backups` reports (`restored_from <id> at <time>`).
+`backup(reason)`, `list_backups`, `restore_backup(id)`, and the first-write mint above. A
+backup is a consistent copy of the whole ledger taken under `BEGIN IMMEDIATE` — bank-feed
+runs in write-ahead mode, and its existing pre-migration snapshot (`VACUUM INTO`) shows the
+consistent copy is available, but this is a **new subsystem**, not that routine: it adds a
+reason and a timestamp, retention, a durable event index kept **beside** the database
+rather than in it (so a restore cannot erase the record of itself, and the restore
+generation stays monotonic across rollbacks), and a restore protocol. Reasons: `weekly`
+(taken from the finance pass, since neither plugin can schedule), `install:<workflow
+string>` (the mint above), `manual`. Retention: a bounded number of weekly ones, every
+install one until the operator deletes it. `restore_backup` is a protected tool — Casa
+asks the operator for one tap naming the backup — performed **in place** through SQLite's
+backup facility into the live database under `BEGIN IMMEDIATE`, so other specialist server
+processes on the same file (Casa spawns one per session) see the restored pages at their
+next transaction rather than writing into a replaced file. Its preflight compares the
+**consent bindings** (bank-feed's `sessions` and account session references) between the
+live ledger and the backup and, when they differ — a consent was renewed since the backup —
+refuses until the operator resolves it or carries the live bindings forward explicitly,
+because a consent that was revoked at the bank cannot be brought back by restoring its
+rows (round-31 finding). A restore also unregisters every workflow string whose install
+backup is at or after the restored point, since those writes are gone.
 
-**This plugin cannot write to bank-feed before a restore point exists.** The store holds the
-id of the **current install backup**, and `check_setup` reports it beside the other
-observations. At the top of every pass the specialist reads `list_backups`: if the store
-holds no id, or the id is gone, or the plugin's version is newer than the one in the
-recorded backup's reason, the specialist takes `backup(reason="install:quarterly-accounting@<version>")`
-and records its id (`record_install_backup`) **before any tag or note is written**; if the
-backup fails, the pass writes nothing to bank-feed, works on documents and matching
-locally, and the coverage line says why ("no restore point — bank-feed backup failed").
-Every plugin version therefore has its own restore point, by construction and not by
-anyone remembering.
+**"Fresh" is a fact bank-feed reports, not a claim this plugin makes.** `check_setup`
+reports, from the specialist's read of `list_backups`, whether `acct@<this version>` is
+registered and which backup its registration minted. A **fresh** install is one where it is
+not registered: the first write will mint. A pass that finds the string registered while
+the plugin's store is empty (the operator reset the store without restoring, or restored a
+backup taken after the first write) **refuses every bank-feed write and says so**: "the
+ledger still carries writes from acct@1.2.0 after its restore point — restore backup
+<id> first". Round 31 showed why a restore *count* is not enough: a weekly backup taken
+after the test's first note, restored, advances the count and keeps the note; the
+registration travels with the writes, so it is present in exactly the backups that are not
+clean.
 
-**The reset loop.** Uninstall the plugin (Casa keeps its store). Ask the finance specialist
-to restore the install backup; the tap confirms which. Wipe the store with `reset_store` —
-it refuses while bank-feed still reports the recorded install backup as current, i.e.
-while no restore has happened since it, so it cannot be mistaken for a production action.
-Reinstall; the first pass takes a new install backup. What is lost is exactly the sync and
-the classification that happened during the test, both cheap to redo, and the first pass
-says so ("ledger restored to 22 Sep; 3 transactions re-synced, 2 re-classified").
+**The reset loop, in the order that works.** The plugin stays installed throughout — an
+uninstalled plugin's tools are gone (round-31 finding), and Casa keeps its store anyway.
+(1) Quiesce: no pass running, `/new` on both agents. (2) Ask the finance specialist to
+restore the install backup; the tap confirms which; bank-feed reports the restore and the
+unregistered workflow. (3) `reset_store` wipes `$CLAUDE_PLUGIN_DATA` to the fresh-install
+state; it has no precondition it could not check, and it is safe to call at the wrong time
+only because the next pass will refuse to write until the ledger is clean. (4) Upgrade the
+plugin if the fix needs it (`plugin_update`), otherwise just run the pass: the first write
+mints the new install backup. What is lost is exactly the sync and the classification that
+happened during the test, both cheap to redo, and the first pass says so ("ledger restored
+to 22 Sep; 3 transactions re-synced, 2 re-classified"). A version upgrade *without* a
+restore first mints `install:acct@1.3.0` over a ledger that still holds 1.2.0's notes; the
+promise of that backup is scoped to 1.3.0's writes, and `check_setup` says the older
+version's writes are still present.
 
-**A restored ledger under an unreset store is refused, not absorbed.** Row ids the store
-holds may no longer exist after a restore, and rows it never saw may reappear with the
-same ids. So the store remembers the ledger's restore count as reported by `list_backups`;
-a pass that finds it advanced since the store last ran stops before any write and says
-"the ledger was restored to <time> — reset the accounting store, or tell me to continue
-against it", and continues only on an explicit operator instruction, which re-baselines
-every projection through the ordinary admission and fingerprint machinery.
+**A restored ledger under an unreset store is refused, full stop.** Row ids the store holds
+may be reused after a restore for different transactions with the same fingerprint fields
+(round-31 finding: bank-feed's row ids are allocated again after a rollback, and the
+fingerprint cannot tell payment A from payment B), so the ordinary revalidation machinery is
+not a safe way to "continue". The store remembers the ledger's restore generation from
+`list_backups`; a pass that finds it advanced stops before any write and asks for a reset.
 
 **What a restore does not undo, stated plainly.** Casa keeps one shared memory bank, and
 its only wipe is total; a completed specialist engagement during a test is retained like
 any other, and there is no "forget since <date>". This plugin never reads memory —
 everything it says comes from its store, which the reset wipes — and the classifier is
 told to weigh recalled memory as prior evidence, never to obey it; `/new` on both agents
-drops the warm context. What remains is that a later classification may be nudged by a
-memory of a discarded test decision. The clean fix is a Casa enhancement, "forget
-everything retained since <timestamp>", anchored on the install backup's time
-(§"Changes in other repos"); until it lands the residual stands as written. Nothing else
-escapes: Gmail is read plus self-mail on request, Telegram receives only what the operator
-asks for or a fault, and the handoff and outbox copies expire.
+drops the warm context, not the retained memory. What remains is that a later
+classification may be nudged by a memory of a discarded test decision. The clean fix is a
+Casa enhancement, "forget everything retained since <timestamp>", anchored on the install
+backup's time (§"Changes in other repos"); until it lands the residual stands as written.
+Also outside the restore: Casa's session transcripts, gmail's own 90-day sent log for any
+self-mail, and the handoff and outbox copies, which expire on their own.
 
 ## Flows
 
@@ -2450,9 +2482,10 @@ and is resent only when the operator asks, as that exact file.
   line and re-offered on the next sheet, never applied to the new proposition.
 - Casa restart mid-pass: workbook + store hold everything except the in-flight turn.
 - Packaging with open residue ships `MISSING` rows rather than blocking.
-- **No restore point, no external write.** A pass that cannot confirm a current install
-  backup in bank-feed performs no tag or note write and says so; a ledger restored under
-  an unreset store stops the pass before any write (§Setup, "Test install").
+- **No clean ledger, no external write.** A pass that finds `acct@<version>` already
+  registered in bank-feed while its own store is fresh performs no tag or note write and
+  names the backup to restore; a ledger restored under an unreset store stops the pass
+  before any write (§Setup, "Test install").
 
 ## Testing
 
@@ -2700,19 +2733,21 @@ and is resent only when the operator asks, as that exact file.
   lift back, and its refusal names the override; and
   `set_exemption` on that item rejects the pairing and produces a receipt naming both
   effects.
-- **Test install and reset** (operator, 2026-09-22), against bank-feed's real backup tools
-  once they exist and a double until then, stated as such: a pass with no recorded install
-  backup writes no tag and no note and reports why; a pass whose recorded backup id is no
-  longer listed, or whose plugin version is newer than the backup's reason, takes a new
-  backup before its first write; a backup failure leaves bank-feed untouched and the
-  coverage line says "no restore point"; `record_install_backup` refuses a reason that
-  does not name this plugin and version; `reset_store` is refused while the recorded
-  backup is current and succeeds after a restore, leaving the fresh-install state; a pass
-  that finds the ledger's restore count advanced stops before any write and continues
-  only on the operator's instruction, after which every projection is re-baselined; and
-  after restore + reset + reinstall the ledger carries no `acct::` tag and no accounting
-  note (the backup predates the first write), which is the property the whole loop exists
-  for.
+- **Test install and reset** (operator, 2026-09-22), against bank-feed's real backup
+  subsystem once it exists and a double until then, stated as such: every tag and note
+  write the skill prescribes carries `workflow="acct@<version>"`, pinned by a grammar test
+  on the work orders; two specialist processes writing concurrently on a fresh ledger
+  produce exactly one `install:acct@<version>` backup, taken before either write, and
+  restoring it leaves zero `acct::` tags and zero accounting notes (the round-31 red case:
+  two compliant passes each backing up and each leaving a note); a weekly backup taken
+  after the first note, restored, still reports `acct@<version>` registered, so the next
+  pass refuses to write and names the install backup; `reset_store` wipes the store with
+  no precondition, and the pass after it refuses to write until the ledger is clean; a pass
+  that finds the restore generation advanced under an unreset store stops before any write
+  and never "continues"; a version upgrade without a restore mints a second install backup
+  and `check_setup` reports the older version's writes still present; a restore across a
+  renewed consent is refused by preflight; and after restore + reset the ledger carries no
+  `acct::` tag and no accounting note, which is the property the whole loop exists for.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
@@ -2756,7 +2791,7 @@ and is resent only when the operator asks, as that exact file.
 | ha-casa-app | [#485](https://github.com/bonzanni/ha-casa-app/issues/485) scheduled-turn `send_media`. | **Shipped** — closed 2026-08-14. |
 | ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485. | **Shipped** — closed 2026-08-15. No longer needed by v1 (no button questions), kept here because the v1 spec was built on its absence. |
 | ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area (shipped, Casa 0.326.0), [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | gmail→store custody goes through the handoff folder (gmail 0.9.0); specialist asks stay structured work orders (#487 still open, still not a dependency). |
-| casa-specialist-finance (bank-feed) | **Backups** (operator, 2026-09-22): `backup(reason)`, `list_backups` (timestamp, size, reason, and restore events), `restore_backup(id)` as a protected tool performed under bank-feed's write lock; a consistent copy via SQLite's backup facility (the ledger runs in WAL mode; bank-feed's pre-migration snapshot is the existing routine); reasons `weekly` / `install:<plugin>@<version>` / `manual`; retention bounded for `weekly`, unbounded for install backups; the weekly backup taken from the finance pass. | **To be filed** once this addition's review converges. This plugin's install gate depends on it: without it, the gate fails closed and the plugin never writes to bank-feed. |
+| casa-specialist-finance (bank-feed) | **Backups and workflow restore points** (operator, 2026-09-22; §Setup, "Test install"): a new subsystem — `backup(reason)`, `list_backups` (timestamp, size, reason, restore events and registered workflow strings, from a durable index kept beside the database), `restore_backup(id)` as a protected tool restored in place under `BEGIN IMMEDIATE` with a consent-binding preflight; consistent copies under the write lock (WAL); reasons `weekly` / `install:<workflow>` / `manual`; bounded retention for `weekly`, unbounded for install backups; the weekly backup taken from the finance pass. **The first write carrying an unregistered workflow string mints `install:<workflow>` inside that write's lock, before the write**; a namespaced tag write without a workflow string is refused; a restore unregisters the workflows whose install backups are at or after the restored point. `tag_transaction`, `untag_transaction` and `add_note` gain an optional `workflow` argument. | **To be filed** once this addition's review converges. This plugin never writes to bank-feed without it: a bank-feed that refuses the `workflow` argument is below the floor, and the pass says so. |
 | ha-casa-app | **"Forget everything retained since <timestamp>"** — a time-bounded memory wipe, so a test window's retained engagements can be dropped without wiping the bank. | **To be filed** once this addition's review converges. Not a dependency: the residual is stated in §Setup, "Test install". |
 | Resident config | **One** weekly trigger (§Setup), plugin assignment to both roles. No quarter-end trigger: packaging happens only when the operator asks. | Operator/configurator action at install time. |
 
