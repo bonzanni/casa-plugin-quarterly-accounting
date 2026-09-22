@@ -315,9 +315,13 @@ name): **`YYYY-Qn`** (e.g. `2026-Q2`). Never a bare `Qn`.
 
 The store holds **supporting documents of every kind**, not only invoices (operator,
 2026-09-22): a vendor's invoice, a sales invoice the operator issued, a payslip, a bank or
-tax statement, a receipt. Each carries a **kind** — `invoice`, `sales-invoice`, `payslip`,
+tax statement, a receipt. Each carries a **kind** — `invoice`, `sales-invoice`, `credit-note`, `payslip`,
 `statement`, `receipt`, `other` — read provisionally at ingest and corrected by the
-specialist when it judges the document. The kind is what lets a document satisfy an
+specialist when it judges the document. `credit-note` covers both directions: a vendor's
+credit note behind a refund the B.V. received, and the B.V.'s own credit note behind a
+refund it paid a client (round-26 finding, both reviewers: the classifier defines `refund`
+as "a credit reversing a purchase", and a mapping that expected nothing for it would
+have left VAT-relevant evidence unsought). The kind is what lets a document satisfy an
 expectation (§"Document expectation"): a payslip never satisfies a transaction that needs
 an invoice, whatever the amounts say.
 
@@ -574,7 +578,10 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
 
 5. **Validity of the current machine pairing.** One active `matched` whose fingerprint
    holds — row facts and expectation kind alike, the document still of the expected
-   kind → `{acct::matched}`; a `matched` whose fingerprint differs, or an active
+   kind → `{acct::matched}`; a machine pairing whose document kind no longer equals the
+   expectation kind is not here at all — the sweep retired it `rejected` (§Match records,
+   the fingerprint), so the lineage falls through to step 6; a `matched` whose fingerprint
+   differs in row facts, or an active
    `proposed` (whether or not its fingerprint holds — an invalidated proposal stays a
    proposal, round-14 finding) → `{acct::proposed}` with a residue line for the change.
    Then step 8.
@@ -618,8 +625,10 @@ specialist doing on its own what only a correction may do.
   most one active match per invoice, by default. The server rejects a second
   `record_match`/`propose_match` that would violate either.
 - **No allocation groups in v1** (operator decision, 2026-09-21). One invoice paid in
-  installments, one payment covering several invoices, partial settlements, fees and
-  credit notes are **not modelled**: the documents are retained, the transaction stays
+  installments, one payment covering several invoices, partial settlements, fees, and a
+  credit note *netted against an invoice inside one payment* are **not modelled** (a
+  refund that is its own transaction matches its credit note one to one and is modelled
+  — §"Document expectation", row 7): the documents are retained, the transaction stays
   unresolved, and `notes.md` explains the relationship for the accountant. This cuts
   group total arithmetic, group cardinality, group confirmation, group repair and group
   packaging semantics — machinery for exceptions v1 was never asked to automate. The
@@ -654,10 +663,19 @@ against the live row, superseded or not. The classification is the one input tha
 `export_history` does not carry them (round 25, both reviewers) — so it is observed per
 row by the sweep's `get_transaction` read (§"The sweep", step 3) and recorded on the
 projection as its **classification observation**, refreshed every cycle for every managed
-lineage, matched and delivered ones included. A changed material fact, **or a changed
-expectation kind** (the classifier re-tags a salary payment as fuel; a matched purchase
-gains `internal-transfer`; the operator sets a counterparty to `none`), **invalidates**
-the acceptance (reducer step 3, or step 5 for a machine pairing): the pairing stays the
+lineage, matched and delivered ones included. A changed material fact **invalidates** the acceptance (reducer step 3, or step 5 for a
+machine pairing). A changed **expectation kind** (the classifier re-tags a salary payment
+as fuel; a matched purchase gains `internal-transfer`; the operator sets a counterparty to
+`none`) is stronger than an invalidation, because the held document *cannot* satisfy the
+new expectation — a payslip is never a fuel invoice, whatever the amounts: a **machine**
+pairing of the wrong kind is retired `rejected` by the sweep (a recorded retirement, with
+a residue line naming the reason), and the lineage is searched for a document of the new
+kind like any unpaired one; an **operator** pairing of the wrong kind is shown `proposed`
+with the reason — the operator chose that document knowing what it was, and the classifier
+may be the one that is wrong — and a candidate of the right kind that the search finds
+lands `conflicted` beside it for the operator to pick, never replacing it silently
+(round-26 finding: the earlier text invalidated both alike and then excluded the lineage
+from the replacement search it promised). For a plain invalidation: the pairing stays the
 lineage's current candidate and is shown `proposed` with a residue line until the operator
 confirms against the new facts, or the facts revert. Migrated tags and notes on a successor row are not fresh approval
 either.
@@ -683,17 +701,20 @@ table and it is the test oracle):
 |---|---|---|
 | 1 | the operator exempted this payment (`set_exemption`) | `none` |
 | 2 | the counterparty KB carries an override (operator or specialist, `set_expectation`) | the override — it beats the row's workflow state too: a parked Belastingdienst row is `none`, not unknown |
-| 3 | the row is in the classifier's queue: no classification tag, or `awaiting-operator` (a parked row's content tags are not trusted; bank-feed's own `classification_state` ranks parked above classified) | **unknown** — `required` for the ledger tag (operator ruling: "nothing held yet"), searched for nothing until classified |
-| 4 | `unclassifiable` | DBIT → `invoice, required`; CRDT → `sales-invoice, required` (the operator declined to say; the safe reading is that a document matters) |
-| 5 | a flow correction is present: `internal-transfer`, `cash-withdrawal` | `none` |
-| 6 | DBIT, chain under `salary` / `payroll` | `payslip, optional` |
-| 7 | DBIT, chain under `fees` / `interest` / `tax` | `statement, optional` |
-| 8 | DBIT, flow correction `refund` or `reimbursement` (the B.V. paying money back), or chain `income, refund` | `none` |
-| 9 | DBIT, anything else (any chain, or a mapping override for that chain) | `invoice, required` |
-| 10 | CRDT, flow correction `refund` / `reimbursement`, or chain under `income, refund` / `income, interest` / `income, dividend` | `none` |
-| 11 | CRDT, anything else — `income, *` or an unknown chain | `sales-invoice, required` |
+| 3 | `unclassifiable` — terminal, checked **before** the queue state, in bank-feed's own `classification_state` order (terminal > parked > classified > workable; round-26 finding: a terminal row also has no classification tag, and a queue check placed first swallowed it into "unknown" forever, since the classifier never drains a terminal row) | DBIT → `invoice, required`; CRDT → `sales-invoice, required` (the operator declined to say; the safe reading is that a document matters) |
+| 4 | the row is in the classifier's queue: `awaiting-operator`, or no classification tag at all (a parked row's content tags are not trusted) | **unknown** — `required` for the ledger tag (operator ruling: "nothing held yet"), searched for nothing until classified |
+| 5 | **classification conflict**: the tags carry more than one flow correction, or chain roots that would select different rows below (`salary` with `fees`; `income, consulting` with `internal-transfer` is *not* a conflict — a flow correction beats a chain by rows 6–7) | **unknown**, and the row is shown under "classification conflict" with its tags, so the operator or the classifier can clean it up (round-26 finding: additive tags can select two rows with different answers, and "first rule" would have picked one silently) |
+| 6 | flow correction `internal-transfer` or `cash-withdrawal` | `none` |
+| 7 | flow correction `refund` — either direction: a vendor's credit note behind money received, the B.V.'s own credit note behind money paid back | `credit-note, required` |
+| 8 | flow correction `reimbursement` — either direction | `receipt, optional` |
+| 9 | DBIT, chain under `salary` / `payroll` | `payslip, optional` |
+| 10 | DBIT, chain under `fees` / `interest` / `tax` | `statement, optional` |
+| 11 | DBIT, anything else (any chain, or a mapping override for that chain) | `invoice, required` |
+| 12 | CRDT, chain under `income, refund` (a credit reversing a purchase, tagged as a chain rather than a flow correction) | `credit-note, required` |
+| 13 | CRDT, chain under `income, interest` / `income, dividend` | `none` |
+| 14 | CRDT, anything else — `income, *` or an unknown chain | `sales-invoice, required` |
 
-Rows 5–11 are **the shipped mapping**; `set_expectation(scope=<chain>, …)` overrides one
+Rows 6–14 are **the shipped mapping**; `set_expectation(scope=<chain>, …)` overrides one
 row's outcome for one chain and is consulted at the row where that chain would have
 matched. **The mapping ships with defaults and is edited by asking**, never at install:
 "payslips don't matter" moves `payslip` to `none`; "Belastingdienst never has a document"
@@ -722,7 +743,8 @@ plugin reads the classification from the row's tags — the chain, the flow corr
 (`internal-transfer`, `refund`, `reimbursement`, `fees`), the parked and terminal markers —
 and never writes one. A row still in the classifier's queue (workable, or parked
 `awaiting-operator`) has expectation *unknown* unless an exemption or a counterparty
-override says otherwise (rows 1–3 of the table); `unclassifiable` is row 4. **The
+override says otherwise (rows 1, 2 and 4 of the table); `unclassifiable` is row 3, and a
+classification conflict is row 5. **The
 expectation is a standing dependency, not a one-time lookup** (round 25, both reviewers):
 the classifier's rules are additive, `apply_rules` adds repaired-rule tags to old rows,
 and a chain can be corrected later, so every managed lineage's classification is
@@ -1301,7 +1323,10 @@ in week one and an operator who concludes after a month that the plugin does not
    directions, and revalidates fingerprints from it); then, for every admitted lineage —
    paired or not — the specialist reads the row's classification and derives the
    expectation (a changed kind invalidates a current pairing, §Match records), and
-   triages the unpaired lineages whose expectation is `required` or `optional`
+   triages every lineage whose expectation is `required` or `optional` **and that has no
+   current pairing of the expected kind** — unpaired ones, ones whose machine pairing the
+   sweep just retired for a kind change, and ones whose operator pairing is shown
+   `proposed` for a kind change (a found candidate lands `conflicted` beside it) —
    against the document store × counterparty KB, reading the documents as needed —
    required first, optional with whatever budget is left. Lineages still in the
    classifier's queue are recorded as **not yet classified** and left alone.
@@ -1317,8 +1342,9 @@ in week one and an operator who concludes after a month that the plugin does not
      expectation of a document kind (not `none`, not unknown);
    - the document is **held** in custody, is of the **kind the expectation names** (a
      payslip never satisfies an invoice expectation, whatever the amount), and reads as
-     that kind — an invoice, not a quotation, order confirmation or credit note; a sales
-     invoice issued *by* the B.V., for a CRDT;
+     that kind — an invoice, not a quotation or order confirmation (a credit note is its
+     own kind and satisfies only a `credit-note` expectation); a sales invoice issued *by*
+     the B.V., for a CRDT;
    - **exact money agreement** — equal gross payable, equal currency, integer minor
      units. This one stays hard: it is the cheapest true signal available, and relaxing
      it buys nothing a review can catch as easily;
@@ -1793,7 +1819,7 @@ is the open item. Concretely, every pass does four things with four different sc
 |---|---|
 | **Admit newly eligible payments** | Every currently eligible active row on the bound account that has no projection yet (§"The projection", admission) — not "rows we have not seen", since an in-place correction can make a row we skipped last week eligible this week. Each lands in its own booking-date quarter, which is usually the current one but is decided by the row, never by the calendar on the day of the pass. |
 | **Search and match open items** | **Every unresolved transaction with a `required` or `optional` expectation, either direction, whatever quarter it belongs to** — required first, subject to the search age-out below. September's stragglers keep being chased through October and beyond. A row not yet classified is not searched; it is counted. |
-| **Repair sweep and fingerprint revalidation** | **Every active match in every quarter, AND every row of every delivered package** — the two sets are not the same, and an earlier draft used only the first (round-6 finding). A payment that shipped as `MISSING` has no match; so does every CRDT row; a change to either still makes the accountant's copy wrong, which is precisely what "a delivered quarter changed underneath" promises to catch. The sweep therefore compares the stored fingerprint of every delivered ledger row — its facts **and its expectation kind** — against current bank-feed state and classification, independent of whether a document was ever matched to it; a delivered row the classifier has since re-tagged into a different kind is a changed quarter. It compares against the pass's bank snapshot (§Tool surface, `import_ledger_export`) locally rather than querying per row; without a snapshot this step is **not checked** and the coverage line says so. |
+| **Repair sweep and fingerprint revalidation** | **Every active match in every quarter, AND every row of every delivered package** — the two sets are not the same, and an earlier draft used only the first (round-6 finding). A payment that shipped as `MISSING` has no match; so does every CRDT row; a change to either still makes the accountant's copy wrong, which is precisely what "a delivered quarter changed underneath" promises to catch. The sweep therefore compares the stored fingerprint of every delivered ledger row — its facts **and its expectation kind** — against current state, independent of whether a document was ever matched to it; a delivered row the classifier has since re-tagged into a different kind is a changed quarter. **Two inputs, two sources** (round-26 finding: the snapshot carries no tags): the bank facts come from the pass's bank snapshot (§Tool surface, `import_ledger_export`), compared locally rather than per row, and the expectation kind comes from the projection's classification observation, refreshed by the sweep's per-row read on its durable cursor — so the delivered-quarter check runs whenever either input advances, and the coverage line discloses the two separately (`bank checked through 20 Sep · classification checked through 13 Sep`). Without a snapshot the bank half is **not checked**; without a completed sweep cycle the classification half is. |
 | **Annotate** | Whatever it just decided. |
 
 **Search effort ages out; the item never does.** An unresolved payment stops being
@@ -2162,6 +2188,9 @@ bank data through <date>, digest <hash>` for diagnostics.
 │                        # YYYY-MM-DD_vendor_amount[_hash8].pdf; a `proposed` line
 │                        # never lands here
 ├── sales-invoices/      # matched documents of kind `sales-invoice`, required tier
+├── credit-notes/        # matched documents of kind `credit-note`, required tier —
+│                        # a vendor's behind a refund received, the B.V.'s own behind
+│                        # a refund paid
 ├── documents/           # every other matched document: any kind at OPTIONAL tier,
 │                        # and `payslip` / `statement` / `receipt` / `other` at either
 │                        # tier — one destination per document, never two
@@ -2202,8 +2231,9 @@ that was not found; `notes.md` opens with the required ones and lists the unclas
 ones apart, and the caption counts both ("3 still missing, 2 not yet classified"). **Routing is total
 and exclusive over (kind, tier)** (round-25 finding: a required receipt had no folder and
 an optional invoice had two): `invoice` + `required` → `invoices/`; `sales-invoice` +
-`required` → `sales-invoices/`; every other matched (kind, tier) → `documents/`; an
-expectation of `none` never has a matched document, so nothing routes for it. The build is deterministic — the same
+`required` → `sales-invoices/`; `credit-note` + `required` → `credit-notes/`; every other
+matched (kind, tier) → `documents/`; an expectation of `none` never has a matched document,
+so nothing routes for it. The build is deterministic — the same
 frozen inputs produce the same bytes (fixed ordering, fixed timestamps, stable
 serialisation) — which is what lets a caption say "identical to the package from 14 Oct"
 as a computed fact rather than a judgement. Supply stragglers and ask again: the next
@@ -2485,10 +2515,21 @@ and is resent only when the operator asks, as that exact file.
   reclassification invalidates** (round-25 S1, both reviewers), pinned against
   bank-feed's real tag tools: a payslip matched to a DBIT tagged `income, salary` becomes
   `proposed` with a residue line when the row is re-tagged `transport, fuel`, and the
-  lineage's `invoice, required` expectation enters the next search; a matched purchase
-  invoice becomes `proposed` when the row gains `internal-transfer`; a delivered ledger
-  row re-tagged into a different kind is reported as a changed quarter; and a tier-only
-  change (`required` → `optional`) leaves a matched pairing matched.
+  lineage's `invoice, required` expectation enters the next search; a machine-matched purchase
+  invoice is retired `rejected` (recorded, residue line) when the row gains
+  `internal-transfer`, while an operator-matched one becomes `proposed` with the reason
+  and a right-kind candidate found later lands `conflicted` beside it; a lineage whose
+  machine pairing was retired for a kind change is in the next pass's search plan; a
+  delivered ledger row re-tagged into a different kind is reported as a changed quarter
+  from the classification observation, with the snapshot unchanged (a test that reads
+  kind from the export must fail); and a tier-only change (`required` → `optional`)
+  leaves a matched pairing matched. **And the round-26 rows**: a CRDT tagged `refund`
+  or `income, refund` derives `credit-note, required`, a DBIT tagged `refund` the same,
+  and a held credit note satisfies it while an invoice does not; a row tagged only
+  `unclassifiable` derives `required` (row 3) and never `unknown`; `salary, fees` on a
+  DBIT derives unknown, is tagged `acct::open`, and is shown under "classification
+  conflict"; `transport, fuel, refund` derives `credit-note, required` and is not a
+  conflict; and a required credit note routes to `credit-notes/`.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
