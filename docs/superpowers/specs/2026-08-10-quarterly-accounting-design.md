@@ -347,9 +347,10 @@ there are no unversioned flags. Consequences, each closing a reviewed failure pa
   re-resolves the target row (`get_transaction`, state active) immediately before
   `record_match`/`propose_match`, and passes the resolved snapshot; if a sweep
   retarget later collides with a match already created on the successor row, the
-  server atomically moves **both** contenders to `conflicted` — a non-active
-  state, so the one-active-match invariant is never violated by the collision
-  itself — with a residue line. Neither contender needs a cleanup instruction attached:
+  server resolves it by the reducer's order (above): an operator-authored pairing
+  wins and the other contender goes to `conflicted`; two machine contenders **both**
+  go to `conflicted` — a non-active state, so the one-active-match invariant is never
+  violated by the collision itself — with a residue line either way. Neither contender needs a cleanup instruction attached:
   both transactions' projections are recomputed from their new state, and the sweep
   enumerates every projection unconditionally, so the round-4 hazard (a record invisible
   to both worklists) cannot exist when there are no worklists to be invisible to; the conflict is resolved only by
@@ -363,11 +364,14 @@ had not decided — an exemption against `open`, a proposal against an exemption
 predecessor merging into a successor the operator had since matched. Three instances of one
 shape: decisions were scattered across match records, a vendor field and an exemption flag,
 and every pairwise interaction had to be written down by hand. So the store keeps, per
-lineage, **one append-only decision log**: each entry is a decision kind (pair, unpair,
-exempt, lift, none-expected-by-vendor), its author (`auto` or `operator`), its sequence
-number from the same store-wide sequence the note revisions use, and the shown revision it
-was bound to when the author is the operator. Two rules, and only two, resolve every
-interaction, including the ones no table row anticipates:
+lineage, **one append-only decision log**: each entry is a decision kind (pair, propose,
+unpair, exempt, lift), its author (`auto` or `operator`), its sequence number from the same
+store-wide sequence the note revisions use, the **row fingerprint it was made against**,
+and the shown revision it was bound to when the author is the operator. A vendor's channel
+(`none-expected`, `portal`) is **not** a lineage decision: it is a vendor fact the reducer
+reads from the KB at the end (round-13 finding: listing it as an entry kind left
+machine-vs-machine order undefined). Two rules resolve every interaction between
+*decisions*, including the ones no table row anticipates:
 
 - **the latest operator decision wins**, and **a machine decision never overrides an
   operator decision** — it is refused at write time (`record_match`/`propose_match` on an
@@ -380,6 +384,50 @@ interaction, including the ones no table row anticipates:
   ends matched (the later operator decision), and a matched predecessor whose successor the
   operator later exempted ends exempt, with the pairing moved to `rejected` by the exemption
   entry exactly as it would have been without the merge.
+
+**A decision is valid only against the facts it was made against — validity is not a
+third rule, it comes before both** (round-13, both reviewers). Every pair or propose entry
+carries the row fingerprint it was made against. When the live row's material facts differ
+(the in-place correction case below: €100 accepted, then corrected to €90 under the same
+`row_id`), the entry is **invalidated, not overridden**: it stays in the log as history, it
+no longer counts as an active pairing, and the lineage shows the pairing as `proposed`
+with a residue line until the operator confirms it against the new facts — a fresh
+operator entry with the new fingerprint. So "a machine decision never overrides an
+operator decision" is exactly true: the fingerprint sweep appends nothing and decides
+nothing; it observes that the world the decision was about is gone. An exemption carries no
+fingerprint and survives a correction — "this payment needs no invoice" is not about the
+amount — but the correction is still reported.
+
+**The reducer, as one total function.** Everything above and the table in §"The
+projection" are *derived* from this order, and an implementation follows the order, not
+the prose. For one lineage, given its merged log, its live row and the vendor KB:
+
+1. **Eligibility.** Destination row not eligible (§"The projection", admission) → `∅`.
+2. **Validity.** Drop every pair/propose entry whose fingerprint no longer matches the
+   live row; note each one as `invalidated` for the residue.
+3. **Operator precedence.** Take the latest operator entry among what remains. `exempt`
+   with no later operator `lift`/`pair` → `{acct::no-invoice-expected}`, and every active
+   pairing on the lineage is `rejected` (done at the exemption's commit, so this step only
+   ever confirms it). An operator `pair` → `{acct::matched}`; any other contender, machine
+   or a colliding operator pairing discovered by a merge, goes to `conflicted` with residue
+   — the operator's *latest* pairing is never the one displaced (round-13 finding: the
+   round-2 collision rule moved **both** contenders to `conflicted` unconditionally, which
+   discarded the operator's own pairing).
+4. **Collision among machine contenders.** Two active machine pairings on one lineage —
+   a retarget landing on a row that already has one, a merge — go **both** to `conflicted`
+   with a residue line, as round 2 specified; this is now the only case that rule covers.
+5. **Machine pairing.** One valid active `matched` → `{acct::matched}`; one valid active
+   `proposed`, or a `matched` invalidated in step 2 → `{acct::proposed}`.
+6. **Vendor default.** No active pairing and the vendor's channel is `none-expected` →
+   `{acct::no-invoice-expected}`. Weaker than any pairing on purpose: a document that
+   matches a specific payment beats a default about its vendor.
+7. **Otherwise** `{acct::open}` — never paired, everything rejected, `conflicted` only,
+   accepted-missing after "stop chasing".
+8. **Portal.** If the vendor's channel is `portal` and the row is eligible, add
+   `acct::portal` to whatever the steps above produced.
+
+Cardinality (below) is enforced at write time, so step 5 sees at most one active machine
+pairing except in the collision case step 4 already handled.
 
 **Operator authorship is checked, not declared** (round-12 S1). An `author=operator` write —
 `set_exemption`, `record_match`, `confirm_match`, `reject_match` from a correction — must
@@ -427,9 +475,11 @@ the amount is corrected — the sweep sees neither `superseded` nor `vanished` a
 on. So: every pass, and again immediately before packaging, every active match
 re-compares its snapshot fingerprint (account, direction, currency, `amount_minor`,
 status, booking date, counterparty, remittance) **and bank-feed's review flags**
-against the live row, superseded or not. A changed material fact invalidates
-acceptance: the match demotes to `proposed` with `repair_owed` and a residue line.
-Migrated tags and notes on a successor row are not fresh approval either.
+against the live row, superseded or not. A changed material fact **invalidates**
+the acceptance (reducer step 2 — the decision stays in the log as history and stops
+counting): the lineage shows `proposed` with a residue line until the operator confirms
+against the new facts. Migrated tags and notes on a successor row are not fresh approval
+either.
 
 ### Vendor KB
 
@@ -517,13 +567,17 @@ raw provider payload (`state`, `superseded_by`, `booking_date`, `value_date`, `d
 file rather than model context, so nothing is truncated; the specialist calls it (it is a
 finance-role tool) and passes the path. At roughly half a kilobyte a row the handoff cap of
 25 MB is decades of one account's history. The package's ledger lists the full quarter from
-it (unmatched DBIT and CRDT rows included); the match records alone cannot produce it. **It filters to the bound account
-and to ACTIVE rows.** `export_history` runs `SELECT … FROM transactions ORDER BY …` with
-no state predicate (verified 2026-09-21, `tools_refresh.py:914`), so it returns
-superseded predecessors beside their successors: importing it raw and selecting "every
-transaction booked in the quarter" turns one €99 payment that went pending → booked into
-€198 (round-5 finding). Superseded and vanished observations are kept as history and
-disclosed in `notes.md` where they explain something, never summed into the ledger.
+it (unmatched DBIT and CRDT rows included); the match records alone cannot produce it. **The import retains every row of the
+bound account in every state; only the package ledger and the admission candidates
+select ACTIVE rows** (round-13 finding: an earlier sentence had the import itself filter
+to active, which discarded exactly the superseded and vanished rows that lineage
+resolution and the delivered-row fingerprint sweep need). `export_history` runs `SELECT …
+FROM transactions ORDER BY …` with no state predicate (verified 2026-09-21,
+`tools_refresh.py:914`), so it returns superseded predecessors beside their successors:
+selecting "every transaction booked in the quarter" from it without the active filter
+turns one €99 payment that went pending → booked into €198 (round-5 finding). Superseded
+and vanished observations are kept as history and disclosed in `notes.md` where they
+explain something, never summed into the ledger.
 Packaging: `build_quarterly_package(quarter)`, `stage_for_delivery(target)` (copies
 an invoice PDF or the built package into casa's plugin outbox for `send_media`, and
 nothing else). **It does not publish to the handoff folder in v1.** A round-10 fix
@@ -686,12 +740,15 @@ One object, owned by the plugin server, per **transaction lineage**:
   with `acct::open` — an exempt payment has no pairing either — so precedence is
   written down:
 
+  This table is **derived from the reducer in §Match records** ("The reducer, as one total
+  function") and is illustrative; where they could ever differ, the reducer's order wins.
+
   | Lineage state (first row that applies) | Desired set |
   |---|---|
   | destination row not currently eligible (corrected to CRDT, or to before the watermark) | `∅` |
   | exempt by the operator (`set_exemption`) — structurally, no active pairing exists while it stands | `{acct::no-invoice-expected}` |
-  | an active `matched` pairing | `{acct::matched}` |
-  | an active `proposed` pairing | `{acct::proposed}` |
+  | an active `matched` pairing whose fingerprint still holds | `{acct::matched}` |
+  | an active `proposed` pairing, or a `matched` one whose fingerprint no longer holds | `{acct::proposed}` |
   | the vendor's channel is `none-expected` and nothing is paired | `{acct::no-invoice-expected}` |
   | otherwise — never paired, every pairing rejected, `conflicted` only, accepted-missing after "stop chasing" | `{acct::open}` |
   | plus, whenever the vendor's channel is `portal` and the row is eligible | `∪ {acct::portal}` |
@@ -1905,9 +1962,10 @@ pass offers to resend that exact file, in words, like everything else.
   across two passes**; a stale-revision `confirm_match` that must be rejected by
   CAS; a demotion after which the transaction's recomputed projection no longer asserts
   a match (never a stale
-  `acct::matched`); a retarget colliding with a successor-row match (both moved to
-  non-active `conflicted` and `repair_owed` in one transition — no
-  `conflicted`+`clean` record — residue line emitted, cardinality intact); a
+  `acct::matched`); a retarget colliding with a successor-row match (two machine contenders both
+  moved to non-active `conflicted` in one transition — residue line emitted,
+  cardinality intact — and, the round-13 case, an operator's later pairing on the
+  successor **kept** while the machine contender alone goes `conflicted`); a
   rejected match with `repair_owed` whose row is superseded before cleanup (repair
   rewritten to the live successor, stale tags corrected); and concurrent package builds
   that must yield
@@ -2002,7 +2060,16 @@ pass offers to resend that exact file, in words, like everything else.
   the two rules predict, and the merged log has one lift for one lift appended; an
   `author=operator` write without a valid `render_id` is refused, and one carrying a
   render id for a different item is refused; and a `propose_match` on an exempt lineage is
-  refused and appears in the residue.
+  refused and appears in the residue. **And the round-13 reducer order**, pinned against
+  bank-feed's real `apply_plan`: an operator-accepted €100 pairing whose row is corrected
+  in place to €90 is invalidated, not overridden — the log keeps the entry, the lineage
+  shows `acct::proposed` with a residue line, and an operator confirmation against the
+  new facts restores `acct::matched`; an exemption survives the same correction; an auto
+  proposal followed by the vendor becoming `none-expected` stays `acct::proposed`; a
+  delivered ledger row that bank-feed then supersedes or vanishes is detected from a
+  snapshot that retained non-active rows (a test that imports active rows only must
+  fail); and the reducer, given the same merged log and row in any entry order, is a
+  pure function of them.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
