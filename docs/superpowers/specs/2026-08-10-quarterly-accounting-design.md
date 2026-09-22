@@ -385,49 +385,76 @@ machine-vs-machine order undefined). Two rules resolve every interaction between
   operator later exempted ends exempt, with the pairing moved to `rejected` by the exemption
   entry exactly as it would have been without the merge.
 
-**A decision is valid only against the facts it was made against — validity is not a
-third rule, it comes before both** (round-13, both reviewers). Every pair or propose entry
-carries the row fingerprint it was made against. When the live row's material facts differ
-(the in-place correction case below: €100 accepted, then corrected to €90 under the same
-`row_id`), the entry is **invalidated, not overridden**: it stays in the log as history, it
-no longer counts as an active pairing, and the lineage shows the pairing as `proposed`
-with a residue line until the operator confirms it against the new facts — a fresh
-operator entry with the new fingerprint. So "a machine decision never overrides an
-operator decision" is exactly true: the fingerprint sweep appends nothing and decides
-nothing; it observes that the world the decision was about is gone. An exemption carries no
-fingerprint and survives a correction — "this payment needs no invoice" is not about the
-amount — but the correction is still reported.
+**A decision is valid only against the facts it was made against — and validity is
+judged on the *current* decision alone, after precedence has chosen it** (round-13 and
+round-14, both reviewers). Every pair or propose entry carries the row fingerprint it was
+made against. When the live row's material facts differ from the current pairing's
+fingerprint (the in-place correction case below: €100 accepted, then corrected to €90
+under the same `row_id`), that pairing is **invalidated, not overridden and not
+dropped**: it stays the lineage's current pairing, it counts as `proposed` rather than
+`matched`, and a residue line asks the operator to confirm it against the new facts — a
+fresh operator entry with the new fingerprint. It is never replaced by an older entry:
+round 14 reproduced the alternative (validity as a filter over the whole log), under which
+correcting €100→€90→€100 resurrected invoice A after the operator had replaced it with B.
+Anything a later decision superseded is history whatever the fingerprints say. Validity is
+a comparison with the live row, so a correction that is itself reverted restores the
+acceptance on its own — the decision was about those facts and they are true again — and
+the residue reports both changes. So "a machine decision never overrides an operator
+decision" is exactly true: the fingerprint sweep appends nothing and decides nothing; it
+observes whether the world the current decision was about still holds. An exemption
+carries no fingerprint and survives a correction — "this payment needs no invoice" is not
+about the amount — but the correction is still reported.
 
 **The reducer, as one total function.** Everything above and the table in §"The
 projection" are *derived* from this order, and an implementation follows the order, not
 the prose. For one lineage, given its merged log, its live row and the vendor KB:
 
 1. **Eligibility.** Destination row not eligible (§"The projection", admission) → `∅`.
-2. **Validity.** Drop every pair/propose entry whose fingerprint no longer matches the
-   live row; note each one as `invalidated` for the residue.
-3. **Operator precedence.** Take the latest operator entry among what remains. `exempt`
-   with no later operator `lift`/`pair` → `{acct::no-invoice-expected}`, and every active
-   pairing on the lineage is `rejected` (done at the exemption's commit, so this step only
-   ever confirms it). An operator `pair` → `{acct::matched}`; any other contender, machine
-   or a colliding operator pairing discovered by a merge, goes to `conflicted` with residue
-   — the operator's *latest* pairing is never the one displaced (round-13 finding: the
-   round-2 collision rule moved **both** contenders to `conflicted` unconditionally, which
-   discarded the operator's own pairing).
-4. **Collision among machine contenders.** Two active machine pairings on one lineage —
-   a retarget landing on a row that already has one, a merge — go **both** to `conflicted`
-   with a residue line, as round 2 specified; this is now the only case that rule covers.
-5. **Machine pairing.** One valid active `matched` → `{acct::matched}`; one valid active
-   `proposed`, or a `matched` invalidated in step 2 → `{acct::proposed}`.
-6. **Vendor default.** No active pairing and the vendor's channel is `none-expected` →
+2. **Operator precedence — the latest operator entry fixes the lineage's current
+   decision, and everything before it is history.** "Before it" means every earlier entry
+   in the merged log, any author, including entries merged in from another lineage
+   (round-14 finding: `unpair` had no branch, so a merged-in machine pairing slipped past
+   it). By kind:
+   - `exempt` → the current decision is the exemption: `{acct::no-invoice-expected}`,
+     stop. Every active pairing was `rejected` at the exemption's commit; this step only
+     confirms it.
+   - `pair P` → P is the current pairing; go to step 3. Any other still-active contender —
+     a machine pairing, or a second operator pairing discovered by a merge — goes to
+     `conflicted` with residue; the operator's *latest* pairing is never the one displaced
+     (round-13 finding: the round-2 collision rule moved **both** contenders to `conflicted`
+     unconditionally, which discarded the operator's own pairing).
+   - `unpair X` → X is `rejected` (done at commit), and **no pairing older than this entry
+     is current**, whoever made it; go to step 4 with only the entries *after* it.
+   - `lift` → the exemption is cleared; go to step 4 with only the entries after it.
+   - no operator entry at all → go to step 4 with the whole log.
+3. **Validity of the current operator pairing.** Compare P's fingerprint with the live
+   row. Equal → `{acct::matched}`. Different → `{acct::proposed}` with a residue line, P
+   still the current pairing (never dropped, never replaced by an older entry); when the
+   operator confirms against the new facts, or the facts revert, it is `matched` again.
+   Then step 8.
+4. **Machine contenders among the entries that remain.** Cardinality (below) admits one
+   active machine pairing per lineage, so at most one remains — except when a retarget
+   lands on a row that already has one, or a merge brings two: then **both** go to
+   `conflicted` with a residue line, as round 2 specified, and this is now the only case
+   that rule covers.
+5. **Validity of the current machine pairing.** One active `matched` whose fingerprint
+   holds → `{acct::matched}`; a `matched` whose fingerprint differs, or an active
+   `proposed` (whether or not its fingerprint holds — an invalidated proposal stays a
+   proposal, round-14 finding) → `{acct::proposed}` with a residue line for the change.
+   Then step 8.
+6. **Vendor default.** No current pairing and the vendor's channel is `none-expected` →
    `{acct::no-invoice-expected}`. Weaker than any pairing on purpose: a document that
    matches a specific payment beats a default about its vendor.
-7. **Otherwise** `{acct::open}` — never paired, everything rejected, `conflicted` only,
-   accepted-missing after "stop chasing".
+7. **Otherwise** `{acct::open}` — never paired, everything rejected or unpaired,
+   `conflicted` only, accepted-missing after "stop chasing".
 8. **Portal.** If the vendor's channel is `portal` and the row is eligible, add
    `acct::portal` to whatever the steps above produced.
 
-Cardinality (below) is enforced at write time, so step 5 sees at most one active machine
-pairing except in the collision case step 4 already handled.
+Two properties the order is built to have, and the tests pin: **nothing older than the
+latest operator entry is ever current** (so a fingerprint change can invalidate the current
+pairing but cannot resurrect a replaced one), and **invalidation changes a pairing's
+status, never its existence** (an invalid `matched` and an invalid `proposed` are both
+shown as `proposed`, and both stay the lineage's current candidate).
 
 **Operator authorship is checked, not declared** (round-12 S1). An `author=operator` write —
 `set_exemption`, `record_match`, `confirm_match`, `reject_match` from a correction — must
@@ -2069,7 +2096,15 @@ pass offers to resend that exact file, in words, like everything else.
   delivered ledger row that bank-feed then supersedes or vanishes is detected from a
   snapshot that retained non-active rows (a test that imports active rows only must
   fail); and the reducer, given the same merged log and row in any entry order, is a
-  pure function of them.
+  pure function of them. **And the round-14 traces**, each run through the numbered steps
+  as written against bank-feed's real `apply_plan`: operator pairs A at €100, correction to
+  €90, operator pairs B at €90, correction back to €100 — B is the current pairing, shown
+  `proposed`, and A is never selected again; `[operator pair P, operator unpair P]` ends
+  `acct::open` (or the vendor default), never `matched`; a lineage with machine pairing A
+  merged with one whose log reads `[operator pair B, unpair B]` ends with A `conflicted`
+  and no `acct::matched`, because the unpair is later than A; an auto proposal at €90
+  whose row is corrected to €100 stays `acct::proposed`, not `open`; and a correction that
+  is reverted restores `acct::matched` with both changes in the residue.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
