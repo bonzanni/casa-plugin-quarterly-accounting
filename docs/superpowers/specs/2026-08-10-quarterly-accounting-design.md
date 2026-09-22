@@ -410,23 +410,34 @@ projection" are *derived* from this order, and an implementation follows the ord
 the prose. For one lineage, given its merged log, its live row and the vendor KB:
 
 1. **Eligibility.** Destination row not eligible (§"The projection", admission) → `∅`.
-2. **Operator precedence — the latest operator entry fixes the lineage's current
-   decision, and everything before it is history.** "Before it" means every earlier entry
-   in the merged log, any author, including entries merged in from another lineage
-   (round-14 finding: `unpair` had no branch, so a merged-in machine pairing slipped past
-   it). By kind:
-   - `exempt` → the current decision is the exemption: `{acct::no-invoice-expected}`,
-     stop. Every active pairing was `rejected` at the exemption's commit; this step only
-     confirms it.
+2. **Operator precedence.** Two operator entry kinds are *lineage-wide* and fix the
+   current decision — `exempt` and `pair`; the latest of those two in the merged log
+   wins, and every pairing older than it is retired. Two are *targeted* — `unpair X` and
+   `lift` — and retire exactly their target and nothing else (round-15 finding: a
+   round-14 rule that made everything older than an `unpair` history let "no, not that
+   one" about a freshly shown conflicted candidate cancel the accepted pairing beside it,
+   and a `lift` with no exemption standing did the same). Every retirement names a match
+   state, because "history" is not one (round-15 finding): a retired pairing that was
+   active becomes `conflicted` when it lost to a later operator `pair` (it may have been
+   right; residue says so) and `rejected` when an `exempt` or its own `unpair` retired it.
+   By kind, taking the latest lineage-wide entry:
+   - `exempt` → `{acct::no-invoice-expected}`, then **step 8**. Every active pairing was
+     `rejected` at the exemption's commit; a contender a later merge brings onto an exempt
+     lineage is `rejected` by the merge transaction for the same reason, since the
+     exemption is the later decision.
    - `pair P` → P is the current pairing; go to step 3. Any other still-active contender —
      a machine pairing, or a second operator pairing discovered by a merge — goes to
      `conflicted` with residue; the operator's *latest* pairing is never the one displaced
      (round-13 finding: the round-2 collision rule moved **both** contenders to `conflicted`
      unconditionally, which discarded the operator's own pairing).
-   - `unpair X` → X is `rejected` (done at commit), and **no pairing older than this entry
-     is current**, whoever made it; go to step 4 with only the entries *after* it.
-   - `lift` → the exemption is cleared; go to step 4 with only the entries after it.
-   - no operator entry at all → go to step 4 with the whole log.
+   - neither → go to step 4 with every pairing that is still active.
+
+   The targeted kinds have **write-time preconditions**, refused by the server with the
+   current facts rather than absorbed: `unpair X` requires X to be an active pairing on the
+   lineage, and rejects X alone; `lift` requires an exemption to stand, and clears it
+   alone. An operator `record_match` on an exempt lineage is one transaction that appends
+   `lift` first and `pair` second — in that order, since the opposite order reproduced
+   `open` (round 15).
 3. **Validity of the current operator pairing.** Compare P's fingerprint with the live
    row. Equal → `{acct::matched}`. Different → `{acct::proposed}` with a residue line, P
    still the current pairing (never dropped, never replaced by an older entry); when the
@@ -450,11 +461,14 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
 8. **Portal.** If the vendor's channel is `portal` and the row is eligible, add
    `acct::portal` to whatever the steps above produced.
 
-Two properties the order is built to have, and the tests pin: **nothing older than the
-latest operator entry is ever current** (so a fingerprint change can invalidate the current
-pairing but cannot resurrect a replaced one), and **invalidation changes a pairing's
-status, never its existence** (an invalid `matched` and an invalid `proposed` are both
-shown as `proposed`, and both stay the lineage's current candidate).
+Three properties the order is built to have, and the tests pin: **nothing older than the
+latest lineage-wide operator entry (`pair` or `exempt`) is ever current** (so a fingerprint
+change can invalidate the current pairing but cannot resurrect a replaced one); **a
+targeted operator entry (`unpair`, `lift`) touches only its target** (so a correction about
+one candidate never cancels another); and **invalidation changes a pairing's status, never
+its existence** (an invalid `matched` and an invalid `proposed` are both shown as
+`proposed`, and both stay the lineage's current candidate). Every pairing that leaves
+"active" does so into one of the four match states, named in the step that retires it.
 
 **Operator authorship is checked, not declared** (round-12 S1). An `author=operator` write —
 `set_exemption`, `record_match`, `confirm_match`, `reject_match` from a correction — must
@@ -503,9 +517,9 @@ on. So: every pass, and again immediately before packaging, every active match
 re-compares its snapshot fingerprint (account, direction, currency, `amount_minor`,
 status, booking date, counterparty, remittance) **and bank-feed's review flags**
 against the live row, superseded or not. A changed material fact **invalidates**
-the acceptance (reducer step 2 — the decision stays in the log as history and stops
-counting): the lineage shows `proposed` with a residue line until the operator confirms
-against the new facts. Migrated tags and notes on a successor row are not fresh approval
+the acceptance (reducer step 3, or step 5 for a machine pairing): the pairing stays the
+lineage's current candidate and is shown `proposed` with a residue line until the operator
+confirms against the new facts, or the facts revert. Migrated tags and notes on a successor row are not fresh approval
 either.
 
 ### Vendor KB
@@ -557,8 +571,8 @@ stored on the projection with the projection's revision as its CAS (round-11 fin
 precedence table named this fact and no tool stored it). Committing `exempt=true` moves any
 active pairing on that lineage to `rejected` in the same transaction, and while it stands
 the server refuses `record_match` and `propose_match` on the lineage — so an exemption and
-an active pairing never coexist. Lifting it is `exempt=false`, or an operator-authored
-`record_match`, which appends a lift in the same transaction. "Operator-authored" is a
+an active pairing never coexist. Lifting it is `exempt=false` — refused unless an exemption stands — or an
+operator-authored `record_match`, which appends `lift` then `pair` in one transaction. "Operator-authored" is a
 `render_id` binding the server checks against the render log, not a word the caller
 passes (§Match records, "Operator authorship is checked"). Vendor-level `none-expected`
 stays vendor-scoped, in `upsert_vendor`, and is a decision-log entry of its own kind.
@@ -2101,8 +2115,14 @@ pass offers to resend that exact file, in words, like everything else.
   €90, operator pairs B at €90, correction back to €100 — B is the current pairing, shown
   `proposed`, and A is never selected again; `[operator pair P, operator unpair P]` ends
   `acct::open` (or the vendor default), never `matched`; a lineage with machine pairing A
-  merged with one whose log reads `[operator pair B, unpair B]` ends with A `conflicted`
-  and no `acct::matched`, because the unpair is later than A; an auto proposal at €90
+  merged with one whose log reads `[operator pair B, unpair B]` ends with A as the current
+  machine pairing — `acct::matched` if its fingerprint holds — because the unpair
+  targeted B and says nothing about A, which the operator has not yet been shown (round
+  15 reversed the round-14 expectation, which had A `conflicted`); `unpair Q` of a
+  freshly shown `conflicted` candidate beside accepted P leaves P `matched`; `lift` with
+  no exemption standing is refused and appends nothing; a merge that brings machine
+  pairing A onto an exempt lineage leaves A `rejected` and the lineage
+  `acct::no-invoice-expected`; an exemption on a portal vendor's row keeps `acct::portal`; an auto proposal at €90
   whose row is corrected to €100 stays `acct::proposed`, not `open`; and a correction that
   is reverted restores `acct::matched` with both changes in the residue.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
