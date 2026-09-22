@@ -1442,8 +1442,12 @@ rows, so a pass with a populated store went on annotating against stale row ids 
 occasion to learn of a restore another process left unsettled, and round 35 reproduced a
 second restore committing over a first one's marker before the first was settled, so the
 first was recorded aborted and the generation advanced by one for two restores. It runs
-**under the ledger's writer lock and an exclusive lock on the index file**, and a mint or
-restore keeps the writer lock from that settlement through its own commit (round-33
+**under the ledger's writer lock and an exclusive lock on the index file**; a mint or
+restore keeps the writer lock from that settlement through its own commit, and
+`list_backups` keeps both locks from settlement **through capturing the generation and
+registration state it returns** (round-37 finding: releasing them in between let a restore
+land and die after commit before the answer was assembled, and the answer carried the old
+generation) (round-33
 finding: two processes recovering at once each appended `committed` for one restore and
 counted it twice), and **each operation id gets exactly one terminal record** — a second
 process finding the terminal line already present appends nothing. It walks the index: a
@@ -2826,7 +2830,10 @@ and is resent only when the operator asks, as that exact file.
   begins, and the generation advances by two; the same A-dies-after-commit case followed
   by already-open B answering `list_backups` reports the advanced generation and the
   unregistered workflow, because settlement ran before the answer, and a pass with a
-  populated store then stops before any write; a crash between the restore's commit and its `committed` line is settled by
+  populated store then stops before any write; `list_backups` that settled, then released
+  its locks, then assembled its answer would have reported generation 0 after a restore
+  committed in that gap — a test that interposes a restore between settlement and the
+  answer must see the advanced generation, which only holding the locks gives; a crash between the restore's commit and its `committed` line is settled by
   the in-ledger marker at the next open, and the generation counts it once; a restore performed as attach-and-replace inside
   `BEGIN IMMEDIATE` while a second process holds a read transaction leaves that process
   seeing the restored rows on its next write transaction; a disk-full failure during the
