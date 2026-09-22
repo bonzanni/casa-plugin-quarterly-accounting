@@ -147,7 +147,7 @@ correctness properties protect nothing. Three rungs:
 
 | Rung | What is on it | Discipline |
 |---|---|---|
-| **Free** | Everything v1 does: ingest, auto-match, demote, retarget, reject, re-label; bank-feed `acct::*` tags (an `untag_transaction` away from undone); notes (append-only, corrected by appending); **and the quarterly package itself** — the operator asks for a zip, checks it, corrects what is wrong and asks again (operator, 2026-09-21). A rebuild costs one message. Emailing a package or an invoice **to their own mailbox** (operator, 2026-09-22): it stays in their hands. | Act. No question, no confirmation, no ceremony. |
+| **Free** | Everything v1 does: ingest, auto-match, demote, retarget, reject, re-label; bank-feed `acct::*` tags (an `untag_transaction` away from undone); notes (append-only, corrected by appending); **and the quarterly package itself** — the operator asks for a zip, checks it, corrects what is wrong and asks again (operator, 2026-09-21). A rebuild costs one message. Emailing a package or an invoice **to their own mailbox** (operator, 2026-09-22): it stays in their hands. Casa asks one approval tap per email, showing the recipient — Casa's gate, not this plugin's. | Act. No question, no confirmation, no ceremony. |
 | **Gated** | Nothing, in v1. | — |
 
 **v1 therefore has no routine gates and no routine button questions.** Every step is
@@ -737,14 +737,17 @@ operator's own mailbox**). **Operator ruling, 2026-09-22: emailing the package o
 invoice to themselves is on the free rung** — it never leaves their hands, so it is as
 retractable as the Telegram copy — and "email me the Q3 package" is a supported ask.
 Mailing anyone else stays on the gated rung and out of v1 (§"The reversibility ladder").
-Stated honestly, because rounds 11 and 12 raised it: the recipient rule is **skill
-guidance, not a server check**. The server publishes a file and cannot see who an email
-goes to, and gmail's `send_email` attaches any handoff file to any recipient; the only
-thing standing between "to myself" and "to my accountant" is Ellen following the skill.
-The operator accepted that residual with the ruling, on the same footing as the render
-binding's — one trusted model, on their own box, guarding against a mistake rather than
-an adversary. A future version that mails the accountant on purpose needs a recipient the
-server can check; that is a design, not a sentence.
+**Who checks the recipient: Casa, through the operator's own tap** (round 23, both
+reviewers, verified against gmail 0.9.0 and Casa 0.328.0). gmail declares `send_email` a
+protected tool, so every call needs a single-use approval that Casa hashes over the exact
+arguments — the recipient included — and shows as *"Send email to <address>: <subject>"*;
+an approval cannot be reused for a different recipient, and an unapproved call has no
+grant. So the recipient rule is not skill guidance after all: this plugin's server still
+cannot see who an email goes to, but the operator sees it on every send and nothing sends
+without them. Two consequences, stated: **the cost is one tap per email**, which is Casa's
+gate and not this plugin's, so the ruling's "free rung" is exactly true of the plugin and
+one tap short of true end to end; and a tap-free self-mail would need a recipient
+exemption in gmail or Casa, which is not asked for and not assumed.
 
 House disciplines copied from bank-feed: explicit loud failures, numeric caps and
 truncation notices on reads, provider text fenced as untrusted on output, three-way
@@ -2066,6 +2069,18 @@ After a `delivery_uncertain` the package is NOT re-sent automatically: the send 
 landed, and a second zip in the accountant's hands is worse than a question. The next
 pass offers to resend that exact file, in words, like everything else.
 
+**Email delivery is in the same delivery log and under the same uncertainty rule** (round
+23, both reviewers). When the operator asks for the package by email (§Tool surface,
+`stage_for_delivery`; §"The reversibility ladder"), the delivery-log entry records the
+channel, the exact built file, and the `request_id` passed to gmail's `send_email`, and is
+marked delivered only when `send_email` returns a message id. gmail's own sent-log records
+a `request_id` **only after a successful send**, so a transport timeout leaves no record
+on either side and a retry with the same `request_id` sends a second email (Astra
+reproduced it against gmail 0.9.0's real send path). Therefore an ambiguous email outcome
+— timeout, an error after the request was accepted — is recorded as `delivery_uncertain`
+against the retained build exactly as a Telegram one is, is never retried automatically,
+and is resent only when the operator asks, as that exact file.
+
 ## Privacy
 
 - The repo ships **zero** personal or company data: no IBANs (bank-feed owns
@@ -2140,7 +2155,12 @@ pass offers to resend that exact file, in words, like everything else.
   distinct names** (exclusive create, widening precision), and neither overwrites the
   other or an earlier build; a rebuild with nothing changed still produces a file and
   says so in the caption, reserving no revision because there are none; the caption's
-  "what changed since" line is computed from the delivery log rather than asserted; and
+  "what changed since" line is computed from the delivery log rather than asserted; an
+  email delivery is logged with its channel, exact file and `request_id`, marked
+  delivered only on a returned message id, and a simulated timeout leaves it
+  `delivery_uncertain` with no automatic retry (a test that retries the same
+  `request_id` after a timeout must observe a second send against gmail's real server
+  function, which is why the rule exists); and
   the ledger of a quarter containing a superseded predecessor and its active successor
   totals the payment ONCE.
 - The round-5 red cases, from the independent design and its comparison: a material
