@@ -60,8 +60,8 @@ Everything else in this document is the detail under those three.
 - A standing answer to “what am I missing?”, **retrievable at the moment the operator
   chooses**, with the links in it. Not a list repeated every Monday at an hour when
   nobody can act on it (§“Push tells, pull works”).
-- Quarter-end zip package delivered over Telegram: `invoices/` (bulk-uploadable to
-  SnelStart), `ledger.xlsx`, `notes.md`.
+- A zip package delivered over Telegram whenever the operator asks for a quarter:
+  `invoices/` (bulk-uploadable to SnelStart), `ledger.csv`, `ledger.xlsx`, `notes.md`.
 - A lean vendor knowledge base whose primary asset is the **researched invoice
   deep-link** per portal vendor — found once, at real effort, reused every quarter.
 - Bank-feed stays consistent: every match decision is mirrored into bank-feed tags and
@@ -98,7 +98,7 @@ server.** All document reading and all matching judgment happen in agents via `R
 
 | Actor | Responsibilities |
 |---|---|
-| Casa core | Fires the weekly / quarter-end triggers at the resident; enforces tool gates. |
+| Casa core | Fires the weekly trigger at the resident; enforces tool gates. |
 | Resident (Ellen) | Orchestrates passes; all Gmail work (targeted searches, attachment download, ingest); **all** operator conversation (the review sheet, its free-text replies, the occasional one-line question folded into the sheet); sends the zip. |
 | Finance specialist | All matching judgment, grounded in its own `Read` of the actual PDFs; all bank-feed tagging/notes; portal-link research (WebSearch); returns structured work orders. Never talks to the operator (structurally cannot: `ask_user` requires direct execution). |
 | Plugin MCP server | Invoice store, vendor KB, match records, quarter workbook, filename normalization, package/zip build, outbox staging. |
@@ -433,7 +433,6 @@ This is the only way bytes enter custody. It is a copy rather than a reference o
 purpose: a handoff file is removed after 7 days, so a record pointing at it would be
 custody in name only. The metadata
 arguments are the agent's provisional reading, for filing; the bytes are the fact.
-`update_invoice_metadata`, `mark_irrelevant`,
 `update_invoice_metadata`, `mark_irrelevant`.
 Query: `list_unmatched_invoices`, `list_quarter_state`, `get_vendor`.
 Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match` — every
@@ -735,7 +734,7 @@ database cannot silently inherit the old row handles.
 **What the zip files are called — defaulted, never asked.** The package name defaults to
 a slug of the bound account's label, or to `books` when that yields nothing usable, and
 it is stored (changeable) rather than configured. The first package says so in one line:
-`Files are named "books-2026-Q3-r1.zip" — say "call the zips <name>" to change that.`
+`Files are named "books-2026-Q3-partial-2026-08-14.zip" — say "call the zips <name>" to change that.`
 Said once, on the first package only. A default nobody minds costs one line; a question
 at install costs a decision at the worst possible moment, when the operator wants the
 thing installed and has no opinion yet.
@@ -1018,7 +1017,7 @@ store through the same tools; none of them is a mode.
 | **A reply arrives while a pass is running** | It applies to the propositions the sheet recorded. If the running pass has already moved one of them, that line's CAS check refuses and the receipt reports it with current facts. Nothing blocks and nothing queues. |
 | **A reply lands after the quarter shipped** | The correction applies normally, and the receipt adds one line: the delivered package no longer matches, say "rebuild it" for a fresh one. Never rebuilt automatically — a new zip nobody asked for is worse than a stale one they know about. |
 | **The operator asks something** ("what am I missing for Q3?", "accounting list", "I'm doing accounting now") | The pull view: the collection list with links, rendered from the store, no pass and no mutation. This is the entry point for work done at a time of the operator's choosing (§"Push tells, pull works"). |
-| **The operator supplies a document** (self-addressed mail) | The next pass collects it by default, and its message names the successful intake. If they want it recorded now, `accounting: check emailed invoices` runs the sweep immediately and answers with a receipt (§"Recording Saturday's work on Saturday"). Either way, no obligation and no countdown. |
+| **The operator supplies a document** — sent to Ellen in Telegram, or by self-addressed mail | A Telegram document is filed in that same turn (§"Handing it a document"). A self-addressed mail is collected by the next pass, silently; the intake shows in the next view the operator asks for. If they want it recorded now, `accounting: check emailed invoices` runs the sweep immediately and answers with a receipt. Either way, no obligation and no countdown. |
 | **The operator corrects something unprompted** ("the Adobe one is wrong") | Resolved against the store's open items like any other correction. Here Adobe is missing rather than paired, so there is nothing to unpair, and Ellen says what she can do instead. |
 | **The first run after install** | Same pass, plus account binding and one scope line. §Setup. |
 | **A pass could not finish, or Casa restarted mid-pass** | The store holds everything except the in-flight turn. The next pass resumes from durable state and its sheet opens with the coverage it actually achieved, never a silent partial. |
@@ -1297,7 +1296,7 @@ another look at the Adobe one". The distinction is between *spending effort* and
 
 **Nothing closes a quarter.** Not the calendar, not the package. A quarter whose package
 shipped in October still accepts a late invoice in November — the item matches, the
-the operator asks for a fresh package, and decides whether their accountant needs it.
+operator asks for a fresh package, and decides whether their accountant needs it.
 If they want to stop chasing an old quarter, they say so ("stop chasing Q2") and its
 remaining open items become accepted-missing: still listed, still shipped as `MISSING`,
 never searched for again.
@@ -1410,7 +1409,6 @@ acceptable answer, and it always comes with the document safely filed — which 
 part that would actually have cost the operator something to redo.
 
 ### Portal invoices: offered, never demanded
-### Portal invoices: offered, never demanded
 
 Most invoices involve no file handling at all — an email vendor's PDF is found, fetched
 and filed without the operator's involvement. This section is only about the minority
@@ -1428,22 +1426,19 @@ package ships, and the accountant has what they need to act. So:
 - A portal item that keeps being offered and never supplied does not escalate. It stays
   a line, at the same weight, for as long as it is true.
 
-**If the operator does want the PDF in the package, the path that works today is email
-to self.** Verified 2026-09-21: `filters.TEXT` is the only inbound filter registered in
-the entire channel layer (`telegram.py:1057`), and nothing anywhere reads
-`message.document` or `message.photo` — a PDF sent to Ellen fires no handler at all and
-is silently dropped. So the sheet's portal lines name the path that exists:
-`Get invoice, then email it to yourself: <link>`. The pass runs one targeted search for
-recent self-addressed mail carrying attachments whenever anything is in the
-portal/missing state, so a forwarded PDF is found even when its subject matches nothing
-about the transaction. Such documents carry `source=manual-email`, which is recorded and
-changes nothing about how they are read or judged.
-
-**Shipped upstream:** [ha-casa-app#1036](https://github.com/bonzanni/ha-casa-app/issues/1036)
-(Casa 0.325.0) accepts an inbound Telegram document, and
-[#486](https://github.com/bonzanni/ha-casa-app/issues/486) (Casa 0.326.0) lets it reach
-this plugin. So "send me the invoice" is the obvious gesture it ought to be. The sheet's
-portal line can offer it beside email-to-self; nothing else in the design changes.
+**If the operator does want the PDF in the package, two paths exist, and the portal line
+names both.** Sending the PDF to Ellen in Telegram is the obvious gesture, and it works
+since Casa 0.325.0 ([ha-casa-app#1036](https://github.com/bonzanni/ha-casa-app/issues/1036)
+receives the document) and 0.326.0
+([#486](https://github.com/bonzanni/ha-casa-app/issues/486): `share_inbound_file` hands it
+to this plugin) — it is filed in that turn, §"Handing it a document". Email to self is
+the other: the pass runs one targeted search for recent self-addressed mail carrying
+attachments whenever anything is in the portal/missing state, so a forwarded PDF is
+found even when its subject matches nothing about the transaction. Such documents carry
+`source=manual-email`, which is recorded and changes nothing about how they are read or
+judged. An earlier revision (2026-09-21) verified that Telegram documents were silently
+dropped at the channel layer; that stopped being true at 0.325.0, and the floor is above
+it.
 
 ### Recognising a reply, when nothing guarantees the context survived
 
