@@ -381,16 +381,21 @@ recomputed by folding the **union of the two logs, retirements included**, and a
 retirements the merged fold causes are appended too. Three consequences, each a reviewed
 failure:
 
-- **A committed retirement is never undone by a re-fold.** Round 19 reproduced the
-  alternative — a fold of writer entries alone from the empty state: machine A and B
-  collided and were `conflicted` at a merge, the operator paired B's invoice to another
-  payment, and a later merge re-folded B back to active, leaving one invoice on two
-  payments. Retirement is monotone (a pairing only ever moves toward `conflicted` or
-  `rejected`), so recording it can never be wrong; **clearing an exemption is not
-  monotone, so it is never recorded** — an operator pair with sequence *s* clears any
-  exemption with a lower sequence as a derived effect inside the fold, and no `lift`
-  entry is written for it (rounds 18–19: a persisted "implicit lift" was re-folded out of
-  order and erased a newer exemption).
+- **A committed retirement is never undone by a re-fold — and it retires an
+  activation, not a match id.** Round 19 reproduced the alternative — a fold of writer
+  entries alone from the empty state: machine A and B collided and were `conflicted` at a
+  merge, the operator paired B's invoice to another payment, and a later merge re-folded B
+  back to active, leaving one invoice on two payments. Retirement is monotone *per
+  activation* (an activation only ever moves toward `conflicted` or `rejected`), so
+  recording it can never be wrong for that activation; it is **not** monotone per match
+  id, because the operator can confirm the same pairing again later — a `confirm_match`
+  or `record_match` naming an existing pairing is a **new activation** with its own
+  sequence, and a retirement bound to the older activation does not touch it (round-20
+  finding, both merge orders now agree). **Clearing an exemption is not monotone at all,
+  so it is never recorded** — an operator pair with sequence *s* clears any exemption
+  with a lower sequence as a derived effect inside the fold, and no `lift` entry is
+  written for it (rounds 18–19: a persisted "implicit lift" was re-folded out of order and
+  erased a newer exemption).
 - **Merge order is history, not a free variable.** Because retirements are recorded, two
   walk orders that retire different things leave different logs, and the two ledgers
   differ. That is accepted and stated: what the ledger shows is the fold of what actually
@@ -398,12 +403,18 @@ failure:
   asked for a merge result independent of walk order and round 19 showed that goal
   contradicts durable retirement; durable retirement wins, because its failure mode is a
   double allocation of an invoice and the other's is a different candidate in the residue.
-- **Every activation is checked against occupancy.** Whenever a fold would make a pairing
-  active — at commit, at merge, or a re-fold — the store checks, atomically with the
-  fold, that the pairing's invoice is not active on another lineage; if it is, the pairing
-  is retired `conflicted` (recorded) with a residue line naming the other payment. The
-  invoice-cardinality invariant is therefore enforced on the fold, not only on the match
-  tools' writes.
+- **Every activation is checked against occupancy, under one stated serialization.**
+  Whenever a fold would make a pairing active — at commit, at merge, or a re-fold — the
+  store checks that the pairing's invoice is not active on another lineage; if it is, the
+  pairing is retired `conflicted` (recorded) with a residue line naming the other payment.
+  "Atomically" is a concrete contract, not a word (round-20 finding): the plugin server is
+  the store's **single writer**, every match write and every fan-in fold runs inside one
+  SQLite `BEGIN IMMEDIATE` transaction covering the fold, the occupancy read, the
+  retirement appends and the commit, and a **partial unique index on the invoice over
+  active states** (`matched`, `proposed`) backs the check — an index conflict is converted
+  into the same recorded `conflicted` retirement, never surfaced as an error. A
+  two-connection race test pins it. The invoice-cardinality invariant is therefore
+  enforced on the fold, not only on the match tools' writes.
 
 Rounds 14–16 found a different error and this restores nothing of it: those rounds
 *selected* "the latest entry" instead of folding, so a retirement committed later was never
@@ -460,7 +471,7 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
    | operator `exempt E` | every active **and `conflicted`** pairing → `rejected`, recorded; E stands, superseding any earlier standing exemption (round-18 finding: two exemptions meeting a pairing between them had no rule — the fold settles E10, P15, E20 as: exempt, P clears E10, E20 rejects P and stands) |
    | operator `lift` | clears the standing exemption; restores nothing; a `lift` folded from a lineage where it was valid but meeting no exemption in the merged fold is a no-op |
    | specialist `propose M, resolves=[…]` | every named id → `rejected`, **unconditionally and whatever its state at replay** (round-19 finding: at write time the list was validated against the conflicted set, but a re-fold can meet the same entry with those ids in other states; the specialist's judgment about them stands), then as `propose M` |
-   | store `retire X → conflicted \| rejected` | sets X's state; nothing else — this is how a committed retirement survives every re-fold |
+   | store `retire X@a → conflicted \| rejected` | X's **activation** *a* — the sequence of the writer entry that made X active — is retired to that state; nothing else. The entry is ignored when X's current activation is later than *a* (round-20 finding: a retirement bound to the match id alone, generated while re-folding an older activation, retired the operator's later confirmation of the same pairing), and it never moves `rejected` back to `conflicted`. This binding is what lets a committed retirement survive every re-fold without outliving the thing it retired |
    | fingerprint change on the live row | not an entry — validity is judged in steps 3 and 5 against the live row at reduction time |
 
    Then, over that state:
@@ -2233,7 +2244,15 @@ pass offers to resend that exact file, in words, like everything else.
   B@30]` ends A `conflicted`, `acct::open`, because normalization ran inside B's
   transition; a `propose C@40, resolves=[A, B]` re-folded after a merge that meanwhile
   rejected A and activated B still rejects both and leaves C the lone candidate; and a
-  `lift` folded from another lineage that meets no exemption is a no-op; `lift` with
+  `lift` folded from another lineage that meets no exemption is a no-op; **the round-20
+  activations**: `[propose P@10, confirm P@30]` merged with `[exempt@20]` ends
+  `acct::matched` — E@20 retires the activation P@10, the confirmation P@30 is a new
+  activation the retirement does not touch — and re-folding it again does not change it;
+  predecessors `[machine A@10]`, `[exempt@20, lift@25]` and `[propose C@30, confirm C@62]`
+  end C `acct::matched` under every merge order, because the A/C collision retired C's
+  activation at 30 and not its confirmation at 62; a recorded retirement never moves a
+  `rejected` activation to `conflicted`; and two connections activating one invoice on two
+  lineages in the same instant leave exactly one active and one recorded `conflicted`; `lift` with
   no exemption standing is refused and appends nothing; a merge that brings machine
   pairing A onto an exempt lineage leaves A `rejected` and the lineage
   `acct::no-invoice-expected`; an exemption on a portal vendor's row keeps `acct::portal`; an auto proposal at €90
