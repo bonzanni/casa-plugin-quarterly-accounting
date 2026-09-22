@@ -1433,8 +1433,11 @@ marker holding the backup id was compared with the operation id and a committed 
 was recorded as aborted) — appends `restore <op> of <backup> pending`, performs the
 transactional replacement, which also writes **the restore operation id** into a
 `ledger_meta` row **inside that same transaction, after the rows**, then appends
-`restore <op> committed`. Recovery runs at every `open_db`, **at the start of every mint and every restore,
-before the operation touches anything, and before `list_backups` answers** — the
+`restore <op> committed`. Recovery runs at every `open_db`, **at the start of every mint, every restore and every
+annotation write that carries a workflow string, before the operation touches anything,
+and before `list_backups` answers** (round-39 finding: with settlement required before
+mints, restores and listings but not before an ordinary write, a restore that committed
+and died left an already-open process checking its write against the stale generation) — the
 generation and the registration state that answer carries are what this plugin's
 freshness and restore checks read, and round 36 reproduced an already-open process
 answering with the pre-restore generation while the ledger already held the restored
@@ -1531,7 +1534,11 @@ write (round-38 finding, reproduced with the locks held — the listing simply b
 restore until after its capture). So **every annotation write that carries a workflow
 string also carries `expected_generation`, the restore generation the pass read from
 `list_backups`, and bank-feed rejects the write when the ledger's generation differs**,
-exactly as `expected_revision` guards this plugin's own store. The specialist passes it on
+exactly as `expected_revision` guards this plugin's own store — and the order inside
+bank-feed is fixed (round 39): the write's `BEGIN IMMEDIATE` first, then settlement under
+both locks, then the generation comparison against the settled index, then the mint if the
+workflow string is new, then the write; a mismatch rolls the whole transaction back,
+minting and writing nothing. A generation read before the lock is never what is compared. The specialist passes it on
 every `tag_transaction`, `untag_transaction` and `add_note`; a rejection stops the pass
 before any further write with "the ledger was restored since this pass began — reset the
 accounting store". The store also remembers the generation it last ran against, so a pass
@@ -2854,7 +2861,15 @@ and is resent only when the operator asks, as that exact file.
   pass reads generation 0, a restore then lands, and the pass's first `tag_transaction`
   with `expected_generation=0` is rejected and the pass stops with no write landed
   (round-38 S1); a `tag_transaction` carrying a workflow string without
-  `expected_generation` is refused; and a weekly `backup(reason="weekly")` interrupted
+  `expected_generation` is refused; a restore commits and dies before its terminal line,
+  then an already-open process issues a `tag_transaction` with the generation it read
+  earlier — the write's own settlement records the restore, the comparison fails, and
+  nothing is written or minted (round-39 S1) — including when the restored backup is a
+  weekly one that still carries the workflow registration, so no mint would have run and
+  nothing but the per-write settlement stands between the stale generation and a tag on
+  a reused row id (Astra's reproduction); a `tag_transaction` whose caller read the
+  generation, then let a restore commit, then acquired the lock, is rejected, since the
+  comparison happens after `BEGIN IMMEDIATE`; and a weekly `backup(reason="weekly")` interrupted
   after its pending line is settled at the next open exactly as a mint is; a crash between the restore's commit and its `committed` line is settled by
   the in-ledger marker at the next open, and the generation counts it once; a restore performed as attach-and-replace inside
   `BEGIN IMMEDIATE` while a second process holds a read transaction leaves that process
