@@ -1150,10 +1150,19 @@ prints it beside the bank coverage (`bank checked through 20 Sep · classificati
 expectation filtering or display cap** (round-28 finding, both reviewers: a stale
 `none` lineage is exactly the one a missing-list filter would drop, and it is exactly
 the one whose staleness may be hiding an errand): the status view, "what am I missing",
-"anything I should check" and a quarter view take **every managed lineage booked in the
-quarter(s) the view shows, whatever its expectation, tier or state, printed or not**,
-plus the older open items the view lists; a one-item question takes that lineage; a
-package takes the quarter's lineages. A member admitted and never observed has no
+"anything I should check" and a quarter view take **every managed lineage from the
+watermark through the latest quarter the view shows, whatever its expectation, tier or
+state, printed or not** — by effective date, which is `booking_date`, or `value_date`
+while the row is pending and has none, the same date admission uses (round-29 finding,
+both reviewers: "booked in the quarter" dropped every pending row from every scope, and
+"the older open items the view lists" let the display decide membership, so an older
+lineage cached as `none` that the classifier had since re-tagged to `invoice, required`
+sat outside the scope precisely while its staleness hid an errand). Those views reach
+every earlier quarter — they list older open items from any of them — so their coverage
+must answer for every earlier lineage too. `build_review(scope)` resolves that
+membership set first, uncapped and unfiltered, persists it with the rendering, and only
+then filters and caps what it prints; a one-item question takes that lineage; a package
+takes its quarter's lineages by the same effective date. A member admitted and never observed has no
 timestamp: it does not move the date, and the line says so in a count (`classification
 through 13 Sep · 2 never checked`), so a fresh admission can never read as fresh
 classification; a scope with no lineages at all prints `no transactions yet` and no
@@ -2597,12 +2606,18 @@ and is resent only when the operator asks, as that exact file.
   bank date without the classification date fails; a "what am I missing" view over a
   quarter holding a required lineage observed 22 Sep and a `none` lineage observed 13 Sep
   prints `classification through 13 Sep`, because membership precedes the filter; a
+  pending row admitted on its `value_date` is a member of that quarter's views; a Q2
+  lineage cached `none` and last observed 13 Sep, re-tagged since to `transport, fuel`,
+  is a member of a Q3 view's coverage although no view prints it, and the persisted
+  membership set of the rendering contains it; a
   scope holding a lineage admitted this pass and never observed prints `N never checked`
   and keeps the date of the observed ones; an empty scope prints `no transactions yet`
   and no dates; correcting a wrong-kind document's `kind` bumps the item's revision, a
   `confirm_match` bound to the old shown revision is refused, and the correction flow
   re-renders before applying; an operator `record_match(invoice)` on an exempt DBIT
-  tagged `transport, fuel` succeeds, the guard being evaluated after the lift; and
+  tagged `transport, fuel` succeeds, the guard being evaluated after the lift, while the
+  same call on a lineage whose counterparty override says `none` is refused, rolls the
+  lift back, and its refusal names the override; and
   `set_exemption` on that item rejects the pairing and produces a receipt naming both
   effects.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
