@@ -357,6 +357,40 @@ there are no unversioned flags. Consequences, each closing a reviewed failure pa
   transaction. (Round-2 finding: retarget/new-match collision; round-3 finding:
   two active `proposed` would themselves have violated cardinality.)
 
+**Decisions about a lineage form one ordered log, and the desired state is a function of
+it** (round-12 generalization). Rounds 10, 11 and 12 each found a lineage state the design
+had not decided — an exemption against `open`, a proposal against an exemption, an exempt
+predecessor merging into a successor the operator had since matched. Three instances of one
+shape: decisions were scattered across match records, a vendor field and an exemption flag,
+and every pairwise interaction had to be written down by hand. So the store keeps, per
+lineage, **one append-only decision log**: each entry is a decision kind (pair, unpair,
+exempt, lift, none-expected-by-vendor), its author (`auto` or `operator`), its sequence
+number from the same store-wide sequence the note revisions use, and the shown revision it
+was bound to when the author is the operator. Two rules, and only two, resolve every
+interaction, including the ones no table row anticipates:
+
+- **the latest operator decision wins**, and **a machine decision never overrides an
+  operator decision** — it is refused at write time (`record_match`/`propose_match` on an
+  exempt lineage, `set_exemption(auto)` does not exist) and surfaced as residue ("a document
+  turned up for a payment you exempted");
+- **an absence is not a decision.** A lift is an entry; a lineage that was never exempted
+  has no entry. Merging two lineages (§"The projection", fan-in) is the **union of their logs
+  in sequence order**, and the merged desired state is recomputed from that union by the
+  same two rules — so an exempt predecessor whose successor the operator later matched
+  ends matched (the later operator decision), and a matched predecessor whose successor the
+  operator later exempted ends exempt, with the pairing moved to `rejected` by the exemption
+  entry exactly as it would have been without the merge.
+
+**Operator authorship is checked, not declared** (round-12 S1). An `author=operator` write —
+`set_exemption`, `record_match`, `confirm_match`, `reject_match` from a correction — must
+carry the `render_id` of a delivered rendering that showed that item, and the server accepts
+the author only when the render log has it. A specialist working a pass holds no render ids,
+so it cannot lift an exemption or launder an auto pick into an operator decision by passing a
+word. Stated honestly: this is a guard against a mistaken caller, not a security boundary —
+both callers are trusted models on the operator's own box, and a model that called
+`build_review` first could forge the binding. It closes the reachable error, which is the
+specialist doing on its own what only a correction may do.
+
 **Cardinality invariants (server-enforced, not convention):**
 
 - At most one **active** (`matched` or `proposed`) match per transaction row, and at
@@ -447,8 +481,10 @@ precedence table named this fact and no tool stored it). Committing `exempt=true
 active pairing on that lineage to `rejected` in the same transaction, and while it stands
 the server refuses `record_match` and `propose_match` on the lineage — so an exemption and
 an active pairing never coexist. Lifting it is `exempt=false`, or an operator-authored
-`record_match`, which clears it in the same transaction. Vendor-level `none-expected`
-stays vendor-scoped, in `upsert_vendor`.
+`record_match`, which appends a lift in the same transaction. "Operator-authored" is a
+`render_id` binding the server checks against the render log, not a word the caller
+passes (§Match records, "Operator authorship is checked"). Vendor-level `none-expected`
+stays vendor-scoped, in `upsert_vendor`, and is a decision-log entry of its own kind.
 Projection: `list_projections()` — every transaction lineage with its desired tag set and
 snapshot, which is what the specialist reconciles against bank-feed;
 `record_observation(projection_id, observed_tags, observed_snapshot, error)` — what it
@@ -471,8 +507,17 @@ would leave corrections re-rendering forever. Corrections go through the ordinar
 Ellen resolves the operator's description to an item by reading `list_quarter_state`,
 and an ambiguous description is a question, never a pick.
 Ledger input: `import_ledger_export(path)` — takes (via `casa_handoff.capture`) the
-file bank-feed's `export_history` published to the handoff folder so the package's ledger can list the full quarter (unmatched DBIT and CRDT rows
-included); the match records alone cannot produce it. **It filters to the bound account
+file bank-feed's `export_history` published to the handoff folder. **It runs every pass,
+not only at packaging** (round-12 finding, both reviewers): the imported file is the pass's
+**bank snapshot**, the one complete read of the bound account this design has — admission,
+fingerprint revalidation of every active match and every delivered ledger row, and the
+package ledger all work from it. `export_history` writes every ledger column except the
+raw provider payload (`state`, `superseded_by`, `booking_date`, `value_date`, `direction`,
+`status`, `needs_review`, `review_reason` included) for every account and every state, as a
+file rather than model context, so nothing is truncated; the specialist calls it (it is a
+finance-role tool) and passes the path. At roughly half a kilobyte a row the handoff cap of
+25 MB is decades of one account's history. The package's ledger lists the full quarter from
+it (unmatched DBIT and CRDT rows included); the match records alone cannot produce it. **It filters to the bound account
 and to ACTIVE rows.** `export_history` runs `SELECT … FROM transactions ORDER BY …` with
 no state predicate (verified 2026-09-21, `tools_refresh.py:914`), so it returns
 superseded predecessors beside their successors: importing it raw and selecting "every
@@ -579,9 +624,16 @@ One object, owned by the plugin server, per **transaction lineage**:
   reviewers). **Eligibility** is a predicate on a row's *current* facts: on the bound
   account, direction DBIT, and dated on or after the **watermark** — by `booking_date`,
   or by `value_date` while the row is still pending and has none. **Admission** is the
-  moment a lineage gets a projection: every pass reads the bound account's active rows
-  in bulk (the fingerprint sweep already does) and admits **every eligible row that has
-  no projection yet** — never "every row we have not seen", because bank-feed corrects
+  moment a lineage gets a projection: every pass takes the **bank snapshot** (§Tool
+  surface, `import_ledger_export` — bank-feed's `export_history` through the handoff
+  folder, every row of every state with `value_date`, `state` and `superseded_by`) and
+  admits **every eligible row in it that has no projection yet**. Round 12 reproduced why
+  the snapshot is the only read that works: `list_transactions` truncates at 200 rows,
+  has no cursor outside the classifier-queue mode, and silently omits a pending row whose
+  `booking_date` is NULL — so "read the rows in bulk" through it would skip exactly the
+  pending payments that need admitting on their `value_date`. A pass whose snapshot import
+  failed or is absent reports admission and revalidation as **not checked**, never as
+  complete — never "every row we have not seen", because bank-feed corrects
   rows in place under the same `row_id` (a June 30 booking becomes July 1; a CRDT
   becomes a DBIT), and a row observed once and skipped must be admitted the pass it
   becomes eligible. Once admitted, a projection **persists for the lineage** through
@@ -667,7 +719,13 @@ One object, owned by the plugin server, per **transaction lineage**:
 - **Registered before its first external write**, retained after rejection, and retained
   after its tags are observed absent.
 - **Fan-in merges.** Two projections that resolve to one successor merge their aliases
-  and recompute a single projection atomically.
+  **and their decision logs**, in sequence order, and recompute a single projection
+  atomically from the merged log (§Match records, "Decisions… form one ordered log"). No
+  merge-specific precedence exists: the latest operator decision in the union wins, machine
+  decisions never override one, and a pairing the merged log no longer supports moves to
+  `rejected` (an exemption outranks it) or `conflicted` (two active pairings collide) in the
+  same transaction, with a residue line. Round 12 found "merge aliases and recompute" said
+  nothing about which exemption or lift survived; now nothing needs saying per case.
 
 **Invariant:** every managed lineage has exactly one current desired annotation, and
 every row its annotations can migrate to is reachable from that projection.
@@ -892,8 +950,10 @@ in week one and an operator who concludes after a month that the plugin does not
 
 1. **Repair sweep** (above), then Ellen delegates: “weekly pass, `<YYYY-Qn>` —
    report new transaction state and search plans.”
-2. **Specialist triage** over new DBIT transactions × invoice store × KB, reading
-   PDFs as needed.
+2. **Specialist: sync, snapshot, triage.** `sync`, then `export_history` →
+   `import_ledger_export` (the bank snapshot; the server admits newly eligible rows and
+   revalidates fingerprints from it), then triage over the newly admitted and still-open
+   DBIT lineages × invoice store × KB, reading PDFs as needed.
 
    **Auto-match bar (operator decision, 2026-09-21 — deliberately loose).** The
    plugin's job is to save the operator work. A bar tuned so tight that it matches
@@ -1375,7 +1435,7 @@ is the open item. Concretely, every pass does four things with four different sc
 |---|---|
 | **Admit newly eligible payments** | Every currently eligible active row on the bound account that has no projection yet (§"The projection", admission) — not "rows we have not seen", since an in-place correction can make a row we skipped last week eligible this week. Each lands in its own booking-date quarter, which is usually the current one but is decided by the row, never by the calendar on the day of the pass. |
 | **Search and match open items** | **Every unresolved payment, whatever quarter it belongs to** — subject to the search age-out below. September's stragglers keep being chased through October and beyond. |
-| **Repair sweep and fingerprint revalidation** | **Every active match in every quarter, AND every row of every delivered package** — the two sets are not the same, and an earlier draft used only the first (round-6 finding). A payment that shipped as `MISSING` has no match; so does every CRDT row; a change to either still makes the accountant's copy wrong, which is precisely what "a delivered quarter changed underneath" promises to catch. The sweep therefore compares the stored fingerprint of every delivered ledger row against current bank-feed state, independent of whether an invoice was ever matched to it. It reads the account's rows in bulk and compares locally rather than querying per row. |
+| **Repair sweep and fingerprint revalidation** | **Every active match in every quarter, AND every row of every delivered package** — the two sets are not the same, and an earlier draft used only the first (round-6 finding). A payment that shipped as `MISSING` has no match; so does every CRDT row; a change to either still makes the accountant's copy wrong, which is precisely what "a delivered quarter changed underneath" promises to catch. The sweep therefore compares the stored fingerprint of every delivered ledger row against current bank-feed state, independent of whether an invoice was ever matched to it. It compares against the pass's bank snapshot (§Tool surface, `import_ledger_export`) locally rather than querying per row; without a snapshot this step is **not checked** and the coverage line says so. |
 | **Annotate** | Whatever it just decided. |
 
 **Search effort ages out; the item never does.** An unresolved payment stops being
@@ -1934,7 +1994,15 @@ pass offers to resend that exact file, in words, like everything else.
   enumerated as `ineligible`; a CRDT corrected in place to DBIT, and a June 30 row
   corrected to July 1 across the watermark, are admitted on the next pass although both
   were observed and skipped before; and a pending row admitted on its `value_date`
-  follows its supersession to the booked successor.
+  follows its supersession to the booked successor. **And the round-12 decision log**: a
+  pending row with `booking_date NULL` is admitted from the snapshot (pinned against the
+  real `export_history` output, since `list_transactions` omits it); a pass with no
+  snapshot reports admission and revalidation as not checked; the same four decisions
+  applied in each of the 24 orders to two lineages that then merge reach the desired state
+  the two rules predict, and the merged log has one lift for one lift appended; an
+  `author=operator` write without a valid `render_id` is refused, and one carrying a
+  render id for a different item is refused; and a `propose_match` on an exempt lineage is
+  refused and appears in the residue.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
