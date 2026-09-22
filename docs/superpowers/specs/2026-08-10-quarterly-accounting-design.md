@@ -1426,21 +1426,28 @@ fsyncs it, appends `mint <id> pending`, renames the copy into place, then regist
 commits the write in the ledger transaction, then appends `mint <id> committed`. A
 **restore** appends `restore <id> pending`, performs the transactional replacement — which
 also writes the restored backup's id into a `ledger_meta` row **inside that same
-transaction** — then appends `restore <id> committed`. Recovery at every `open_db` walks
-the index: a `mint pending` with no `committed` and no matching registration in the ledger
-is an orphan backup — kept, since it is consistent, relabelled `orphan`; a registration
-whose backup file is missing fails that workflow's writes closed until the operator
-restores or re-mints; a `restore pending` with no `committed` is settled by the ledger's
-own marker — marker equal to the id means the replacement committed, and recovery appends
-`committed`; otherwise it appends `aborted`. **The restore generation is the count of
-`restore … committed` lines**, so it is monotonic by construction and never read from the
+transaction** — then appends `restore <id> committed`. Recovery at every `open_db` runs
+**under the ledger's writer lock and an exclusive lock on the index file** (round-33
+finding: two processes recovering at once each appended `committed` for one restore and
+counted it twice), and **each operation id gets exactly one terminal record** — a second
+process finding the terminal line already present appends nothing. It walks the index: a
+`mint pending` whose final backup file is present but has no matching registration in the
+ledger is an orphan backup — kept, since it is consistent, relabelled `orphan`; a `mint
+pending` whose final file is absent (the crash came before the rename) has its temporary
+file removed and `aborted` appended, and the next write mints afresh; a registration whose
+backup file is missing fails that workflow's writes closed until the operator restores or
+re-mints; a `restore pending` with no terminal line is settled by the ledger's own marker —
+marker equal to the id means the replacement committed, and recovery appends `committed`;
+otherwise it appends `aborted`. **The restore generation is the number of distinct restore
+ids with a `committed` line**, so it is monotonic by construction and never read from the
 ledger. Reasons: `weekly`
 (taken from the finance pass, since neither plugin can schedule), `install:<workflow
 string>` (the mint above), `manual`. Retention: a bounded number of weekly ones, every
 install one until the operator deletes it. `restore_backup` is a protected tool — Casa
 asks the operator for one tap naming the backup — performed **in place, as ordinary SQL
 inside one `BEGIN IMMEDIATE`**: the backup file is attached, every table's rows are
-replaced from it, and the transaction commits; the consent preflight below runs inside the
+replaced from it — `sqlite_sequence` included, so row ids resume from the backup's
+counter and are not reallocated (round 33) — and the transaction commits; the consent preflight below runs inside the
 same transaction, so no other specialist's write can land between the check and the
 replacement, and other specialist server processes on the same file (Casa spawns one per
 session) see the restored rows at their next transaction rather than writing into a
@@ -2781,8 +2788,10 @@ and is resent only when the operator asks, as that exact file.
   and `check_setup` reports the older version's writes still present; a restore across a
   renewed consent keeps the live `sessions` and account bindings and restores everything
   else, and the next sync succeeds against the live consent; a crash between `mint pending`
-  and the ledger commit leaves an `orphan` backup and no registration, and the next write
-  mints again; a crash between the restore's commit and its `committed` line is settled by
+  and the rename leaves a temp file that recovery removes with an `aborted` line; a crash
+  between the rename and the ledger commit leaves an `orphan` backup and no registration,
+  and the next write mints again; two processes recovering the same pending restore at
+  once produce one `committed` line and a generation that advances by one; a crash between the restore's commit and its `committed` line is settled by
   the in-ledger marker at the next open, and the generation counts it once; a restore performed as attach-and-replace inside
   `BEGIN IMMEDIATE` while a second process holds a read transaction leaves that process
   seeing the restored rows on its next write transaction; a disk-full failure during the
