@@ -558,10 +558,16 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
    **except for a kind mismatch, which no confirmation cures** (round-27 finding): a
    payslip does not become an invoice because the operator says so twice. `confirm_match`
    and `record_match` refuse, with the facts, a document whose kind is not the lineage's
-   current expectation kind; the operator's ways out are the right-kind candidate shown
-   `conflicted` beside P, correcting the document's kind (`update_document_metadata`), or
-   correcting the expectation (`set_expectation`, `set_exemption`) — after which the same
-   confirmation goes through. Then step 8.
+   current expectation kind; the operator has two ways to a match and one way to close the item without one
+   (round-28 finding, both reviewers: the earlier list mixed them and skipped a step):
+   confirm the right-kind candidate shown `conflicted` beside P; or correct the
+   document's kind (`update_document_metadata`) or the expectation (`set_expectation`) —
+   **either correction changes the proposition and bumps the item's revision, so the
+   correction flow re-renders and applies nothing until the operator has seen the item
+   again** (§"Descriptions choose the target; the revision the operator was SHOWN is what
+   binds") — and then confirm P against what was shown. `set_exemption` is the third
+   thing, not a route to a match: it rejects P and derives `none`, and its receipt says
+   so (`Exempted 4 Adobe; unpaired payslip P.`). Then step 8.
 4. **Machine candidates — a set, judged as a set, and `conflicted` is sticky.** This
    normalization runs **inside every transition that adds a machine candidate** (step 2's
    table), and what it retires is recorded; the reducer then reads the settled state. The
@@ -831,7 +837,11 @@ checked inside the transaction**: each named one goes `rejected`, and a list tha
 fewer, names an id that is no longer `conflicted` (the operator confirmed it meanwhile —
 round-18 finding, where "all of them" let a superset retire the operator's pairing), or
 names an id from another lineage is refused whole, with nothing mutated. A `confirm_match`
-on an exempt lineage appends `lift` then `pair`, exactly as `record_match` does.
+on an exempt lineage appends `lift` then `pair`, exactly as `record_match` does — and
+**the kind guard is evaluated against the expectation the lineage will have after the
+lift**, in the same transaction, rolling back whole on refusal (round-28 finding: checked
+before the lift, every operator match on an exempt lineage would refuse, since an
+exemption's expectation is `none`).
 Exemption: `set_exemption(projection_id, exempt, expected_revision)` — the operator's
 per-payment "needs no invoice" / "does need one after all", a lineage-scoped decision
 stored on the projection with the projection's revision as its CAS (round-11 finding: the
@@ -853,8 +863,11 @@ account, gmail tools, last sync), one branch at the top of every pass;
 `bind_account(account_id)` — records the business account and its ledger instance on
 first run; `set_package_name(name)` — changes the zip filename prefix, which otherwise
 defaults and is never asked about.
-Review: `build_review(scope)` — renders the current view (missing first, then guessed)
-from store state and persists it as an **unshown rendering**: an id, the moment, and the
+Review: `build_review(scope)` — `scope` is a quarter (default: the current one), a list of
+quarters, or one lineage; it fixes the projection set the rendering covers and the set
+the coverage dates are computed over, before any filtering or capping (§"The sweep"). It
+renders the current view (missing first, then guessed) from store state and persists it
+as an **unshown rendering**: an id, the moment, and the
 revision of every item in it. `mark_rendering_delivered(render_id)` — called by Ellen
 **after** the send succeeds — is what promotes it to shown and advances the
 shown-revision pointers. Without that second call the rendering stays unshown, because
@@ -1133,7 +1146,18 @@ every row was observed this cycle reads as fresh, and one row the cycle has not 
 yet drags the date back to when it was last seen, which is the honest number. Every view
 prints it beside the bank coverage (`bank checked through 20 Sep · classification through
 13 Sep`); the second date is the one that says how stale the expectation kinds behind
-"what am I missing" may be. A projection whose
+"what am I missing" may be. **Membership is defined per view, and fixed before any
+expectation filtering or display cap** (round-28 finding, both reviewers: a stale
+`none` lineage is exactly the one a missing-list filter would drop, and it is exactly
+the one whose staleness may be hiding an errand): the status view, "what am I missing",
+"anything I should check" and a quarter view take **every managed lineage booked in the
+quarter(s) the view shows, whatever its expectation, tier or state, printed or not**,
+plus the older open items the view lists; a one-item question takes that lineage; a
+package takes the quarter's lineages. A member admitted and never observed has no
+timestamp: it does not move the date, and the line says so in a count (`classification
+through 13 Sep · 2 never checked`), so a fresh admission can never read as fresh
+classification; a scope with no lineages at all prints `no transactions yet` and no
+dates. Otherwise both dates are always printed; neither is ever printed alone. A projection whose
 repair is refused — tag cap reached, a persistent API failure — is recorded with the
 refusal and surfaced, never silently retried into an infinite loop.
 
@@ -2570,7 +2594,17 @@ and is resent only when the operator asks, as that exact file.
   DBIT `refund`'s search plan targets Sent and its credit note naming the client is not
   labelled `recipient?`; and a view over a scope with one lineage last observed 13 Sep and
   the rest today prints `classification through 13 Sep`, while a renderer that prints the
-  bank date without the classification date fails.
+  bank date without the classification date fails; a "what am I missing" view over a
+  quarter holding a required lineage observed 22 Sep and a `none` lineage observed 13 Sep
+  prints `classification through 13 Sep`, because membership precedes the filter; a
+  scope holding a lineage admitted this pass and never observed prints `N never checked`
+  and keeps the date of the observed ones; an empty scope prints `no transactions yet`
+  and no dates; correcting a wrong-kind document's `kind` bumps the item's revision, a
+  `confirm_match` bound to the old shown revision is refused, and the correction flow
+  re-renders before applying; an operator `record_match(invoice)` on an exempt DBIT
+  tagged `transport, fuel` succeeds, the guard being evaluated after the lift; and
+  `set_exemption` on that item rejects the pairing and produces a receipt naming both
+  effects.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
