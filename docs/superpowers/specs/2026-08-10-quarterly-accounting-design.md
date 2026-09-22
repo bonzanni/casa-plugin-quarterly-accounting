@@ -10,7 +10,8 @@ All three judgment calls made during convergence are now ruled. **Ruling 1 (oper
 directions; "open" means "a required supporting document is missing", not "an invoice";
 what document a transaction needs follows from tx-classifier's classification through a
 stored expectation mapping — this plugin classifies nothing (§"Document expectation"). That
-change is a new mechanism and went back through review (rounds 25+). The other two were
+change is a new mechanism and went back through review: rounds 25–30, ending with Astra
+and Terra both **SHIP** at the round-30 tree (b0508f9), nothing at S1/S2. The other two were
 ruled the same day: the admission
 watermark defaults to the binding quarter, and emailing the package to the operator's own
 mailbox is on the free rung (the branch is restored; the recipient is checked by Casa's
