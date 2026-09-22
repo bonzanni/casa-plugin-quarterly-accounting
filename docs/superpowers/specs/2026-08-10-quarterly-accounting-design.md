@@ -5,9 +5,10 @@ Review status: **converged 2026-09-22 at rounds 10–22** — Astra (`gpt-6-astr
 Terra (`gpt-5.6-terra`, medium) both **SHIP** at the round-22 tree, nothing at S1/S2, on
 harnesses that reproduce against bank-feed 0.10.1, Casa 0.326.0–0.328.0 and gmail 0.9.0
 source. Each round's findings and fixes are in that round's commit message (`git log`).
-Three judgment calls made during convergence without an operator ruling, flagged for one:
-CRDT rows are unmanaged (no projection, no `acct::` tag); the admission watermark defaults to
-the binding quarter; the package-to-gmail delivery branch is out of v1.
+Two judgment calls made during convergence still await an operator ruling: CRDT rows are
+unmanaged (no projection, no `acct::` tag); the package-to-gmail delivery branch is out of
+v1. The admission watermark defaulting to the binding quarter was **ruled by the operator,
+2026-09-22**.
 Revised 2026-09-22 — re-verified against casa **v0.328.0** and bank-feed **0.10.1**
 after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31 landed.
 Required floors: casa **0.326.0**, bank-feed **0.10.0** (§Casa baseline).
@@ -863,9 +864,10 @@ One object, owned by the plugin server, per **transaction lineage**:
   | watermark moved later | **not offered** in v1 | — |
 
   No CRDT row is ever eligible (§Non-goals). The watermark is stored with the binding and
-  defaults to **the first day of the quarter in which the account was bound** — the
-  quarter the operator installed the plugin to get done, and nothing older, which is what
-  §Non-goals' "no bootstrap over historical quarters" means in row terms. The first view
+  defaults to **the first day of the quarter in which the account was bound** (operator
+  ruling, 2026-09-22) — the quarter the operator installed the plugin to get done, and
+  nothing older, which is what §Non-goals' "no bootstrap over historical quarters" means
+  in row terms. The first view
   says so in one line (`Starting from Q3 2026 — say "start from Q2" to go further back`).
   Without a boundary at all, "whatever bank-feed has that we have not seen" admitted two
   years of history and wrote `acct::open` across it on install day (round-10 finding).
