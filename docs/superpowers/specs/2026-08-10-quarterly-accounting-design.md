@@ -1,6 +1,9 @@
 # casa-plugin-quarterly-accounting — design
 
 Status: draft for operator review · 2026-08-10
+Revised 2026-09-22 — re-verified against casa **v0.328.0** and bank-feed **0.10.1**
+after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31 landed.
+Required floors: casa **0.326.0**, bank-feed **0.10.0** (§Casa baseline).
 Revised 2026-09-20 — re-verified against casa **v0.323.0**. Both scheduled-turn
 dependencies landed; the contracts they landed with (one attention lane, durable
 asks, background jobs) change the weekly pass. See “Casa baseline”.
@@ -163,12 +166,18 @@ vendor name, an amount, a date, and "wrong", "good", "needs no invoice", "rebuil
 only package-identity concept the operator ever meets. Everything else is machinery, and machinery that leaks onto the sheet
 is a defect.
 
-## Casa baseline (re-verified 2026-09-21, casa **v0.324.0**)
+## Casa baseline (re-verified 2026-09-22, casa **v0.328.0**; required floor **v0.326.0**)
 
 v1 was written against v0.2xx with two scheduled-turn enhancements outstanding. Both
 landed, and each brought contracts this plugin must design against, not merely enjoy.
 
-**The required floor is v0.324.0, not v0.323.0** (round-5 finding). ha-casa-app#990 —
+**The required casa floor is v0.326.0**, and every step up to it is load-bearing:
+v0.324.0 for #990 (below), v0.325.0 for inbound Telegram documents (#1036), and v0.326.0
+for the cross-plugin handoff folder (#486) that ingest and ledger import both go through.
+An earlier revision of this section named v0.324.0 as the floor; that stopped being true
+when ingest moved onto the handoff folder.
+
+**Why v0.324.0 mattered on its own** (round-5 finding). ha-casa-app#990 —
 `send_message` reporting success when the channel delivered nothing — is fixed in
 **v0.324.0** (`23c44160`, "send_message reports a message that reached nobody"), one
 commit after the v0.323.0 tag. The distinction is not pedantry: on v0.323.0 a fault
@@ -236,8 +245,19 @@ attaches handoff files. bank-feed's `export_history` publishes its ledger export
 Casa's `share_inbound_file` copies a file the operator sent in Telegram there. This
 plugin vendors `casa_handoff.py` verbatim.
 
-**bank-feed floor: 0.9.0** (casa-specialist-finance component 0.10.0,
-[casa-specialist-finance#31](https://github.com/bonzanni/casa-specialist-finance/issues/31)).
+**bank-feed floor: 0.10.0** (casa-specialist-finance component 0.11.0). Three fixes sit
+below it, each load-bearing:
+
+| bank-feed | Fix | Why this plugin needs it |
+|---|---|---|
+| 0.8.1 | [#30](https://github.com/bonzanni/casa-specialist-finance/issues/30) — a pending row is superseded once; a stale second supersession is refused (`StalePlan`) | Otherwise overlapping syncs strand migrated annotations on a row no lineage walk reaches. |
+| 0.9.0 | [#31](https://github.com/bonzanni/casa-specialist-finance/issues/31) — `owner::name` tags are another workflow's | The whole `acct::` vocabulary below depends on it. |
+| **0.10.0** | `export_history` publishes into Casa's handoff folder | `import_ledger_export` takes the export only through `casa_handoff.capture` and refuses any other path. On 0.9.x the export lands in bank-feed's private data directory, so **packaging fails closed**. |
+
+An earlier revision named 0.9.0 as the floor — correct for the namespace, one version
+short once ledger import moved onto the handoff folder.
+
+The namespace itself ([#31](https://github.com/bonzanni/casa-specialist-finance/issues/31)):
 A tag written `owner::name` belongs to another workflow: bank-feed never counts it as
 content classification (the classifier's untagged queue keeps the row), gives it its own
 per-row budget (16 per namespace, 64 namespaced in all, apart from the 32 classification
@@ -612,24 +632,31 @@ one loop.
 - **Wrong note text is permanent.** Revisions make duplicates interpretable, not
   preventable: two specialists can both observe a missing snapshot and append it, and a
   crash after an append leaves the same ambiguity.
-- **Absence from a note read is not proof of non-delivery.** `get_transaction` returns
-  only the newest 20 notes (verified 2026-09-21: `tools_read.py` — `ORDER BY note_id
-  DESC LIMIT 20`). Restating the current snapshot preserves visibility at the cost of
-  more duplicates.
+- **Absence from a note read is not proof of non-delivery.** `get_transaction` still
+  returns only the newest 20 notes (`ORDER BY note_id DESC LIMIT 20`). Restating the
+  current snapshot preserves visibility at the cost of more duplicates. Since bank-feed
+  0.10.1 the reader is at least told how to interpret what it sees: the journal header
+  reads *"where they conflict, the latest reflects the outcome"* and survives the cap,
+  and a note-search hit says how many newer notes follow it on that row. That matches
+  this design's own convention — tags carry current state, notes carry the story — and
+  it helps a human reading the ledger; it does not change what this plugin may conclude
+  from a read, so it is not part of the floor.
 - **Projections accumulate.** Every sweep revisits every one, and safe retirement is
   unavailable without evidence that old writers cannot return. Tag caps or a persistently
   failing API can block repair, which is then reported rather than absorbed.
 - **Identity tracking is real work.** Successor chains, merges, vanished rows and changed
   fingerprints still need handling; this centralises those obligations rather than
   erasing them.
-- **A lineage can be broken upstream**, and then annotations sit where no lineage walk
-  reaches them. Two overlapping bank-feed syncs can supersede one predecessor in turn,
-  the second overwriting the first's `superseded_by`, leaving the first successor holding
-  migrated tags and notes
-  ([casa-specialist-finance#30](https://github.com/bonzanni/casa-specialist-finance/issues/30),
-  reproduced against the real apply path). Not closable from this side: the projection
-  cannot retain an alias for a successor no specialist ever observed. Recorded because a
-  stranded `acct::matched` keeps asserting a pairing the operator may have rejected.
+- ~~**A lineage can be broken upstream.**~~ **Closed upstream, bank-feed 0.8.1**
+  ([casa-specialist-finance#30](https://github.com/bonzanni/casa-specialist-finance/issues/30)).
+  Two overlapping syncs could supersede one predecessor in turn, the second overwriting
+  `superseded_by` and stranding the first successor's migrated tags and notes where no
+  lineage walk reached them — not closable from this side, since the projection cannot
+  hold an alias for a successor nobody observed. bank-feed now supersedes only a row
+  that is still `state='active'` with `superseded_by IS NULL`; the losing run raises
+  `StalePlan`, rolls back whole, and `sync` reports it `FAILED` with the ledger unchanged
+  (verified 2026-09-22, `apply.py`). Lineage edges are now written once, which is the
+  property the projection's alias model assumed.
 
 
 ## Setup (install day, once)
@@ -1064,6 +1091,20 @@ runtime. The plugin cannot close this from its own side; closing it would need a
 platform path that renders and delivers without passing through model-authored text.
 Until then the honest position is that this defence depends on model compliance, and the
 mechanisms below reduce rather than eliminate the exposure.
+
+**What casa 0.327.0 changes, and what it does not.** Casa now prefixes everything Ellen
+sends in a turn with *"Casa: Ellen answered without opening “invoice.pdf”"* when the
+operator sent files and she answered without opening any of them — including text she
+stores for a later turn or hands to another agent. That is exactly the shape of
+enforcement this section says is missing: a platform rule applied to model-authored text,
+disclosed rather than suppressed. **But it covers files the operator sent, not ledger
+state.** A status answer invented without calling `list_quarter_state` triggers nothing,
+because no file was involved. Two things follow. For the document-handover flow, the
+platform now catches the specific failure of describing an invoice nobody opened — a real
+reduction in this plugin's exposure. And casa 0.327.0/0.328.0 route every piece of text
+Ellen emits through one place that applies per-turn rules (#1038), which is the natural
+home for an equivalent rule — *"answered about the ledger without reading it"* — should
+one ever be proposed. Until then the residual risk above stands as written.
 
 **Why it matters more here than in most designs.** Every guarantee in the pull model —
 loose matching is safe because guesses are shown, the coverage line is how you learn the
