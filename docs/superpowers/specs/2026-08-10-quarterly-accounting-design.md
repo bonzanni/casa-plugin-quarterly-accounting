@@ -1433,8 +1433,13 @@ marker holding the backup id was compared with the operation id and a committed 
 was recorded as aborted) — appends `restore <op> of <backup> pending`, performs the
 transactional replacement, which also writes **the restore operation id** into a
 `ledger_meta` row **inside that same transaction, after the rows**, then appends
-`restore <op> committed`. Recovery at every `open_db` runs
-**under the ledger's writer lock and an exclusive lock on the index file** (round-33
+`restore <op> committed`. Recovery runs at every `open_db` **and again at the start of every mint and every
+restore, before the operation touches anything** — an already-open process has no other
+occasion to learn of a restore another process left unsettled, and round 35 reproduced a
+second restore committing over a first one's marker before the first was settled, so the
+first was recorded aborted and the generation advanced by one for two restores. It runs
+**under the ledger's writer lock and an exclusive lock on the index file**, and a mint or
+restore keeps the writer lock from that settlement through its own commit (round-33
 finding: two processes recovering at once each appended `committed` for one restore and
 counted it twice), and **each operation id gets exactly one terminal record** — a second
 process finding the terminal line already present appends nothing. It walks the index: a
@@ -2811,7 +2816,10 @@ and is resent only when the operator asks, as that exact file.
   and `notes_match` finds a restored note afterwards; a rename without a directory fsync
   followed by power loss is the case the directory fsync exists for, pinned by a test that
   checks the final file's presence after a simulated loss; two processes recovering the same pending restore at
-  once produce one `committed` line and a generation that advances by one; a crash between the restore's commit and its `committed` line is settled by
+  once produce one `committed` line and a generation that advances by one; process A
+  commits restore R1 and dies before its terminal line while process B is already open,
+  then B restores R2 of the same backup — B's settlement records R1 `committed` before R2
+  begins, and the generation advances by two; a crash between the restore's commit and its `committed` line is settled by
   the in-ledger marker at the next open, and the generation counts it once; a restore performed as attach-and-replace inside
   `BEGIN IMMEDIATE` while a second process holds a read transaction leaves that process
   seeing the restored rows on its next write transaction; a disk-full failure during the
