@@ -407,13 +407,25 @@ failure:
   Whenever a fold would make a pairing active — at commit, at merge, or a re-fold — the
   store checks that the pairing's invoice is not active on another lineage; if it is, the
   pairing is retired `conflicted` (recorded) with a residue line naming the other payment.
-  "Atomically" is a concrete contract, not a word (round-20 finding): the plugin server is
-  the store's **single writer**, every match write and every fan-in fold runs inside one
-  SQLite `BEGIN IMMEDIATE` transaction covering the fold, the occupancy read, the
-  retirement appends and the commit, and a **partial unique index on the invoice over
-  active states** (`matched`, `proposed`) backs the check — an index conflict is converted
-  into the same recorded `conflicted` retirement, never surfaced as an error. A
-  two-connection race test pins it. The invoice-cardinality invariant is therefore
+  "Atomically" is a concrete contract, not a word (rounds 20–21): there is **one SQLite
+  store and several server processes writing it** — Casa spawns the plugin's MCP server
+  per agent session (`plugin-runtime.md`: "an agent's … MCP process spawn"), so Ellen's
+  server and each ephemeral specialist's server are separate processes on the same
+  `$CLAUDE_PLUGIN_DATA`. Round 21 reproduced what "single writer" would have hidden: a
+  second `BEGIN IMMEDIATE` on a locked store fails with *database is locked*, and a
+  correction the operator just gave would go unapplied. So: every match write and every
+  fan-in fold **acquires the store's write lock** (`BEGIN IMMEDIATE` with a bounded
+  `busy_timeout`, retried until acquired or the bound expires), **allocates its writer
+  sequence number inside that transaction**, and does the fold, the occupancy read, the
+  retirement appends and the commit before releasing it. The loser of a same-invoice race
+  is therefore always the write that serialized later — the higher sequence — and a
+  **partial unique index on the invoice over active states** (`matched`, `proposed`)
+  backs the check: an index conflict is converted into the same recorded `conflicted`
+  retirement for that later activation, never surfaced as an error. Lock contention that
+  outlives the bound is the one thing that does surface: the tool returns the error and
+  the receipt says the correction was not applied, so nothing is silently dropped. A
+  race test across two connections **and two processes**, including forced lock
+  contention, pins it. The invoice-cardinality invariant is therefore
   enforced on the fold, not only on the match tools' writes.
 
 Rounds 14–16 found a different error and this restores nothing of it: those rounds
@@ -2251,8 +2263,10 @@ pass offers to resend that exact file, in words, like everything else.
   predecessors `[machine A@10]`, `[exempt@20, lift@25]` and `[propose C@30, confirm C@62]`
   end C `acct::matched` under every merge order, because the A/C collision retired C's
   activation at 30 and not its confirmation at 62; a recorded retirement never moves a
-  `rejected` activation to `conflicted`; and two connections activating one invoice on two
-  lineages in the same instant leave exactly one active and one recorded `conflicted`; `lift` with
+  `rejected` activation to `conflicted`; and two connections — and separately two processes — activating one invoice on two
+  lineages in the same instant leave exactly one active and one recorded `conflicted`,
+  with the later-serialized sequence the loser, and forced lock contention within the
+  bound still applies both writes in order; `lift` with
   no exemption standing is refused and appends nothing; a merge that brings machine
   pairing A onto an exempt lineage leaves A `rejected` and the lineage
   `acct::no-invoice-expected`; an exemption on a portal vendor's row keeps `acct::portal`; an auto proposal at €90
