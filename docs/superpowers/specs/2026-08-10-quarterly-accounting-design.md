@@ -5,8 +5,13 @@ Review status: **converged 2026-09-22 at rounds 10–22** — Astra (`gpt-6-astr
 Terra (`gpt-5.6-terra`, medium) both **SHIP** at the round-22 tree, nothing at S1/S2, on
 harnesses that reproduce against bank-feed 0.10.1, Casa 0.326.0–0.328.0 and gmail 0.9.0
 source. Each round's findings and fixes are in that round's commit message (`git log`).
-One judgment call made during convergence still awaits an operator ruling: CRDT rows are
-unmanaged (no projection, no `acct::` tag). Two were ruled on 2026-09-22: the admission
+All three judgment calls made during convergence are now ruled. **Ruling 1 (operator,
+2026-09-22) reshaped the scope**: every transaction on the account is managed, both
+directions; "open" means "a required supporting document is missing", not "an invoice";
+what document a transaction needs follows from tx-classifier's classification through a
+stored expectation mapping — this plugin classifies nothing (§"Document expectation"). That
+change is a new mechanism and went back through review (rounds 25+). The other two were
+ruled the same day: the admission
 watermark defaults to the binding quarter, and emailing the package to the operator's own
 mailbox is on the free rung (the branch is restored; the recipient is checked by Casa's
 one-tap approval of the exact send, and email is under the delivery log). Rounds 23–24
@@ -28,16 +33,19 @@ own three upstream prerequisites as non-blocking under coordination cost.
 
 Automate the quarterly accounting preparation for the operator's B.V.: match every
 transaction on the business bank account (already ingested by bank-feed) against its
-invoice, collect the invoice PDFs, and deliver — shortly after each quarter closes — a
-single zip containing a SnelStart-ready invoice folder, a ledger, and a notes file.
+supporting document — a vendor's invoice, the sales invoice the operator issued, a
+payslip, or nothing at all when none exists — collect the documents, and deliver, whenever
+the operator asks for a quarter, a single zip containing a SnelStart-ready invoice folder,
+a ledger, and a notes file.
 Along the way, keep bank-feed tags and notes authoritative so the bank ledger itself is
 progressively annotated.
 
 ## How it works, in three sentences
 
 **1. The work runs on its own, weekly, and says nothing.** A scheduled pass syncs the
-bank feed, matches new payments to invoices, chases whatever is still open from earlier
-quarters, annotates the operator's own ledger, and delivers no message. The only thing it ever sends unprompted is a fault that would
+bank feed, lets the classifier say what each new transaction is, matches transactions to
+the documents they need, chases whatever is still open from earlier quarters, annotates
+the operator's own ledger, and delivers no message. The only thing it ever sends unprompted is a fault that would
 otherwise go unnoticed (§"When the plugin may speak first").
 
 **2. The operator interrogates it whenever they have time.** How does the quarter stand,
@@ -54,8 +62,10 @@ Everything else in this document is the detail under those three.
 
 ## Goals
 
-- Weekly, mostly-autonomous matching of DBIT transactions to invoice PDFs. The plugin
-  **decides and shows** rather than asking: a loose match that is visible and reversible
+- Weekly, mostly-autonomous matching of every transaction, both directions, to the
+  document it needs — purchase invoices and sales invoices first, because those are what
+  the VAT return turns on (operator, 2026-09-22); payslips and statements as a second
+  tier. The plugin **decides and shows** rather than asking: a loose match that is visible and reversible
   beats a strict one that hands the work back (see §“The reversibility ladder”).
 - **It must be faster than doing it by hand, and it must cost nothing when ignored.**
   The plugin sends nothing on a schedule; asking it for the picture and correcting one
@@ -76,18 +86,27 @@ Everything else in this document is the detail under those three.
 - A lean vendor knowledge base whose primary asset is the **researched invoice
   deep-link** per portal vendor — found once, at real effort, reused every quarter.
 - Bank-feed stays consistent: every match decision is mirrored into bank-feed tags and
-  notes, with drift detected and repaired.
+  notes, with drift detected and repaired — so filtering the operator's own ledger by
+  `acct::open` answers "which transactions still lack a required document" without
+  asking the plugin anything.
 
 ## Non-goals (v1)
 
 - No vendor-portal scraping or credentialed browser automation. Portal invoices are
   link-only: the ledger carries the most precise link the agent could research.
-- No invoice matching for CRDT (incoming) transactions, and no accounting tag on them
-  either (round-10 finding: an `acct::open` on an incoming transfer would tell the ledger
-  it "lacks an invoice"). They are not managed lineages — no projection, no `acct::`
-  write. They reach the package through bank-feed's ledger export, carrying whatever
-  classification tx-classifier gave them. The ledger still lists the full quarter, both
-  directions.
+- **No classification by this plugin.** What a transaction *is* — a software purchase, a
+  salary, a client payment, an internal transfer, a tax refund — is tx-classifier's
+  judgment, made in the same specialist session, and this plugin never duplicates it
+  (operator, 2026-09-22). It reads the classification and derives what document, if any,
+  the transaction needs (§"Document expectation"). Until a row is classified this plugin
+  does not know what to look for and does not guess.
+- **No sales-invoice source beyond the mailbox and the operator's hand.** A client
+  payment's sales invoice is found in Gmail (the sent copy) or handed over; reading it
+  straight from the operator's invoicing tool is a v2 source, not a v1 dependency.
+- Incoming transactions are matched like outgoing ones — to the sales invoice they settle
+  — but nothing in v1 does anything with the sales invoice beyond filing and packaging
+  it. Round 10 had cut incoming rows out entirely to stop `acct::open` reading as "missing
+  an invoice" on a refund; the operator's ruling fixed the meaning of the tag instead.
 - No public release. Private GitHub repo; casa installs it via the authenticated
   fetch path (`GITHUB_TOKEN` through `git-credential-casa.sh`).
 - No bootstrap pass over historical quarters. The KB starts empty and earns entries
@@ -115,7 +134,7 @@ server.** All document reading and all matching judgment happen in agents via `R
 | Casa core | Fires the weekly trigger at the resident; enforces tool gates. |
 | Resident (Ellen) | Orchestrates passes; all Gmail work (targeted searches, attachment download, ingest); **all** operator conversation (the review sheet, its free-text replies, the occasional one-line question folded into the sheet); sends the zip. |
 | Finance specialist | All matching judgment, grounded in its own `Read` of the actual PDFs; all bank-feed tagging/notes; portal-link research (WebSearch); returns structured work orders. Never talks to the operator (structurally cannot: `ask_user` requires direct execution). |
-| Plugin MCP server | Invoice store, vendor KB, match records, quarter workbook, filename normalization, package/zip build, outbox staging. |
+| Plugin MCP server | Document store, counterparty KB and expectation mapping, match records, quarter workbook, filename normalization, package/zip build, outbox staging. |
 | Operator | Reads a short weekly message; corrects a line in free text when they disagree; pulls the collection list when they sit down to do it; supplies invoices if they feel like it; receives one zip per quarter. Every one of those is optional. |
 
 Rationale for the split (verified against casa code, 2026-08-10):
@@ -292,22 +311,30 @@ Nothing identifying ships in the repo.
 Canonical quarter identifier everywhere (paths, records, tool arguments, tags, zip
 name): **`YYYY-Qn`** (e.g. `2026-Q2`). Never a bare `Qn`.
 
-### Invoice store
+### Document store
+
+The store holds **supporting documents of every kind**, not only invoices (operator,
+2026-09-22): a vendor's invoice, a sales invoice the operator issued, a payslip, a bank or
+tax statement, a receipt. Each carries a **kind** — `invoice`, `sales-invoice`, `payslip`,
+`statement`, `receipt`, `other` — read provisionally at ingest and corrected by the
+specialist when it judges the document. The kind is what lets a document satisfy an
+expectation (§"Document expectation"): a payslip never satisfies a transaction that needs
+an invoice, whatever the amounts say.
 
 - **Custody is by content hash, not by name.** Files live at
-  `invoices/<sha256[:2]>/<sha256>.pdf`. The human-readable
-  `<YYYY-MM-DD>_<vendor>_<amount>.pdf` is a package-time rendering, and carries a short
-  hash suffix when two invoices would otherwise render the same name — two same-day,
-  same-amount purchases from one vendor collide on the v1 scheme, which specified no
-  overwrite, refusal or disambiguation rule.
-- Index row: id, content hash, size, vendor, invoice date, invoice number, amount,
-  currency, recipient-as-read, source (gmail message id / manual), acquisition
+  `documents/<sha256[:2]>/<sha256>.<ext>`. The human-readable
+  `<YYYY-MM-DD>_<counterparty>_<amount>.<ext>` is a package-time rendering, and carries a
+  short hash suffix when two documents would otherwise render the same name — two
+  same-day, same-amount purchases from one vendor collide on the v1 scheme, which
+  specified no overwrite, refusal or disambiguation rule.
+- Index row: id, content hash, size, kind, counterparty, document date, document number,
+  amount, currency, recipient-as-read, source (gmail message id / manual), acquisition
   coordinates for retry, extraction author, status
   (`unmatched` / `matched` / `irrelevant`).
-- **Byte identity is not invoice identity.** A vendor that re-renders or re-sends the
+- **Byte identity is not document identity.** A vendor that re-renders or re-sends the
   same invoice produces different bytes and a second index row; two equal payments
   could then each take one while every per-file cardinality check passes. The server
-  flags an issuer + invoice-number collision across differing hashes and refuses
+  flags an issuer + document-number collision across differing hashes and refuses
   automatic acceptance on either side until it is resolved.
 - Custody is independent of matching: rejecting a candidate never deletes its PDF, and
   v1 deletes nothing automatically. A document is `held` only once its complete bytes
@@ -380,8 +407,8 @@ lineage, **one append-only decision log**: each entry is a decision kind (pair, 
 unpair, exempt, lift), its author (`auto` or `operator`), its sequence number from the same
 store-wide sequence the note revisions use, the **row fingerprint it was made against**,
 and the shown revision it was bound to when the author is the operator. A vendor's channel
-(`none-expected`, `portal`) is **not** a lineage decision: it is a vendor fact the reducer
-reads from the KB at the end (round-13 finding: listing it as an entry kind left
+(the expectation, the portal source) is **not** a lineage decision: it is a fact the
+reducer derives from the KB, the mapping and the row's classification at the end (round-13 finding: listing it as an entry kind left
 machine-vs-machine order undefined). **A lineage's match-record state is the fold of its log**, in store-wide sequence order,
 through the one transition table in step 2 below, starting from the empty state — and **the
 log holds two kinds of entry**: the decisions writers append, and the **retirements the
@@ -498,7 +525,7 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
    | fingerprint change on the live row | not an entry — validity is judged in steps 3 and 5 against the live row at reduction time |
 
    Then, over that state:
-   - an exemption stands → `{acct::no-invoice-expected}`, then **step 8**. Nothing is
+   - an exemption stands → `{acct::no-document-expected}`, then **step 8**. Nothing is
      active while it stands, by the transitions above.
    - an operator-authored pairing is active → it is current (the transitions leave at most
      one); go to step 3.
@@ -548,12 +575,14 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
    `proposed` (whether or not its fingerprint holds — an invalidated proposal stays a
    proposal, round-14 finding) → `{acct::proposed}` with a residue line for the change.
    Then step 8.
-6. **Vendor default.** No current pairing and the vendor's channel is `none-expected` →
-   `{acct::no-invoice-expected}`. Weaker than any pairing on purpose: a document that
-   matches a specific payment beats a default about its vendor.
+6. **Expectation** (§"Document expectation"), for a lineage with no current pairing:
+   `none` → `{acct::no-document-expected}`; `optional` → `∅` (no tag: a nice-to-have that is
+   missing is not an errand); `required` or unknown → step 7. Weaker than any pairing on
+   purpose: a document that matches a specific payment beats a default about its
+   counterparty or its class.
 7. **Otherwise** `{acct::open}` — never paired, everything rejected or unpaired,
-   `conflicted` only, accepted-missing after "stop chasing".
-8. **Portal.** If the vendor's channel is `portal` and the row is eligible, add
+   `conflicted` only, accepted-missing after "stop chasing", not yet classified.
+8. **Portal.** If the counterparty's source is `portal` and the row is eligible, add
    `acct::portal` to whatever the steps above produced.
 
 Four properties the order is built to have, and the tests pin: **the state of any lineage,
@@ -622,25 +651,84 @@ lineage's current candidate and is shown `proposed` with a residue line until th
 confirms against the new facts, or the facts revert. Migrated tags and notes on a successor row are not fresh approval
 either.
 
-### Vendor KB
+### Document expectation — what a transaction needs, and how much it matters
 
-Lean, one record per vendor:
+**The operator's ruling (2026-09-22) that reshaped the scope.** Not every outgoing payment
+has an invoice (interest, salaries), some have another document worth keeping (a payslip),
+and incoming payments are the same story (a client payment settles a sales invoice; a tax
+refund settles nothing). So the question this plugin answers for every transaction is not
+"where is the invoice" but **"what document does this need, does one exist yet, and how
+much does it matter"** — and the first half of that is decided by what the transaction
+*is*, which is tx-classifier's judgment, never this plugin's.
+
+An **expectation** is a pair: a document **kind** (`invoice`, `sales-invoice`, `payslip`,
+`statement`, `receipt`) or `none`, and a **tier**, `required` or `optional`. It is derived
+per lineage, first rule that applies:
+
+| Source, in precedence order | Example |
+|---|---|
+| 1. the operator's per-payment exemption (`set_exemption`) | "the 180.00 one needs no invoice" → `none` |
+| 2. the counterparty KB entry, when the operator or specialist has set one | Belastingdienst → `none`; Zapier → `invoice, required`, portal link |
+| 3. the **classification mapping**, keyed by the row's classification chain | `income, salary` on a DBIT → `payslip, optional`; `internal-transfer` → `none`; `income, refund` → `none`; any other DBIT → `invoice, required`; any other CRDT → `sales-invoice, required` |
+| 4. the row is **not yet classified** | expectation **unknown** — treated as `required` for the ledger tag (operator ruling: "nothing held yet" is the truth), searched for nothing until classified |
+
+**The mapping ships with defaults and is edited by asking**, never at install: "payslips
+don't matter" moves `payslip` to `optional` (it already is) or to `none`; "Belastingdienst
+never has a document" writes a counterparty entry. Defaults, stated so they can be argued
+with: on a DBIT, `salary`/`payroll` chains → `payslip, optional`; `fees`, `interest`,
+`tax` chains → `statement, optional`; `internal-transfer`, `cash-withdrawal` → `none`;
+everything else → `invoice, required`. On a CRDT, `income, refund`, `reimbursement`,
+`internal-transfer`, `income, interest` → `none`; `income, *` otherwise → `sales-invoice,
+required`; a CRDT with a chain the mapping does not know → `sales-invoice, required`. The
+default errs toward *required*, because the failure mode of `optional` is a VAT-relevant
+document nobody looked for, and the failure mode of `required` is one line too many that
+the operator turns off in a sentence.
+
+**The tier is what the ledger tag and the views run on** (operator, 2026-09-22):
+
+| Expectation | No document held | Document matched |
+|---|---|---|
+| `required` (or unknown) | `acct::open`; leads every view; `MISSING` in the ledger | `acct::matched` |
+| `optional` | **no tag**; not in "what am I missing"; shown on "show the rest"; still searched, cheaply, and filed when found; `notes.md` lists it under "nice to have, not found" | `acct::matched` |
+| `none` | `acct::no-document-expected` | — (a document that turns up anyway is filed as `irrelevant` to this transaction, never matched) |
+| unknown (not yet classified) | `acct::open`, and the row is shown under **"not yet classified"**, apart from "missing" | — |
+
+Filtering the operator's own ledger by `acct::open` therefore answers exactly the question
+the VAT return asks: which transactions still lack a document that matters.
+
+**Sequencing with the classifier.** tx-classifier drains its queue in the same specialist
+session, on `sync`'s own trailer, before this plugin's triage (§Weekly pass step 2). This
+plugin reads the classification from the row's tags — the chain, the flow corrections
+(`internal-transfer`, `refund`, `reimbursement`, `fees`), the parked and terminal markers —
+and never writes one. A row still in the classifier's queue (workable, or parked
+`awaiting-operator`) has expectation *unknown*; a `unclassifiable` row is treated as
+`invoice, required` on a DBIT and `sales-invoice, required` on a CRDT, since the operator
+declined to say what it was and the safe reading is that a document matters. On a quiet
+week this ordering is invisible. On the first pass over a full quarter the classifier's
+own 25-rows-per-pass budget means the first passes are mostly classification and the
+document hunt follows; the coverage line says how many rows are not yet classified.
+
+**Counterparty KB** — lean, one record per counterparty, now the second source above:
 
 - canonical name; counterparty patterns as bank-feed shows them (`BCK*ZAPIER` → Zapier)
-- channel: `email` / `portal` / `receipt-only` / `none-expected`
-- **invoice_link** — the researched deep link, as close to “the page listing your
-  invoices” as the vendor allows. This is the KB's primary asset: found once with
+- expectation override: kind + tier, or `none` — set by the operator ("no invoices ever
+  for X") or by the specialist when a vendor's documents turn out to be a kind the
+  mapping did not predict
+- source: `email` / `portal` — where the document comes from
+- **document_link** — the researched deep link, as close to "the page listing your
+  invoices" as the vendor allows. This is the KB's primary asset: found once with
   real effort (WebSearch), cached forever, re-researched only when the operator says
   it broke.
-- search_hint (for email vendors), free-text notes (“invoices post ~3 days after
-  charge”)
+- search_hint (for email vendors), free-text notes ("invoices post ~3 days after
+  charge")
 - one source note per link (where it was found, when) — **not** per-field provenance,
   and no scheduled re-verification. A link is re-researched when a retrieval actually
   fails; an aging policy turns a deep-link notebook into standing upkeep for links that
   still work. A `[Wrong]` tap records the fact; it does not mandate a follow-up turn.
 
-`none-expected` is load-bearing: it is what stops bank fees, taxes, and receipt-less
-charges from polluting the residue list forever.
+A counterparty entry of `none` is load-bearing: it is what stops bank fees, taxes, and
+receipt-less charges from polluting the residue list forever, where the classification
+mapping alone would not (a tax authority's rows may carry several different chains).
 
 ### Quarter workbook
 
@@ -649,10 +737,10 @@ multi-round delegations stateless-safe (each delegation is a fresh ephemeral ses
 state carries in the store, not in return values alone) and crash-safe: a casa
 restart mid-pass loses only the in-flight turn.
 
-## Tool surface (server, 20 tools)
+## Tool surface (server, 21 tools)
 
-Ingest & curation: `ingest_invoice(source_path, vendor, invoice_date, invoice_number,
-amount, currency, recipient, source_ref)` — **the server takes `source_path` from
+Ingest & curation: `ingest_document(source_path, kind, counterparty, document_date,
+document_number, amount, currency, recipient, source_ref)` — **the server takes `source_path` from
 Casa's handoff folder with `casa_handoff.capture`, and copies those bytes into its own
 store, hashes them and indexes them, in that order**. It returns the content hash.
 `source_path` is the path gmail's `download_attachment` returned, or the path
@@ -661,8 +749,13 @@ This is the only way bytes enter custody. It is a copy rather than a reference o
 purpose: a handoff file is removed after 7 days, so a record pointing at it would be
 custody in name only. The metadata
 arguments are the agent's provisional reading, for filing; the bytes are the fact.
-`update_invoice_metadata`, `mark_irrelevant`.
-Query: `list_unmatched_invoices`, `list_quarter_state`, `get_vendor`.
+`update_document_metadata` (the specialist corrects the provisional `kind` here when it
+judges the document), `mark_irrelevant`.
+Query: `list_unmatched_documents`, `list_quarter_state`, `get_counterparty`.
+Expectation: `set_expectation(scope, kind, tier)` — `scope` is a counterparty or a
+classification chain; the operator's "no invoices ever for X" and "payslips don't matter"
+land here, with the render binding when the operator is the author (§"Document
+expectation"). The per-payment case stays `set_exemption`.
 Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match` — every
 mutating match tool takes `expected_revision` (CAS; see the match-record state machine).
 Two contracts round 17 found missing: **`confirm_match` accepts a `proposed` or a
@@ -687,13 +780,13 @@ the server refuses `record_match` and `propose_match` on the lineage — so an e
 an active pairing never coexist. Lifting it is `exempt=false` — refused unless an exemption stands — or an
 operator-authored `record_match`, which appends `lift` then `pair` in one transaction. "Operator-authored" is a
 `render_id` binding the server checks against the render log, not a word the caller
-passes (§Match records, "Operator authorship is checked"). Vendor-level `none-expected`
-stays vendor-scoped, in `upsert_vendor`, and is a decision-log entry of its own kind.
+passes (§Match records, "Operator authorship is checked"). Counterparty-level and class-level expectations live in `set_expectation`, outside the
+lineage's log; the reducer reads them at step 6.
 Projection: `list_projections()` — every transaction lineage with its desired tag set and
 snapshot, which is what the specialist reconciles against bank-feed;
 `record_observation(projection_id, observed_tags, observed_snapshot, error)` — what it
 saw, recorded without exempting the projection from later sweeps.
-KB: `upsert_vendor`.
+KB: `upsert_counterparty`.
 Setup: `check_setup()` — what the pass can actually reach (bank-feed tools, bound
 account, gmail tools, last sync), one branch at the top of every pass;
 `bind_account(account_id)` — records the business account and its ledger instance on
@@ -837,8 +930,9 @@ One object, owned by the plugin server, per **transaction lineage**:
   construction.
 - **Admission and eligibility are two different things** (round-11 finding, both
   reviewers). **Eligibility** is a predicate on a row's *current* facts: on the bound
-  account, direction DBIT, and dated on or after the **watermark** — by `booking_date`,
-  or by `value_date` while the row is still pending and has none. **Admission** is the
+  account — either direction (operator, 2026-09-22; round 10 had admitted DBIT only) —
+  and dated on or after the **watermark** — by `booking_date`, or by `value_date` while
+  the row is still pending and has none. **Admission** is the
   moment a lineage gets a projection: every pass takes the **bank snapshot** (§Tool
   surface, `import_ledger_export` — bank-feed's `export_history` through the handoff
   folder, every row of every state with `value_date`, `state` and `superseded_by`) and
@@ -849,23 +943,22 @@ One object, owned by the plugin server, per **transaction lineage**:
   pending payments that need admitting on their `value_date`. A pass whose snapshot import
   failed or is absent reports admission and revalidation as **not checked**, never as
   complete — never "every row we have not seen", because bank-feed corrects
-  rows in place under the same `row_id` (a June 30 booking becomes July 1; a CRDT
-  becomes a DBIT), and a row observed once and skipped must be admitted the pass it
-  becomes eligible. Once admitted, a projection **persists for the lineage** through
+  rows in place under the same `row_id` (a June 30 booking becomes July 1), and a row
+  observed once and skipped must be admitted the pass it becomes eligible. Once admitted, a projection **persists for the lineage** through
   supersession, vanishing, rejection and every later correction — retention is what
   keeps a stale write repairable. But **the desired set is computed against current
-  eligibility**: a managed lineage whose destination row is no longer eligible — a debit
-  corrected to a credit, a booking date corrected to before the watermark — desires the
-  **empty set**, so the next sweep removes its owned tags and the row is reported as
-  `ineligible`, still enumerated. Both reviewers reproduced the alternative against
-  bank-feed's real `apply_plan`: a DBIT→CRDT correction kept its `row_id` and its
-  `acct::open`, and "persists" alone would have had the sweep reaffirm an accounting
-  status on an incoming transfer, which §Non-goals forbids.
+  eligibility**: a managed lineage whose destination row is no longer eligible — a booking date
+  corrected to before the watermark — desires the **empty set**, so the next sweep
+  removes its owned tags and the row is reported as `ineligible`, still enumerated. (Round
+  11 reproduced this against bank-feed's real `apply_plan` with a DBIT→CRDT correction
+  keeping its `row_id` and its `acct::open`, back when incoming rows were out of scope; a
+  direction flip is now an ordinary fingerprint change, and the expectation is re-derived
+  from the row's classification like any other fact.)
 
   | Transition (real bank-feed behaviour) | Projection | Desired set |
   |---|---|---|
   | eligible row first seen, no projection | admitted | per the table below |
-  | ineligible row first seen (CRDT, before watermark, other account) | none | — |
+  | ineligible row first seen (before watermark, other account) | none | — |
   | pending row books: supersession to a booked successor | follows the lineage (alias) | recomputed on the successor's facts |
   | in-place correction makes an unmanaged row eligible | admitted this pass | per the table |
   | in-place correction makes a managed row ineligible | retained, marked `ineligible` | `∅` — owned tags removed |
@@ -873,7 +966,7 @@ One object, owned by the plugin server, per **transaction lineage**:
   | watermark moved earlier | previously ineligible rows admitted next pass | per the table |
   | watermark moved later | **not offered** in v1 | — |
 
-  No CRDT row is ever eligible (§Non-goals). The watermark is stored with the binding and
+  Both directions are eligible (operator, 2026-09-22). The watermark is stored with the binding and
   defaults to **the first day of the quarter in which the account was bound** (operator
   ruling, 2026-09-22) — the quarter the operator installed the plugin to get done, and
   nothing older, which is what §Non-goals' "no bootstrap over historical quarters" means
@@ -907,13 +1000,14 @@ One object, owned by the plugin server, per **transaction lineage**:
 
   | Lineage state (first row that applies) | Desired set |
   |---|---|
-  | destination row not currently eligible (corrected to CRDT, or to before the watermark) | `∅` |
-  | exempt by the operator (`set_exemption`) — structurally, no active pairing exists while it stands | `{acct::no-invoice-expected}` |
+  | destination row not currently eligible (corrected to before the watermark) | `∅` |
+  | exempt by the operator (`set_exemption`) — structurally, no active pairing exists while it stands | `{acct::no-document-expected}` |
   | an active `matched` pairing whose fingerprint still holds | `{acct::matched}` |
   | an active `proposed` pairing, or a `matched` one whose fingerprint no longer holds | `{acct::proposed}` |
-  | the vendor's channel is `none-expected` and nothing is paired | `{acct::no-invoice-expected}` |
-  | otherwise — never paired, every pairing rejected, `conflicted` only, accepted-missing after "stop chasing" | `{acct::open}` |
-  | plus, whenever the vendor's channel is `portal` and the row is eligible | `∪ {acct::portal}` |
+  | nothing paired and the expectation is `none` | `{acct::no-document-expected}` |
+  | nothing paired and the expectation is `optional` | `∅` |
+  | otherwise — expectation `required` or unknown: never paired, every pairing rejected, `conflicted` only, accepted-missing after "stop chasing", not yet classified | `{acct::open}` |
+  | plus, whenever the counterparty's source is `portal` and the row is eligible | `∪ {acct::portal}` |
 
   Round 11 found the first version of this table let an active `proposed` — an
   unresolved machine proposition — outrank the operator's exemption, and an existing
@@ -921,15 +1015,15 @@ One object, owned by the plugin server, per **transaction lineage**:
   not merely first in the table: committing it rejects any active pairing in the same
   transaction and the server refuses new auto pairings while it stands (§Tool surface,
   `set_exemption`), which makes the row above it unreachable rather than merely ordered.
-  A vendor's `none-expected` is weaker on purpose — it is a default about a vendor, and
-  a document that does match a specific payment beats it; the operator's word about one
+  An expectation of `none` is weaker on purpose — it is a default about a counterparty
+  or a class, and a document that does match a specific payment beats it; the operator's word about one
   payment beats everything. Accepted-missing stays `acct::open` on purpose: "stop
   chasing" rations search effort, it does not change the fact that no invoice exists. A
   match landing swaps one status for another in a single reduction, so `acct::open` and
   `acct::matched` can never be desired together.
 - **`owned_tags` is a fixed, reserved vocabulary inside the `acct::` namespace**, not a
   prefix rule: exactly `acct::matched`, `acct::proposed`, `acct::portal`,
-  `acct::no-invoice-expected`, `acct::open`.
+  `acct::no-document-expected`, `acct::open`.
   The namespace is what tells bank-feed these are not classifications; the fixed list is
   what tells the sweep what it may remove. Anything else — an `acct::`-namespaced tag the
   operator added by hand, or an un-namespaced `acct-matched` — is foreign and is never
@@ -1171,10 +1265,16 @@ in week one and an operator who concludes after a month that the plugin does not
 
 1. **Repair sweep** (above), then Ellen delegates: “weekly pass, `<YYYY-Qn>` —
    report new transaction state and search plans.”
-2. **Specialist: sync, snapshot, triage.** `sync`, then `export_history` →
-   `import_ledger_export` (the bank snapshot; the server admits newly eligible rows and
-   revalidates fingerprints from it), then triage over the newly admitted and still-open
-   DBIT lineages × invoice store × KB, reading PDFs as needed.
+2. **Specialist: sync, classify, snapshot, triage.** `sync`; then tx-classifier drains
+   its queue on the trailer's own trigger, as it does in every finance pass — this plugin
+   waits for it and never classifies (§"Document expectation"); then `export_history` →
+   `import_ledger_export` (the bank snapshot; the server admits newly eligible rows, both
+   directions, and revalidates fingerprints from it); then, for every admitted lineage
+   with no current pairing, the specialist reads the row's classification, derives the
+   expectation, and triages the lineages whose expectation is `required` or `optional`
+   against the document store × counterparty KB, reading the documents as needed —
+   required first, optional with whatever budget is left. Lineages still in the
+   classifier's queue are recorded as **not yet classified** and left alone.
 
    **Auto-match bar (operator decision, 2026-09-21 — deliberately loose).** The
    plugin's job is to save the operator work. A bar tuned so tight that it matches
@@ -1183,9 +1283,12 @@ in week one and an operator who concludes after a month that the plugin does not
 
    Auto-match requires:
 
-   - an **eligible** bank observation: active, booked, DBIT, on the configured account;
-   - the invoice is **held** in custody and reads as an invoice, not a quotation, order
-     confirmation or credit note;
+   - an **eligible** bank observation: active, booked, on the configured account, with an
+     expectation of a document kind (not `none`, not unknown);
+   - the document is **held** in custody, is of the **kind the expectation names** (a
+     payslip never satisfies an invoice expectation, whatever the amount), and reads as
+     that kind — an invoice, not a quotation, order confirmation or credit note; a sales
+     invoice issued *by* the B.V., for a CRDT;
    - **exact money agreement** — equal gross payable, equal currency, integer minor
      units. This one stays hard: it is the cheapest true signal available, and relaxing
      it buys nothing a review can catch as easily;
@@ -1218,8 +1321,10 @@ in week one and an operator who concludes after a month that the plugin does not
 
    Returns a structured work order per transaction: `matched` (with label) /
    `proposed` (indistinguishable candidates) / `portal` (tagged, link noted) /
-   `none-expected` / `missing` with a **search plan carrying discriminators**, not just
-   a query (“want €54.45 within ~10 days of May 6; ignore payment confirmations”).
+   `no-document` (expectation `none`) / `not-yet-classified` / `missing` — tier named —
+   with a **search plan carrying discriminators**, not just a query ("want €54.45 within
+   ~10 days of May 6; ignore payment confirmations"; for a CRDT, "want our sales invoice
+   for €1,210.00 to <client>, probably in Sent").
 3. **Ellen's targeted Gmail round — searching is where the match rate is won, so it is
    budgeted generously.** The v1 rule ("roughly one precise search per transaction;
    hard bound of two rounds, then residue") was written under the strict-matching
@@ -1262,14 +1367,16 @@ in week one and an operator who concludes after a month that the plugin does not
    when it fits Telegram's 4096 UTF-16 units, missing first, phone-width blocks rather
    than aligned columns, evidence instead of label codes, and no numbering.
 
-5. CRDT transactions: nothing. They are not managed (§Non-goals); the ledger export
-   lists them at packaging time.
+5. Incoming transactions go through exactly the same steps; what differs is the document
+   they need (usually the sales invoice the operator issued) and where it is found
+   (usually the sent mail).
 
 **A broken pass must not read as deficient books.** "No invoice found" when Gmail was
 unavailable, or "nothing new" when the bank feed was stale, tells the operator something
-false about their own accounting. Three states stay distinct and render differently:
-**missing** (searched, not found), **not searched** (the pass could not look), and **not
-checked** (the pass stopped before reaching it). A degraded pass leads with its own
+false about their own accounting. Four states stay distinct and render differently:
+**missing** (searched, not found), **not yet classified** (the classifier has not said
+what it is, so nothing was searched), **not searched** (the pass could not look), and
+**not checked** (the pass stopped before reaching it). A degraded pass leads with its own
 condition, ahead of any accounting result:
 
 ```
@@ -1313,7 +1420,7 @@ catch, because it launders a guess into a human decision. So:
 - **Facts are distinct from verdicts.** "3 is my accountant" records an identity; it
   does **not** mean "no invoice expected" (that is "3 needs no invoice", a per-payment
   exemption through `set_exemption`), and it certainly does not mean "never for this
-  vendor" (that is "no invoices ever for X", the vendor's channel).
+  vendor" (that is "no invoices ever for X", the counterparty's expectation).
   The plugin never manufactures "ever" out of a one-off answer.
 
 **Descriptions choose the target; the revision the operator was SHOWN is what binds.**
@@ -1351,7 +1458,7 @@ same rule applies to its state.
 | Unique target | A description that resolves to exactly one open item: a vendor name, or a vendor plus any discriminator already printed on it (amount, date). Case and whitespace normalised; **no fuzzy vendor matching** — two Adobe charges need the date or the amount, and if the description still fits both, it asks. |
 | Whole clauses | A supported clause must consume all its text. "Zapier and Vercel" is a target list with no verb: nothing applies, and the reply asks whether they are wrong. Never extract a convenient command from prose that did not parse. |
 | Negative verdicts unpair, and only that | "the Zapier one is wrong", "no to Zapier", "Zapier and Vercel are wrong" remove the pairing and keep both payment and document. On a missing or identity-only item there is no pairing to remove: nothing mutates, and the reply says what it could do instead. |
-| Exemptions are per payment, and say so | "the 180.00 one needs no invoice" calls `set_exemption` on that lineage, bound to the shown revision like every correction; if it was paired, the receipt says the pairing was dropped too. "It does need an invoice after all" lifts it. "No invoices ever for X" is a different sentence and sets the vendor's channel to `none-expected` instead; neither is inferred from the other. |
+| Exemptions are per payment, and say so | "the 180.00 one needs no invoice" calls `set_exemption` on that lineage, bound to the shown revision like every correction; if it was paired, the receipt says the pairing was dropped too. "It does need an invoice after all" lifts it. "No invoices ever for X" is a different sentence and sets the counterparty's expectation to `none` through `set_expectation` instead; neither is inferred from the other. |
 | Ambiguous bulk clauses apply nothing | "all good except the Zapier" does not say whether Zapier is wrong or merely unchecked. Nothing applies; the reply names the two phrasings that work. Input-error handling, not a gate. |
 | Validate against the saved proposition | An unknown number is reported, never redirected to a nearby one. Independent valid clauses still apply; the exceptions ride in the same receipt. |
 | Instructions separate from corrections | "Zapier is wrong; rebuild it" unpairs, then rebuilds that quarter. An unresolved correction blocks its dependent rebuild and says so. Unsupported wording is reported, never swallowed into a note. |
@@ -1624,7 +1731,7 @@ server:
 | The ask | What comes back |
 |---|---|
 | "What's the status of the quarterly accounting?" | The whole picture: coverage, counts, what is missing, what was guessed. |
-| "What am I missing?" / "accounting list" | The errand list only — payments without invoices, with links and the email-to-self instruction. No machine reasoning in the way. |
+| "What am I missing?" / "accounting list" | The errand list only — transactions whose **required** document is missing, both directions, with links and the email-to-self instruction; then one line for rows not yet classified, and one for the count of nice-to-haves (`+3 nice-to-have — say "show the rest"`). No machine reasoning in the way. |
 | "Anything I should check?" | The guessed pairings only, each with the evidence that made it uncertain. |
 | "Did the Adobe invoice arrive?" / "what did I pay Zapier this quarter?" | A direct answer about one thing. |
 | "How did Q2 go?" | A closed quarter: what shipped, what shipped incomplete, and how to rebuild it. |
@@ -1655,7 +1762,7 @@ is the open item. Concretely, every pass does four things with four different sc
 | Step | Scope |
 |---|---|
 | **Admit newly eligible payments** | Every currently eligible active row on the bound account that has no projection yet (§"The projection", admission) — not "rows we have not seen", since an in-place correction can make a row we skipped last week eligible this week. Each lands in its own booking-date quarter, which is usually the current one but is decided by the row, never by the calendar on the day of the pass. |
-| **Search and match open items** | **Every unresolved payment, whatever quarter it belongs to** — subject to the search age-out below. September's stragglers keep being chased through October and beyond. |
+| **Search and match open items** | **Every unresolved transaction with a `required` or `optional` expectation, either direction, whatever quarter it belongs to** — required first, subject to the search age-out below. September's stragglers keep being chased through October and beyond. A row not yet classified is not searched; it is counted. |
 | **Repair sweep and fingerprint revalidation** | **Every active match in every quarter, AND every row of every delivered package** — the two sets are not the same, and an earlier draft used only the first (round-6 finding). A payment that shipped as `MISSING` has no match; so does every CRDT row; a change to either still makes the accountant's copy wrong, which is precisely what "a delivered quarter changed underneath" promises to catch. The sweep therefore compares the stored fingerprint of every delivered ledger row against current bank-feed state, independent of whether an invoice was ever matched to it. It compares against the pass's bank snapshot (§Tool surface, `import_ledger_export`) locally rather than querying per row; without a snapshot this step is **not checked** and the coverage line says so. |
 | **Annotate** | Whatever it just decided. |
 
@@ -1713,7 +1820,7 @@ I'll have the answer shortly.
 A marker older than a generous threshold is treated as a dead process and reclaimed —
 **and reclaiming it bumps a generation counter that the marker carries.** A pass whose
 generation is no longer current is refused at every write **into this plugin's own
-store**, including the ones not CAS'd on a match record: `upsert_vendor`, the search
+store**, including the ones not CAS'd on a match record: `upsert_counterparty`, the search
 bookkeeping, the delivery log and the setup/binding state. An earlier draft claimed "every write underneath is already
 CAS'd, so a duplicated pass can only waste effort". **That claim was false** (round-5
 review): match mutations are CAS'd, but vendor, bookkeeping and log writes are not, so a
@@ -1758,7 +1865,7 @@ comes first:
 
 - **the operator's next text turn** — "this is the Twitter invoice", "file that", or any
   accounting question: Ellen calls `list_inbound_files`, passes the file through
-  `share_inbound_file` to `ingest_invoice`, and answers with the receipt below;
+  `share_inbound_file` to `ingest_document`, and answers with the receipt below;
 - **the next pass**, which sweeps Ellen's inbox exactly as it sweeps self-addressed mail:
   every PDF or image there that is not yet held is ingested. The pass executes as Ellen,
   so the inbox is hers to list (INV-HANDOFF-004 keys on the executing agent, which is why
@@ -1768,7 +1875,7 @@ Both are safe to repeat because **ingest is idempotent by content hash**: a docu
 shared twice, or swept after it was already filed by hand, produces one custody record.
 That idempotency is the recovery path, and there is deliberately no per-intake obligation
 record to keep in step with it: a turn that dies between `share_inbound_file` and
-`ingest_invoice` leaves the inbox copy where it was, and the next text turn or pass files
+`ingest_document` leaves the inbox copy where it was, and the next text turn or pass files
 it. The bound that remains, stated plainly: Casa keeps an inbox file for **seven days**, so
 a document sent while no pass and no accounting turn ran for a whole week — Casa down,
 the trigger removed — expires unfiled, and the plugin has no record it ever existed. It
@@ -1923,7 +2030,7 @@ a correction (asking "is 4 right?" changes nothing about line 4).
 
 First classification of a vendor as portal-only triggers the one-time link research
 (specialist, WebSearch): prefer the authenticated deep URL
-(`console.vendor.tld/invoices`) over the marketing domain. Filed via `upsert_vendor`
+(`console.vendor.tld/invoices`) over the marketing domain. Filed via `upsert_counterparty`
 with provenance. Every later quarter resolves instantly from the KB.
 
 ### Packaging (there is no quarter-end event)
@@ -2008,8 +2115,8 @@ where an invoice file happens to be stored.** The invoice-date storage path
 booked in the quarter and pulls each matched invoice PDF into the package regardless
 of its storage directory — so an invoice dated June 30 that pays a July 1 charge
 ships in the Q3 package (the cross-quarter case both reviewers flagged). An
-unmatched invoice appears in no package's `invoices/`; it is listed in `notes.md` of
-the quarter it was ingested in.
+unmatched document appears in no package folder; it is listed in `notes.md` of the
+quarter it was ingested in.
 
 **The build is one transaction and deterministic.** `build_package(quarter)` freezes
 the match snapshot and the imported ledger rows before writing any file, so the zip is
@@ -2020,18 +2127,24 @@ bank data through <date>, digest <hash>` for diagnostics.
 
 ```
 <slug>-<YYYY-Qn>[-partial]-<YYYY-MM-DD>.zip
-├── invoices/            # SnelStart bulk upload: YYYY-MM-DD_vendor_amount[_hash8].pdf
-│                        # matched only — a `proposed` line never lands here
+├── invoices/            # SnelStart bulk upload, purchase invoices:
+│                        # YYYY-MM-DD_vendor_amount[_hash8].pdf — matched only, a
+│                        # `proposed` line never lands here
+├── sales-invoices/      # matched sales invoices for incoming payments, same naming
+├── documents/           # matched optional-tier documents (payslips, statements)
 ├── ledger.csv           # full quarter, both directions: date, amount, currency,
 │                        # direction, counterparty, vendor, status, confidence label,
-│                        # invoice filename OR portal deep-link, notes
+│                        # expectation (kind, tier), document filename OR portal
+│                        # deep-link, notes
 ├── ledger.xlsx          # same rows, for the accountant's tooling (operator decision,
 │                        # 2026-09-21: ship both)
 ├── unresolved/          # only when non-empty: retained candidate PDFs for lines that
 │                        # did NOT match, so the accountant has the evidence without
 │                        # another mailbox hunt — deliberately NOT in invoices/, which
 │                        # is the bulk-upload set
-└── notes.md             # what is missing first (with best links), then anomalies,
+└── notes.md             # missing REQUIRED documents first (purchase invoices, then
+                         # sales invoices, with best links), then rows not yet
+                         # classified, then nice-to-haves not found, then anomalies,
                          # unsupported relationships (split/aggregate payments, credit
                          # notes), KB changes, commentary
 ```
@@ -2047,8 +2160,13 @@ authoritative one: if the two ever disagree, the CSV is right and the XLSX is a 
 as such in both ledgers, so the accountant sees which pairings the machine chose under
 competition rather than being handed a uniform-looking set of assertions.
 
-Missing invoices never block shipping: ledger rows read `MISSING` with the best
-available link, and `notes.md` opens with them. The build is deterministic — the same
+Missing documents never block shipping — and neither does a row the classifier has not
+reached (operator question, 2026-09-22: "what happens if a package is requested and this
+information is still missing?" — it ships). Ledger rows read `MISSING` for a required
+document with the best available link, `UNCLASSIFIED` for a row whose expectation is not
+yet known, `NO-DOCUMENT` for expectation `none`, and `OPTIONAL-MISSING` for a nice-to-have
+that was not found; `notes.md` opens with the required ones and lists the unclassified
+ones apart, and the caption counts both ("3 still missing, 2 not yet classified"). The build is deterministic — the same
 frozen inputs produce the same bytes (fixed ordering, fixed timestamps, stable
 serialisation) — which is what lets a caption say "identical to the package from 14 Oct"
 as a computed fact rather than a judgement. Supply stragglers and ask again: the next
@@ -2187,7 +2305,7 @@ and is resent only when the operator asks, as that exact file.
   budget; nothing rendered carries a line number; a correction naming two items leaves
   every other item's author untouched (implicit approval gets its own red case); "all
   good" confirms only what was shown; "the BCK*XYZ one is my accountant" does not set
-  no-invoice-expected; "Zapier and Vercel" and "all good except the Zapier" apply
+  an exemption; "Zapier and Vercel" and "all good except the Zapier" apply
   nothing and answer with the phrasing that works; a description matching two open items
   asks rather than picking; a description matching none is reported and never redirected
   to a near miss; **an item with no shown revision produces a re-render and no
@@ -2218,21 +2336,23 @@ and is resent only when the operator asks, as that exact file.
   `actual := (actual − owned) ∪ desired` must reach the same result from an arbitrary
   starting tag set, including one containing foreign tags it must not touch. **And the
   desired-set table's precedence** (round-10 S1): a payment the operator exempted, and a
-  `none-expected` vendor's payment, desire `{acct::no-invoice-expected}` and never
+  `none-expected` vendor's payment, desire `{acct::no-document-expected}` and never
   `{acct::open}`; a portal vendor's unpaired payment desires both `acct::open` and
   `acct::portal`; a row with 64 namespaced tags from other owners is reported
-  unprojectable rather than retried; a CRDT row, a row on another account and a row
-  booked before the watermark get no projection and no `acct::` write; and moving the
+  unprojectable rather than retried; a row on another account and a row
+  booked before the watermark get no projection and no `acct::` write, and a CRDT row on
+  the bound account gets one (operator, 2026-09-22); and moving the
   watermark earlier admits exactly the rows it newly covers on the next pass. **And the
   round-11 transitions**, each pinned against bank-feed's real `apply_plan` rather than
   a double: exempting a payment that carries an active `proposed` (or `matched`) rejects
-  the pairing in the same transaction and the next sweep shows `acct::no-invoice-expected`
+  the pairing in the same transaction and the next sweep shows `acct::no-document-expected`
   alone; `propose_match` on an exempt lineage is refused; an operator `record_match` on an
-  exempt lineage clears the exemption; a managed DBIT corrected in place to CRDT desires
-  `∅`, its `acct::open` is removed by the next sweep, and the projection is still
-  enumerated as `ineligible`; a CRDT corrected in place to DBIT, and a June 30 row
-  corrected to July 1 across the watermark, are admitted on the next pass although both
-  were observed and skipped before; and a pending row admitted on its `value_date`
+  exempt lineage clears the exemption; a managed row corrected in place to before the watermark
+  desires `∅`, its `acct::open` is removed by the next sweep, and the projection is still
+  enumerated as `ineligible`; a June 30 row corrected to July 1 across the watermark is
+  admitted on the next pass although it was observed and skipped before; a DBIT corrected
+  in place to CRDT keeps its projection and re-derives its expectation from its
+  classification (a `sales-invoice` expectation replacing an `invoice` one); and a pending row admitted on its `value_date`
   follows its supersession to the booked successor. **And the round-12 decision log**: a
   pending row with `booking_date NULL` is admitted from the snapshot (pinned against the
   real `export_history` output, since `list_transactions` omits it); a pass with no
@@ -2267,8 +2387,8 @@ and is resent only when the operator asks, as that exact file.
   exemption at sequence 10 on one lineage merged with a valid operator pairing P at 20 on
   another ends `acct::matched` with **no** `lift` entry written (the clear is derived), so
   merging a third lineage carrying an exemption at 21 folds `E10, P20, E21` to
-  `acct::no-invoice-expected` with P `rejected`; the reverse sequence, E at 20 and P at 10,
-  ends P `rejected` and `acct::no-invoice-expected`; three predecessors carrying
+  `acct::no-document-expected` with P `rejected`; the reverse sequence, E at 20 and P at 10,
+  ends P `rejected` and `acct::no-document-expected`; three predecessors carrying
   machine A `matched`, B `matched`, C `proposed` reach the **same** state — all three
   `conflicted`, `acct::open` — under every one of the six merge orders; `confirm_match` on
   one of those `conflicted` ids makes it `acct::matched` and leaves the other two
@@ -2305,9 +2425,23 @@ and is resent only when the operator asks, as that exact file.
   bound still applies both writes in order; `lift` with
   no exemption standing is refused and appends nothing; a merge that brings machine
   pairing A onto an exempt lineage leaves A `rejected` and the lineage
-  `acct::no-invoice-expected`; an exemption on a portal vendor's row keeps `acct::portal`; an auto proposal at €90
+  `acct::no-document-expected`; an exemption on a portal vendor's row keeps `acct::portal`; an auto proposal at €90
   whose row is corrected to €100 stays `acct::proposed`, not `open`; and a correction that
   is reverted restores `acct::matched` with both changes in the residue.
+- **Document expectation** (operator ruling, 2026-09-22), pinned against tx-classifier's
+  real tag vocabulary and bank-feed's real `classification_state`: a row in the
+  classifier's queue derives *unknown*, desires `{acct::open}`, is rendered under "not
+  yet classified" and is searched for nothing; the same row, once tagged
+  `internal-transfer`, flips to `{acct::no-document-expected}` in the next reduction, and
+  once tagged `income, salary` on a DBIT flips to `∅` (optional) and leaves "what am I
+  missing"; a CRDT tagged `income, consulting` derives `sales-invoice, required` and a
+  held payslip does not satisfy it while a held sales invoice does; `set_expectation` on
+  a counterparty beats the mapping and loses to `set_exemption` on one payment; the
+  shipped defaults produce, for a fixture of twenty representative chains in both
+  directions, exactly the table in §"Document expectation"; an `unclassifiable` row is
+  `required`; a package built with two unclassified rows ships, lists them apart from
+  `MISSING`, and its caption counts them; and a nice-to-have found later lands in
+  `documents/`, never in `invoices/`.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
@@ -2319,7 +2453,7 @@ and is resent only when the operator asks, as that exact file.
   quarter boundary produces ONE view; a description matching two open items asks rather
   than picking, and a description matching none says so rather than redirecting; and a
   a stale pass whose generation was reclaimed is refused at every write, including
-  `upsert_vendor` and the delivery log, not merely at the CAS'd match writes.
+  `upsert_counterparty` and the delivery log, not merely at the CAS'd match writes.
 - **Gap re-entry**: with six unanswered sheets behind it, the next sheet is bounded, is
   built from current state rather than replayed, and carries a count of what it did not
   print.
@@ -2367,7 +2501,7 @@ None blocks v1. Each costs a plugin-side line rather than a wait (open as of
 | [#1036](https://github.com/bonzanni/ha-casa-app/issues/1036) — casa cannot receive an inbound Telegram document (shipped, Casa 0.325.0; reaches this plugin via #486, Casa 0.326.0) | — | Resolved. Email-to-self still works; a document the operator never supplies is still a normal outcome. |
 | [#1037](https://github.com/bonzanni/ha-casa-app/issues/1037) — the inbound `reply_to_message_id` is discarded (enhancement, filed by this work) | A reply made with Telegram's reply gesture cannot be bound to the message it answers. | Resolving descriptions against live store state removes the need entirely; the field would only be a convenience now. |
 | [#1033](https://github.com/bonzanni/ha-casa-app/issues/1033) — a progress report made while answering the operator is credited to the previous batch (bug, medium) | Only if a pass becomes a `casa.jobs` job. | Settled by the jobs decision below; v1 does not declare a job. |
-| [#480](https://github.com/bonzanni/ha-casa-app/issues/480) — apply the per-engagement uid and capability drop to in-process (`in_casa`) engagements too (enhancement) | Would change this plugin's file-access assumptions: the gmail→store custody hop (now through Casa's handoff folder, `0770` and root-owned) and the specialist's `Read` of the invoice store both rely today on plugins sharing the process user; a uid-dropped plugin could reach neither. INV-CONT-004 already requires a pinned plugin directory to be owned by the dropped uid or world-readable and traversable. | Watch it. If it lands, the store's directory modes and the ingest hop need a re-read. |
+| [#480](https://github.com/bonzanni/ha-casa-app/issues/480) — apply the per-engagement uid and capability drop to in-process (`in_casa`) engagements too (enhancement) | Would change this plugin's file-access assumptions: the gmail→store custody hop (now through Casa's handoff folder, `0770` and root-owned) and the specialist's `Read` of the document store both rely today on plugins sharing the process user; a uid-dropped plugin could reach neither. INV-CONT-004 already requires a pinned plugin directory to be owned by the dropped uid or world-readable and traversable. | Watch it. If it lands, the store's directory modes and the ingest hop need a re-read. |
 
 Checked and **not** reachable for this plugin as specified: the plugin-setup and consent
 issues (#1012, #1005, #1014 — it declares no setup tool and no credentials) and #987
