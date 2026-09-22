@@ -1465,7 +1465,10 @@ recovery appends `committed`; otherwise it appends `aborted`. **The restore gene
 ids with a `committed` line**, so it is monotonic by construction and never read from the
 ledger. Reasons: `weekly`
 (taken from the finance pass, since neither plugin can schedule), `install:<workflow
-string>` (the mint above), `manual`. Retention: a bounded number of weekly ones, every
+string>` (the mint above), `manual`. **Every `backup(reason)`, weekly or manual, follows
+the mint's index protocol** — pending line, copy, rename, directory fsync, terminal line —
+and holds both locks from settlement through its commit (round-38 finding: only the mint
+and the restore had been given the protocol). Retention: a bounded number of weekly ones, every
 install one until the operator deletes it. `restore_backup` is a protected tool — Casa
 asks the operator for one tap naming the backup — performed **in place, as ordinary SQL
 inside one `BEGIN IMMEDIATE`**: the backup file is attached, every **ordinary** table's rows are
@@ -1518,12 +1521,22 @@ restore first mints `install:acct@1.3.0` over a ledger that still holds 1.2.0's 
 promise of that backup is scoped to 1.3.0's writes, and `check_setup` says the older
 version's writes are still present.
 
-**A restored ledger under an unreset store is refused, full stop.** Row ids the store holds
-may be reused after a restore for different transactions with the same fingerprint fields
-(round-31 finding: bank-feed's row ids are allocated again after a rollback, and the
-fingerprint cannot tell payment A from payment B), so the ordinary revalidation machinery is
-not a safe way to "continue". The store remembers the ledger's restore generation from
-`list_backups`; a pass that finds it advanced stops before any write and asks for a reset.
+**A restored ledger under an unreset store is refused, full stop — by bank-feed, on every
+write.** Row ids the store holds may be reused after a restore for different transactions
+with the same fingerprint fields (round-31 finding: bank-feed's row ids are allocated again
+after a rollback, and the fingerprint cannot tell payment A from payment B), so the ordinary
+revalidation machinery is not a safe way to "continue". Reading the generation at the top
+of the pass is not enough either: a restore can land between that read and the pass's first
+write (round-38 finding, reproduced with the locks held — the listing simply blocks the
+restore until after its capture). So **every annotation write that carries a workflow
+string also carries `expected_generation`, the restore generation the pass read from
+`list_backups`, and bank-feed rejects the write when the ledger's generation differs**,
+exactly as `expected_revision` guards this plugin's own store. The specialist passes it on
+every `tag_transaction`, `untag_transaction` and `add_note`; a rejection stops the pass
+before any further write with "the ledger was restored since this pass began — reset the
+accounting store". The store also remembers the generation it last ran against, so a pass
+that finds it advanced at the top stops before its first write; the per-write precondition
+is what closes the window between that check and the writes.
 
 **What a restore does not undo, stated plainly.** Casa keeps one shared memory bank, and
 its only wipe is total; a completed specialist engagement during a test is retained like
@@ -2830,10 +2843,19 @@ and is resent only when the operator asks, as that exact file.
   begins, and the generation advances by two; the same A-dies-after-commit case followed
   by already-open B answering `list_backups` reports the advanced generation and the
   unregistered workflow, because settlement ran before the answer, and a pass with a
-  populated store then stops before any write; `list_backups` that settled, then released
-  its locks, then assembled its answer would have reported generation 0 after a restore
-  committed in that gap — a test that interposes a restore between settlement and the
-  answer must see the advanced generation, which only holding the locks gives; a crash between the restore's commit and its `committed` line is settled by
+  populated store then stops before any write; a `list_backups` racing a restore has exactly two
+  serialized outcomes and the test accepts both and nothing else (round-38 correction of
+  this line): the listing that acquires the locks first blocks the restore through its
+  capture and returns the pre-restore pair (generation unchanged, workflow registered); a
+  restore that commits first — and dies before its terminal line — is settled by the
+  listing, which returns the advanced generation and the unregistered workflow; an answer
+  of "generation unchanged, workflow unregistered, restored rows visible" is the one that
+  releasing the locks between settlement and capture produced, and must never occur; a
+  pass reads generation 0, a restore then lands, and the pass's first `tag_transaction`
+  with `expected_generation=0` is rejected and the pass stops with no write landed
+  (round-38 S1); a `tag_transaction` carrying a workflow string without
+  `expected_generation` is refused; and a weekly `backup(reason="weekly")` interrupted
+  after its pending line is settled at the next open exactly as a mint is; a crash between the restore's commit and its `committed` line is settled by
   the in-ledger marker at the next open, and the generation counts it once; a restore performed as attach-and-replace inside
   `BEGIN IMMEDIATE` while a second process holds a read transaction leaves that process
   seeing the restored rows on its next write transaction; a disk-full failure during the
@@ -2882,7 +2904,7 @@ and is resent only when the operator asks, as that exact file.
 | ha-casa-app | [#485](https://github.com/bonzanni/ha-casa-app/issues/485) scheduled-turn `send_media`. | **Shipped** — closed 2026-08-14. |
 | ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485. | **Shipped** — closed 2026-08-15. No longer needed by v1 (no button questions), kept here because the v1 spec was built on its absence. |
 | ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area (shipped, Casa 0.326.0), [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | gmail→store custody goes through the handoff folder (gmail 0.9.0); specialist asks stay structured work orders (#487 still open, still not a dependency). |
-| casa-specialist-finance (bank-feed) | **Backups and workflow restore points** (operator, 2026-09-22; §Setup, "Test install"): a new subsystem — `backup(reason)`, `list_backups` (timestamp, size, reason, restore events and registered workflow strings, from a durable index kept beside the database), `restore_backup(id)` as a protected tool restored in place as transactional SQL (attach the backup, replace every ordinary table's rows, `sqlite_sequence` last, the `notes_fts` index rebuilt rather than copied, a `ledger_meta` marker holding the restore operation id) inside one `BEGIN IMMEDIATE` with the consent-binding preflight in the same transaction — not the backup API, which refuses a destination with an open transaction; consistent copies under the write lock (WAL); reasons `weekly` / `install:<workflow>` / `manual`; bounded retention for `weekly`, unbounded for install backups; the weekly backup taken from the finance pass. **The first write carrying an unregistered workflow string mints `install:<workflow>` inside that write's lock, before the write**; a namespaced tag write without a workflow string is refused; a restore unregisters the workflows whose install backups are at or after the restored point. `tag_transaction`, `untag_transaction` and `add_note` gain an optional `workflow` argument. | **To be filed** once this addition's review converges. This plugin never writes to bank-feed without it: a bank-feed that refuses the `workflow` argument is below the floor, and the pass says so. |
+| casa-specialist-finance (bank-feed) | **Backups and workflow restore points** (operator, 2026-09-22; §Setup, "Test install"): a new subsystem — `backup(reason)`, `list_backups` (timestamp, size, reason, restore events and registered workflow strings, from a durable index kept beside the database), `restore_backup(id)` as a protected tool restored in place as transactional SQL (attach the backup, replace every ordinary table's rows, `sqlite_sequence` last, the `notes_fts` index rebuilt rather than copied, a `ledger_meta` marker holding the restore operation id) inside one `BEGIN IMMEDIATE` with the consent-binding preflight in the same transaction — not the backup API, which refuses a destination with an open transaction; consistent copies under the write lock (WAL); reasons `weekly` / `install:<workflow>` / `manual`; bounded retention for `weekly`, unbounded for install backups; the weekly backup taken from the finance pass. **The first write carrying an unregistered workflow string mints `install:<workflow>` inside that write's lock, before the write**; a namespaced tag write without a workflow string is refused; a restore unregisters the workflows whose install backups are at or after the restored point. `tag_transaction`, `untag_transaction` and `add_note` gain optional `workflow` and `expected_generation` arguments; a write carrying a workflow string must carry `expected_generation`, and is rejected when it differs from the ledger's restore generation. | **To be filed** once this addition's review converges. This plugin never writes to bank-feed without it: a bank-feed that refuses the `workflow` argument is below the floor, and the pass says so. |
 | ha-casa-app | **"Forget everything retained since <timestamp>"** — a time-bounded memory wipe, so a test window's retained engagements can be dropped without wiping the bank. | **To be filed** once this addition's review converges. Not a dependency: the residual is stated in §Setup, "Test install". |
 | Resident config | **One** weekly trigger (§Setup), plugin assignment to both roles. No quarter-end trigger: packaging happens only when the operator asks. | Operator/configurator action at install time. |
 
