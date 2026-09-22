@@ -71,9 +71,12 @@ Everything else in this document is the detail under those three.
 
 - No vendor-portal scraping or credentialed browser automation. Portal invoices are
   link-only: the ledger carries the most precise link the agent could research.
-- No invoice matching for CRDT (incoming) transactions — they are classified
-  (revenue / transfer / interest / other) and annotated, nothing more. The ledger
-  still lists the full quarter, both directions.
+- No invoice matching for CRDT (incoming) transactions, and no accounting tag on them
+  either (round-10 finding: an `acct::open` on an incoming transfer would tell the ledger
+  it "lacks an invoice"). They are not managed lineages — no projection, no `acct::`
+  write. They reach the package through bank-feed's ledger export, carrying whatever
+  classification tx-classifier gave them. The ledger still lists the full quarter, both
+  directions.
 - No public release. Private GitHub repo; casa installs it via the authenticated
   fetch path (`GITHUB_TOKEN` through `git-credential-casa.sh`).
 - No bootstrap pass over historical quarters. The KB starts empty and earns entries
@@ -469,7 +472,11 @@ transaction booked in the quarter" turns one €99 payment that went pending →
 disclosed in `notes.md` where they explain something, never summed into the ledger.
 Packaging: `build_quarterly_package(quarter)`, `stage_for_delivery(target)` (copies
 an invoice PDF or the built package into casa's plugin outbox for `send_media`, or
-publishes it to the handoff folder so gmail's `send_email` can attach it).
+publishes it to the handoff folder so gmail's `send_email` can attach it — **to the
+operator's own mailbox only**, in v1. Mailing the accountant, or anyone else, is on the
+gated rung and out of scope (§"The reversibility ladder"); the skill says so, and the
+handoff branch exists for "email me the Q3 package" and nothing else. Round-10 finding:
+the two sections read together permitted materially different delivery behaviour).
 
 House disciplines copied from bank-feed: explicit loud failures, numeric caps and
 truncation notices on reads, provider text fenced as untrusted on output, three-way
@@ -514,12 +521,15 @@ complete successful reconciliation restores the current projection — provided 
 `acct::` capacity and the traversal completes.** Each qualifier is a reproduced failure,
 not a hedge:
 
-- **Capacity.** `tag_transaction` is all-or-nothing against per-row budgets. Since
-  bank-feed 0.9.0 the `acct::` namespace has its own budget of 16 per row, which
-  classification and other workflows' tags cannot consume, and our whole vocabulary is
-  five names. It can still be filled by hand-written `acct::` tags outside our
-  vocabulary (foreign, never removed), so a row whose desired set is refused is
-  **reported as unprojectable**, not retried forever.
+- **Capacity.** `tag_transaction` is all-or-nothing against per-row budgets, and two of
+  them bind an `acct::` write (bank-feed 0.9.0, `rules.cap_problem`): the namespace's own
+  16 per row, which classification tags cannot consume, **and a shared cap of 64
+  namespaced tags per row across every owner, which other workflows can exhaust** — four
+  namespaces at 16 each refuse the first `acct::open` with "would carry 65 namespaced
+  tags, past the cap of 64" (round-10, reproduced by both reviewers). Our whole
+  vocabulary is five names, so the first budget is only filled by hand-written `acct::`
+  tags outside it (foreign, never removed); the second is out of our hands. Either
+  refusal makes the row **reported as unprojectable**, not retried forever.
 - **Renames — closed by bank-feed 0.9.0.** `rename_tag` renamed globally with no record
   of origin, so renaming an accounting tag moved the assertion outside our vocabulary
   and it survived every later reconciliation, including across a rejection. bank-feed
@@ -552,6 +562,19 @@ One object, owned by the plugin server, per **transaction lineage**:
   match: a rejected match contributes no accepted relationship, and issues no
   instruction to erase an accepted replacement's tags. That is finding 4, closed by
   construction.
+- **Admission — which lineages are managed.** A projection exists for every bank-feed
+  row that is on the bound account, `state='active'` when first seen, direction DBIT,
+  and booked on or after the **watermark**; and it persists for the lineage from then
+  on (through supersession, vanishing and rejection). Nothing else has one: no CRDT row
+  (§Non-goals), no row on another account, no row booked before the watermark. The
+  watermark is stored with the binding and defaults to **the first day of the quarter
+  in which the account was bound** — the quarter the operator installed the plugin to
+  get done, and nothing older, which is what §Non-goals' "no bootstrap over historical
+  quarters" means in row terms. The first view says so in one line
+  (`Starting from Q3 2026 — say "start from Q2" to go further back`), and moving it
+  earlier admits the older rows on the next pass. Without this rule "whatever bank-feed
+  has that we have not seen" admitted two years of history and wrote `acct::open`
+  across it on install day (round-10 finding, both reviewers).
 - **"Managed" includes transactions with no match at all** — one still awaiting an
   invoice has a projection, because coverage must not depend on a match existing.
   **Its desired EXTERNAL tag set was empty in v1** (round-9 finding, reproduced
@@ -563,12 +586,28 @@ One object, owned by the plugin server, per **transaction lineage**:
   [casa-specialist-finance#31](https://github.com/bonzanni/casa-specialist-finance/issues/31)
   closed that in bank-feed 0.9.0 (see the bank-feed floor above): `acct::open` leaves the
   row in the queue. **Restored (operator, 2026-09-22):** a managed transaction with no
-  accepted or proposed pairing desires `{acct::open}`. That is the concrete goal the
-  mirroring exists for — the operator's own ledger shows which payments still lack an
-  invoice, filterable by tag, without asking the plugin anything. The desired value is
-  computed per transaction like every other, so `acct::open` and `acct::matched` can
-  never be desired together: a match landing replaces one with the other in a single
-  reduction.
+  accepted or proposed pairing — and no exemption — desires `{acct::open}`. That is the
+  concrete goal the mirroring exists for — the operator's own ledger shows which payments
+  still lack an invoice, filterable by tag, without asking the plugin anything.
+- **The desired set is one table, with precedence**, computed per lineage from its
+  current decisions and facts. Exactly one *status* tag is ever desired; `acct::portal`
+  is a channel fact and rides alongside whichever status applies. Round 10 found that
+  the one-line rule above, read literally, overwrote an operator's "needs no invoice"
+  with `acct::open` — an exempt payment has no pairing either — so precedence is
+  written down:
+
+  | Lineage state (first row that applies) | Desired set |
+  |---|---|
+  | an active `matched` pairing | `{acct::matched}` |
+  | an active `proposed` pairing | `{acct::proposed}` |
+  | exempt: the operator said this payment needs no invoice, or the vendor's channel is `none-expected` | `{acct::no-invoice-expected}` |
+  | otherwise — never paired, every pairing rejected, `conflicted` only, accepted-missing after "stop chasing" | `{acct::open}` |
+  | plus, whenever the vendor's channel is `portal` | `∪ {acct::portal}` |
+
+  Accepted-missing stays `acct::open` on purpose: "stop chasing" rations search effort,
+  it does not change the fact that no invoice exists. A match landing swaps one status
+  for another in a single reduction, so `acct::open` and `acct::matched` can never be
+  desired together.
 - **`owned_tags` is a fixed, reserved vocabulary inside the `acct::` namespace**, not a
   prefix rule: exactly `acct::matched`, `acct::proposed`, `acct::portal`,
   `acct::no-invoice-expected`, `acct::open`.
@@ -729,7 +768,10 @@ The first pass asks bank-feed for its accounts. bank-feed categorises every acco
 | No `company` account | The sheet asks, listing what bank-feed does have, and mentions that `label_account` is how an account becomes a company one. |
 
 The binding records both the account and the ledger instance, so a recreated bank
-database cannot silently inherit the old row handles.
+database cannot silently inherit the old row handles — and the **watermark**, the first
+day of the quarter the account was bound in, before which no row is managed (§"The
+projection", admission). The first view says which quarter it starts from and how to move
+it; nothing is asked.
 
 **What the zip files are called — defaulted, never asked.** The package name defaults to
 a slug of the bound account's label, or to `books` when that yields nothing usable, and
@@ -891,7 +933,8 @@ in week one and an operator who concludes after a month that the plugin does not
    when it fits Telegram's 4096 UTF-16 units, missing first, phone-width blocks rather
    than aligned columns, evidence instead of label codes, and no numbering.
 
-5. CRDT transactions: classified and annotated only.
+5. CRDT transactions: nothing. They are not managed (§Non-goals); the ledger export
+   lists them at packaging time.
 
 **A broken pass must not read as deficient books.** "No invoice found" when Gmail was
 unavailable, or "nothing new" when the bank feed was stale, tells the operator something
@@ -1017,7 +1060,7 @@ store through the same tools; none of them is a mode.
 | **A reply arrives while a pass is running** | It applies to the propositions the sheet recorded. If the running pass has already moved one of them, that line's CAS check refuses and the receipt reports it with current facts. Nothing blocks and nothing queues. |
 | **A reply lands after the quarter shipped** | The correction applies normally, and the receipt adds one line: the delivered package no longer matches, say "rebuild it" for a fresh one. Never rebuilt automatically — a new zip nobody asked for is worse than a stale one they know about. |
 | **The operator asks something** ("what am I missing for Q3?", "accounting list", "I'm doing accounting now") | The pull view: the collection list with links, rendered from the store, no pass and no mutation. This is the entry point for work done at a time of the operator's choosing (§"Push tells, pull works"). |
-| **The operator supplies a document** — sent to Ellen in Telegram, or by self-addressed mail | A Telegram document is filed in that same turn (§"Handing it a document"). A self-addressed mail is collected by the next pass, silently; the intake shows in the next view the operator asks for. If they want it recorded now, `accounting: check emailed invoices` runs the sweep immediately and answers with a receipt. Either way, no obligation and no countdown. |
+| **The operator supplies a document** — sent to Ellen in Telegram, or by self-addressed mail | A Telegram document is filed in the operator's next text turn or by the next pass, whichever comes first — arrival itself runs no turn (§"Handing it a document"). A self-addressed mail is collected by the next pass, silently; the intake shows in the next view the operator asks for. If they want it recorded now, `accounting: check emailed invoices` runs the sweep immediately and answers with a receipt. Either way, no obligation and no countdown. |
 | **The operator corrects something unprompted** ("the Adobe one is wrong") | Resolved against the store's open items like any other correction. Here Adobe is missing rather than paired, so there is nothing to unpair, and Ellen says what she can do instead. |
 | **The first run after install** | Same pass, plus account binding and one scope line. §Setup. |
 | **A pass could not finish, or Casa restarted mid-pass** | The store holds everything except the in-flight turn. The next pass resumes from durable state and its sheet opens with the coverage it actually achieved, never a silent partial. |
@@ -1280,7 +1323,7 @@ is the open item. Concretely, every pass does four things with four different sc
 
 | Step | Scope |
 |---|---|
-| **Ingest new payments** | Whatever bank-feed has that we have not seen. Each lands in its own booking-date quarter, which is usually the current one but is decided by the row, never by the calendar on the day of the pass. |
+| **Ingest new payments** | Every row that satisfies the admission rule (§"The projection": bound account, active, DBIT, booked on or after the watermark) and that we have not seen. Each lands in its own booking-date quarter, which is usually the current one but is decided by the row, never by the calendar on the day of the pass. |
 | **Search and match open items** | **Every unresolved payment, whatever quarter it belongs to** — subject to the search age-out below. September's stragglers keep being chased through October and beyond. |
 | **Repair sweep and fingerprint revalidation** | **Every active match in every quarter, AND every row of every delivered package** — the two sets are not the same, and an earlier draft used only the first (round-6 finding). A payment that shipped as `MISSING` has no match; so does every CRDT row; a change to either still makes the accountant's copy wrong, which is precisely what "a delivered quarter changed underneath" promises to catch. The sweep therefore compares the stored fingerprint of every delivered ledger row against current bank-feed state, independent of whether an invoice was ever matched to it. It reads the account's rows in bulk and compares locally rather than querying per row. |
 | **Annotate** | Whatever it just decided. |
@@ -1371,11 +1414,36 @@ an external write that already landed. Two consequences, both required:
 ### Handing it a document
 
 **"This is the Twitter invoice for September."** The operator supplies a PDF — sent
-to the assistant directly (Casa 0.325.0 keeps it; Ellen passes it to `ingest_invoice`
-through `share_inbound_file` without asking again), or by self-addressed mail — usually
-with a sentence about what it is.
-That sentence is **evidence, not instruction**: it helps identify the vendor and period
-when the document is unclear, and it never overrides what the document says.
+to Ellen in Telegram, or by self-addressed mail — usually with a sentence about what it
+is. That sentence is **evidence, not instruction**: it helps identify the vendor and
+period when the document is unclear, and it never overrides what the document says.
+
+**A Telegram document does not start a turn, and the design must not pretend it does**
+(round-10 S1, reproduced against Casa 0.328.0; the rule is Casa's INV-INBOX-006). Casa
+downloads the file into Ellen's inbox, acknowledges it with a channel message of its own,
+and runs no agent turn — a caption on the document reaches nobody, because the non-text
+handler is disjoint from the text handler. So filing happens in one of two turns, whichever
+comes first:
+
+- **the operator's next text turn** — "this is the Twitter invoice", "file that", or any
+  accounting question: Ellen calls `list_inbound_files`, passes the file through
+  `share_inbound_file` to `ingest_invoice`, and answers with the receipt below;
+- **the next pass**, which sweeps Ellen's inbox exactly as it sweeps self-addressed mail:
+  every PDF or image there that is not yet held is ingested. The pass executes as Ellen,
+  so the inbox is hers to list (INV-HANDOFF-004 keys on the executing agent, which is why
+  the specialist never does this).
+
+Both are safe to repeat because **ingest is idempotent by content hash**: a document
+shared twice, or swept after it was already filed by hand, produces one custody record.
+That idempotency is the recovery path, and there is deliberately no per-intake obligation
+record to keep in step with it: a turn that dies between `share_inbound_file` and
+`ingest_invoice` leaves the inbox copy where it was, and the next text turn or pass files
+it. The bound that remains, stated plainly: Casa keeps an inbox file for **seven days**, so
+a document sent while no pass and no accounting turn ran for a whole week — Casa down,
+the trigger removed — expires unfiled, and the plugin has no record it ever existed. It
+does not become a `MISSING` line by mistake; it is simply absent, and "did the Twitter
+invoice arrive?" reads the store and says no. The receipt (`Filed.`) is the only
+confirmation of custody; its absence means the file is not held.
 
 What happens, in order, stopping at the first that resolves:
 
@@ -1431,7 +1499,8 @@ names both.** Sending the PDF to Ellen in Telegram is the obvious gesture, and i
 since Casa 0.325.0 ([ha-casa-app#1036](https://github.com/bonzanni/ha-casa-app/issues/1036)
 receives the document) and 0.326.0
 ([#486](https://github.com/bonzanni/ha-casa-app/issues/486): `share_inbound_file` hands it
-to this plugin) — it is filed in that turn, §"Handing it a document". Email to self is
+to this plugin) — it is filed in the operator's next text turn or by the next pass, since
+arrival itself runs no turn (§"Handing it a document"). Email to self is
 the other: the pass runs one targeted search for recent self-addressed mail carrying
 attachments whenever anything is in the portal/missing state, so a forwarded PDF is
 found even when its subject matches nothing about the transaction. Such documents carry
@@ -1788,7 +1857,8 @@ pass offers to resend that exact file, in words, like everything else.
 - **The projection sweep gets the four reproduced failures as pinned red cases**, since
   each one is now supposed to be unreachable rather than handled: a stale writer that
   lands `acct::matched` after a rejection has been cleaned up (next sweep restores the
-  desired empty set); a rejected projection whose row is superseded between the stale
+  desired `{acct::open}` — not the empty set the pre-restoration text expected, round-10
+  finding); a rejected projection whose row is superseded between the stale
   write and the sweep (the lineage, not the row id, keeps it enumerable, and the tags are
   found on the successor); a rejected match and an accepted replacement on ONE
   transaction (one desired set computed from both, reaching the same fixed point from
@@ -1797,7 +1867,14 @@ pass offers to resend that exact file, in words, like everything else.
   pin — **the row stays in bank-feed's untagged classifier queue while carrying it**).
   Plus the reducer itself:
   `actual := (actual − owned) ∪ desired` must reach the same result from an arbitrary
-  starting tag set, including one containing foreign tags it must not touch.
+  starting tag set, including one containing foreign tags it must not touch. **And the
+  desired-set table's precedence** (round-10 S1): a payment the operator exempted, and a
+  `none-expected` vendor's payment, desire `{acct::no-invoice-expected}` and never
+  `{acct::open}`; a portal vendor's unpaired payment desires both `acct::open` and
+  `acct::portal`; a row with 64 namespaced tags from other owners is reported
+  unprojectable rather than retried; a CRDT row, a row on another account and a row
+  booked before the watermark get no projection and no `acct::` write; and moving the
+  watermark earlier admits exactly the rows it newly covers on the next pass.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
