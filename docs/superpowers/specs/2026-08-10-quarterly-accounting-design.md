@@ -11,7 +11,11 @@ directions; "open" means "a required supporting document is missing", not "an in
 what document a transaction needs follows from tx-classifier's classification through a
 stored expectation mapping — this plugin classifies nothing (§"Document expectation"). That
 change is a new mechanism and went back through review: rounds 25–30, ending with Astra
-and Terra both **SHIP** at the round-30 tree (b0508f9), nothing at S1/S2. The other two were
+and Terra both **SHIP** at the round-30 tree (b0508f9), nothing at S1/S2. A further
+addition — **test install and reset on production**, with bank-feed minting the restore
+point on the first accounting write (§Setup, "Test install") — went through rounds 31–40,
+ending with both **SHIP** at the round-40 tree (1a8e078); round 33 was Terra-only, Astra's
+run having been cut off by OpenAI's content filter, and is recorded as such. The other two were
 ruled the same day: the admission
 watermark defaults to the binding quarter, and emailing the package to the operator's own
 mailbox is on the free rung (the branch is restored; the recipient is checked by Casa's
