@@ -5,10 +5,11 @@ Review status: **converged 2026-09-22 at rounds 10–22** — Astra (`gpt-6-astr
 Terra (`gpt-5.6-terra`, medium) both **SHIP** at the round-22 tree, nothing at S1/S2, on
 harnesses that reproduce against bank-feed 0.10.1, Casa 0.326.0–0.328.0 and gmail 0.9.0
 source. Each round's findings and fixes are in that round's commit message (`git log`).
-Two judgment calls made during convergence still await an operator ruling: CRDT rows are
-unmanaged (no projection, no `acct::` tag); the package-to-gmail delivery branch is out of
-v1. The admission watermark defaulting to the binding quarter was **ruled by the operator,
-2026-09-22**.
+One judgment call made during convergence still awaits an operator ruling: CRDT rows are
+unmanaged (no projection, no `acct::` tag). Two were ruled on 2026-09-22: the admission
+watermark defaults to the binding quarter, and emailing the package to the operator's own
+mailbox is on the free rung (the branch is restored, its recipient rule stated as skill
+guidance).
 Revised 2026-09-22 — re-verified against casa **v0.328.0** and bank-feed **0.10.1**
 after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31 landed.
 Required floors: casa **0.326.0**, bank-feed **0.10.0** (§Casa baseline).
@@ -146,7 +147,7 @@ correctness properties protect nothing. Three rungs:
 
 | Rung | What is on it | Discipline |
 |---|---|---|
-| **Free** | Everything v1 does: ingest, auto-match, demote, retarget, reject, re-label; bank-feed `acct::*` tags (an `untag_transaction` away from undone); notes (append-only, corrected by appending); **and the quarterly package itself** — the operator asks for a zip, checks it, corrects what is wrong and asks again (operator, 2026-09-21). A rebuild costs one message. | Act. No question, no confirmation, no ceremony. |
+| **Free** | Everything v1 does: ingest, auto-match, demote, retarget, reject, re-label; bank-feed `acct::*` tags (an `untag_transaction` away from undone); notes (append-only, corrected by appending); **and the quarterly package itself** — the operator asks for a zip, checks it, corrects what is wrong and asks again (operator, 2026-09-21). A rebuild costs one message. Emailing a package or an invoice **to their own mailbox** (operator, 2026-09-22): it stays in their hands. | Act. No question, no confirmation, no ceremony. |
 | **Gated** | Nothing, in v1. | — |
 
 **v1 therefore has no routine gates and no routine button questions.** Every step is
@@ -730,16 +731,20 @@ turns one €99 payment that went pending → booked into €198 (round-5 findin
 and vanished observations are kept as history and disclosed in `notes.md` where they
 explain something, never summed into the ledger.
 Packaging: `build_quarterly_package(quarter)`, `stage_for_delivery(target)` (copies
-an invoice PDF or the built package into casa's plugin outbox for `send_media`, and
-nothing else). **It does not publish to the handoff folder in v1.** A round-10 fix
-constrained a handoff branch — so gmail's `send_email` could attach the package — to the
-operator's own mailbox, and round 11 pointed out that the constraint lived in skill text
-with nothing checkable behind it: the server cannot see a recipient, and gmail attaches
-any handoff file. Mailing the package to anyone is on the gated rung (§"The reversibility
-ladder"), so the branch is removed rather than described; Telegram delivery is the one
-path, and the operator forwards from there. If "email me the package" turns out to be
-wanted, it needs a recipient the server can check, and that is a v2 design, not a
-sentence.
+an invoice PDF or the built package into casa's plugin outbox for `send_media`, or
+publishes it to the handoff folder so gmail's `send_email` can attach it **to the
+operator's own mailbox**). **Operator ruling, 2026-09-22: emailing the package or an
+invoice to themselves is on the free rung** — it never leaves their hands, so it is as
+retractable as the Telegram copy — and "email me the Q3 package" is a supported ask.
+Mailing anyone else stays on the gated rung and out of v1 (§"The reversibility ladder").
+Stated honestly, because rounds 11 and 12 raised it: the recipient rule is **skill
+guidance, not a server check**. The server publishes a file and cannot see who an email
+goes to, and gmail's `send_email` attaches any handoff file to any recipient; the only
+thing standing between "to myself" and "to my accountant" is Ellen following the skill.
+The operator accepted that residual with the ruling, on the same footing as the render
+binding's — one trusted model, on their own box, guarding against a mistake rather than
+an adversary. A future version that mails the accountant on purpose needs a recipient the
+server can check; that is a design, not a sentence.
 
 House disciplines copied from bank-feed: explicit loud failures, numeric caps and
 truncation notices on reads, provider text fenced as untrusted on output, three-way
