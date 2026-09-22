@@ -8,8 +8,10 @@ source. Each round's findings and fixes are in that round's commit message (`git
 One judgment call made during convergence still awaits an operator ruling: CRDT rows are
 unmanaged (no projection, no `acct::` tag). Two were ruled on 2026-09-22: the admission
 watermark defaults to the binding quarter, and emailing the package to the operator's own
-mailbox is on the free rung (the branch is restored, its recipient rule stated as skill
-guidance).
+mailbox is on the free rung (the branch is restored; the recipient is checked by Casa's
+one-tap approval of the exact send, and email is under the delivery log). Rounds 23–24
+re-reviewed those rulings: round 24 Astra SHIP, Terra SHIP WITH FIXES on this status line
+alone, corrected here without a further round.
 Revised 2026-09-22 — re-verified against casa **v0.328.0** and bank-feed **0.10.1**
 after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31 landed.
 Required floors: casa **0.326.0**, bank-feed **0.10.0** (§Casa baseline).
