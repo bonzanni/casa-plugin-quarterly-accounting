@@ -424,7 +424,7 @@ multi-round delegations stateless-safe (each delegation is a fresh ephemeral ses
 state carries in the store, not in return values alone) and crash-safe: a casa
 restart mid-pass loses only the in-flight turn.
 
-## Tool surface (server, 19 tools)
+## Tool surface (server, 20 tools)
 
 Ingest & curation: `ingest_invoice(source_path, vendor, invoice_date, invoice_number,
 amount, currency, recipient, source_ref)` — **the server takes `source_path` from
@@ -440,6 +440,15 @@ arguments are the agent's provisional reading, for filing; the bytes are the fac
 Query: `list_unmatched_invoices`, `list_quarter_state`, `get_vendor`.
 Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match` — every
 mutating match tool takes `expected_revision` (CAS; see the match-record state machine).
+Exemption: `set_exemption(projection_id, exempt, expected_revision)` — the operator's
+per-payment "needs no invoice" / "does need one after all", a lineage-scoped decision
+stored on the projection with the projection's revision as its CAS (round-11 finding: the
+precedence table named this fact and no tool stored it). Committing `exempt=true` moves any
+active pairing on that lineage to `rejected` in the same transaction, and while it stands
+the server refuses `record_match` and `propose_match` on the lineage — so an exemption and
+an active pairing never coexist. Lifting it is `exempt=false`, or an operator-authored
+`record_match`, which clears it in the same transaction. Vendor-level `none-expected`
+stays vendor-scoped, in `upsert_vendor`.
 Projection: `list_projections()` — every transaction lineage with its desired tag set and
 snapshot, which is what the specialist reconciles against bank-feed;
 `record_observation(projection_id, observed_tags, observed_snapshot, error)` — what it
@@ -471,12 +480,16 @@ transaction booked in the quarter" turns one €99 payment that went pending →
 €198 (round-5 finding). Superseded and vanished observations are kept as history and
 disclosed in `notes.md` where they explain something, never summed into the ledger.
 Packaging: `build_quarterly_package(quarter)`, `stage_for_delivery(target)` (copies
-an invoice PDF or the built package into casa's plugin outbox for `send_media`, or
-publishes it to the handoff folder so gmail's `send_email` can attach it — **to the
-operator's own mailbox only**, in v1. Mailing the accountant, or anyone else, is on the
-gated rung and out of scope (§"The reversibility ladder"); the skill says so, and the
-handoff branch exists for "email me the Q3 package" and nothing else. Round-10 finding:
-the two sections read together permitted materially different delivery behaviour).
+an invoice PDF or the built package into casa's plugin outbox for `send_media`, and
+nothing else). **It does not publish to the handoff folder in v1.** A round-10 fix
+constrained a handoff branch — so gmail's `send_email` could attach the package — to the
+operator's own mailbox, and round 11 pointed out that the constraint lived in skill text
+with nothing checkable behind it: the server cannot see a recipient, and gmail attaches
+any handoff file. Mailing the package to anyone is on the gated rung (§"The reversibility
+ladder"), so the branch is removed rather than described; Telegram delivery is the one
+path, and the operator forwards from there. If "email me the package" turns out to be
+wanted, it needs a recipient the server can check, and that is a v2 design, not a
+sentence.
 
 House disciplines copied from bank-feed: explicit loud failures, numeric caps and
 truncation notices on reads, provider text fenced as untrusted on output, three-way
@@ -562,19 +575,44 @@ One object, owned by the plugin server, per **transaction lineage**:
   match: a rejected match contributes no accepted relationship, and issues no
   instruction to erase an accepted replacement's tags. That is finding 4, closed by
   construction.
-- **Admission — which lineages are managed.** A projection exists for every bank-feed
-  row that is on the bound account, `state='active'` when first seen, direction DBIT,
-  and booked on or after the **watermark**; and it persists for the lineage from then
-  on (through supersession, vanishing and rejection). Nothing else has one: no CRDT row
-  (§Non-goals), no row on another account, no row booked before the watermark. The
-  watermark is stored with the binding and defaults to **the first day of the quarter
-  in which the account was bound** — the quarter the operator installed the plugin to
-  get done, and nothing older, which is what §Non-goals' "no bootstrap over historical
-  quarters" means in row terms. The first view says so in one line
-  (`Starting from Q3 2026 — say "start from Q2" to go further back`), and moving it
-  earlier admits the older rows on the next pass. Without this rule "whatever bank-feed
-  has that we have not seen" admitted two years of history and wrote `acct::open`
-  across it on install day (round-10 finding, both reviewers).
+- **Admission and eligibility are two different things** (round-11 finding, both
+  reviewers). **Eligibility** is a predicate on a row's *current* facts: on the bound
+  account, direction DBIT, and dated on or after the **watermark** — by `booking_date`,
+  or by `value_date` while the row is still pending and has none. **Admission** is the
+  moment a lineage gets a projection: every pass reads the bound account's active rows
+  in bulk (the fingerprint sweep already does) and admits **every eligible row that has
+  no projection yet** — never "every row we have not seen", because bank-feed corrects
+  rows in place under the same `row_id` (a June 30 booking becomes July 1; a CRDT
+  becomes a DBIT), and a row observed once and skipped must be admitted the pass it
+  becomes eligible. Once admitted, a projection **persists for the lineage** through
+  supersession, vanishing, rejection and every later correction — retention is what
+  keeps a stale write repairable. But **the desired set is computed against current
+  eligibility**: a managed lineage whose destination row is no longer eligible — a debit
+  corrected to a credit, a booking date corrected to before the watermark — desires the
+  **empty set**, so the next sweep removes its owned tags and the row is reported as
+  `ineligible`, still enumerated. Both reviewers reproduced the alternative against
+  bank-feed's real `apply_plan`: a DBIT→CRDT correction kept its `row_id` and its
+  `acct::open`, and "persists" alone would have had the sweep reaffirm an accounting
+  status on an incoming transfer, which §Non-goals forbids.
+
+  | Transition (real bank-feed behaviour) | Projection | Desired set |
+  |---|---|---|
+  | eligible row first seen, no projection | admitted | per the table below |
+  | ineligible row first seen (CRDT, before watermark, other account) | none | — |
+  | pending row books: supersession to a booked successor | follows the lineage (alias) | recomputed on the successor's facts |
+  | in-place correction makes an unmanaged row eligible | admitted this pass | per the table |
+  | in-place correction makes a managed row ineligible | retained, marked `ineligible` | `∅` — owned tags removed |
+  | correction makes it eligible again | same projection | per the table |
+  | watermark moved earlier | previously ineligible rows admitted next pass | per the table |
+  | watermark moved later | **not offered** in v1 | — |
+
+  No CRDT row is ever eligible (§Non-goals). The watermark is stored with the binding and
+  defaults to **the first day of the quarter in which the account was bound** — the
+  quarter the operator installed the plugin to get done, and nothing older, which is what
+  §Non-goals' "no bootstrap over historical quarters" means in row terms. The first view
+  says so in one line (`Starting from Q3 2026 — say "start from Q2" to go further back`).
+  Without a boundary at all, "whatever bank-feed has that we have not seen" admitted two
+  years of history and wrote `acct::open` across it on install day (round-10 finding).
 - **"Managed" includes transactions with no match at all** — one still awaiting an
   invoice has a projection, because coverage must not depend on a match existing.
   **Its desired EXTERNAL tag set was empty in v1** (round-9 finding, reproduced
@@ -598,16 +636,26 @@ One object, owned by the plugin server, per **transaction lineage**:
 
   | Lineage state (first row that applies) | Desired set |
   |---|---|
+  | destination row not currently eligible (corrected to CRDT, or to before the watermark) | `∅` |
+  | exempt by the operator (`set_exemption`) — structurally, no active pairing exists while it stands | `{acct::no-invoice-expected}` |
   | an active `matched` pairing | `{acct::matched}` |
   | an active `proposed` pairing | `{acct::proposed}` |
-  | exempt: the operator said this payment needs no invoice, or the vendor's channel is `none-expected` | `{acct::no-invoice-expected}` |
+  | the vendor's channel is `none-expected` and nothing is paired | `{acct::no-invoice-expected}` |
   | otherwise — never paired, every pairing rejected, `conflicted` only, accepted-missing after "stop chasing" | `{acct::open}` |
-  | plus, whenever the vendor's channel is `portal` | `∪ {acct::portal}` |
+  | plus, whenever the vendor's channel is `portal` and the row is eligible | `∪ {acct::portal}` |
 
-  Accepted-missing stays `acct::open` on purpose: "stop chasing" rations search effort,
-  it does not change the fact that no invoice exists. A match landing swaps one status
-  for another in a single reduction, so `acct::open` and `acct::matched` can never be
-  desired together.
+  Round 11 found the first version of this table let an active `proposed` — an
+  unresolved machine proposition — outrank the operator's exemption, and an existing
+  proposal survive the operator exempting that payment. So the operator's exemption is
+  not merely first in the table: committing it rejects any active pairing in the same
+  transaction and the server refuses new auto pairings while it stands (§Tool surface,
+  `set_exemption`), which makes the row above it unreachable rather than merely ordered.
+  A vendor's `none-expected` is weaker on purpose — it is a default about a vendor, and
+  a document that does match a specific payment beats it; the operator's word about one
+  payment beats everything. Accepted-missing stays `acct::open` on purpose: "stop
+  chasing" rations search effort, it does not change the fact that no invoice exists. A
+  match landing swaps one status for another in a single reduction, so `acct::open` and
+  `acct::matched` can never be desired together.
 - **`owned_tags` is a fixed, reserved vocabulary inside the `acct::` namespace**, not a
   prefix rule: exactly `acct::matched`, `acct::proposed`, `acct::portal`,
   `acct::no-invoice-expected`, `acct::open`.
@@ -982,8 +1030,9 @@ catch, because it launders a guess into a human decision. So:
   sheet; it resolves no missing invoice and picks no winner among alternatives. "4 good"
   confirms exactly line 4.
 - **Facts are distinct from verdicts.** "3 is my accountant" records an identity; it
-  does **not** mean "no invoice expected" (that is "3 needs no invoice"), and it
-  certainly does not mean "never for this vendor" (that is "no invoices ever for X").
+  does **not** mean "no invoice expected" (that is "3 needs no invoice", a per-payment
+  exemption through `set_exemption`), and it certainly does not mean "never for this
+  vendor" (that is "no invoices ever for X", the vendor's channel).
   The plugin never manufactures "ever" out of a one-off answer.
 
 **Descriptions choose the target; the revision the operator was SHOWN is what binds.**
@@ -1021,6 +1070,7 @@ same rule applies to its state.
 | Unique target | A description that resolves to exactly one open item: a vendor name, or a vendor plus any discriminator already printed on it (amount, date). Case and whitespace normalised; **no fuzzy vendor matching** — two Adobe charges need the date or the amount, and if the description still fits both, it asks. |
 | Whole clauses | A supported clause must consume all its text. "Zapier and Vercel" is a target list with no verb: nothing applies, and the reply asks whether they are wrong. Never extract a convenient command from prose that did not parse. |
 | Negative verdicts unpair, and only that | "the Zapier one is wrong", "no to Zapier", "Zapier and Vercel are wrong" remove the pairing and keep both payment and document. On a missing or identity-only item there is no pairing to remove: nothing mutates, and the reply says what it could do instead. |
+| Exemptions are per payment, and say so | "the 180.00 one needs no invoice" calls `set_exemption` on that lineage, bound to the shown revision like every correction; if it was paired, the receipt says the pairing was dropped too. "It does need an invoice after all" lifts it. "No invoices ever for X" is a different sentence and sets the vendor's channel to `none-expected` instead; neither is inferred from the other. |
 | Ambiguous bulk clauses apply nothing | "all good except the Zapier" does not say whether Zapier is wrong or merely unchecked. Nothing applies; the reply names the two phrasings that work. Input-error handling, not a gate. |
 | Validate against the saved proposition | An unknown number is reported, never redirected to a nearby one. Independent valid clauses still apply; the exceptions ride in the same receipt. |
 | Instructions separate from corrections | "Zapier is wrong; rebuild it" unpairs, then rebuilds that quarter. An unresolved correction blocks its dependent rebuild and says so. Unsupported wording is reported, never swallowed into a note. |
@@ -1323,7 +1373,7 @@ is the open item. Concretely, every pass does four things with four different sc
 
 | Step | Scope |
 |---|---|
-| **Ingest new payments** | Every row that satisfies the admission rule (§"The projection": bound account, active, DBIT, booked on or after the watermark) and that we have not seen. Each lands in its own booking-date quarter, which is usually the current one but is decided by the row, never by the calendar on the day of the pass. |
+| **Admit newly eligible payments** | Every currently eligible active row on the bound account that has no projection yet (§"The projection", admission) — not "rows we have not seen", since an in-place correction can make a row we skipped last week eligible this week. Each lands in its own booking-date quarter, which is usually the current one but is decided by the row, never by the calendar on the day of the pass. |
 | **Search and match open items** | **Every unresolved payment, whatever quarter it belongs to** — subject to the search age-out below. September's stragglers keep being chased through October and beyond. |
 | **Repair sweep and fingerprint revalidation** | **Every active match in every quarter, AND every row of every delivered package** — the two sets are not the same, and an earlier draft used only the first (round-6 finding). A payment that shipped as `MISSING` has no match; so does every CRDT row; a change to either still makes the accountant's copy wrong, which is precisely what "a delivered quarter changed underneath" promises to catch. The sweep therefore compares the stored fingerprint of every delivered ledger row against current bank-feed state, independent of whether an invoice was ever matched to it. It reads the account's rows in bulk and compares locally rather than querying per row. |
 | **Annotate** | Whatever it just decided. |
@@ -1874,7 +1924,17 @@ pass offers to resend that exact file, in words, like everything else.
   `acct::portal`; a row with 64 namespaced tags from other owners is reported
   unprojectable rather than retried; a CRDT row, a row on another account and a row
   booked before the watermark get no projection and no `acct::` write; and moving the
-  watermark earlier admits exactly the rows it newly covers on the next pass.
+  watermark earlier admits exactly the rows it newly covers on the next pass. **And the
+  round-11 transitions**, each pinned against bank-feed's real `apply_plan` rather than
+  a double: exempting a payment that carries an active `proposed` (or `matched`) rejects
+  the pairing in the same transaction and the next sweep shows `acct::no-invoice-expected`
+  alone; `propose_match` on an exempt lineage is refused; an operator `record_match` on an
+  exempt lineage clears the exemption; a managed DBIT corrected in place to CRDT desires
+  `∅`, its `acct::open` is removed by the next sweep, and the projection is still
+  enumerated as `ineligible`; a CRDT corrected in place to DBIT, and a June 30 row
+  corrected to July 1 across the watermark, are admitted on the next pass although both
+  were observed and skipped before; and a pending row admitted on its `value_date`
+  follows its supersession to the booked successor.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
