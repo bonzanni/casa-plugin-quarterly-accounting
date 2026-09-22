@@ -371,11 +371,17 @@ store-wide sequence the note revisions use, the **row fingerprint it was made ag
 and the shown revision it was bound to when the author is the operator. A vendor's channel
 (`none-expected`, `portal`) is **not** a lineage decision: it is a vendor fact the reducer
 reads from the KB at the end (round-13 finding: listing it as an entry kind left
-machine-vs-machine order undefined). The log is the **audit trail and the source of sequence numbers**; it is not replayed to
-decide anything (rounds 14–17 each found a replayed log re-selecting a retired decision).
-Decisions take effect once, as match-record state, at the commit that makes them or the
-merge that brings two lineages' state together — the retirement list in step 2 below is the
-whole of it. Two principles it is built on:
+machine-vs-machine order undefined). **A lineage's match-record state is the fold of its log**, in store-wide sequence order,
+through the one transition list in step 2 below, starting from the empty state. At commit
+the fold advances by one entry; at a fan-in merge the state is **recomputed from the union
+of the two logs**, sorted by sequence, from the empty state — never by combining the two
+folded states (round-18 finding: combining folded states pairwise made `(A + E) + P` and
+`A + (E + P)` leave A `rejected` in one order and `conflicted` in the other, so traversal
+order decided the ledger). A fold over a sorted union is the same whatever order the
+lineages were walked in; that is the whole reason for the shape. Rounds 14–16 found a
+different error and this restores nothing of it: those rounds *selected* "the latest entry"
+instead of folding, so a retirement committed later was never consumed. The fold consumes
+every entry, and a retired pairing stays retired until a later entry names it again. Two principles it is built on:
 
 - **the operator's later word wins, and a machine decision never overrides an operator
   decision.** "Later" is always the store-wide sequence number, compared between the two
@@ -413,76 +419,65 @@ projection" are *derived* from this order, and an implementation follows the ord
 the prose. For one lineage, given its merged log, its live row and the vendor KB:
 
 1. **Eligibility.** Destination row not eligible (§"The projection", admission) → `∅`.
-2. **Operator precedence — over the pairings that are active now, never over the log.**
-   Rounds 14–16 each found a way for a decision the operator had already retired to be
-   re-selected, because the step chose "the latest entry in the log" and a retirement is a
-   *later* entry that the selection never consumed (`[pair P, unpair P]` selected P;
-   `[exempt, lift]` kept the exemption; a cutoff at the latest lineage-wide entry retired a
-   merged-in candidate the trace required current). So the reducer does not replay the
-   log. **Retirement happens once, at the commit that causes it or at the merge that
-   discovers it, as match-record state; the reducer reads that state.** Its inputs for a
-   lineage are: the standing exemption, if any; the set of **active** pairings, each with
-   its author, sequence number and fingerprint; the live row; the vendor channel. Then:
-   - an exemption stands → `{acct::no-invoice-expected}`, then **step 8**. (Nothing is
-     active while it stands: the exemption's commit `rejected` every active pairing, a
-     merge onto an exempt lineage `rejects` an incoming machine pairing and any operator
-     pairing **older** than the exemption, and `record_match`/`propose_match` are refused.)
-   - at least one active pairing is operator-authored → the one with the highest
-     sequence number is current; go to step 3. Every other active pairing, any author,
-     goes to `conflicted` with residue — at commit when the operator paired, at merge when
-     a merge brought it — and the operator's latest pairing is never the one displaced
-     (round-13 finding).
-   - otherwise → step 4 with the active machine pairings.
+2. **Operator precedence — over the state the fold produced.** The fold's state for a
+   lineage is: the **standing exemption** (at most one, with its sequence number), the set
+   of **active** pairings (each with author, sequence number, fingerprint), the set of
+   **`conflicted`** candidates, and the `rejected` history. The fold's transition list —
+   applied one entry at a time in sequence order, at commit and at merge alike — is:
 
-   **What retires what, at commit or merge — and into which of the four states**, since
-   "history" is not one (round-15 finding): an operator `pair P` moves every other active
-   pairing to `conflicted`; an `exempt` moves every active pairing to `rejected`; an
-   `unpair X` moves X alone to `rejected`; a `lift` clears the exemption alone and
-   restores nothing; a merge applies the same rules to the union as if the later — by store-wide
-   sequence number — of any two conflicting decisions had been committed on the merged
-   lineage: the later operator pairing stays current and the earlier goes `conflicted`; a
-   machine pairing meeting a current operator pairing goes `conflicted`; a machine pairing
-   meeting an exemption goes `rejected` whatever their order; an **operator** pairing
-   meeting an exemption is decided by sequence — a newer exemption `rejects` the older
-   pairing, a **newer operator pairing clears the older exemption** (the merge appends
-   `lift`, then the pairing is current; round-17 finding, both reviewers, where an
-   unqualified "meeting an exemption goes rejected" contradicted "the later word wins");
-   and a machine pairing meeting **no** current operator pairing and no exemption joins the
-   machine candidate set of step 4 (the round-14 trace: machine A merged into
-   `[pair B, unpair B]` finds B already `rejected`, so A is the lineage's only candidate
-   and is current). **A retired
-   pairing never returns on its own**: not when a later entry is itself retired, not when
-   a fingerprint reverts. It comes back only as a new entry — the specialist re-proposing
-   it, or the operator pairing it.
+   | Entry (by sequence) | Transition |
+   |---|---|
+   | operator `pair P` | if an exemption stands, it is cleared first (an implicit `lift` at this sequence, appended by the fold); P becomes the current pairing; every other active **or `conflicted`** pairing goes `conflicted` |
+   | machine `pair`/`propose M` | if an exemption stands → M is `rejected` (at write time the tool refuses instead; in a merge fold this is what "machine never overrides operator" means); else if an operator pairing is current → M `conflicted`; else M joins the machine candidate set (step 4 decides its status) |
+   | operator `unpair X` | X → `rejected`, whatever its state; nothing else changes, and nothing already retired becomes current |
+   | operator `exempt E` | every active **and `conflicted`** pairing → `rejected`; E stands, superseding any earlier standing exemption (round-18 finding: two exemptions meeting a pairing between them had no rule — the fold settles E10, P15, E20 as: exempt, P clears E10, E20 rejects P and stands) |
+   | operator `lift` | clears the standing exemption; restores nothing |
+   | specialist `propose M, resolves=[…]` | each named `conflicted` candidate → `rejected`, then as `propose M` |
+   | fingerprint change on the live row | not an entry — validity is judged in steps 3 and 5 against the live row at reduction time |
+
+   Then, over that state:
+   - an exemption stands → `{acct::no-invoice-expected}`, then **step 8**. Nothing is
+     active while it stands, by the transitions above.
+   - an operator-authored pairing is active → it is current (the transitions leave at most
+     one); go to step 3.
+   - otherwise → step 4 with the machine candidate set.
+
+   Why the earlier statements of this step failed, so the shape is not re-litigated: rounds
+   14–16 *selected* the latest entry instead of folding, so a later `unpair` or `lift` was
+   never consumed; round 17 folded per lineage but combined two folded states pairwise at
+   merge, which is not associative. A fold of the sorted union is both.
 
    **The targeted kinds have write-time preconditions**, refused by the server with the
-   current facts rather than absorbed: `unpair X` requires X to be **active or
-   `conflicted`** on the lineage — a `conflicted` candidate is shown in the residue and
-   the reply grammar promises a negative verdict can remove it (round-16 finding: an
-   "active only" precondition refused exactly that) — and moves X alone to `rejected`;
-   `lift` requires an exemption to stand, and clears it alone. An operator `record_match`
-   on an exempt lineage is one transaction that appends `lift` first and `pair` second —
-   in that order, since the opposite order reproduced `open` (round 15).
+   current facts rather than absorbed: `unpair X` requires X to be active or `conflicted`
+   on the lineage (a `conflicted` candidate is shown in the residue and the reply grammar
+   promises a negative verdict can remove it); `lift` requires an exemption to stand.
+   Every operator pair-type write — `record_match` and `confirm_match` alike — on an
+   exempt lineage is one transaction that appends `lift` first and `pair` second (round-18
+   finding: only `record_match` said so, and a `confirm_match` of a shown `conflicted`
+   candidate on an exempt lineage produced a current pairing under a standing exemption).
 
 3. **Validity of the current operator pairing.** Compare P's fingerprint with the live
    row. Equal → `{acct::matched}`. Different → `{acct::proposed}` with a residue line, P
    still the current pairing (never dropped, never replaced by an older entry); when the
    operator confirms against the new facts, or the facts revert, it is `matched` again.
    Then step 8.
-4. **Machine candidates — a set, judged as a set.** The lineage's machine candidate set is
-   every machine pairing that is **active or `conflicted`** on it. Exactly one member →
-   it is current (active); go to step 5. More than one → **all** of them are `conflicted`
-   with a residue line, including any that arrived active and any that were already
-   `conflicted` — an unresolved collision is a property of the set, and a newcomer joins
-   it rather than surviving it. Round 17 reproduced why on bank-feed's real three-way
-   supersession: with "collide the pair that met, keep the rest", merging A+B first left C
-   as the survivor and merging A+C first left B, so traversal order chose the invoice that
-   entered the package. Judged as a set, every merge order gives the same conflicted three.
-   A collision is resolved only by explicit reassignment: the operator confirming one
-   candidate (§Tool surface, `confirm_match` on a `conflicted` id), the operator rejecting
-   candidates (`unpair`), or the specialist re-proposing with `resolves=` naming every
-   `conflicted` candidate on the lineage, each of which goes `rejected` — a re-proposal
-   that names fewer is refused, so the set never grows past what the specialist judged.
+4. **Machine candidates — a set, judged as a set, and `conflicted` is sticky.** The lineage's
+   machine candidate set is every machine pairing that is **active or `conflicted`** on it.
+   Exactly one member **and it is active** → it is current; go to step 5. More than one →
+   **all** of them are `conflicted` with a residue line, including any that arrived active
+   and any already `conflicted` — an unresolved collision is a property of the set, and a
+   newcomer joins it rather than surviving it. Exactly one member and it is **`conflicted`**
+   → it stays `conflicted` and the lineage falls through to step 6 (round-18 finding: after
+   A/B collided, the operator confirmed B and later unpaired B, and a singleton rule
+   reactivated A, which the operator had never chosen — a retired pairing never returns on
+   its own). Round 17 reproduced the set rule's necessity on bank-feed's real three-way
+   supersession: with "collide the pair that met, keep the rest", merging A+B first left C as
+   the survivor and merging A+C first left B, so traversal order chose the invoice that
+   entered the package. A collision is resolved only by explicit reassignment: the operator
+   confirming one candidate (§Tool surface, `confirm_match` on a `conflicted` id), the
+   operator rejecting candidates (`unpair`), or the specialist re-proposing with
+   `resolves=` naming the `conflicted` set exactly.
+
 5. **Validity of the current machine pairing.** One active `matched` whose fingerprint
    holds → `{acct::matched}`; a `matched` whose fingerprint differs, or an active
    `proposed` (whether or not its fingerprint holds — an invalidated proposal stays a
@@ -496,8 +491,10 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
 8. **Portal.** If the vendor's channel is `portal` and the row is eligible, add
    `acct::portal` to whatever the steps above produced.
 
-Three properties the order is built to have, and the tests pin: **the reducer selects
-only among pairings that are active now, and a retired pairing never returns on its own**
+Four properties the order is built to have, and the tests pin: **the merged state of any
+set of lineages is the fold of their logs' union in sequence order, so it is the same under
+every merge order**; **the reducer selects only among pairings that are active now, and a
+retired pairing never returns on its own**
 (so a fingerprint change can invalidate the current pairing but cannot resurrect a replaced
 or rejected one, and retiring a later entry does not revive an earlier one); **a targeted
 operator entry (`unpair`, `lift`) touches only its target** (so a correction about one
@@ -609,8 +606,12 @@ on the lineage goes `conflicted` (step 2's operator-pair rule) — unless the ca
 invoice has meanwhile been paired on another lineage, in which case the write is refused
 with those facts (cardinality: a `conflicted` record holds no slot, so the slot may be
 gone). And **`propose_match`/`record_match` by the specialist on a lineage with `conflicted`
-candidates requires `resolves=[match_ids]` naming all of them**; each named one goes
-`rejected` in the same transaction, and naming fewer is refused.
+candidates requires `resolves=[match_ids]` equal to the lineage's current `conflicted` set,
+checked inside the transaction**: each named one goes `rejected`, and a list that names
+fewer, names an id that is no longer `conflicted` (the operator confirmed it meanwhile —
+round-18 finding, where "all of them" let a superset retire the operator's pairing), or
+names an id from another lineage is refused whole, with nothing mutated. A `confirm_match`
+on an exempt lineage appends `lift` then `pair`, exactly as `record_match` does.
 Exemption: `set_exemption(projection_id, exempt, expected_revision)` — the operator's
 per-payment "needs no invoice" / "does need one after all", a lineage-scoped decision
 stored on the projection with the projection's revision as its CAS (round-11 finding: the
@@ -862,13 +863,14 @@ One object, owned by the plugin server, per **transaction lineage**:
   tags, which is the failure this whole mechanism exists to prevent.
 - **Registered before its first external write**, retained after rejection, and retained
   after its tags are observed absent.
-- **Fan-in merges.** Two projections that resolve to one successor merge their aliases,
-  their logs (for audit and sequence numbers) and their **match-record state**, and apply
-  the retirement list of §Match records step 2 to the union in one transaction, as if the
-  later of any two conflicting decisions — by sequence number — had been committed on the
-  merged lineage. The merged result does not depend on which lineage was walked first
-  (round-17 finding, pinned): the candidate set is a set, and a collision among machine
-  candidates is a property of that set, not of the pair that met first.
+- **Fan-in merges.** Two projections that resolve to one successor merge their aliases
+  and their logs, and the merged match-record state is **recomputed by folding the union
+  of the logs in sequence order from the empty state** (§Match records, step 2's
+  transition table), in one transaction with the projection recompute. The two lineages'
+  previously folded states are discarded, not combined (round-18 finding: combining them
+  was not associative). The merged result therefore does not depend on which lineage was
+  walked first, for any number of predecessors, and the tests pin it over every merge
+  order of up to four.
 
 **Invariant:** every managed lineage has exactly one current desired annotation, and
 every row its annotations can migrate to is reachable from that projection.
@@ -2176,7 +2178,14 @@ pass offers to resend that exact file, in words, like everything else.
   one of those `conflicted` ids makes it `acct::matched` and leaves the other two
   `conflicted`, and is refused when its invoice was paired elsewhere in the meantime; and a
   specialist `propose_match` on that lineage without `resolves=` naming all three is
-  refused; `lift` with
+  refused; **the round-18 folds**: A/B `conflicted`, operator confirms B, operator unpairs B
+  — A stays `conflicted` and the lineage is `acct::open`, never `matched`; machine A,
+  exemption E@10 and operator P@20 across three predecessors reach one state under every
+  parenthesisation of the merge (the fold gives one answer: A@5 is active until E@10 rejects it,
+  P@20 clears E and is current — so A `rejected`, P `matched`, whatever the walk order); E@10,
+  P@15, E@20 end exempt with P `rejected`; `confirm_match` of a shown `conflicted`
+  candidate on an exempt lineage appends `lift` then `pair` and ends `acct::matched`; and
+  `resolves=[A, B]` after the operator confirmed B is refused whole, B untouched; `lift` with
   no exemption standing is refused and appends nothing; a merge that brings machine
   pairing A onto an exempt lineage leaves A `rejected` and the lineage
   `acct::no-invoice-expected`; an exemption on a portal vendor's row keeps `acct::portal`; an auto proposal at €90
