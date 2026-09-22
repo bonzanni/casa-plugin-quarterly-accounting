@@ -554,8 +554,14 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
    derived expectation. Equal, and the document's kind still equals the expected kind →
    `{acct::matched}`. Different → `{acct::proposed}` with a residue line, P
    still the current pairing (never dropped, never replaced by an older entry); when the
-   operator confirms against the new facts, or the facts revert, it is `matched` again.
-   Then step 8.
+   operator confirms against the new facts, or the facts revert, it is `matched` again —
+   **except for a kind mismatch, which no confirmation cures** (round-27 finding): a
+   payslip does not become an invoice because the operator says so twice. `confirm_match`
+   and `record_match` refuse, with the facts, a document whose kind is not the lineage's
+   current expectation kind; the operator's ways out are the right-kind candidate shown
+   `conflicted` beside P, correcting the document's kind (`update_document_metadata`), or
+   correcting the expectation (`set_expectation`, `set_exemption`) — after which the same
+   confirmation goes through. Then step 8.
 4. **Machine candidates — a set, judged as a set, and `conflicted` is sticky.** This
    normalization runs **inside every transition that adds a machine candidate** (step 2's
    table), and what it retires is recorded; the reducer then reads the settled state. The
@@ -670,7 +676,11 @@ as fuel; a matched purchase gains `internal-transfer`; the operator sets a count
 new expectation — a payslip is never a fuel invoice, whatever the amounts: a **machine**
 pairing of the wrong kind is retired `rejected` by the sweep (a recorded retirement, with
 a residue line naming the reason), and the lineage is searched for a document of the new
-kind like any unpaired one; an **operator** pairing of the wrong kind is shown `proposed`
+kind like any unpaired one. **Every retirement, this one included, recomputes the
+document's availability**: a document held by no active pairing returns to `unmatched`,
+so `list_unmatched_documents` and the next triage see it again — if the classifier
+reverts its tags, the same document is a candidate once more, never hidden behind a
+`matched` status nothing holds (round-27 finding); an **operator** pairing of the wrong kind is shown `proposed`
 with the reason — the operator chose that document knowing what it was, and the classifier
 may be the one that is wrong — and a candidate of the right kind that the search finds
 lands `conflicted` beside it for the operator to pick, never replacing it silently
@@ -690,8 +700,10 @@ refund settles nothing). So the question this plugin answers for every transacti
 much does it matter"** — and the first half of that is decided by what the transaction
 *is*, which is tx-classifier's judgment, never this plugin's.
 
-An **expectation** is a pair: a document **kind** (`invoice`, `sales-invoice`, `payslip`,
-`statement`, `receipt`) or `none`, and a **tier**, `required` or `optional`. It is derived
+An **expectation** is a pair: a document **kind** (`invoice`, `sales-invoice`,
+`credit-note`, `payslip`, `statement`, `receipt`) or `none`, and a **tier**, `required` or
+`optional` — the same kind domain the document store uses and `set_expectation` validates
+against (round-27 finding: row 7 derived a kind the domain did not list). It is derived
 per lineage by **one decision procedure, direction-aware, first rule that applies** (round
 25 found a precedence table and a defaults paragraph that disagreed on `income, refund`
 for a DBIT, and left a parked row with a counterparty override undecided; there is now one
@@ -705,18 +717,18 @@ table and it is the test oracle):
 | 4 | the row is in the classifier's queue: `awaiting-operator`, or no classification tag at all (a parked row's content tags are not trusted) | **unknown** — `required` for the ledger tag (operator ruling: "nothing held yet"), searched for nothing until classified |
 | 5 | **classification conflict**: the tags carry more than one flow correction, or chain roots that would select different rows below (`salary` with `fees`; `income, consulting` with `internal-transfer` is *not* a conflict — a flow correction beats a chain by rows 6–7) | **unknown**, and the row is shown under "classification conflict" with its tags, so the operator or the classifier can clean it up (round-26 finding: additive tags can select two rows with different answers, and "first rule" would have picked one silently) |
 | 6 | flow correction `internal-transfer` or `cash-withdrawal` | `none` |
-| 7 | flow correction `refund` — either direction: a vendor's credit note behind money received, the B.V.'s own credit note behind money paid back | `credit-note, required` |
+| 7 | the tag `refund` is present — either direction: a vendor's credit note behind money received, the B.V.'s own credit note behind money paid back. **Tags are tags**: bank-feed keeps no record of whether `refund` arrived as a flow correction or as the tail of the chain `income, refund`, so this one row covers both spellings (round-27 finding: a separate CRDT row for the chain form was unreachable, and a chain override for `income, refund` could be bypassed) | `credit-note, required` |
 | 8 | flow correction `reimbursement` — either direction | `receipt, optional` |
 | 9 | DBIT, chain under `salary` / `payroll` | `payslip, optional` |
 | 10 | DBIT, chain under `fees` / `interest` / `tax` | `statement, optional` |
 | 11 | DBIT, anything else (any chain, or a mapping override for that chain) | `invoice, required` |
-| 12 | CRDT, chain under `income, refund` (a credit reversing a purchase, tagged as a chain rather than a flow correction) | `credit-note, required` |
-| 13 | CRDT, chain under `income, interest` / `income, dividend` | `none` |
-| 14 | CRDT, anything else — `income, *` or an unknown chain | `sales-invoice, required` |
+| 12 | CRDT, chain under `income, interest` / `income, dividend` | `none` |
+| 13 | CRDT, anything else — `income, *` or an unknown chain | `sales-invoice, required` |
 
-Rows 6–14 are **the shipped mapping**; `set_expectation(scope=<chain>, …)` overrides one
-row's outcome for one chain and is consulted at the row where that chain would have
-matched. **The mapping ships with defaults and is edited by asking**, never at install:
+Rows 6–13 are **the shipped mapping**; `set_expectation(scope=<chain>, …)` overrides the
+outcome for a chain **at whichever row the row's tags actually select** — an override
+for `income, refund` applies at row 7, because that is where a row carrying `refund` is
+decided — and never depends on how a tag got there. **The mapping ships with defaults and is edited by asking**, never at install:
 "payslips don't matter" moves `payslip` to `none`; "Belastingdienst never has a document"
 writes a counterparty override (row 2). The defaults err toward *required*, because the
 failure mode of `optional` is a VAT-relevant document nobody looked for, and the failure
@@ -807,7 +819,8 @@ expectation"). The per-payment case stays `set_exemption`.
 Matching: `record_match`, `propose_match`, `confirm_match`, `reject_match` — every
 mutating match tool takes `expected_revision` (CAS; see the match-record state machine).
 Two contracts round 17 found missing: **`confirm_match` accepts a `proposed` or a
-`conflicted` id.** With the operator's `render_id`, confirming a `conflicted` candidate
+`conflicted` id whose document kind equals the lineage's current expectation kind**
+(refused with the facts otherwise — §Match records step 3). With the operator's `render_id`, confirming a `conflicted` candidate
 makes it the operator's pairing — current, and every other active or `conflicted` candidate
 on the lineage goes `conflicted` (step 2's operator-pair rule) — unless the candidate's
 invoice has meanwhile been paired on another lineage, in which case the write is refused
@@ -1111,7 +1124,16 @@ Unconditional enumeration replaces every selection rule:
    from future sweeps** — that exemption is what let a stale writer escape in round 7.
 
 The enumeration is **resumable**: it advances a durable cursor and picks up where the
-last session stopped, so a cycle spans as many passes as it needs. A projection whose
+last session stopped, so a cycle spans as many passes as it needs. The cursor orders
+projections by id, not by date, and says nothing about coverage on its own (round-27,
+both reviewers): **the classification coverage of a view is the oldest successful
+classification-observation timestamp among the lineages in that view's scope** — the
+observation is stamped on each projection when the sweep reads its row — so a scope whose
+every row was observed this cycle reads as fresh, and one row the cycle has not reached
+yet drags the date back to when it was last seen, which is the honest number. Every view
+prints it beside the bank coverage (`bank checked through 20 Sep · classification through
+13 Sep`); the second date is the one that says how stale the expectation kinds behind
+"what am I missing" may be. A projection whose
 repair is refused — tag cap reached, a persistent API failure — is recorded with the
 refusal and surfaced, never silently retried into an infinite loop.
 
@@ -1366,7 +1388,7 @@ in week one and an operator who concludes after a month that the plugin does not
    | `guessed` | chose among N candidates; the runners-up are named on the line |
    | `no-ref` | vendor has repeating equal charges and no invoice number or payment reference appeared on both sides |
    | `partial-search` | the search was truncated or a fetch failed, so "unique" is unproven |
-   | `recipient?` | the invoice does not name the B.V., or names someone else |
+   | `recipient?` | the document does not name the B.V. as the party it should — for a purchase invoice or a vendor's credit note, the recipient; for a sales invoice or the B.V.'s own credit note, the issuer — or names someone else |
 
    `clean` lines are for skimming. The other four are what the sheet puts in front of
    the operator. Nothing here blocks: a `guessed` + `recipient?` match still lands as
@@ -1380,7 +1402,12 @@ in week one and an operator who concludes after a month that the plugin does not
    `no-document` (expectation `none`) / `not-yet-classified` / `missing` — tier named —
    with a **search plan carrying discriminators**, not just a query ("want €54.45 within
    ~10 days of May 6; ignore payment confirmations"; for a CRDT, "want our sales invoice
-   for €1,210.00 to <client>, probably in Sent").
+   for €1,210.00 to <client>, probably in Sent"). **Credit notes follow the direction**
+   (round-27 finding): behind a DBIT `refund` the document is the B.V.'s own credit note,
+   searched in Sent, issued by the B.V. and naming the client as recipient — so the
+   `recipient?` label does not fire on it; behind a CRDT `refund` it is the vendor's
+   credit note, searched like their invoices, naming the B.V. as recipient, and
+   `recipient?` applies as for an invoice.
 3. **Ellen's targeted Gmail round — searching is where the match rate is won, so it is
    budgeted generously.** The v1 rule ("roughly one precise search per transaction;
    hard bound of two rounds, then residue") was written under the strict-matching
@@ -1673,7 +1700,9 @@ Five mechanisms, each doing real work:
    phrase, never compute — counts, totals, coverage dates and ordering all arrive
    already calculated.
 5. **Provenance is printed, so an invented answer has to forge it.** Every view carries
-   `bank checked through <date>` from the run record. It is there for the operator, and
+   `bank checked through <date>` from the run record and `classification through <date>`
+   from the oldest classification observation in its scope (§"The sweep"); the renderer
+   emits both or neither, never one. It is there for the operator, and
    it also means a fabricated status has to fabricate a coverage date that the next real
    answer will contradict.
 
@@ -1714,7 +1743,7 @@ usually means, then anything the machine guessed at and would like challenged:
 
 ```
 Accounting · Q3 2026
-Bank checked through 20 Sep · 41 payments, 3 without an invoice.
+Bank checked through 20 Sep · classification through 13 Sep · 41 transactions, 3 missing a document.
 
 MISSING
 Adobe · EUR 54.45 · 14 Sep
@@ -1740,7 +1769,9 @@ say "check emailed invoices" to file them now.
 
 The coverage line is load-bearing: it is the only way the operator learns the plugin has
 stopped working, now that nothing arrives on its own. `Bank checked through 20 Sep` read
-on 14 October says more than any status notification would have.
+on 14 October says more than any status notification would have, and `classification
+through 13 Sep` beside it says whether the "what is missing" list is built on current
+expectations or on last month's.
 
 ### When the plugin may speak first
 
@@ -2529,7 +2560,17 @@ and is resent only when the operator asks, as that exact file.
   `unclassifiable` derives `required` (row 3) and never `unknown`; `salary, fees` on a
   DBIT derives unknown, is tagged `acct::open`, and is shown under "classification
   conflict"; `transport, fuel, refund` derives `credit-note, required` and is not a
-  conflict; and a required credit note routes to `credit-notes/`.
+  conflict; and a required credit note routes to `credit-notes/`. **And the round-27 rows**: a CRDT
+  tagged `income, refund` and one tagged `refund` alone both derive `credit-note, required`
+  at row 7, and a chain override for `income, refund` applies to both; `confirm_match` of
+  a payslip on a lineage whose expectation is `invoice` is refused with the facts, and
+  goes through after `update_document_metadata` corrects the kind or `set_expectation`
+  corrects the expectation; a document whose machine pairing was retired for a kind change
+  is listed by `list_unmatched_documents` and proposed again when the tags revert; a
+  DBIT `refund`'s search plan targets Sent and its credit note naming the client is not
+  labelled `recipient?`; and a view over a scope with one lineage last observed 13 Sep and
+  the rest today prints `classification through 13 Sep`, while a renderer that prints the
+  bank date without the classification date fails.
 - **Intake and recognition**: a self-addressed mail carrying a PDF is ingested by the
   targeted sweep and matched like any other document; a message naming a number that is
   not a live line is NOT treated as a sheet reply; `all good` is a sheet reply only
