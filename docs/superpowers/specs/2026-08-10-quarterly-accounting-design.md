@@ -587,8 +587,8 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
 3. **Validity of the current operator pairing.** Compare P's fingerprint — the row facts
    and the expectation kind it was made against — with the live row and the currently
    derived expectation. Equal, and the document's kind still equals the expected kind —
-   or the expectation is currently unknown, which suspends the kind comparison and only
-   that (§Match records, "An expectation that becomes unknown") — →
+   or the expectation is currently unknown and the pairing was kind-valid against the
+   last known expectation (§Match records, "An expectation that becomes unknown") — →
    `{acct::matched}`. Different → `{acct::proposed}` with a residue line, P
    still the current pairing (never dropped, never replaced by an older entry); when the
    operator confirms against the new facts, or the facts revert, it is `matched` again —
@@ -627,7 +627,7 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
 
 5. **Validity of the current machine pairing.** One active `matched` whose fingerprint
    holds — row facts and expectation kind alike, the document still of the expected
-   kind, the kind comparison suspended while the expectation is unknown → `{acct::matched}`; a machine pairing whose document kind no longer equals the
+   kind (while the expectation is unknown: the last known kind verdict) → `{acct::matched}`; a machine pairing whose document kind no longer equals the
    expectation kind is not here at all — the sweep retired it `rejected` (§Match records,
    the fingerprint), so the lineage falls through to step 6; a `matched` whose fingerprint
    differs in row facts, or an active
@@ -826,11 +826,19 @@ reading "unknown ≠ invoice" as a mismatch would retire every machine pairing o
 was reachable before — the classifier's tags can be removed by hand — and bank-feed
 0.12.0 makes it reachable for the whole ledger at once: `purge(user_work=erase)` deletes
 every tag on every surviving row, classification included, and the next sweep would
-otherwise reject every machine pairing in the store. So the kind comparison is
-**suspended while the expectation is unknown**: the pairing keeps its status, the row is
-shown under "not yet classified" (where a matched one says which document it holds), and
-the comparison resumes against the first known kind the classifier gives it — a match,
-nothing; a different kind, the rule above. The row facts are compared as always. For a plain invalidation: the pairing stays the
+otherwise reject every machine pairing in the store. So **while the expectation is
+unknown, the pairing keeps the kind verdict it had against the last known expectation**
+(round-42 finding: "suspend the comparison" read as "the kind check passes", which
+promoted an operator pairing already shown `proposed` for a kind mismatch back to
+`matched` the moment its tags were erased). A pairing whose kind matched stays
+kind-valid. One whose kind already mismatched stays mismatched: an operator pairing is
+still shown `proposed` with that reason, and a machine pairing had already been retired.
+The row is shown under "not yet classified" (where a paired one says which document it
+holds), and comparison against the live expectation resumes at the first known kind the
+classifier gives it: a match, nothing changes; a different kind, the rule above applies.
+The row facts are compared as always. The last known kind is recorded on the projection
+with each classification observation, so the verdict is read from the store, never
+re-derived from tags that are gone. For a plain invalidation: the pairing stays the
 lineage's current candidate and is shown `proposed` with a residue line until the operator
 confirms against the new facts, or the facts revert. Migrated tags and notes on a successor row are not fresh approval
 either.
@@ -889,7 +897,7 @@ without either being wrong.
 | `required` (or unknown) | `acct::open`; leads every view; `MISSING` in the ledger | `acct::matched` |
 | `optional` | **no tag**; not in "what am I missing"; shown on "show the rest"; still searched, cheaply, and filed when found; `notes.md` lists it under "nice to have, not found" | `acct::matched` |
 | `none` | `acct::no-document-expected` | — (a document that turns up anyway is filed as `irrelevant` to this transaction, never matched) |
-| unknown (not yet classified) | `acct::open`, and the row is shown under **"not yet classified"**, apart from "missing" | nothing new is matched to it; a pairing made while it had a kind keeps its status (`acct::matched` or `acct::proposed`) and is shown under "not yet classified" with its document, until a kind returns (§Match records) |
+| unknown (not yet classified) | `acct::open`, and the row is shown under **"not yet classified"**, apart from "missing" | nothing new is matched to it; a pairing made while it had a kind keeps its last known kind verdict (`acct::matched` if it was kind-valid; an operator pairing already mismatched stays `acct::proposed`) and is shown under "not yet classified" with its document, until a kind returns (§Match records) |
 
 Filtering the operator's own ledger by `acct::open` therefore answers exactly the question
 the VAT return asks: which transactions still lack a document that matters.
@@ -3126,7 +3134,11 @@ and is resent only when the operator asks, as that exact file.
   leaves every one of those pairings `matched` (count them) with the rows shown under
   "not yet classified", and once the classifier re-tags a row with a different kind, that
   pairing — and only that one — is retired `rejected`; a mutation that treats unknown as a
-  kind change must fail the count.
+  kind change must fail the count. The round-42 trace: an operator pairing on one
+  unchanged payment goes `invoice → payslip → unknown` (re-tag, then
+  `purge(user_work=erase)` deleting zero rows) and must read `matched → proposed →
+  proposed`. The `matched` count after the purge is 0, and a mutation that reads unknown
+  as "kind passes" gives 1.
 - Matching quality is LLM behavior, not unit-testable here, and the v1 expectation that
   the first quarter would run `proposed`-heavy is **obsolete** — it belonged to the
   strict bar that the loose-matching ruling replaced. The first quarter should match
