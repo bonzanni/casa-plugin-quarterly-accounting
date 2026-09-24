@@ -22,9 +22,17 @@ mailbox is on the free rung (the branch is restored; the recipient is checked by
 one-tap approval of the exact send, and email is under the delivery log). Rounds 23–24
 re-reviewed those rulings: round 24 Astra SHIP, Terra SHIP WITH FIXES on this status line
 alone, corrected here without a further round.
+Revised 2026-09-24 — **ended lineages**, pending review. After #39 shipped, bank-feed
+0.12.0 (component 0.13.0) gave `purge` a `user_work` choice; re-checking the spec against
+component 0.13.2 found that a row erased outright, and a tombstoned one, had no defined
+effect on the fold, and that an expectation turning unknown would have retired every
+machine pairing after a `purge(user_work=erase)`. Written in §Match records ("A lineage
+can end"; "An expectation that becomes unknown"), reducer step 0, §"The projection",
+§"The sweep", §Setup ("Erasures are not restores"), §Testing; the bank-feed floor moves
+to 0.11.0.
 Revised 2026-09-22 — re-verified against casa **v0.328.0** and bank-feed **0.10.1**
 after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31 landed.
-Required floors: casa **0.326.0**, bank-feed **0.10.0** (§Casa baseline).
+Required floors: casa **0.326.0**, bank-feed **0.11.0** (§Casa baseline; 0.10.0 until #39 shipped).
 Revised 2026-09-20 — re-verified against casa **v0.323.0**. Both scheduled-turn
 dependencies landed; the contracts they landed with (one attention lane, durable
 asks, background jobs) change the weekly pass. See “Casa baseline”.
@@ -283,17 +291,24 @@ attaches handoff files. bank-feed's `export_history` publishes its ledger export
 Casa's `share_inbound_file` copies a file the operator sent in Telegram there. This
 plugin vendors `casa_handoff.py` verbatim.
 
-**bank-feed floor: 0.10.0** (casa-specialist-finance component 0.11.0). Three fixes sit
-below it, each load-bearing:
+**bank-feed floor: 0.11.0** (casa-specialist-finance component 0.12.0). Four fixes sit
+below it, each load-bearing (re-verified 2026-09-24 against component 0.13.2, bank-feed
+0.12.2):
 
 | bank-feed | Fix | Why this plugin needs it |
 |---|---|---|
 | 0.8.1 | [#30](https://github.com/bonzanni/casa-specialist-finance/issues/30) — a pending row is superseded once; a stale second supersession is refused (`StalePlan`) | Otherwise overlapping syncs strand migrated annotations on a row no lineage walk reaches. |
 | 0.9.0 | [#31](https://github.com/bonzanni/casa-specialist-finance/issues/31) — `owner::name` tags are another workflow's | The whole `acct::` vocabulary below depends on it. |
 | **0.10.0** | `export_history` publishes into Casa's handoff folder | `import_ledger_export` takes the export only through `casa_handoff.capture` and refuses any other path. On 0.9.x the export lands in bank-feed's private data directory, so **packaging fails closed**. |
+| **0.11.0** | [#39](https://github.com/bonzanni/casa-specialist-finance/issues/39) — backups, a protected restore, and the restore point minted on a workflow's first write; `workflow` and `expected_generation` on `tag_transaction`, `untag_transaction` and `add_note` | Every accounting write carries both (§Setup, "Test install"). Below it the `workflow` argument is refused, and the pass says the ledger is below the floor rather than writing unfenced. |
 
 An earlier revision named 0.9.0 as the floor — correct for the namespace, one version
-short once ledger import moved onto the handoff folder.
+short once ledger import moved onto the handoff folder; the next named 0.10.0, written
+before #39 shipped. **Not a floor, handled on every version:** erasure. `purge`,
+`forget_local_account` and `delete_all_data` have deleted rows since component 0.5.0;
+0.12.0 (component 0.13.0) added `purge`'s `user_work=erase`, which also strips the tags
+and notes of the rows it keeps. The plugin's answer does not depend on which of those it
+meets (§Match records, "A lineage can end").
 
 The namespace itself ([#31](https://github.com/bonzanni/casa-specialist-finance/issues/31)):
 A tag written `owner::name` belongs to another workflow: bank-feed never counts it as
@@ -422,7 +437,8 @@ machine-vs-machine order undefined). **A lineage's match-record state is the fol
 through the one transition table in step 2 below, starting from the empty state — and **the
 log holds two kinds of entry**: the decisions writers append, and the **retirements the
 store itself commits** when a transition retires a pairing (`retire X → conflicted` or
-`→ rejected`, with the cause and its own sequence number). At commit the fold advances by
+`→ rejected`, with the cause and its own sequence number — a kind mismatch, an occupancy
+collision, or the lineage ending). At commit the fold advances by
 one writer entry plus whatever retirements it caused; at a fan-in merge the state is
 recomputed by folding the **union of the two logs, retirements included**, and any new
 retirements the merged fold causes are appended too. Three consequences, each a reviewed
@@ -515,6 +531,10 @@ about the amount — but the correction is still reported.
 projection" are *derived* from this order, and an implementation follows the order, not
 the prose. For one lineage, given its merged log, its live row and the vendor KB:
 
+0. **Ended** (§"A lineage can end", under §Match records). The lineage's destination row
+   is `vanished` or erased → `∅`, and nothing below applies. The fold is still computed —
+   the `retire` entries the end caused are in it — so the residue and the log stay
+   reproducible.
 1. **Eligibility.** Destination row not eligible (§"The projection", admission) → `∅`.
 2. **Operator precedence — over the state the fold produced.** The fold's state for a
    lineage is: the **standing exemption** (at most one, with its sequence number), the set
@@ -556,7 +576,9 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
 
 3. **Validity of the current operator pairing.** Compare P's fingerprint — the row facts
    and the expectation kind it was made against — with the live row and the currently
-   derived expectation. Equal, and the document's kind still equals the expected kind →
+   derived expectation. Equal, and the document's kind still equals the expected kind —
+   or the expectation is currently unknown, which suspends the kind comparison and only
+   that (§Match records, "An expectation that becomes unknown") — →
    `{acct::matched}`. Different → `{acct::proposed}` with a residue line, P
    still the current pairing (never dropped, never replaced by an older entry); when the
    operator confirms against the new facts, or the facts revert, it is `matched` again —
@@ -595,7 +617,7 @@ the prose. For one lineage, given its merged log, its live row and the vendor KB
 
 5. **Validity of the current machine pairing.** One active `matched` whose fingerprint
    holds — row facts and expectation kind alike, the document still of the expected
-   kind → `{acct::matched}`; a machine pairing whose document kind no longer equals the
+   kind, the kind comparison suspended while the expectation is unknown → `{acct::matched}`; a machine pairing whose document kind no longer equals the
    expectation kind is not here at all — the sweep retired it `rejected` (§Match records,
    the fingerprint), so the lineage falls through to step 6; a `matched` whose fingerprint
    differs in row facts, or an active
@@ -661,9 +683,70 @@ pending → booked), and bank-feed itself migrates tags and notes to the success
 re-resolves every active match's `row_id` via `get_transaction`; if the row is
 superseded, the match is atomically retargeted to the successor (snapshot facts
 re-verified against the new row — a booked amount correction that breaks the match
-demotes it to `proposed` with a residue line); if the row has `vanished`, the match
-reopens as `unmatched` and is reported. `list_transactions` filters to active rows,
-so without this step a superseded match would silently leave every worklist.
+demotes it to `proposed` with a residue line); if the row has **ended** — `vanished`, or
+erased outright — the lineage ends as the next paragraph says. `list_transactions`
+filters to active rows, so without this step a superseded match would silently leave
+every worklist.
+
+**A lineage can end, and there are exactly two ways** (added 2026-09-24, after bank-feed
+0.12.0 shipped `purge` with `user_work`). An earlier revision said a vanished row's match
+"reopens as `unmatched`", which is not a match state and has no transition in the fold;
+and it said nothing at all about a row that is simply *gone*, which bank-feed can now do
+on the operator's word. Both are the same event for this plugin: **the lineage's
+destination row will never again be an active row, and if the payment comes back it
+comes back as a different row with no link to this one.** Verified against bank-feed
+component 0.13.2 (bank-feed 0.12.2):
+
+- **`vanished`** — bank-feed tombstones a row that is absent from a proven interval
+  (`ingest.reconcile`, rule 3). It is terminal for that `row_id`: the matcher takes only
+  `state='active'` rows as candidates (`live = [s for s in stored if s["state"] ==
+  "active"]`), so a payment that reappears is a fresh insert with a new occurrence, never
+  the old row revived, and no `superseded_by` link joins them. The row itself stays in the
+  ledger, with whatever tags it carried.
+- **erased** — `purge` (by `booking_date`, or `all`), `forget_local_account` and
+  `delete_all_data` delete rows outright, their tags and notes with them. Such a row is
+  absent from the bank snapshot and `get_transaction` answers `no transaction #N`.
+  **An erased `row_id` is never reallocated**: `transactions.row_id` is `AUTOINCREMENT`
+  and no erasure touches `sqlite_sequence`, so a later insert can never take its id and
+  make a stored alias point at a different payment. The one path on which ids *are*
+  reallocated is a restore, and that is already refused under a populated store
+  (§Setup, "Test install"); erasures do not advance the restore generation and do not
+  need to.
+
+**An ended lineage** is judged ended only on positive evidence from the bound ledger,
+never from a failed read: `vanished` from the row's own `state`; erased only when, in
+the same pass, the self-check found the bound account in the bound ledger instance, the
+snapshot import succeeded, the row id is absent from it, and `get_transaction` answers
+`no transaction #N` for it. A pass whose snapshot import failed, or whose self-check
+did not find the bound account, judges nothing ended — "not checked", as everywhere
+else. The end is recorded on the projection (`ended: vanished | erased`, with the pass
+that observed it) and is terminal. What follows from it, in one transaction:
+
+- every active **and `conflicted`** pairing on the lineage is retired `rejected` by a
+  **store retirement** (step 2's `retire` entry, cause `row-ended`), operator pairings
+  included. This is not a machine decision overriding an operator's: the operator's
+  decision was about a payment row, and the kind-mismatch rule keeps an operator pairing
+  because the classifier may be the one that is wrong — here there is nothing left that
+  could be wrong except bank-feed's own ledger, whose rules make the end terminal. A
+  standing exemption stays in the log and is inert;
+- **every retirement recomputes document availability** (below), so the documents the
+  lineage held return to `unmatched` and the next triage can match them to the row the
+  payment came back as, if it comes back. That row is a new lineage, admitted like any
+  other, and **nothing carries across by resemblance**: an operator confirmation on the
+  ended row is not a confirmation of the new one, whose pairing is judged afresh and
+  shown like any machine pick. The residue says both halves once:
+  `Adobe €59.99 · 3 Jul left the bank ledger (erased) — its invoice is free again`;
+- the desired set is `∅` (reducer step 0). A vanished row still exists, so the sweep
+  removes its owned tags like any ineligible row's — a stale writer's later `acct::open`
+  on it is repaired the same way. An erased row has nothing to remove and can take no
+  write: a stale `tag_transaction` on it fails at bank-feed.
+
+An ended lineage stays enumerated, like every projection, but an erased one is never read
+again (its id cannot come back) and a vanished one is read only to repair its tags. Ended
+lineages are **outside every view's membership and coverage** (§"The sweep"): they have
+no row to classify, so their observation timestamp would otherwise drag the
+classification date back for ever. They are listed once in the residue of the pass that
+ends them, and a package or view never lists them as open.
 
 **A row can also change without being superseded, and that is the case v1 missed.**
 bank-feed's update path rewrites `booking_date`, `value_date`, `amount_minor`,
@@ -696,7 +779,18 @@ with the reason — the operator chose that document knowing what it was, and th
 may be the one that is wrong — and a candidate of the right kind that the search finds
 lands `conflicted` beside it for the operator to pick, never replacing it silently
 (round-26 finding: the earlier text invalidated both alike and then excluded the lineage
-from the replacement search it promised). For a plain invalidation: the pairing stays the
+from the replacement search it promised). **An expectation that becomes unknown is not a
+kind change** (added 2026-09-24): a row that returns to the classifier's queue, or whose
+tags conflict (§"Document expectation", rows 4–5), has no kind to compare against, and
+reading "unknown ≠ invoice" as a mismatch would retire every machine pairing on it. That
+was reachable before — the classifier's tags can be removed by hand — and bank-feed
+0.12.0 makes it reachable for the whole ledger at once: `purge(user_work=erase)` deletes
+every tag on every surviving row, classification included, and the next sweep would
+otherwise reject every machine pairing in the store. So the kind comparison is
+**suspended while the expectation is unknown**: the pairing keeps its status, the row is
+shown under "not yet classified" (where a matched one says which document it holds), and
+the comparison resumes against the first known kind the classifier gives it — a match,
+nothing; a different kind, the rule above. The row facts are compared as always. For a plain invalidation: the pairing stays the
 lineage's current candidate and is shown `proposed` with a residue line until the operator
 confirms against the new facts, or the facts revert. Migrated tags and notes on a successor row are not fresh approval
 either.
@@ -755,7 +849,7 @@ without either being wrong.
 | `required` (or unknown) | `acct::open`; leads every view; `MISSING` in the ledger | `acct::matched` |
 | `optional` | **no tag**; not in "what am I missing"; shown on "show the rest"; still searched, cheaply, and filed when found; `notes.md` lists it under "nice to have, not found" | `acct::matched` |
 | `none` | `acct::no-document-expected` | — (a document that turns up anyway is filed as `irrelevant` to this transaction, never matched) |
-| unknown (not yet classified) | `acct::open`, and the row is shown under **"not yet classified"**, apart from "missing" | — |
+| unknown (not yet classified) | `acct::open`, and the row is shown under **"not yet classified"**, apart from "missing" | nothing new is matched to it; a pairing made while it had a kind keeps its status (`acct::matched` or `acct::proposed`) and is shown under "not yet classified" with its document, until a kind returns (§Match records) |
 
 Filtering the operator's own ledger by `acct::open` therefore answers exactly the question
 the VAT return asks: which transactions still lack a document that matters.
@@ -1052,6 +1146,10 @@ One object, owned by the plugin server, per **transaction lineage**:
   | correction makes it eligible again | same projection | per the table |
   | watermark moved earlier | previously ineligible rows admitted next pass | per the table |
   | watermark moved later | **not offered** in v1 | — |
+  | destination row tombstoned (`state='vanished'`) | retained, marked `ended: vanished`; pairings retired, documents freed | `∅` — owned tags removed |
+  | destination row erased (`purge`, `forget_local_account`, `delete_all_data`) | retained, marked `ended: erased`; pairings retired, documents freed; never read again | `∅` — nothing left to write |
+  | the payment comes back (bank re-sync after an erasure, or a reappearance after a tombstone) | a **new** lineage, admitted like any other; nothing carried across | per the table |
+  | `purge(user_work=erase)` strips the tags of a row it keeps | same projection; classification unknown until the classifier re-tags it | per the table — the sweep re-adds owned tags and restates the accounting note |
 
   Both directions are eligible (operator, 2026-09-22). The watermark is stored with the binding and
   defaults to **the first day of the quarter in which the account was bound** (operator
@@ -1087,6 +1185,7 @@ One object, owned by the plugin server, per **transaction lineage**:
 
   | Lineage state (first row that applies) | Desired set |
   |---|---|
+  | lineage ended — destination row `vanished` or erased | `∅` |
   | destination row not currently eligible (corrected to before the watermark) | `∅` |
   | exempt by the operator (`set_exemption`) — structurally, no active pairing exists while it stands | `{acct::no-document-expected}` |
   | an active `matched` pairing whose fingerprint still holds | `{acct::matched}` |
@@ -1138,7 +1237,11 @@ Unconditional enumeration replaces every selection rule:
 
 1. Enumerate **all** projections — no filter on match state, annotation state or
    delivery state.
-2. Resolve destinations, merge collisions, revalidate transaction facts.
+2. Resolve destinations, merge collisions, revalidate transaction facts, and **end the
+   lineages whose destination ended** (§Match records, "A lineage can end"): a
+   tombstoned destination is seen in the row's `state`; an erased one is found cheaply
+   from the snapshot — every live alias absent from it is a candidate — and confirmed by
+   `get_transaction`'s `no transaction #N`, under the evidence rule stated there.
 3. Read the current tags and notes; record the row's **classification observation**
    and re-derive its expectation (§"Document expectation") — for every projection, paired
    or not, since a changed expectation kind invalidates a pairing (§Match records); then
@@ -1165,7 +1268,9 @@ expectation filtering or display cap** (round-28 finding, both reviewers: a stal
 the one whose staleness may be hiding an errand): the status view, "what am I missing",
 "anything I should check" and a quarter view take **every managed lineage from the
 watermark through the latest quarter the view shows, whatever its expectation, tier or
-state, printed or not** — by effective date, which is `booking_date`, or `value_date`
+state, printed or not** — except an **ended** lineage, which has no row left to classify
+and would otherwise hold the classification date at its last observation for ever; it is
+reported once, by the pass that ends it (§Match records, "A lineage can end") — by effective date, which is `booking_date`, or `value_date`
 while the row is pending and has none, the same date admission uses (round-29 finding,
 both reviewers: "booked in the quarter" dropped every pending row from every scope, and
 "the older open items the view lists" let the display decide membership, so an older
@@ -1229,6 +1334,14 @@ one loop.
 - **Identity tracking is real work.** Successor chains, merges, vanished rows and changed
   fingerprints still need handling; this centralises those obligations rather than
   erasing them.
+- **A payment that leaves the ledger and comes back is two lineages.** bank-feed links a
+  tombstoned or erased row to nothing, and this design never links by resemblance, so the
+  operator's confirmation on the old row does not carry to the new one: the freed document
+  is matched afresh and shown like any machine pick. The cost is one more line on a sheet
+  after a rare, operator-initiated event; the alternative — re-attaching by content — is
+  the resemblance rule this design refuses everywhere else, and bank-feed's own attempt at
+  re-attaching annotations across an erasure was cut after the same finding twice
+  (component 0.13.0).
 - ~~**A lineage can be broken upstream.**~~ **Closed upstream, bank-feed 0.8.1**
   ([casa-specialist-finance#30](https://github.com/bonzanni/casa-specialist-finance/issues/30)).
   Two overlapping syncs could supersede one predecessor in turn, the second overwriting
@@ -1548,6 +1661,38 @@ before any further write with "the ledger was restored since this pass began —
 accounting store". The store also remembers the generation it last ran against, so a pass
 that finds it advanced at the top stops before its first write; the per-write precondition
 is what closes the window between that check and the writes.
+
+**Erasures are not restores, and are not fenced like one** (added 2026-09-24).
+bank-feed 0.12.0 gave `purge` a required `user_work` (`keep` or `erase`) and made
+`purge` and `forget_local_account` take a pre-erasure backup first; `delete_all_data`
+also erases every workflow registration. None of the three advances the restore
+generation. That is correct for this plugin, and the reason is the one that made a
+restore dangerous: **a restore reallocates row ids, an erasure never does**
+(`AUTOINCREMENT`; no erasure touches `sqlite_sequence`), so after an erasure every id
+the store holds either names the same payment or names nothing. The per-lineage end
+(§Match records, "A lineage can end") handles the second case; a pass-level stop would
+make any `purge` of old unmanaged history cost the whole accounting store. Three
+consequences, stated:
+
+- **After `delete_all_data`, `check_setup` finds `acct@<version>` unregistered under a
+  populated store.** That is not the fresh-install state and is not treated as one: the
+  generation is unchanged, so it can only be an erasure. The self-check stops the pass
+  while the bound account is gone ("the bound account gone from bank-feed"); once it is
+  linked again — `account_id` is a hash of IBAN and currency, so the same account comes
+  back under the same id — the next pass ends every old lineage as erased, admits the
+  re-synced rows as new lineages, and its first write mints a fresh
+  `install:acct@<version>`. `forget_local_account` of the bound account behaves the same
+  way without touching the registration.
+- **Undoing a `purge` is a restore.** Restoring the pre-erasure backup `purge` names
+  advances the generation, so this plugin stops as for any restore and wants
+  `reset_store`. Recovering an erasure therefore costs the accounting store; the
+  operator's own `purge` reply already names that backup, and the stop message says what
+  the reset loses.
+- **The accounting notes on rows a `purge` keeps can go** (`user_work=erase` deletes every
+  note and tag on surviving rows too). The sweep restates the current snapshot where the
+  visible accounting note is missing (§"The sweep", step 5), so the ledger shows current
+  state again after one cycle; the history of earlier accounting revisions on those rows
+  is gone from bank-feed and survives only in this plugin's store.
 
 **What a restore does not undo, stated plainly.** Casa keeps one shared memory bank, and
 its only wipe is total; a completed specialist engagement during a test is retained like
@@ -2015,7 +2160,7 @@ Two conditions qualify, and they were chosen rather than assumed:
 | Condition | Why silence costs something |
 |---|---|
 | **Collection has stopped working** — bank consent expired (PSD2 consents die roughly every 90 days), Gmail auth failed, the bound account vanished from bank-feed | Without a message the operator finds out the next time they ask, and by then weeks of payments may never have been searched. The message names exactly what to re-authorise. |
-| **A delivered quarter changed underneath** — a bank row inside a shipped package was corrected or superseded after delivery | Their accountant is holding numbers that are now wrong, and only the operator can decide whether to send a rebuild. Rare; genuinely urgent. |
+| **A delivered quarter changed underneath** — a bank row inside a shipped package was corrected, superseded, tombstoned or erased after delivery (an erasure is the operator's own act, but a `purge` by date can reach a quarter they have forgotten was delivered; the message names the rows and the package, once) | Their accountant is holding numbers that are now wrong, and only the operator can decide whether to send a rebuild. Rare; genuinely urgent. |
 
 **Deliberately NOT notified**, each considered and declined: the quarter approaching its
 close; a guessed pairing, however large; progress on invoices the operator supplied;
@@ -2902,6 +3047,32 @@ and is resent only when the operator asks, as that exact file.
   proven by casa's code: the resident ingests a synthetic document, the specialist
   reads that same record and those same bytes, and the resident stages it for delivery.
   It is a release check, not a reason to build a transfer service.
+- **Ended lineages** (added 2026-09-24), each against bank-feed's real `purge`,
+  `forget_local_account`, `delete_all_data` and `reconcile` — never a test double that
+  deletes rows by hand, since what is being pinned is bank-feed's id and state behaviour:
+  an operator-matched lineage whose row `purge` erases ends `erased`, its pairing is
+  retired `rejected` by a recorded store retirement with cause `row-ended`, and its
+  document returns to `unmatched` (count the documents held by active pairings before
+  and after); a re-sync that brings the payment back admits a **new** lineage whose
+  pairing with the freed document is a machine pick, never the operator's (assert the
+  author); after `purge` and a re-sync, no new row's `row_id` equals any id the store holds
+  (the `AUTOINCREMENT` claim, asserted, not assumed); a row tombstoned by `reconcile` ends
+  `vanished` and the sweep removes its owned tags, and a stale `acct::open` written to it
+  afterwards is removed at the next cycle; a pass whose snapshot import failed, and a pass
+  whose self-check did not find the bound account, end **nothing** even when every
+  `get_transaction` read answers `no transaction` (the wrong-ledger case — run it against
+  bank-feed's other mode's ledger); an ended lineage is outside every view's membership,
+  so a scope whose only stale lineage has ended prints a fresh classification date; a
+  delivered row that `purge` erases raises the "delivered quarter changed" message once,
+  and not again the next pass; `delete_all_data`, relink and re-sync leave `check_setup`
+  reporting unregistered under a populated store, the pass proceeds, and the first write
+  mints a new `install:acct@<version>`; restoring `purge`'s pre-erasure backup advances
+  the generation and the pass stops for `reset_store`. **And the unknown-expectation
+  rule**: `purge(user_work=erase)` on a ledger with machine-matched classified rows
+  leaves every one of those pairings `matched` (count them) with the rows shown under
+  "not yet classified", and once the classifier re-tags a row with a different kind, that
+  pairing — and only that one — is retired `rejected`; a mutation that treats unknown as a
+  kind change must fail the count.
 - Matching quality is LLM behavior, not unit-testable here, and the v1 expectation that
   the first quarter would run `proposed`-heavy is **obsolete** — it belonged to the
   strict bar that the loose-matching ruling replaced. The first quarter should match
@@ -2923,7 +3094,7 @@ and is resent only when the operator asks, as that exact file.
 | ha-casa-app | [#485](https://github.com/bonzanni/ha-casa-app/issues/485) scheduled-turn `send_media`. | **Shipped** — closed 2026-08-14. |
 | ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485. | **Shipped** — closed 2026-08-15. No longer needed by v1 (no button questions), kept here because the v1 spec was built on its absence. |
 | ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area (shipped, Casa 0.326.0), [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | gmail→store custody goes through the handoff folder (gmail 0.9.0); specialist asks stay structured work orders (#487 still open, still not a dependency). |
-| casa-specialist-finance (bank-feed) | **Backups and workflow restore points** (operator, 2026-09-22; §Setup, "Test install"): a new subsystem — `backup(reason)`, `list_backups` (timestamp, size, reason, restore events and registered workflow strings, from a durable index kept beside the database), `restore_backup(id)` as a protected tool restored in place as transactional SQL (attach the backup, replace every ordinary table's rows, `sqlite_sequence` last, the `notes_fts` index rebuilt rather than copied, a `ledger_meta` marker holding the restore operation id) inside one `BEGIN IMMEDIATE` with the consent-binding preflight in the same transaction — not the backup API, which refuses a destination with an open transaction; consistent copies under the write lock (WAL); reasons `weekly` / `install:<workflow>` / `manual`; bounded retention for `weekly`, unbounded for install backups; the weekly backup taken from the finance pass. **The first write carrying an unregistered workflow string mints `install:<workflow>` inside that write's lock, before the write**; a namespaced tag write without a workflow string is refused; a restore unregisters the workflows whose install backups are at or after the restored point. `tag_transaction`, `untag_transaction` and `add_note` gain optional `workflow` and `expected_generation` arguments; a write carrying a workflow string must carry `expected_generation`, and is rejected when it differs from the ledger's restore generation. | **Filed 2026-09-22 as [casa-specialist-finance#39](https://github.com/bonzanni/casa-specialist-finance/issues/39)**, after the addition converged (rounds 31–40). This plugin never writes to bank-feed without it: a bank-feed that refuses the `workflow` argument is below the floor, and the pass says so. |
+| casa-specialist-finance (bank-feed) | **Backups and workflow restore points** (operator, 2026-09-22; §Setup, "Test install"): a new subsystem — `backup(reason)`, `list_backups` (timestamp, size, reason, restore events and registered workflow strings, from a durable index kept beside the database), `restore_backup(id)` as a protected tool restored in place as transactional SQL (attach the backup, replace every ordinary table's rows, `sqlite_sequence` last, the `notes_fts` index rebuilt rather than copied, a `ledger_meta` marker holding the restore operation id) inside one `BEGIN IMMEDIATE` with the consent-binding preflight in the same transaction — not the backup API, which refuses a destination with an open transaction; consistent copies under the write lock (WAL); reasons `weekly` / `install:<workflow>` / `manual`; bounded retention for `weekly`, unbounded for install backups; the weekly backup taken from the finance pass. **The first write carrying an unregistered workflow string mints `install:<workflow>` inside that write's lock, before the write**; a namespaced tag write without a workflow string is refused; a restore unregisters the workflows whose install backups are at or after the restored point. `tag_transaction`, `untag_transaction` and `add_note` gain optional `workflow` and `expected_generation` arguments; a write carrying a workflow string must carry `expected_generation`, and is rejected when it differs from the ledger's restore generation. | **Shipped** — filed 2026-09-22 as [casa-specialist-finance#39](https://github.com/bonzanni/casa-specialist-finance/issues/39), merged 2026-09-23 as component 0.12.0 (bank-feed 0.11.0, the floor). This plugin never writes to bank-feed without it: a bank-feed that refuses the `workflow` argument is below the floor, and the pass says so. |
 | ha-casa-app | **"Forget everything retained since <timestamp>"** — a time-bounded memory wipe, so a test window's retained engagements can be dropped without wiping the bank. | **Filed 2026-09-22 as [ha-casa-app#1045](https://github.com/bonzanni/ha-casa-app/issues/1045)**. Not a dependency: the residual is stated in §Setup, "Test install". |
 | Resident config | **One** weekly trigger (§Setup), plugin assignment to both roles. No quarter-end trigger: packaging happens only when the operator asks. | Operator/configurator action at install time. |
 
