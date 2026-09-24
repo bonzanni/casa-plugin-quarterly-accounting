@@ -29,10 +29,16 @@ effect on the fold, and that an expectation turning unknown would have retired e
 machine pairing after a `purge(user_work=erase)`. Written in §Match records ("A lineage
 can end"; "An expectation that becomes unknown"), reducer step 0, §"The projection",
 §"The sweep", §Setup ("Erasures are not restores"), §Testing; the bank-feed floor moves
-to 0.11.0.
+to 0.11.0. **Round 41** (tree d8ac37b): Astra and Terra both DO NOT SHIP, one S1 each.
+Terra: ends were judged in the repair sweep, which runs before the pass's snapshot exists,
+so they now commit at the import, before triage. Astra, reproduced: a date `purge` cuts
+supersession chains, so an erased row did not prove the payment ended. **Operator ruling
+2026-09-25:** fixed upstream as
+[casa-specialist-finance#56](https://github.com/bonzanni/casa-specialist-finance/issues/56)
+(lineage-closed purge), and the bank-feed floor rises to the release that closes it.
 Revised 2026-09-22 — re-verified against casa **v0.328.0** and bank-feed **0.10.1**
 after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31 landed.
-Required floors: casa **0.326.0**, bank-feed **0.11.0** (§Casa baseline; 0.10.0 until #39 shipped).
+Required floors: casa **0.326.0**, bank-feed **the release closing casa-specialist-finance#56** (§Casa baseline; 0.10.0 until #39 shipped, then 0.11.0).
 Revised 2026-09-20 — re-verified against casa **v0.323.0**. Both scheduled-turn
 dependencies landed; the contracts they landed with (one attention lane, durable
 asks, background jobs) change the weekly pass. See “Casa baseline”.
@@ -291,24 +297,28 @@ attaches handoff files. bank-feed's `export_history` publishes its ledger export
 Casa's `share_inbound_file` copies a file the operator sent in Telegram there. This
 plugin vendors `casa_handoff.py` verbatim.
 
-**bank-feed floor: 0.11.0** (casa-specialist-finance component 0.12.0). Four fixes sit
-below it, each load-bearing (re-verified 2026-09-24 against component 0.13.2, bank-feed
-0.12.2):
+**bank-feed floor: the release that closes
+[#56](https://github.com/bonzanni/casa-specialist-finance/issues/56)** (not shipped as of
+2026-09-25; the newest release, component 0.13.2 / bank-feed 0.12.2, is below it). This
+plugin is not released against anything lower. Five fixes sit at or below the floor, each
+load-bearing (re-verified 2026-09-24 against component 0.13.2):
 
 | bank-feed | Fix | Why this plugin needs it |
 |---|---|---|
 | 0.8.1 | [#30](https://github.com/bonzanni/casa-specialist-finance/issues/30) — a pending row is superseded once; a stale second supersession is refused (`StalePlan`) | Otherwise overlapping syncs strand migrated annotations on a row no lineage walk reaches. |
 | 0.9.0 | [#31](https://github.com/bonzanni/casa-specialist-finance/issues/31) — `owner::name` tags are another workflow's | The whole `acct::` vocabulary below depends on it. |
 | **0.10.0** | `export_history` publishes into Casa's handoff folder | `import_ledger_export` takes the export only through `casa_handoff.capture` and refuses any other path. On 0.9.x the export lands in bank-feed's private data directory, so **packaging fails closed**. |
+| **the #56 release** (not yet shipped) | [#56](https://github.com/bonzanni/casa-specialist-finance/issues/56) — `purge` deletes a supersession chain whole or not at all | Ending a lineage on an erased row (§Match records, "A lineage can end") is only sound when an erasure cannot cut a chain. Below it, a date `purge` can delete a superseded predecessor and keep its successor, and the plugin would retire decisions about a payment that still exists (round 41). |
 | **0.11.0** | [#39](https://github.com/bonzanni/casa-specialist-finance/issues/39) — backups, a protected restore, and the restore point minted on a workflow's first write; `workflow` and `expected_generation` on `tag_transaction`, `untag_transaction` and `add_note` | Every accounting write carries both (§Setup, "Test install"). Below it the `workflow` argument is refused, and the pass says the ledger is below the floor rather than writing unfenced. |
 
 An earlier revision named 0.9.0 as the floor — correct for the namespace, one version
 short once ledger import moved onto the handoff folder; the next named 0.10.0, written
-before #39 shipped. **Not a floor, handled on every version:** erasure. `purge`,
-`forget_local_account` and `delete_all_data` have deleted rows since component 0.5.0;
+before #39 shipped. The erasure tools themselves are not new: `purge`,
+`forget_local_account` and `delete_all_data` have deleted rows since component 0.5.0.
 0.12.0 (component 0.13.0) added `purge`'s `user_work=erase`, which also strips the tags
-and notes of the rows it keeps. The plugin's answer does not depend on which of those it
-meets (§Match records, "A lineage can end").
+and notes of the rows it keeps. What the floor adds is #56, the guarantee that an
+erasure never cuts a supersession chain, which is what makes an erased row evidence that
+the payment ended (§Match records, "A lineage can end").
 
 The namespace itself ([#31](https://github.com/bonzanni/casa-specialist-finance/issues/31)):
 A tag written `owner::name` belongs to another workflow: bank-feed never counts it as
@@ -711,16 +721,46 @@ component 0.13.2 (bank-feed 0.12.2):
   make a stored alias point at a different payment. The one path on which ids *are*
   reallocated is a restore, and that is already refused under a populated store
   (§Setup, "Test install"); erasures do not advance the restore generation and do not
-  need to.
+  need to. **An erased row proves that the payment ended only if erasures never cut a
+  supersession chain** (round-41 finding, Astra, reproduced on bank-feed's real
+  `reconcile`, `apply_plan` and `purge`). The date form of `purge` selects rows by
+  `booking_date < cutoff` whatever their state, so a pending row #1 (30 Jun), superseded by
+  booked #2 (1 Jul), is deleted by `purge(before_date=2026-07-01)` while #2 survives. The
+  one link between them, #1's `superseded_by`, goes with #1. Every test above then passes,
+  and the operator's pairing on a payment that still exists would be retired. The
+  reverse cut leaves a pending predecessor pointing at an erased successor. **Operator
+  ruling, 2026-09-25: fixed upstream, not guessed around here.**
+  [casa-specialist-finance#56](https://github.com/bonzanni/casa-specialist-finance/issues/56)
+  makes `purge` lineage-closed: a row is deleted only when its whole chain is (a NULL
+  `booking_date` counts as not before the cutoff), and `forget_local_account` and
+  `delete_all_data` already remove whole accounts. **The bank-feed floor rises to the
+  release that closes #56** (§Casa baseline). On a ledger at that floor, an erased
+  destination is an erased lineage: no surviving row of the chain can exist, and no
+  surviving `superseded_by` names a missing row. A lineage walk that nevertheless meets
+  one — a surviving row whose `superseded_by` names an absent id — is a broken floor, not
+  an end. The pass reports it and ends nothing, and the lineage keeps its decisions and
+  its documents.
 
 **An ended lineage** is judged ended only on positive evidence from the bound ledger,
-never from a failed read: `vanished` from the row's own `state`; erased only when, in
-the same pass, the self-check found the bound account in the bound ledger instance, the
-snapshot import succeeded, the row id is absent from it, and `get_transaction` answers
-`no transaction #N` for it. A pass whose snapshot import failed, or whose self-check
-did not find the bound account, judges nothing ended — "not checked", as everywhere
-else. The end is recorded on the projection (`ended: vanished | erased`, with the pass
-that observed it) and is terminal. What follows from it, in one transaction:
+never from a failed read: `vanished` from the row's own `state` in the snapshot; erased
+only when, in the same pass, the self-check found the bound account in the bound ledger
+instance, the snapshot import succeeded, the destination row id is absent from it, and
+`get_transaction` answers `no transaction #N` for it (the specialist reports that answer
+through `record_observation`, as the not-found observation it is). A pass whose snapshot
+import failed, or whose self-check did not find the bound account, judges nothing ended
+— "not checked", as everywhere else. **The end is judged at the import, not in the
+repair sweep** (round-41 finding): the sweep runs at the top of the weekly pass, before
+`sync` and before that pass's snapshot exists, so a rule that judged ends in the sweep
+would always be judging against the previous pass's snapshot — and the returning row,
+admitted by the later import, would find its document still held by the dead lineage
+until another pass. So `import_ledger_export` returns the erase candidates (every
+managed destination absent from the snapshot) and the tombstoned destinations, the
+specialist confirms the candidates with `get_transaction` **before triage** (§Weekly
+pass, step 2), and the ends commit there — the freed documents are candidates in the
+same pass's triage, against the same snapshot that admitted the returning row. The
+import that precedes packaging applies the same rule before the build freezes its
+snapshot. The end is recorded on the projection (`ended: vanished | erased`, with the
+import that observed it) and is terminal. What follows from it, in one transaction:
 
 - every active **and `conflicted`** pairing on the lineage is retired `rejected` by a
   **store retirement** (step 2's `retire` entry, cause `row-ended`), operator pairings
@@ -1237,11 +1277,10 @@ Unconditional enumeration replaces every selection rule:
 
 1. Enumerate **all** projections — no filter on match state, annotation state or
    delivery state.
-2. Resolve destinations, merge collisions, revalidate transaction facts, and **end the
-   lineages whose destination ended** (§Match records, "A lineage can end"): a
-   tombstoned destination is seen in the row's `state`; an erased one is found cheaply
-   from the snapshot — every live alias absent from it is a candidate — and confirmed by
-   `get_transaction`'s `no transaction #N`, under the evidence rule stated there.
+2. Resolve destinations, merge collisions, revalidate transaction facts. **The sweep
+   does not judge ends** — that happens at the snapshot import (§Match records, "A
+   lineage can end") — it only carries out an ended lineage's `∅`: owned tags removed
+   from a vanished row, nothing read or written for an erased one.
 3. Read the current tags and notes; record the row's **classification observation**
    and re-derive its expectation (§"Document expectation") — for every projection, paired
    or not, since a changed expectation kind invalidates a pairing (§Match records); then
@@ -1716,7 +1755,10 @@ self-mail, and the handoff and outbox copies, which expire on their own.
    its queue on the trailer's own trigger, as it does in every finance pass — this plugin
    waits for it and never classifies (§"Document expectation"); then `export_history` →
    `import_ledger_export` (the bank snapshot; the server admits newly eligible rows, both
-   directions, and revalidates fingerprints from it); then, for every admitted lineage —
+   directions, and revalidates fingerprints from it); then the lineages whose destination
+   ended are ended — tombstoned ones from the snapshot, erase candidates confirmed with
+   `get_transaction` (§Match records, "A lineage can end") — so the documents they held
+   are free before triage looks for them; then, for every admitted lineage —
    paired or not — the specialist reads the row's classification and derives the
    expectation (a changed kind invalidates a current pairing, §Match records), and
    triages every lineage whose expectation is `required` or `optional` **and that has no
@@ -3055,7 +3097,12 @@ and is resent only when the operator asks, as that exact file.
   document returns to `unmatched` (count the documents held by active pairings before
   and after); a re-sync that brings the payment back admits a **new** lineage whose
   pairing with the freed document is a machine pick, never the operator's (assert the
-  author); after `purge` and a re-sync, no new row's `row_id` equals any id the store holds
+  author) — and **in the same pass** (round-41 finding): with the `purge` landing before
+  the pass and the payment re-synced by that pass's own `sync`, the end is committed after
+  the import and before triage, so that pass's triage already sees the document as
+  `unmatched` and a pairing of the returning row with it is never refused or
+  `conflicted` by occupancy against the dead lineage (a design that judges ends in the
+  repair sweep fails this); after `purge` and a re-sync, no new row's `row_id` equals any id the store holds
   (the `AUTOINCREMENT` claim, asserted, not assumed); a row tombstoned by `reconcile` ends
   `vanished` and the sweep removes its owned tags, and a stale `acct::open` written to it
   afterwards is removed at the next cycle; a pass whose snapshot import failed, and a pass
@@ -3067,7 +3114,14 @@ and is resent only when the operator asks, as that exact file.
   and not again the next pass; `delete_all_data`, relink and re-sync leave `check_setup`
   reporting unregistered under a populated store, the pass proceeds, and the first write
   mints a new `install:acct@<version>`; restoring `purge`'s pre-erasure backup advances
-  the generation and the pass stops for `reset_store`. **And the unknown-expectation
+  the generation and the pass stops for `reset_store`. **The cut chain** (round-41
+  finding, Astra): on bank-feed at the floor, `reconcile` supersedes pending #1 (30 Jun)
+  with booked #2 (1 Jul), then `purge(before_date=2026-07-01)` deletes **zero** rows of the
+  chain; the next import ends nothing, and the operator's pairing follows #1 → #2 as
+  ordinary supersession. Run against component 0.13.2 (below the floor), the same sequence
+  must show why the floor exists: #1 is gone and #2 survives. A lineage walk that meets a
+  surviving row whose `superseded_by` names an absent id ends nothing and reports a broken
+  floor (build the ledger by hand for this one, since the floor makes it unreachable). **And the unknown-expectation
   rule**: `purge(user_work=erase)` on a ledger with machine-matched classified rows
   leaves every one of those pairings `matched` (count them) with the rows shown under
   "not yet classified", and once the classifier re-tags a row with a different kind, that
@@ -3095,6 +3149,7 @@ and is resent only when the operator asks, as that exact file.
 | ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485. | **Shipped** — closed 2026-08-15. No longer needed by v1 (no button questions), kept here because the v1 spec was built on its absence. |
 | ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area (shipped, Casa 0.326.0), [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | gmail→store custody goes through the handoff folder (gmail 0.9.0); specialist asks stay structured work orders (#487 still open, still not a dependency). |
 | casa-specialist-finance (bank-feed) | **Backups and workflow restore points** (operator, 2026-09-22; §Setup, "Test install"): a new subsystem — `backup(reason)`, `list_backups` (timestamp, size, reason, restore events and registered workflow strings, from a durable index kept beside the database), `restore_backup(id)` as a protected tool restored in place as transactional SQL (attach the backup, replace every ordinary table's rows, `sqlite_sequence` last, the `notes_fts` index rebuilt rather than copied, a `ledger_meta` marker holding the restore operation id) inside one `BEGIN IMMEDIATE` with the consent-binding preflight in the same transaction — not the backup API, which refuses a destination with an open transaction; consistent copies under the write lock (WAL); reasons `weekly` / `install:<workflow>` / `manual`; bounded retention for `weekly`, unbounded for install backups; the weekly backup taken from the finance pass. **The first write carrying an unregistered workflow string mints `install:<workflow>` inside that write's lock, before the write**; a namespaced tag write without a workflow string is refused; a restore unregisters the workflows whose install backups are at or after the restored point. `tag_transaction`, `untag_transaction` and `add_note` gain optional `workflow` and `expected_generation` arguments; a write carrying a workflow string must carry `expected_generation`, and is rejected when it differs from the ledger's restore generation. | **Shipped** — filed 2026-09-22 as [casa-specialist-finance#39](https://github.com/bonzanni/casa-specialist-finance/issues/39), merged 2026-09-23 as component 0.12.0 (bank-feed 0.11.0, the floor). This plugin never writes to bank-feed without it: a bank-feed that refuses the `workflow` argument is below the floor, and the pass says so. |
+| casa-specialist-finance (bank-feed) | **Lineage-closed `purge`**: a row is deleted only when its whole supersession chain is; a NULL `booking_date` counts as not before the cutoff; the reply counts the rows before the cutoff kept to keep chains whole (operator ruling 2026-09-25, round 41). | **Filed 2026-09-25 as [casa-specialist-finance#56](https://github.com/bonzanni/casa-specialist-finance/issues/56).** A dependency: the bank-feed floor is the release that closes it (§Casa baseline). |
 | ha-casa-app | **"Forget everything retained since <timestamp>"** — a time-bounded memory wipe, so a test window's retained engagements can be dropped without wiping the bank. | **Filed 2026-09-22 as [ha-casa-app#1045](https://github.com/bonzanni/ha-casa-app/issues/1045)**. Not a dependency: the residual is stated in §Setup, "Test install". |
 | Resident config | **One** weekly trigger (§Setup), plugin assignment to both roles. No quarter-end trigger: packaging happens only when the operator asks. | Operator/configurator action at install time. |
 
