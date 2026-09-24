@@ -36,6 +36,12 @@ supersession chains, so an erased row did not prove the payment ended. **Operato
 2026-09-25:** fixed upstream as
 [casa-specialist-finance#56](https://github.com/bonzanni/casa-specialist-finance/issues/56)
 (lineage-closed purge), and the bank-feed floor rises to the release that closes it.
+**Round 42** (tree a6c8365): Astra SHIP WITH FIXES (one S2, fixed in 0203101: an unknown
+expectation keeps the last known kind verdict), Terra DO NOT SHIP (one S1: a purge
+between a sync's plan and its apply). A refutation-defense run (Astra) found the
+dismissal holds, since that race is the ruled returning-payment case, and the spec now
+states it (792a5fa). **Converged at round 43: Astra SHIP, Terra SHIP, at 792a5fa,**
+nothing at S1/S2. The #56 floor stays mandatory: the newest bank-feed is below it.
 Revised 2026-09-22 — re-verified against casa **v0.328.0** and bank-feed **0.10.1**
 after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31 landed.
 Required floors: casa **0.326.0**, bank-feed **the release closing casa-specialist-finance#56** (§Casa baseline; 0.10.0 until #39 shipped, then 0.11.0).
