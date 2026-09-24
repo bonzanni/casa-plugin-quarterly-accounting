@@ -739,7 +739,16 @@ component 0.13.2 (bank-feed 0.12.2):
   surviving `superseded_by` names a missing row. A lineage walk that nevertheless meets
   one — a surviving row whose `superseded_by` names an absent id — is a broken floor, not
   an end. The pass reports it and ends nothing, and the lineage keeps its decisions and
-  its documents.
+  its documents. **Chain closure concerns committed rows** (round-42 finding, Terra;
+  dismissed after a refutation-defense run, Astra, which reproduced both branches on
+  bank-feed's real `reconcile`, `purge_rows` and `apply_plan`). If a `purge` erases a
+  predecessor after a `sync` built its plan but before the plan applies, `apply_plan`
+  inserts the booked replacement and skips the missing predecessor's supersede by design
+  (its "honest counts" rule), so the replacement is active and unlinked. That is the
+  returning-payment case, even within one pass: the old lineage ends, its document is
+  freed before triage, the residue line is written, and no operator decision carries
+  across. Refusing the stale plan would not help: the next fetch inserts the same
+  payment afresh, just as unlinked, since its only predecessor is gone.
 
 **An ended lineage** is judged ended only on positive evidence from the bound ledger,
 never from a failed read: `vanished` from the row's own `state` in the snapshot; erased
@@ -3110,7 +3119,10 @@ and is resent only when the operator asks, as that exact file.
   the import and before triage, so that pass's triage already sees the document as
   `unmatched` and a pairing of the returning row with it is never refused or
   `conflicted` by occupancy against the dead lineage (a design that judges ends in the
-  repair sweep fails this); after `purge` and a re-sync, no new row's `row_id` equals any id the store holds
+  repair sweep fails this); the same outcome when the `purge` lands **between a
+  `sync`'s plan and its apply** (build the plan with `reconcile`, `purge_before`, then
+  `apply_plan`: inserted 1, superseded 0, and the replacement is a new lineage); after
+  `purge` and a re-sync, no new row's `row_id` equals any id the store holds
   (the `AUTOINCREMENT` claim, asserted, not assumed); a row tombstoned by `reconcile` ends
   `vanished` and the sweep removes its owned tags, and a stale `acct::open` written to it
   afterwards is removed at the next cycle; a pass whose snapshot import failed, and a pass
