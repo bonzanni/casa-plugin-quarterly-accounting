@@ -9,7 +9,6 @@ A build never overwrites: its filename is reserved by exclusive create,
 widening from the date to minutes, seconds and a short suffix."""
 from __future__ import annotations
 
-import contextlib
 import csv
 import hashlib
 import io
@@ -262,22 +261,15 @@ def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, si
     return "\n".join(out)
 
 
-def _custody():
-    """The interprocess custody lock over documents/ and packages/ (fix wave B,
-    db.custody_lock): a build reads held documents' bytes and writes into
-    packages/, which reset_store erases under that lock. Taken BEFORE the freeze
-    transaction, never inside one (lock order: custody, then SQLite). Until
-    that wave is merged into this line, db has no custody_lock and this is a
-    no-op."""
-    lock = getattr(db, "custody_lock", None)
-    return lock() if lock is not None else contextlib.nullcontext()
-
-
 def build_quarterly_package(conn, quarter: str) -> dict:
     dates.parse_quarter(quarter)
     if conn.in_transaction:
         raise RuntimeError("build_quarterly_package opens its own transactions")
-    with _custody():
+    # The custody lock over documents/ and packages/ (db.custody_lock): a build
+    # reads held documents' bytes and writes into packages/, which reset_store
+    # erases under that lock. Taken BEFORE the freeze transaction, never inside
+    # one (lock order: custody, then SQLite).
+    with db.custody_lock():
         return _build(conn, quarter)
 
 
