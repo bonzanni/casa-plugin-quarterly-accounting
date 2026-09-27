@@ -65,6 +65,14 @@ class TestDesiredSet(unittest.TestCase):
         self.assertEqual(r.desired, frozenset({"acct::open"}))
         self.assertIn("unclassified", r.reasons)
 
+    def test_classification_conflict_reason(self):
+        conflict = ex.derive("DBIT", {"internal-transfer", "refund"})
+        self.assertTrue(conflict.unknown and conflict.conflict)
+        r = R.reduce(inputs([], exp=conflict, last_known=None))
+        self.assertEqual(r.desired, frozenset({"acct::open"}))
+        self.assertIn("classification-conflict", r.reasons)
+        self.assertNotIn("unclassified", r.reasons)
+
     def test_status_tags_are_exclusive(self):
         for entries in ([], [op_pair(1, 1)], [auto(1, 1, "propose")]):
             r = R.reduce(inputs(entries))
@@ -131,6 +139,28 @@ class TestValidity(unittest.TestCase):
         r = R.reduce(inputs([auto(1, 1), auto(2, 2)]))
         self.assertEqual(r.desired, frozenset({"acct::open"}))
         self.assertIn("conflicted", r.reasons)
+
+    def test_operator_pairing_kind_changed_needs_reconfirmation(self):
+        # Fingerprint recorded "invoice" while the pairing was made; the
+        # document's own kind now equals the (later) expectation "payslip".
+        # A stale kind verdict is not a mismatch — no confirmation cures a
+        # mismatch, but confirming against the new kind cures this one — so
+        # it must NOT be silently promoted to acct::matched (round-27/28).
+        r = R.reduce(inputs([op_pair(1, 1, f=fp(FACTS, "invoice"))],
+                            exp=PAYSLIP, last_known="payslip", doc_kinds={1: "payslip"}))
+        self.assertEqual(r.desired, frozenset({"acct::proposed"}))
+        self.assertIn("kind-changed", r.reasons)
+
+    def test_operator_confirmation_against_current_kind_restores_matched(self):
+        entries = [op_pair(1, 1, f=fp(FACTS, "invoice")),
+                   op_pair(2, 1, f=fp(FACTS, "payslip"))]
+        r = R.reduce(inputs(entries, exp=PAYSLIP, last_known="payslip", doc_kinds={1: "payslip"}))
+        self.assertEqual(r.desired, frozenset({"acct::matched"}))
+
+    def test_machine_pairing_kind_changed_stays_proposed(self):
+        r = R.reduce(inputs([auto(1, 1, f=fp(FACTS, "invoice"))],
+                            exp=PAYSLIP, last_known="payslip", doc_kinds={1: "payslip"}))
+        self.assertEqual(r.desired, frozenset({"acct::proposed"}))
 
 
 class TestFixedPoint(unittest.TestCase):
