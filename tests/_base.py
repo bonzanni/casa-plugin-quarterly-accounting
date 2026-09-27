@@ -159,3 +159,36 @@ class StoreCase(TempEnv):
             w.writerow({k: ("" if full.get(k) is None else full.get(k, "")) for k in self.EXPORT_COLS})
         return casa_handoff.publish("bank-feed", "ledger-export-test.csv",
                                     data=buf.getvalue().encode())["path"]
+
+    def show(self, *pids):
+        """What build_review + a successful send + mark_rendering_delivered
+        leave behind (Task 16 builds the real path; this fixture writes the
+        same rows so the match tools can be tested before it exists)."""
+        import db
+        import json
+        rid = "r-test-%d" % (self.conn.execute("SELECT COUNT(*) FROM renders").fetchone()[0] + 1)
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
+                              " delivered_at, text, membership_json) VALUES (?,?,?,?,?,?,?)",
+                              (rid, "status", "{}", db.now(), db.now(), "", json.dumps(list(pids))))
+            for pid in pids:
+                prev = self.conn.execute("SELECT revision FROM projections WHERE pid=?",
+                                         (pid,)).fetchone()[0]
+                mrevs = {str(r[0]): r[1] for r in self.conn.execute(
+                    "SELECT match_id, revision FROM match_state WHERE pid=?", (pid,))}
+                self.conn.execute("INSERT INTO render_items VALUES (?,?,?,?)",
+                                  (rid, pid, prev, json.dumps(mrevs)))
+                self.conn.execute("INSERT OR REPLACE INTO shown VALUES (?,?,?,?,?)",
+                                  (pid, rid, prev, json.dumps(mrevs), db.now()))
+        return rid
+
+    def rev(self, pid=None, match_id=None):
+        if match_id is not None:
+            return self.conn.execute("SELECT revision FROM match_state WHERE match_id=?",
+                                     (match_id,)).fetchone()[0]
+        return self.conn.execute("SELECT revision FROM projections WHERE pid=?",
+                                 (pid,)).fetchone()[0]
+
+    def snapshot(self, pid):
+        import lineage
+        return lineage.live_row(self.conn, lineage.projection(self.conn, pid))
