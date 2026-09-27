@@ -472,9 +472,23 @@ class TestSeenNameProperty(Base):
         def paired(p):
             return self.conn.execute("SELECT 1 FROM match_state WHERE pid=? AND state IN"
                                      " ('matched','proposed')", (p,)).fetchone() is not None
-        for _ in range(12):
+        other = self.item("Zapier", 9900, True)            # unrelated to the family
+        for step in range(12):
             r = views.build_review(self.conn, view="status", quarter="2026-Q3")
             views.mark_rendering_delivered(self.conn, r["render_id"])
+            # round 8: unrelated deliveries between the sheet and the reply
+            for _ in range(rng.randint(0, 2)):
+                if rng.random() < 0.5:
+                    it = views.build_review(self.conn, view="item", pid=other)
+                    views.mark_rendering_delivered(self.conn, it["render_id"])
+                else:
+                    t = self.pass_()
+                    passes.record_probe(self.conn, t, "gmail", False, "down %d %d" % (step, _))
+                    speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+                    if speak:
+                        views.mark_rendering_delivered(self.conn, speak["render_id"])
+                    self.token = self.pass_()
+                    passes.record_probe(self.conn, self.token, "gmail", True)
             live = [p for p in pids if paired(p)]
             if not live:
                 break

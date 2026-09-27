@@ -170,11 +170,24 @@ def _names(d, seen=None) -> set:
     return out
 
 
-def _seen_names(conn) -> dict:
-    """pid (str) -> the payee name the latest delivered rendering printed."""
+def _shown_scopes(conn) -> list:
+    """(pid, scope) of the rendering each payment was last SHOWN in — its own
+    `shown.render_id`, the rendering D3 binds its shown revision to (round 8:
+    the globally latest delivery may be an unrelated item view or an alert)."""
     import json
-    last = db.last_delivered(conn)
-    return json.loads(last["scope_json"]).get("names", {}) if last is not None else {}
+    return [(r[0], json.loads(r[1])) for r in conn.execute(
+        "SELECT s.pid, r.scope_json FROM shown s JOIN renders r ON r.render_id=s.render_id"
+        " WHERE r.delivered_at IS NOT NULL")]
+
+
+def _seen_names(conn) -> dict:
+    """pid (str) -> the payee name the rendering that last showed it printed."""
+    out = {}
+    for pid, scope in _shown_scopes(conn):
+        name = scope.get("names", {}).get(str(pid))
+        if name is not None:
+            out[str(pid)] = name
+    return out
 
 
 def _matches(d, t, seen=None) -> bool:
@@ -192,12 +205,13 @@ def _matches(d, t, seen=None) -> bool:
 
 
 def _delivered_refs(conn) -> dict:
-    """hex -> pid: the generated refs the latest delivered rendering printed."""
-    import json
-    last = db.last_delivered(conn)
-    if last is None:
-        return {}
-    return {k: int(v) for k, v in json.loads(last["scope_json"]).get("refs", {}).items()}
+    """hex -> the pids whose last-shown rendering printed that generated ref."""
+    out: dict = {}
+    for pid, scope in _shown_scopes(conn):
+        for k, v in scope.get("refs", {}).items():
+            if int(v) == pid:
+                out.setdefault(k, set()).add(pid)
+    return out
 
 
 def _resolve(conn, phrase, items):
@@ -215,7 +229,7 @@ def _resolve(conn, phrase, items):
         rest = (phrase[:m.start()] + phrase[m.end():]).strip(" ,")
         rt = _parse_target(rest)
         rt_ok = rt["vendor"] or rt["amount"] is not None or rt["day"] is not None
-        hits += [d for d in items if d["pid"] == refs[m.group(1)]
+        hits += [d for d in items if d["pid"] in refs[m.group(1)]
                  and (not rt_ok or _matches(d, rt, seen_names) or (rt["vendor"] is None
                                                        and _matches_loose(d, rt)))]
     seen, uniq = set(), []
@@ -232,7 +246,7 @@ def _resolve(conn, phrase, items):
         if same:
             msg += " Open for that name: " + "; ".join(views.headline(d) for d in same) + "."
         return None, msg
-    by_pid = {v: k for k, v in refs.items()}
+    by_pid = {p: k for k, ps in refs.items() for p in ps}
     heads = [views.headline(d) + (f" · ref {by_pid[d['pid']]}" if d["pid"] in by_pid else "")
              for d in hits]
     ask = "say it with the amount or the date"

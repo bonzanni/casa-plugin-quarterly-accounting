@@ -836,6 +836,34 @@ class TestIdentity(Base):
         self.assertIsNone(self.author(a))                       # the amount tells them apart
         self.assertEqual(self.author(b)[0], "auto")
 
+    def alias_after(self, between):
+        # round 8 (Astra + Terra S1): an alert or an unrelated item view delivered after the
+        # sheet dropped the alias, and the reply unpaired the EUR 70.00 payment silently
+        import passes
+        a = self.item("A\u00b7B", 5445, "2026-09-14", labels=("guessed",))
+        b = self.item("A\u2022B", 7000, "2026-09-16", labels=("guessed",))
+        z = self.item("Zapier", 9900, "2026-09-17")
+        self.deliver()
+        if between == "alert":
+            t = self.pass_()
+            passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
+            speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+            views.mark_rendering_delivered(self.conn, speak["render_id"])
+            self.token = self.pass_()
+        else:
+            it = views.build_review(self.conn, view="item", pid=z)
+            views.mark_rendering_delivered(self.conn, it["render_id"])
+        out = reply.apply_reply(self.conn, "the A\u2022B one is wrong")
+        self.assertEqual(out["applied"], [])
+        self.assertIn("Which one?", out["receipt"])
+        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
+
+    def test_a_display_alias_survives_a_delivered_alert(self):
+        self.alias_after("alert")
+
+    def test_a_display_alias_survives_an_unrelated_item_view(self):
+        self.alias_after("item")
+
     def test_a_name_that_displays_like_another_asks_with_equal_facts(self):
         a = self.item("A\u00b7B", 5445, "2026-09-14", labels=("guessed",))
         b = self.item("A\u2022B", 5445, "2026-09-14", labels=("guessed",))
