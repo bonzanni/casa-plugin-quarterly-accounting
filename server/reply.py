@@ -145,11 +145,6 @@ _REF = re.compile(r"\bref\s+([0-9a-f]{4,64})\b")
 
 def _parse_target(phrase: str) -> dict:
     p = phrase.strip()
-    ref = None
-    m = _REF.search(p)
-    if m:                   # the "ref …" a view prints on payments that would print alike
-        ref = m.group(1)
-        p = (p[:m.start()] + p[m.end():]).strip(" ,")
     amount = None
     m = _AMOUNT.search(p)
     if m:
@@ -162,15 +157,13 @@ def _parse_target(phrase: str) -> dict:
         day = (int(m.group(1)), _MONTHS[m.group(2)[:3]])
         p = (p[:m.start()] + p[m.end():]).strip()
     p = re.sub(r"^(?:the|from|on)\s+|\s+(?:one|from|on)$", "", p).strip()
-    return {"vendor": kb.norm(p) or None, "amount": amount, "day": day, "ref": ref}
+    return {"vendor": kb.norm(p) or None, "amount": amount, "day": day}
 
 
 def _matches(d, t) -> bool:
     if t["vendor"] and t["vendor"] not in (kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"])):
         return False
     if t["amount"] is not None and d["amount_minor"] != t["amount"]:
-        return False
-    if t.get("ref") and not views.lineage_ref(d["pid"]).startswith(t["ref"]):
         return False
     if t["day"] is not None:
         if not d["date"]:
@@ -181,9 +174,38 @@ def _matches(d, t) -> bool:
     return bool(t["vendor"] or t["amount"] is not None)
 
 
+def _delivered_refs(conn) -> dict:
+    """hex -> pid: the generated refs the latest delivered rendering printed."""
+    import json
+    last = db.last_delivered(conn)
+    if last is None:
+        return {}
+    return {k: int(v) for k, v in json.loads(last["scope_json"]).get("refs", {}).items()}
+
+
 def _resolve(conn, phrase, items):
+    """A description resolves to exactly one open item. The literal reading
+    (the whole phrase as payee, amount, date) and a ref reading are both
+    tried; a "ref <hex>" counts only as a generated ref the latest DELIVERED
+    rendering printed, exactly (round 6: a payee literally named "Adobe ref
+    e40c" is not a ref). Several readings, or several payments: ask."""
     t = _parse_target(phrase)
     hits = [d for d in items if _matches(d, t)]
+    refs = _delivered_refs(conn)
+    m = _REF.search(phrase)
+    if m and m.group(1) in refs:
+        rest = (phrase[:m.start()] + phrase[m.end():]).strip(" ,")
+        rt = _parse_target(rest)
+        rt_ok = rt["vendor"] or rt["amount"] is not None or rt["day"] is not None
+        hits += [d for d in items if d["pid"] == refs[m.group(1)]
+                 and (not rt_ok or _matches(d, rt) or (rt["vendor"] is None
+                                                       and _matches_loose(d, rt)))]
+    seen, uniq = set(), []
+    for d in hits:
+        if d["pid"] not in seen:
+            seen.add(d["pid"])
+            uniq.append(d)
+    hits = uniq
     if len(hits) == 1:
         return hits[0], None
     if not hits:
@@ -193,12 +215,26 @@ def _resolve(conn, phrase, items):
         if same:
             msg += " Open for that name: " + "; ".join(views.headline(d) for d in same) + "."
         return None, msg
-    with views.named(hits):          # payments that print alike are told apart by their ref
-        heads = [views.headline(d) for d in hits]
+    by_pid = {v: k for k, v in refs.items()}
+    heads = [views.headline(d) + (f" · ref {by_pid[d['pid']]}" if d["pid"] in by_pid else "")
+             for d in hits]
     ask = "say it with the amount or the date"
-    if len(set(views.headline(d) for d in hits)) < len(hits):
+    if len(set(heads)) < len(heads) or len(set(views.headline(d) for d in hits)) < len(hits):
         ask += ", or the ref"
-    return None, f"Which one? " + "; ".join(heads) + f" — {ask}."
+    return None, "Which one? " + "; ".join(heads) + f" — {ask}."
+
+
+def _matches_loose(d, t) -> bool:
+    """A ref plus only an amount or a date: those must agree too."""
+    if t["amount"] is not None and d["amount_minor"] != t["amount"]:
+        return False
+    if t["day"] is not None:
+        if not d["date"]:
+            return False
+        dd = dates.parse_day(d["date"])
+        if (dd.day, dd.month) != t["day"]:
+            return False
+    return True
 
 
 def _shown(conn, pid):

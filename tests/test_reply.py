@@ -698,8 +698,8 @@ class TestIdentity(Base):
                                  row_snapshot=self.snapshot(pid))
         r = self.deliver(view="check")
         flat = " ".join(r["text"].split())
-        self.assertIn("invoice SAME from Adobe (2 Sep)", flat)
-        self.assertIn("invoice SAME from Adobe Ireland (2 Sep)", flat)
+        self.assertIn("invoice SAME \u00b7Adobe (2 Sep)", flat)
+        self.assertIn("invoice SAME \u00b7Adobe Ireland (2 Sep)", flat)
         self.assertEqual(len(self.bound(r["render_id"], pid)), 2)
         out = reply.apply_reply(self.conn, "the Adobe one is wrong")
         self.assertIn("Set aside both candidates", out["receipt"])
@@ -724,7 +724,7 @@ class TestIdentity(Base):
         shas = [self.conn.execute("SELECT sha256 FROM documents WHERE doc_id=?", (d,))
                 .fetchone()[0] for d in docs]
         flat = " ".join(r["text"].split())
-        self.assertEqual(flat.count("invoice SAME from Adobe \u00b7"), 2, flat)
+        self.assertEqual(flat.count("invoice SAME \u00b7Adobe\u00b7"), 2, flat)
         self.assertEqual(len(self.bound(r["render_id"], pid)), 2)
         del shas
 
@@ -750,6 +750,76 @@ class TestIdentity(Base):
         out = reply.apply_reply(self.conn, f"the Adobe ref {ref} one is wrong")
         self.assertIsNone(self.author(b))
         self.assertEqual(self.author(a)[0], "auto")
+
+    def conflicted(self, pid, specs, shas=None):
+        docs = [self.doc(document_number=n, issuer=i, document_date="2026-09-02",
+                         source_ref="%s|%s" % (n, i), **({"sha256": shas[k]} if shas else {}))
+                for k, (n, i) in enumerate(specs)]
+        with db.tx(self.conn):
+            for doc in docs:
+                mid = self.conn.execute(
+                    "INSERT INTO matches(pid_created, doc_id, label, runners_up_json,"
+                    " created_seq) VALUES (?,?,'clean','[]',?)",
+                    (pid, doc, db.next_seq(self.conn))).lastrowid
+                self.conn.execute("INSERT INTO match_state(match_id, pid, doc_id, state, author,"
+                                  " activation) VALUES (?,?,?,'conflicted','auto',0)",
+                                  (mid, pid, doc))
+        return docs
+
+    def test_a_payee_literally_named_like_a_ref_is_not_a_ref(self):
+        # round 6 (Astra S1): "Adobe ref e40c" was parsed as pid 1's ref
+        a = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
+        forged = "Adobe ref " + views.lineage_ref(a)[:4]
+        b = self.item(forged, 5445, "2026-09-14", labels=("guessed",))
+        r = self.deliver()
+        self.assertNotIn(" · ref ", r["text"])                 # nothing needed a generated ref
+        out = reply.apply_reply(self.conn, f"the {forged} one is wrong")
+        self.assertIsNone(self.author(b))                        # the payment it names
+        self.assertEqual(self.author(a)[0], "auto")              # untouched
+        del out
+
+    def test_a_literal_name_and_a_delivered_ref_together_ask(self):
+        a = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
+        twin = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
+        r = self.deliver()
+        ref = views.lineage_ref(a)[:4]
+        self.assertIn("ref " + ref, " ".join(r["text"].split()))
+        c = self.item("Adobe ref " + ref, 7000, "2026-09-16", labels=("guessed",))
+        self.deliver()
+        out = reply.apply_reply(self.conn, f"the Adobe ref {ref} one is wrong")
+        self.assertEqual(out["applied"], [])
+        self.assertIn("Which one?", out["receipt"])
+        self.assertEqual((self.author(a)[0], self.author(c)[0], self.author(twin)[0]),
+                         ("auto", "auto", "auto"))
+
+    def test_a_literal_number_cannot_forge_a_generated_identity(self):
+        # round 6 (Astra S2): SAME, SAME and literally "SAME from Adobe ·7692"
+        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        docs = self.conflicted(pid, [("SAME", "Adobe"), ("SAME", "Adobe"),
+                                     ("SAME from Adobe \u00b77692", "Adobe"),
+                                     ("SAME \u00b7Adobe", "Adobe"), ("SAME", "Adobe \u00b7x")],
+                               shas=["7692" + "1" * 60, "1234" + "2" * 60, "3" * 64,
+                                     "4" * 64, "5" * 64])
+        r = self.deliver(view="check")
+        self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+        it = views.build_review(self.conn, view="item", pid=pid)
+        flat = " ".join(it["text"].split())
+        # a literal never prints the reserved mark: generated text is unforgeable
+        self.assertIn("invoice SAME from Adobe \u20227692", flat)
+        self.assertIn("invoice SAME \u2022Adobe", flat)
+        self.assertNotIn("SAME from Adobe \u00b77692", flat)
+        page, after, bound = None, None, set()
+        while True:
+            kw = {"page": page, "after": after} if page else {}
+            it = views.build_review(self.conn, view="item", pid=pid, **kw)
+            bound |= self.bound(it["render_id"], pid)
+            views.mark_rendering_delivered(self.conn, it["render_id"])
+            if it["next"] is None:
+                break
+            page, after = it["next"]["page"], it["next"]["after"]
+        self.assertEqual(len(bound), len(docs))
+        out = reply.apply_reply(self.conn, "the Adobe one is wrong")
+        self.assertIn("Set aside 5 candidates", out["receipt"])
 
     def test_a_four_hex_digest_collision_is_lengthened(self):
         # round 5 (Astra S1): "A"*65+"149" and +"257" share the digest 0844

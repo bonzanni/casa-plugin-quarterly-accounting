@@ -54,36 +54,47 @@ FIELD_MAX = 60
 LINK_MAX = 200
 
 
+MARK = "\u00b7"             # reserved: only generated text prints it (round 6)
+LITERAL_MARK = "\u2022"     # what a literal "·" in free text prints as
+
+
 class _Names:
-    """Per-rendering disambiguation (round 5): displayed identities are made
+    """Per-rendering disambiguation (rounds 5-6): displayed identities are made
     unique BY CONSTRUCTION within one rendering, before anything is composed,
     so the bind-time backstop (_bindable) never decides liveness.
-    - digest: the hex length of a clipped field's digest — the least (>= 4)
-      that keeps every clipped value of the rendering distinct;
-    - docs: doc_id -> what a document's identity adds when two documents of
-      the rendering would print alike (" from <issuer>", then "·<sha256 prefix>"
-      of the stored content hash, lengthened until distinct);
-    - pids: pid -> what a payment's headline adds when two headlines would
-      print alike ("ref <hash prefix>" of the lineage, lengthened until distinct)."""
+
+    Generated disambiguators live in a namespace literal text cannot occupy:
+    they follow the reserved MARK, and every literal free-text field prints a
+    MARK as LITERAL_MARK (field()).
+    - digest: hex length of a clipped field's digest ("…·<hex>");
+    - docs: doc_id -> level; a document at level k >= 1 prints
+      " ·<issuer>" (k = 1), then " ·<issuer>·<sha256 prefix of 4(k-1)>" — the
+      stored content hash, so distinct documents always end up distinct;
+    - pids: pid -> the generated ref hex a payment's headline adds ("ref <hex>").
+    Levels grow to a fixed point over the FINAL identity strings of ALL the
+    rendering's entities, not per original collision group."""
     def __init__(self):
-        self.digest, self.docs, self.pids = 4, {}, {}
+        self.digest, self.docs, self.doc_level, self.pids = 4, {}, {}, {}
 
 
 _NAMES = None
 
 
 def field(text, units: int = FIELD_MAX) -> str:
-    """A free-text field, clipped to `units`. A clipped value carries a digest
-    of its FULL value ("…·3f9a", round 4), as long as this rendering needs for
-    all its clipped values to print distinct (round 5)."""
+    """A literal free-text field: MARK neutralized, clipped to `units` with a
+    digest of its FULL value ("…·3f9a"), as long as this rendering needs for
+    all its clipped values to print distinct."""
     return _field(text, units, _NAMES.digest if _NAMES is not None else 4)
 
 
 def _field(text, units, n) -> str:
-    if not text or utf16_len(text) <= units:
+    if not text:
         return text
-    tag = "\u00b7" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:n]
-    return clip(text, units - utf16_len(tag)) + tag
+    shown = text.replace(MARK, LITERAL_MARK)
+    if utf16_len(shown) <= units:
+        return shown
+    tag = MARK + hashlib.sha256(text.encode("utf-8")).hexdigest()[:n]
+    return clip(shown, units - utf16_len(tag)) + tag
 
 
 def _hex(s: str) -> str:
@@ -91,27 +102,23 @@ def _hex(s: str) -> str:
 
 
 def lineage_ref(pid: int) -> str:
-    """The stable hex a payment's "ref …" disambiguator is a prefix of."""
+    """The stable hex a payment's generated "ref …" is a prefix of."""
     return _hex(f"lineage:{pid}")
 
 
-def _distinct(keys: dict, grow) -> dict:
-    """keys: entity -> base printed identity. Returns entity -> suffix such that
-    base + suffix is distinct across entities: colliding groups take grow(e, n)
-    with n = 4, 8, ... until the group is distinct."""
-    out = {e: "" for e in keys}
-    groups: dict = {}
-    for e, k in keys.items():
-        groups.setdefault(k, []).append(e)
-    for es in groups.values():
-        if len(es) < 2:
-            continue
-        for n in range(4, 65, 4):
-            tags = {e: grow(e, n) for e in es}
-            if len(set(tags.values())) == len(es):
-                out.update(tags)
-                break
-    return out
+def _fixpoint(ents, render, raise_level, cap=17) -> None:
+    """Raise the level of every entity whose FINAL printed identity (render(e),
+    normalized as the bind check sees it) is shared with any other entity of
+    the rendering, until all are distinct (or `cap`)."""
+    for _ in range(cap):
+        seen: dict = {}
+        for e in ents:
+            seen.setdefault(_norm(render(e)), []).append(e)
+        dups = [e for es in seen.values() if len(es) > 1 for e in es]
+        if not dups:
+            return
+        for e in dups:
+            raise_level(e)
 
 
 @contextlib.contextmanager
@@ -124,6 +131,17 @@ def named(items, view_quarter=None):
         yield _NAMES
     finally:
         _NAMES = saved
+
+
+def _doc_extra(doc, level) -> str:
+    if level <= 0:
+        return ""
+    issuer = field(doc.get("issuer")) or ""
+    sha = doc.get("sha256") or _hex(f"doc:{doc.get('doc_id')}")
+    parts = ([issuer] if issuer else []) + ([sha[:4 * (level - 1)]] if level > 1 else [])
+    if not parts:
+        parts = [sha[:4 * level]]
+    return " " + MARK + MARK.join(parts)
 
 
 def names_for(items, view_quarter=None) -> _Names:
@@ -146,21 +164,19 @@ def names_for(items, view_quarter=None) -> _Names:
                 names.digest = n
                 break
         _NAMES = names
-        base = {i: _norm(ident(doc)) for i, doc in docs.items()}
-        count: dict = {}
-        for k in base.values():
-            count[k] = count.get(k, 0) + 1
-        # first the issuer, which a person can read; then the content hash
-        issuer = {i: (f" from {field(docs[i].get('issuer'))}"
-                      if count[base[i]] > 1 and docs[i].get("issuer") else "") for i in docs}
-        names.docs = dict(issuer)
-        again = {i: _norm(ident(doc)) for i, doc in docs.items()}
-        sha = _distinct(again, lambda i, n: " \u00b7" + (docs[i].get("sha256") or
-                                                              _hex(str(i)))[:n])
-        names.docs = {i: issuer[i] + sha[i] for i in docs}
-        heads = {d["pid"]: _norm(headline(d, view_quarter)) for d in items}
-        names.pids = {p: (f"ref {t}" if t else "") for p, t in
-                      _distinct(heads, lambda p, n: lineage_ref(p)[:n]).items()}
+
+        def raise_doc(i):
+            names.doc_level[i] = names.doc_level.get(i, 0) + 1
+            names.docs[i] = _doc_extra(docs[i], names.doc_level[i])
+        _fixpoint(list(docs), lambda i: ident(docs[i]), raise_doc)
+
+        by_pid = {d["pid"]: d for d in items}
+        level: dict = {}
+
+        def raise_pid(p):
+            level[p] = level.get(p, 0) + 1
+            names.pids[p] = lineage_ref(p)[:4 * level[p]]
+        _fixpoint(list(by_pid), lambda p: headline(by_pid[p], view_quarter), raise_pid)
     finally:
         _NAMES = saved
     return names
@@ -201,7 +217,7 @@ def headline(d: dict, view_quarter=None) -> str:
     if d.get("pending"):
         parts.append("pending")
     if _NAMES is not None and _NAMES.pids.get(d["pid"]):
-        parts.append(_NAMES.pids[d["pid"]])
+        parts.append("ref " + _NAMES.pids[d["pid"]])
     if view_quarter and d.get("quarter") and d["quarter"] != view_quarter:
         parts.append(dates.quarter_label(d["quarter"]))
     return " · ".join(parts)
@@ -917,11 +933,17 @@ def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=
                 scope["offers"] = [c.offer for c in chosen if c.offer is not None]
                 if page in (None, 1):
                     scope["residue_silent"] = parts["silent"]
+        printed = _bindable(chosen, text)
+        if _NAMES is not None:
+            # the generated refs this rendering printed on payments it binds: a reply's
+            # "ref <hex>" is honoured only against these (round 6)
+            refs = {_NAMES.pids[p]: p for p in printed if _NAMES.pids.get(p)}
+            if refs:
+                scope["refs"] = refs
         rid = f"r{db.next_seq(conn)}"
         conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                      " membership_json) VALUES (?,?,?,?,?,?)",
                      (rid, view, db.canonical(scope), db.now(), text, json.dumps(members)))
-        printed = _bindable(chosen, text)
         for p, shown_ids in printed.items():
             prev = conn.execute("SELECT revision FROM projections WHERE pid=?", (p,)).fetchone()[0]
             mrevs = {str(r[0]): r[1] for r in conn.execute(

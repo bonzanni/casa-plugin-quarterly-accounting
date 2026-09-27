@@ -57,6 +57,15 @@ class TestFitLines(unittest.TestCase):
             # no half surrogate pair: the text encodes cleanly
             text.encode("utf-16-le")
 
+    def test_a_literal_field_never_prints_the_reserved_mark(self):
+        rng = random.Random(6)
+        for _ in range(300):
+            v = "".join(rng.choice("ab \u00b7ref0123") for _ in range(rng.choice((3, 30, 90))))
+            out = views.field(v)
+            body = out.rsplit(views.CLIP_MARK + views.MARK, 1)[0] if views.utf16_len(
+                v.replace(views.MARK, views.LITERAL_MARK)) > views.FIELD_MAX else out
+            self.assertNotIn(views.MARK, body, (v, out))
+
     def test_clip_never_splits_a_non_bmp_character(self):
         for n in range(1, 12):
             c = views.clip("\U0001f6a8" * 10, n)
@@ -314,10 +323,16 @@ class TestIdentityProperty(Base):
         pids = []
         for i in range(rng.randint(12, 20)):
             payee = rng.choice(("Adobe", "Adobe", "Figma", "Z" * 70 + rng.choice("AB")))
+            if pids and rng.random() < 0.3:          # literal text shaped like generated text
+                other = rng.choice(pids)
+                payee = rng.choice(("Adobe ref " + views.lineage_ref(other)[:4],
+                                    "Adobe ref " + views.lineage_ref(other)[:8],
+                                    "Adobe \u00b7 EUR 54.45", "Adobe\u00b7ref\u00b7"
+                                    + views.lineage_ref(other)[:4]))
             amount = rng.choice((5445, 5445, 1000))
             pid = self.item(payee, amount, False)
             pids.append(pid)
-            shape = rng.choice(("guessed", "candidates", "plain", "same", "forced"))
+            shape = rng.choice(("guessed", "candidates", "plain", "same", "forced", "forge"))
             prefix = "A" * rng.choice((10, 65))
             if shape == "guessed":
                 d = self.doc(counterparty=payee, issuer="I%d" % i,
@@ -332,6 +347,17 @@ class TestIdentityProperty(Base):
                 n = rng.randint(2, 6)
                 self.candidates(pid, ["SAME"] * n,
                                 [rng.choice(("Adobe", "Adobe Ireland")) for _ in range(n)])
+            elif shape == "forge":                # numbers/issuers shaped like generated parts
+                shas = [r[0] for r in self.conn.execute("SELECT sha256 FROM documents")] or ["0"]
+                sha = rng.choice(shas)
+                specs = [("SAME", "Adobe"), ("SAME", "Adobe"),
+                         ("SAME \u00b7Adobe\u00b7" + sha[:4], "Adobe"),
+                         ("SAME from Adobe \u00b7" + sha[:4], "Adobe"),
+                         ("SAME \u00b7Adobe", "Adobe"), ("SAME", "Adobe\u00b7" + sha[:4]),
+                         ("SAMEAdobe" + sha[:8], "Adobe")]
+                rng.shuffle(specs)
+                k = rng.randint(2, len(specs))
+                self.candidates(pid, [n for n, _ in specs[:k]], [i for _, i in specs[:k]])
             elif shape == "forced":
                 d = self.doc(counterparty=payee, issuer="Adobe", document_number=forced[i % 6],
                              document_date="2026-09-02")
