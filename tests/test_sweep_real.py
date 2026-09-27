@@ -376,6 +376,24 @@ class TestEndsAndErasure(Base):
             sweep.record_observation(self.conn, pid=self.pid_of(self.rid()), token=self.token,
                                      not_found=True)
 
+    def test_omitted_observed_notes_is_refused_not_a_duplicate_note(self):
+        # round C1 (Terra S1): observed_notes is not required, so an omitted read-back
+        # made the server believe the current note was never seen and return add_note
+        # again -- the fenced write would raise a real bank-feed row's note count.
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.new_pass()
+        self.cycle()                                 # one accounting note is now on the row
+        r = self.rid()
+        before = list(self.bf.notes(r))
+        self.assertTrue(any(n.startswith("Accounting revision ") for n in before))
+        first_seen = self.bf.conn.execute("SELECT first_seen FROM transactions WHERE row_id=?",
+                                          (r,)).fetchone()[0]
+        self.new_pass()
+        with self.assertRaises(db.Refusal):
+            sweep.record_observation(self.conn, pid=self.pid_of(r), token=self.token,
+                                     observed_tags=self.bf.tags(r), observed_first_seen=first_seen)
+        self.assertEqual(list(self.bf.notes(r)), before)          # no duplicate write happened
+
     def ended_residue(self, pid):
         return [tuple(r) for r in self.conn.execute(
             "SELECT reason, detail FROM residue WHERE pid=? AND reason='ended' ORDER BY rowid",

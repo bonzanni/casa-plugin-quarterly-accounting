@@ -1,4 +1,5 @@
 # tests/test_work.py
+import json
 import unittest
 
 from tests._base import StoreCase
@@ -59,6 +60,30 @@ class TestSearchBookkeeping(Base):
             self.token = self.pass_()
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual((p["search_state"], p["passes_without_candidate"]), ("active", 0))
+
+    def test_incomplete_only_calls_spend_no_age_out_budget(self):
+        # round C1 (Astra S2): incomplete=True with no queries ran no search at all -- the
+        # pass ran out of room before ever reaching this item -- so it must not stamp
+        # last_searched_at nor spend age-out budget any more than an identity-only call does.
+        for _ in range(work.AGE_OUT_PASSES + 2):
+            work.record_search(self.conn, pid=self.pid, token=self.token, incomplete=True)
+            self.token = self.pass_()
+        p = lineage.projection(self.conn, self.pid)
+        self.assertEqual((p["search_state"], p["passes_without_candidate"]), ("active", 0))
+        self.assertNotIn("last_searched_at", json.loads(p["search_json"] or "{}"))
+        self.assertEqual([i["pid"] for i in work.triage(self.conn)], [self.pid])
+
+    def test_incomplete_with_queries_counts_the_queries_not_a_fruitless_search(self):
+        # the other half of the same finding: queries DID run this pass, so they are
+        # recorded, but the item was not finished -- it resumes next pass -- so it is not
+        # yet a completed fruitless search and must not move the age-out streak.
+        for _ in range(work.AGE_OUT_PASSES + 2):
+            work.record_search(self.conn, pid=self.pid, token=self.token,
+                               queries=["from:adobe"], incomplete=True)
+            self.token = self.pass_()
+        p = lineage.projection(self.conn, self.pid)
+        self.assertEqual((p["search_state"], p["passes_without_candidate"]), ("active", 0))
+        self.assertEqual(json.loads(p["search_json"])["queries"], ["from:adobe"])
 
     def test_refuses_without_a_pass_token_unless_a_quiet_revive(self):
         # fix round 1, finding 4 (D10): search bookkeeping is machine-authored and needs the

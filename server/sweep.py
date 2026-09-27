@@ -141,7 +141,7 @@ def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=N
             return {"pid": pid, "status": proj["status"], "desired": json.loads(proj["desired_json"]),
                     "instructions": {}, "bank_writes": None, "read_back": False,
                     "recorded": "the write was refused; reported, not retried"}
-        if observed_tags is None or not observed_first_seen:
+        if observed_tags is None or observed_notes is None or not observed_first_seen:
             raise db.Refusal("record what get_transaction showed: observed_tags, observed_notes "
                              "and the row's first_seen")
         alias = conn.execute("SELECT first_seen FROM aliases WHERE row_id=?",

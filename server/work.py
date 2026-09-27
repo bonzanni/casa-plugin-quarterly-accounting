@@ -19,11 +19,17 @@ AGE_OUT_PASSES = 3
 def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhausted=False,
                   incomplete=False, identity_unknown=None, revive=False) -> dict:
     import passes
-    searched = bool(queries) or found_candidate or exhausted or incomplete
+    # Only actual search effort — a query run, a candidate found, or the idea-space
+    # exhausted — is "searched". `incomplete` alone records that the pass ran out of
+    # room before finishing this item; it is bookkeeping, not effort, and on its own
+    # (no queries) must spend no age-out budget any more than an identity-only call
+    # does (round C1, Astra S2: an incomplete-only call was silently stamping
+    # last_searched_at and counting toward AGE_OUT_PASSES with no query ever run).
+    effort = bool(queries) or found_candidate or exhausted
     # D10: search bookkeeping is machine-authored, so it needs the pass token like any
     # other machine write — except a quiet revive ("have another look", no search effort),
     # which is how an operator's reply re-arms an item outside a pass (fix round 1, finding 4).
-    if token is None and not (revive and not searched):
+    if token is None and not (revive and not effort):
         raise db.Refusal("search bookkeeping is a pass's work: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
@@ -36,12 +42,10 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
         if revive:
             state, streak = "active", 0
         identity = p["identity_question"] if identity_unknown is None else int(bool(identity_unknown))
-        if not searched:
-            # No search effort was spent here: a quiet revive (state/streak above) and/or an
-            # identity-only call move nothing else — age-out budget is never spent on a call
-            # that ran no query and found no candidate (fix round 1, finding 2: an
-            # identity-only call was silently stamping last_searched_at and counting toward
-            # AGE_OUT_PASSES with no Gmail query ever run).
+        if not effort:
+            # No search effort was spent here: a quiet revive (state/streak above), an
+            # identity-only call, and/or an incomplete-only call (the pass never reached
+            # this item) move nothing else.
             conn.execute("UPDATE projections SET search_state=?, passes_without_candidate=?,"
                          " identity_question=? WHERE pid=?", (state, streak, identity, pid))
             lineage.settle(conn, pid)
@@ -54,6 +58,8 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
         search["last_searched_at"] = db.now()
         if found_candidate:
             streak = 0
+        elif incomplete:
+            pass  # the pass did not finish this item; not yet a completed fruitless search
         elif not revive and pass_id and search.get("last_counted_pass") != pass_id:
             streak += 1
             search["last_counted_pass"] = pass_id
