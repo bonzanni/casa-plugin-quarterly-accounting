@@ -38,18 +38,24 @@ CHANGE_WORD = {"corrected": "corrected by the bank", "superseded": "replaced by 
                "vanished": "withdrawn by the bank", "erased": "erased from the ledger",
                "reclassified": "now categorised differently"}
 MORE_CLOSING = "More changed than fits in one message — the rest comes with the next check."
+# Displayed detail with no natural bound is clipped (views.clip, with its mark)
+# before composing (fix wave D round 2): a probe's diagnostic, and any one
+# sentence or package heading. So every occurrence fits a message on its own.
+DETAIL_MAX = 300
+LINE_MAX = views.LINE_MAX
 
 
 def _units(conn, rows) -> list:
     """One unit per occurrence, in the order a rendering prints them: the
     collection alerts, then each package's changes. A unit is (alert_id,
-    package or None, its wrapped lines)."""
+    (package, quarter) or None, its wrapped lines)."""
     out = []
     for a in rows:
         if a["kind"] in COLLECTION:
-            detail = json.loads(a["detail"])["detail"]
+            detail = views.clip(json.loads(a["detail"])["detail"] or "", DETAIL_MAX)
             paren = f" ({detail})" if detail else ""
-            out.append((a["alert_id"], None, views._wrap(COLLECTION[a["kind"]].format(paren=paren))))
+            line = views.clip(COLLECTION[a["kind"]].format(paren=paren), LINE_MAX)
+            out.append((a["alert_id"], None, views._wrap(line)))
     changed = []
     for a in rows:
         if a["kind"] == "delivered-changed":
@@ -59,44 +65,59 @@ def _units(conn, rows) -> list:
         pid = conn.execute("SELECT pid FROM aliases WHERE row_id=?", (c["row_id"],)).fetchone()
         head = views.headline(work.describe(conn, pid[0])) if pid else f"payment #{c['row_id']}"
         word = CHANGE_WORD.get(c["change"], c["change"])
-        out.append((a["alert_id"], (pkg, c["quarter"]), views._wrap(f"{head} — {word}")))
+        line = views.clip(f"{head} — {word}", LINE_MAX)
+        out.append((a["alert_id"], (pkg, c["quarter"]), views._wrap(line)))
     return out
 
 
-def _text(units, more: bool) -> str:
-    lines, pkg = [], None
+def _lines(units) -> tuple:
+    """The rendering's lines and, per line, the occurrence it prints (None for
+    a package's heading and closing sentence)."""
+    lines, owners, pkg = [], [], None
+
+    def put(text, owner=None):
+        for w in views._wrap(views.clip(text, LINE_MAX)):
+            lines.append(w)
+            owners.append(owner)
 
     def close():
         q = pkg[1].split("-")[1]
-        lines.extend(views._wrap(f'Your accountant holds the old numbers. Say "rebuild {q}" '
-                                 "if they need a fresh one."))
-    for _, group, wrapped in units:
+        put(f'Your accountant holds the old numbers. Say "rebuild {q}" if they need a fresh one.')
+    for alert_id, group, wrapped in units:
         if group != pkg:
             if pkg is not None:
                 close()
             pkg = group
             if group is not None:
-                lines.extend(views._wrap(f"The package {group[0]} changed underneath:"))
+                put(f"The package {group[0]} changed underneath:")
         lines.extend(wrapped)
+        owners.extend([alert_id] * len(wrapped))
     if pkg is not None:
         close()
-    if more:
-        lines.append(MORE_CLOSING)
-    return "\n".join(lines)
+    return lines, owners
+
+
+def _render(units, partial: bool) -> tuple:
+    """(text, bound alert ids, intact) through views.fit_lines: an occurrence
+    binds only when every line of it is printed in full; `intact` when the fit
+    cut nothing."""
+    lines, owners = _lines(units)
+    out, whole = views.fit_lines(lines, MORE_CLOSING, always_close=partial)
+    cut = {o for o in owners[whole:] if o is not None}
+    return "\n".join(out), [u[0] for u in units if u[0] not in cut], whole == len(lines)
 
 
 def _batch(units) -> tuple:
-    """The first rendering: whole occurrences, in print order, while the text
-    (with its closing line when some are left over) fits TELEGRAM_LIMIT
-    (fix wave D, Astra S2). At least one occurrence, always: no single
-    occurrence comes near the limit."""
+    """The first rendering: whole occurrences, in print order, while the fit
+    cuts nothing (with the closing line when some are left over). The first is
+    always taken; clipping makes it fit on its own."""
     chosen = units[:1]
     for u in units[1:]:
-        more = len(chosen) + 1 < len(units)
-        if views.utf16_len(_text(chosen + [u], more)) > views.TELEGRAM_LIMIT:
+        partial = len(chosen) + 1 < len(units)
+        if not _render(chosen + [u], partial)[2]:
             break
         chosen.append(u)
-    return chosen, _text(chosen, len(chosen) < len(units))
+    return _render(chosen, len(chosen) < len(units))[:2]
 
 
 def pending_rendering(conn):
@@ -122,8 +143,7 @@ def pending_rendering(conn):
                              " ORDER BY alert_id").fetchall()
         if not rows:
             return None
-        chosen, text = _batch(_units(conn, rows))
-        ids = [u[0] for u in chosen]
+        text, ids = _batch(_units(conn, rows))
         parked = {a["render_id"] for a in rows if a["alert_id"] in ids}
         if len(parked) == 1 and None not in parked:
             rid = next(iter(parked))

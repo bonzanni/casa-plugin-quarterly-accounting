@@ -577,6 +577,25 @@ class TestReceiptPages(Base):
         self.assertEqual((out["receipt"], out["receipt_pages"]), ("", []))
 
 
+class TestReceiptSplit(Base):
+    def test_a_which_one_listing_splits_within_the_limit(self):
+        # fix wave D round 2 (Astra S2): the splitter appended ";" to a full
+        # piece and produced a 4097-unit page.
+        adobe = [self.item("Adobe", 1000 if i == 0 else 10000, "2026-09-01", paired=False)
+                 for i in range(147)]
+        figma = self.item("Figma", 1815, "2026-09-15")
+        self.show(*adobe, figma)
+        out = reply.apply_reply(self.conn, "Adobe is wrong; Figma is wrong")
+        for page in out["receipt_pages"]:
+            self.assertLessEqual(views.utf16_len(page), views.TELEGRAM_LIMIT)
+        self.assertIsNone(self.author(figma))
+        ask = out["asks"][0]
+        self.assertGreater(views.utf16_len(ask), views.TELEGRAM_LIMIT)
+        joined = "\n".join(out["receipt_pages"])
+        self.assertEqual(joined.replace("\n", " "), " ".join(
+            ln for ln in [ask, "Unpaired Figma · EUR 18.15 · 15 Sep."]))
+
+
 class TestIntegration(Base):
     def test_a_counted_but_unprinted_payment_is_reshown_not_changed(self):
         # a never-searched payment is counted ("not searched"), not printed: the

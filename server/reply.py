@@ -200,48 +200,47 @@ def _delivered_package_for(conn, quarter):
                         " ORDER BY d.settled_at DESC LIMIT 1", (quarter,)).fetchone()
 
 
-def _cut(line: str) -> list:
-    """A line over the limit (a "Which one?" listing a hundred charges) split
-    at its "; " separators, else at spaces, else at the unit bound — never a
-    piece over TELEGRAM_LIMIT, and no text lost."""
+def _split(line: str) -> list:
+    """A line over the limit (a "Which one?" listing a hundred charges) as
+    pieces that each fit a message: broken between words, a word longer than a
+    message between code points. Nothing is added and nothing lost (fix wave D
+    round 2: the previous splitter appended a ";" to a full piece)."""
     if views.utf16_len(line) <= views.TELEGRAM_LIMIT:
         return [line]
-    for sep in ("; ", " "):
-        parts = line.split(sep)
-        if len(parts) > 1 and all(views.utf16_len(p) <= views.TELEGRAM_LIMIT for p in parts):
-            out, cur = [], parts[0]
-            for p in parts[1:]:
-                if views.utf16_len(cur + sep + p) <= views.TELEGRAM_LIMIT:
-                    cur += sep + p
-                else:
-                    out.append(cur + sep.rstrip())
-                    cur = p
-            return out + [cur]
     out, cur = [], ""
-    for ch in line:
-        if views.utf16_len(cur + ch) > views.TELEGRAM_LIMIT:
+    for word in line.split(" "):
+        cand = word if not cur else cur + " " + word
+        if views.utf16_len(cand) <= views.TELEGRAM_LIMIT:
+            cur = cand
+            continue
+        if cur:
             out.append(cur)
-            cur = ""
-        cur += ch
-    return out + [cur]
+        cur = ""
+        for ch in word:
+            if views.utf16_len(cur + ch) > views.TELEGRAM_LIMIT:
+                out.append(cur)
+                cur = ""
+            cur += ch
+    return out + [cur] if cur else out
 
 
 def _pages(lines: list) -> list:
     """The receipt as Telegram-sized messages (fix wave D, Astra S2): EVERY
-    line, in order, packed at whole lines into pages of at most TELEGRAM_LIMIT
-    UTF-16 units. Paged, never summarised: spec §Flows asks for "one receipt,
+    line, in order. Paged, never summarised: spec §Flows asks for "one receipt,
     generated from what actually committed, naming vendor and effect", with
     "the exceptions [riding] in the same receipt" — a summary would drop the
-    names that make a misread reply visible. `receipt` is the first page; the
+    names that make a misread reply visible. Each page is what views.fit_lines
+    keeps whole of the lines still to send, so every page is within
+    TELEGRAM_LIMIT by the one shared fit. `receipt` is the first page; the
     caller sends `receipt_pages` in order."""
-    pages, cur = [], []
-    for piece in (p for line in lines for p in _cut(line)):
-        if cur and views.utf16_len("\n".join(cur + [piece])) > views.TELEGRAM_LIMIT:
-            pages.append("\n".join(cur))
-            cur = []
-        cur.append(piece)
-    if cur:
-        pages.append("\n".join(cur))
+    rest = [p for line in lines for p in _split(line)]
+    pages = []
+    while rest:
+        out, whole = views.fit_lines(rest)
+        if whole == 0:              # unreachable: every piece fits on its own
+            raise RuntimeError("a receipt line does not fit one message")
+        pages.append("\n".join(out))
+        rest = rest[whole:]
     return pages
 
 

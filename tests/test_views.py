@@ -2,6 +2,7 @@
 import json
 import re
 import unittest
+from unittest import mock
 
 from tests._base import StoreCase
 import db  # noqa: E402
@@ -339,13 +340,25 @@ class TestSheet(Base):
         kb.upsert_counterparty(self.conn, "Adobe", source="portal",
                                document_link="https://adobe.example/" + "x" * 5000)
         pid = self.add()
-        status = self.render()
-        self.assertLessEqual(views.utf16_len(status["text"]), views.TELEGRAM_LIMIT)
-        self.assertIn('+1 more — say "all of them"', status["text"])
-        for r in (self.render("item", pid=pid), self.render("all")):
+        # fix wave D round 2: the unbounded link is clipped with its mark, so the
+        # item prints whole and is bound (before, the whole text was cut and bound nothing)
+        for r in (self.render(), self.render("item", pid=pid), self.render("all")):
             self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
             self.assertIn("Adobe · EUR 100.00", r["text"])
-            self.assertEqual(r["printed"], 0)       # a cut text binds nothing
+            self.assertIn("https://adobe.example/xxx", r["text"])
+            self.assertIn(views.CLIP_MARK, r["text"])
+            self.assertEqual(r["printed"], 1)
+
+    def test_the_fit_is_the_net_under_the_line_clip(self):
+        # fix wave D round 2: with the per-line clip disabled, the final fit alone
+        # keeps the text deliverable, and a cut text binds nothing (D3).
+        kb.upsert_counterparty(self.conn, "Adobe", source="portal",
+                               document_link="https://adobe.example/" + "x" * 5000)
+        pid = self.add()
+        with mock.patch.object(views, "LINE_MAX", 10 ** 6):
+            for r in (self.render(), self.render("item", pid=pid), self.render("all")):
+                self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+                self.assertEqual(r["printed"], 0)
 
     def test_unprintable_residue_is_marked_with_the_rendering(self):
         pid = self.add()
@@ -413,13 +426,15 @@ class TestSheet(Base):
         self.add(counterparty="Big", amount_minor=100, booking_date="2026-07-01")
         for i in range(10):
             self.add(counterparty=f"Small{i}", amount_minor=200 + i)
+        for i in range(10, 200):
+            self.add(counterparty=f"Small{i}", amount_minor=200 + i)
         r = views.build_review(self.conn, view="missing", quarter="2026-Q3", page=1)
         self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
         self.assertIsNotNone(r["next"])
         self.assertTrue(r["text"].endswith('say "more".'), r["text"][-80:])
         r2 = views.build_review(self.conn, view="missing", quarter="2026-Q3", **{
             k: r["next"][k] for k in ("page", "after")})
-        self.assertIn("Small9", r2["text"])
+        self.assertIn("Small199", r2["text"])
         self.assertIsNone(r2["next"])
 
 

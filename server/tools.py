@@ -66,6 +66,32 @@ def _limit(args, default):
     return v
 
 
+class Undeliverable(RuntimeError):
+    """An operator-facing text over Telegram's limit reached the tool boundary.
+    A bug (every such text is produced through views.fit_lines), reported as
+    an error rather than handed on as a message that cannot be sent."""
+
+
+def _deliverable(tool: str, out):
+    """The final invariant (fix wave D round 2): every operator-facing text a
+    tool returns — a view's `text`, end_pass's `speak.text`, apply_reply's
+    `receipt` and each of its `receipt_pages` — is at most TELEGRAM_LIMIT
+    UTF-16 units; otherwise the call fails loudly (isError)."""
+    if not isinstance(out, dict):
+        return out
+    texts = [("text", out.get("text")), ("receipt", out.get("receipt"))]
+    texts += [(f"receipt_pages[{i}]", t) for i, t in enumerate(out.get("receipt_pages") or [])]
+    speak = out.get("speak")
+    if isinstance(speak, dict):
+        texts.append(("speak.text", speak.get("text")))
+    for key, text in texts:
+        if isinstance(text, str) and views.utf16_len(text) > views.TELEGRAM_LIMIT:
+            raise Undeliverable(f"{tool} produced {key} of {views.utf16_len(text)} UTF-16 units, "
+                                f"over Telegram's {views.TELEGRAM_LIMIT}; it cannot be sent — "
+                                "this is a bug, report it")
+    return out
+
+
 def _pick(args, names):
     return {n: args[n] for n in names if n in args and args[n] is not None}
 
@@ -325,8 +351,8 @@ def t_begin(args):
           obj({"pass_token": TOKEN, "outcome": S, "report": O}, ("pass_token", "outcome")))
 def t_end(args):
     _need(args, "pass_token", "outcome")
-    return passes.end_pass(conn(), _int(args, "pass_token"), args["outcome"],
-                           args.get("report") or {})
+    return _deliverable("end_pass", passes.end_pass(conn(), _int(args, "pass_token"),
+                                                     args["outcome"], args.get("report") or {}))
 
 
 @register("record_probe",
@@ -443,9 +469,9 @@ def t_review(args):
     after = args.get("after")
     if after is not None and not isinstance(after, list):
         raise db.Refusal("after is the cursor a previous page's `next` returned")
-    return views.build_review(conn(), view=args.get("view") or "status",
-                              quarter=args.get("quarter"), pid=_int(args, "pid"),
-                              page=_int(args, "page"), after=after)
+    return _deliverable("build_review", views.build_review(
+        conn(), view=args.get("view") or "status", quarter=args.get("quarter"),
+        pid=_int(args, "pid"), page=_int(args, "page"), after=after))
 
 
 @register("mark_rendering_delivered",
@@ -460,12 +486,13 @@ def t_delivered(args):
 @register("apply_reply",
           "Pass the operator's reply VERBATIM when it reads as a correction, approval, exemption "
           "or instruction about the accounting. Applies only what resolves, bound to what they "
-          "were shown; returns the receipt to send, items to show again (build_review item), and "
-          "instructions for you (rebuild, resend, show views).",
+          "were shown. Send EVERY entry of receipt_pages, in order, each as its own message "
+          "(receipt is the first page). Also returns items to show again (build_review item) "
+          "and instructions for you (rebuild, resend, show views).",
           obj({"text": S}, ("text",)))
 def t_reply(args):
     _need(args, "text")
-    return reply.apply_reply(conn(), args["text"])
+    return _deliverable("apply_reply", reply.apply_reply(conn(), args["text"]))
 
 
 # --- packaging ---------------------------------------------------------------------

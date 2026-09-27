@@ -148,6 +148,37 @@ class TestAlertBatching(StoreCase):
         self.assertLessEqual(views.utf16_len(joined["text"]), views.TELEGRAM_LIMIT)
 
 
+class TestUnboundedDetail(StoreCase):
+    """fix wave D round 2 (Astra + Terra S2): a probe's diagnostic has no bound;
+    the first occurrence of a batch was taken unchecked and rendered 4363/5097
+    units, offered again unchanged forever."""
+    def setUp(self):
+        super().setUp()
+        self.bind()
+
+    def check(self, detail):
+        t = self.pass_()
+        passes.record_probe(self.conn, t, "gmail", False, detail)
+        speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        self.assertLessEqual(views.utf16_len(speak["text"]), views.TELEGRAM_LIMIT)
+        flat = speak["text"].replace("\n", " ")
+        self.assertTrue(flat.startswith("Gmail stopped letting me in ("), flat[:80])
+        self.assertTrue(flat.endswith("Re-authorise Gmail when you can."), flat[-80:])
+        self.assertIn(views.CLIP_MARK, speak["text"])
+        views.mark_rendering_delivered(self.conn, speak["render_id"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM alerts WHERE sent_at IS NULL")
+                         .fetchone()[0], 0)                      # the occurrence was said
+
+    def test_a_repeated_long_diagnostic(self):
+        self.check("Upstream error: " + "gateway timeout; " * 250)
+
+    def test_a_five_thousand_character_diagnostic(self):
+        self.check("E" * 5000)
+
+    def test_a_non_bmp_diagnostic_is_cut_between_characters(self):
+        self.check("\U0001f6a8" * 3000)
+
+
 class TestAlertRace(StoreCase):
     """end_pass commits pass_marker.live=0 before calling pending_rendering, so
     a second pass can begin, re-observe the same still-failing occurrence and

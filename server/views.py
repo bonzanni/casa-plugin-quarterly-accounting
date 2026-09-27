@@ -468,8 +468,16 @@ def _compose(conn, view, q, items, members, lead):
     return parts
 
 
+# Any one displayed line is clipped (clip, with its mark) before wrapping: bank
+# counterparty texts and extracted document fields have no natural bound, and
+# a block of a few bounded lines always fits a page, so paging always advances
+# and what a page prints can be bound (fix wave D round 2).
+LINE_MAX = 600
+
+
 def _text(lines) -> str:
-    return "\n".join(w for line in lines for w in (_wrap(line) if line else [""]))
+    return "\n".join(w for line in lines
+                     for w in (_wrap(clip(line, LINE_MAX)) if line else [""]))
 
 
 def _emit(parts, picks, *, announce, more=None, cap=None, all_sections_empty_msgs=True):
@@ -560,21 +568,67 @@ def _page(parts, after, first):
 
 
 FIT_CLOSING = "The rest did not fit in one message."
+CLIP_MARK = "\u2026"
 
 
-def _fit(lines, closing=FIT_CLOSING) -> str:
-    """The last resort: whole lines up to the limit, and a closing line (which
-    carries the continuation phrase when there is one). Never returns text over
-    TELEGRAM_LIMIT."""
-    text = _text(lines)
-    if utf16_len(text) <= TELEGRAM_LIMIT:
+def clip(text: str, units: int) -> str:
+    """`text` cut to at most `units` UTF-16 units, ending in CLIP_MARK when it
+    was cut — for displayed detail with no natural bound (a probe's diagnostic,
+    a bank counterparty text). Cuts between code points, so a non-BMP
+    character is never split into half a surrogate pair."""
+    if utf16_len(text) <= units:
         return text
-    kept = []
-    for w in text.split("\n"):
-        if utf16_len("\n".join(kept + [w, closing])) > TELEGRAM_LIMIT:
+    out, used = [], 0
+    budget = units - utf16_len(CLIP_MARK)
+    for ch in text:
+        n = utf16_len(ch)
+        if used + n > budget:
             break
-        kept.append(w)
-    return "\n".join(kept + [closing])
+        out.append(ch)
+        used += n
+    return "".join(out) + CLIP_MARK
+
+
+def fit_lines(lines, closing=None, always_close=False) -> tuple:
+    """THE fit (fix wave D round 2, generalized after the same shape recurred in
+    views, alerts and receipts): every operator-facing message is produced
+    through here, and what it returns joins with "\n" to at most
+    TELEGRAM_LIMIT UTF-16 units — every separator and the closing line
+    included, whatever the inputs.
+
+    Returns (out_lines, whole): `whole` is how many leading input lines are
+    printed IN FULL — the only ones a caller may bind (D3). When everything fits,
+    out_lines is the input (plus `closing` if always_close). Otherwise whole
+    lines while they fit beside the closing line; when not even the first line
+    fits, it is clipped with CLIP_MARK so the message still says something (and
+    `whole` is 0). The closing line is never cut away (it is clipped only if it
+    alone exceeds the limit)."""
+    lines = list(lines)
+    tail = [clip(closing, TELEGRAM_LIMIT)] if closing else []
+    if utf16_len("\n".join(lines + (tail if always_close else []))) <= TELEGRAM_LIMIT:
+        return lines + (tail if always_close else []), len(lines)
+    budget = TELEGRAM_LIMIT - (utf16_len(tail[0]) + 1 if tail else 0)
+    kept, used = [], 0
+    for ln in lines:
+        need = utf16_len(ln) + (1 if kept else 0)
+        if used + need > budget:
+            break
+        kept.append(ln)
+        used += need
+    whole = len(kept)
+    if whole == 0 and lines and budget > utf16_len(CLIP_MARK):
+        kept = [clip(lines[0], budget)]
+    if not kept and tail:
+        return tail, 0
+    return kept + tail, whole
+
+
+def fit_message(lines, closing=None, always_close=False) -> str:
+    """fit_lines, joined: a text that is always deliverable. `lines` may be
+    a str (split at newlines)."""
+    if isinstance(lines, str):
+        lines = lines.split("\n")
+    return "\n".join(fit_lines(lines, closing, always_close)[0])
 
 
 def _item_sentence(d) -> str:
@@ -622,7 +676,7 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
     with db.tx(conn):
         members, chosen, scope, nxt = [], [], {"quarter": q, "pid": pid}, None
         if lead[0] is not None:
-            text = _fit(lead[0])
+            text = fit_message(_text(lead[0]), FIT_CLOSING)
             scope["stop"] = True
         else:
             members = membership(conn, view, q, pid)
@@ -647,15 +701,18 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
                 if any(len(s.blocks) > sum(1 for c in chosen if c in s.blocks)
                        for s in parts["sections"]):
                     nxt = {"view": "all" if view == "status" else view, "quarter": q, "page": 1}
-            cut = utf16_len(text) > TELEGRAM_LIMIT
+            # The final text goes through the one fit. If it cut anything, nothing it
+            # prints is bound: the text may not show every block chosen. The closing
+            # line carries the phrase `next` answers, so it is never cut.
+            closing = FIT_CLOSING
+            if nxt is not None:
+                closing = (MORE_LINE if "after" in nxt
+                           else 'The rest did not fit — say "all of them".')
+            body = text.split("\n")
+            out, whole = fit_lines(body, closing)
+            text, cut = "\n".join(out), whole < len(body)
             if cut:
-                # nothing it prints is bound: the text may not show every block chosen.
-                # The closing line carries the phrase `next` answers, so it is never cut.
-                closing = FIT_CLOSING
-                if nxt is not None:
-                    closing = (MORE_LINE if "after" in nxt
-                               else 'The rest did not fit — say "all of them".')
-                text, chosen = _fit(lines, closing), []
+                chosen = []
             if page in (None, 1) and parts["announce"] and not cut \
                     and parts["announce"][0] in lines:
                 scope["announce_watermark"] = True
