@@ -3735,13 +3735,6 @@ class TestSettle(Base):
         self.assertEqual(self.conn.execute("SELECT revision FROM match_state WHERE match_id=?",
                                            (mid,)).fetchone()[0], m0 + 1)
 
-    def test_renaming_the_payee_moves_the_revision(self):
-        self.settle(self.pid)
-        r0 = self.proj()["revision"]
-        import kb
-        kb.upsert_counterparty(self.conn, "Acme Law", patterns=["Adobe"])
-        self.assertEqual(self.proj()["revision"], r0 + 1)
-
     def test_note_revision_comes_from_the_store_sequence_and_moves_with_status(self):
         self.settle(self.pid)
         n1 = self.proj()["note_seq"]
@@ -4080,6 +4073,7 @@ def settle(conn, pid: int) -> R.Reduction:
             # kept one revision, so a confirmation shown at €90 committed at €80)
             "facts": inp.facts if live else None,
             "exp": [exp.kind, exp.tier] if live else None,
+            "payee": kb.display_name(conn, row["counterparty"]) if (live and row) else None,
             "state": c.state, "author": c.author, "activation": c.activation, "fp": c.fp,
             "verdict": R.kind_verdict(c, inp) if live else None,
             "row_ok": (json.loads(c.fp)["facts"] == inp.facts) if (live and c.fp) else None,
@@ -4230,6 +4224,26 @@ class TestKB(StoreCase):
                            tier="optional", author="operator", render_id="r1")
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual((p["exp_kind"], p["exp_tier"]), ("receipt", "optional"))
+
+    def test_renaming_the_payee_moves_the_payment_and_its_pairings(self):
+        # rounds p6/p7: a rename changes what a line shows, so both revisions move
+        import db as _db
+        import reducer as R
+        d = self.doc()
+        with _db.tx(self.conn):
+            row = lineage.live_row(self.conn, lineage.projection(self.conn, self.pid))
+            mid = self.conn.execute("INSERT INTO matches(pid_created, doc_id, created_seq)"
+                                    " VALUES (?,?,0)", (self.pid, d)).lastrowid
+            lineage.append(self.conn, self.pid, "pair", "auto", match_id=mid, doc_id=d,
+                           fp=R.fingerprint(R.facts_of(row), "invoice"))
+            lineage.settle(self.conn, self.pid)
+        p0 = lineage.projection(self.conn, self.pid)["revision"]
+        m0 = self.conn.execute("SELECT revision FROM match_state WHERE match_id=?",
+                               (mid,)).fetchone()[0]
+        kb.upsert_counterparty(self.conn, "My accountant", patterns=["BCK*ZAPIER"])
+        self.assertEqual(lineage.projection(self.conn, self.pid)["revision"], p0 + 1)
+        self.assertEqual(self.conn.execute("SELECT revision FROM match_state WHERE match_id=?",
+                                           (mid,)).fetchone()[0], m0 + 1)
 
     def test_specialist_may_set_a_counterparty_kind(self):
         kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
@@ -7669,6 +7683,10 @@ def evidence(d: dict) -> list:
         elif "kind-changed" in d["reasons"]:
             out.append(f"Its category changed since it was paired — still {name}?")
         labels = cur["labels"]
+        if "guessed" not in labels:
+            # a line that asks for a verdict names what it is asking about (round p7:
+            # a no-ref line never named its invoice, yet "all good" confirmed it)
+            out.insert(0, f"Paired with {name} ({_day(doc['date'])}).")
         if "guessed" in labels:
             others = "; ".join(cur["runners_up"])
             out.append(f"Picked {name} ({_day(doc['date'])}); {others} also fits." if others
@@ -7680,8 +7698,8 @@ def evidence(d: dict) -> list:
         if "recipient?" in labels:
             out.append(f"{name[0].upper() + name[1:]} names "
                        f"{doc.get('recipient') or 'someone else'}, not the business.")
-        if not out and d["status"] == "proposed":
-            out.append(f"Paired with {name}, not sure — say if it's wrong.")
+        if d["status"] == "proposed" and len(out) == 1:
+            out.append("Not sure — say if it's wrong.")
     if d["candidates"]:
         out.append("Could be: " + ", ".join(f"{_docname(c['document'])} "
                                             f"({_day(c['document']['date'])})"
@@ -8131,6 +8149,12 @@ class TestGrammar(Base):
         self.assertEqual(self.author(v)[0], "auto")
         self.assertEqual(self.operator_entries(), 1)
 
+    def test_a_no_ref_line_names_its_invoice(self):
+        pid = self.item("Adobe", 5445, "2026-09-14", labels=("no-ref",))
+        text = self.deliver()["text"]
+        self.assertIn("Paired with invoice", text)
+        del pid
+
     def test_all_good_confirms_only_what_was_shown(self):
         a = self.item("Adobe", 5445, "2026-09-14")
         self.deliver()
@@ -8279,6 +8303,21 @@ class TestGrammar(Base):
         self.deliver()
         out = reply.apply_reply(self.conn, "no invoices ever for Adobe")
         self.assertEqual(len(out["applied"]), 1)
+
+    def test_an_identity_waits_for_every_payment_it_changes(self):
+        # round p7 (Astra S1): the identity reaches an unseen payment with the same bank text
+        import kb
+        kb.upsert_counterparty(self.conn, "my accountant")
+        kb.set_expectation(self.conn, scope_type="counterparty", scope="my accountant",
+                           kind="none", author="specialist")
+        shown_pid = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)
+        self.deliver()
+        hidden = self.item("BCK*XYZ", 25000, "2026-09-18")              # paired, never shown
+        out = reply.apply_reply(self.conn, "the BCK*XYZ 180.00 one is my accountant")
+        self.assertEqual(out["applied"], [])
+        self.assertIn(hidden, out["reshow"])
+        self.assertEqual(self.author(hidden)[0], "auto")
+        del shown_pid
 
     def test_rebuild_is_decided_after_the_whole_reply(self):
         self.deliver()
@@ -8671,9 +8710,10 @@ class _Unseen(Exception):
 
 
 def _broad(conn, run, change, ok_line) -> None:
-    """A vendor- or class-wide operator change binds EVERY payment whose
-    proposition it changes (round p6, Terra S1: "no invoices ever for Adobe"
-    retired a pairing on an Adobe payment the operator had never seen). The
+    """A vendor- or class-wide operator change — or an identity, which reaches
+    every payment with that bank text — binds EVERY payment whose proposition
+    it changes (round p6, Terra S1: "no invoices ever for Adobe" retired a
+    pairing on an Adobe payment the operator had never seen). The
     change is made inside one transaction; every payment whose digest it moved
     must have been shown at the revision it had before the change, or the whole
     change rolls back and those payments are shown first."""
@@ -8708,7 +8748,7 @@ def _broad(conn, run, change, ok_line) -> None:
         run.unresolved += 1
         return
     run.applied.append({"broad": res if isinstance(res, dict) else {"changes": len(res)}})
-    run.lines.append(ok_line)
+    run.lines.append(ok_line() if callable(ok_line) else ok_line)
 
 
 def _last_delivered(conn):
@@ -8763,18 +8803,29 @@ def _one(conn, run, verb, d, m):
                     lambda res: f"{views.headline(d)}: I'll look again at the next check.")
     elif verb == "identity":
         who = m.group("who").strip()
+        # An identity reaches every payment with that bank text (the KB re-settles
+        # them all), so it goes through the same guard as a vendor-wide rule: the
+        # named payment AND every other payment it changes must have been shown as
+        # they are (round p7, Astra S1). The receipt is read after the commit.
+        if _shown(conn, d["pid"]) is None:
+            if d["pid"] not in run.reshow:
+                run.reshow.append(d["pid"])
+            run.lines.append(f"{views.headline(d)} hasn't been shown to you in this form yet "
+                             "— here it is now; nothing applied.")
+            run.unresolved += 1
+            return
+
         def ident():
-            # bound to what the operator was shown, in the same transaction as the
-            # write (round p5, Astra S2: an unseen or changed item was still renamed)
-            render_id, rev = _bind_projection(conn, d)
-            with db.tx(conn):
-                authorship.require_projection_shown(conn, d["pid"], render_id, rev)
-                kb.upsert_in_tx(conn, who, patterns=[d["bank_counterparty"]])
-                conn.execute("UPDATE projections SET identity_question=0 WHERE pid=?", (d["pid"],))
-                lineage.settle(conn, d["pid"])
+            kb.upsert_in_tx(conn, who, patterns=[d["bank_counterparty"]])
+            conn.execute("UPDATE projections SET identity_question=0 WHERE pid=?", (d["pid"],))
+            lineage.settle(conn, d["pid"])
             return {"identity": who}
-        tail = "; still missing a document." if views._is_missing(d) else "."
-        run.guarded(d, ident, lambda res: f"{d['bank_counterparty']}: {who}{tail}")
+
+        def receipt():
+            after = work.describe(conn, d["pid"])
+            tail = "; still missing a document." if views._is_missing(after) else "."
+            return f"{d['bank_counterparty']}: {who}{tail}"
+        _broad(conn, run, ident, receipt)
 ```
 
 Note the approval approach: `all good` binds to the most recent delivered sheet's printed items (`render_items`), and each confirmation still passes through `require_match_shown`. An item the pass moved after the send is therefore re-shown, never confirmed.
