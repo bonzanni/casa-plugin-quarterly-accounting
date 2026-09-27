@@ -47,6 +47,9 @@ after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31
 Required floors: casa **0.326.0**, bank-feed **0.13.0** (casa-specialist-finance component 0.14.0, which closed #56; §Casa baseline).
 Re-verified 2026-09-27 against casa **v0.328.6** and component **0.14.4**: nothing in between
 changes a contract this document relies on.
+Implementation plan: `docs/superpowers/plans/2026-09-27-quarterly-accounting.md`, converged at
+round p10 (b93f71a). Errata D1, D4, D8 and D9 were accepted and applied 2026-09-27; see the plan's
+"Decisions and errata".
 Revised 2026-09-20 — re-verified against casa **v0.323.0**. Both scheduled-turn
 dependencies landed; the contracts they landed with (one attention lane, durable
 asks, background jobs) change the weekly pass. See “Casa baseline”.
@@ -967,7 +970,12 @@ multi-round delegations stateless-safe (each delegation is a fresh ephemeral ses
 state carries in the store, not in return values alone) and crash-safe: a casa
 restart mid-pass loses only the in-flight turn.
 
-## Tool surface (server, 22 tools)
+## Tool surface (server, 33 tools)
+
+**Erratum (operator, 2026-09-27; implementation plan D1):** the server registers 33 tools.
+The flows below need writes this section never named: `begin_pass` / `end_pass` (the pass
+marker), `record_probe`, `record_search`, `stop_chasing`, `set_watermark`, `relabel_match`,
+`record_delivery`, and `apply_reply` (the executable reply grammar). The plan's §D1 has the full list.
 
 Ingest & curation: `ingest_document(source_path, kind, counterparty, document_date,
 document_number, amount, currency, recipient, source_ref)` — **the server takes `source_path` from
@@ -1738,6 +1746,12 @@ the store holds either names the same payment or names nothing. The per-lineage 
 make any `purge` of old unmanaged history cost the whole accounting store. Three
 consequences, stated:
 
+- **Revised 2026-09-27 (operator ruling, plan D4):** from the export alone a wiped ledger is
+  indistinguishable from a different one, so the pass after `delete_all_data` waits for the
+  operator's "the bank ledger was reset", which re-binds the store. Filed upstream as
+  [casa-specialist-finance#69](https://github.com/bonzanni/casa-specialist-finance/issues/69)
+  (a ledger instance id, and `expected_ledger` on annotation writes). Once #69 ships, the
+  sentence is no longer needed and the paragraph below holds as written.
 - **After `delete_all_data`, `check_setup` finds `acct@<version>` unregistered under a
   populated store.** That is not the fresh-install state and is not treated as one: the
   generation is unchanged, so it can only be an erasure. The self-check stops the pass
@@ -2909,7 +2923,8 @@ and is resent only when the operator asks, as that exact file.
   in place to €90 is invalidated, not overridden — the log keeps the entry, the lineage
   shows `acct::proposed` with a residue line, and an operator confirmation against the
   new facts restores `acct::matched`; an exemption survives the same correction; an auto
-  proposal followed by the vendor becoming `none-expected` stays `acct::proposed`; a
+  proposal followed by the vendor becoming `none-expected` is retired `rejected` as a kind
+  change (erratum 2026-09-27, plan D8: §Match records' later ruling wins); a
   delivered ledger row that bank-feed then supersedes or vanishes is detected from a
   snapshot that retained non-active rows (a test that imports active rows only must
   fail); and the reducer, given the same merged log and row in any entry order, is a
@@ -2982,7 +2997,7 @@ and is resent only when the operator asks, as that exact file.
   a counterparty beats the mapping and loses to `set_exemption` on one payment; the
   decision table in §"Document expectation" is the oracle for a fixture of twenty
   representative tag sets in both directions, pinning in particular `income, refund` on a
-  DBIT → `none`, a parked row with a counterparty override → the override, a parked row
+  DBIT → `credit-note, required` (erratum 2026-09-27, plan D9: decision-table row 7 is the oracle), a parked row with a counterparty override → the override, a parked row
   without one → unknown, and a chain-level `set_expectation` beating the shipped row;
   an `unclassifiable` row is `required`; a package built with two unclassified rows
   ships, lists them apart from `MISSING`, and its caption counts them; every (kind, tier)
