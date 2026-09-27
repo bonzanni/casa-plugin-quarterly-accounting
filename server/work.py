@@ -20,11 +20,14 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
                   incomplete=False, identity_unknown=None, revive=False) -> dict:
     import passes
     # Only actual search effort — a query run, a candidate found, or the idea-space
-    # exhausted — is "searched". `incomplete` alone records that the pass ran out of
-    # room before finishing this item; it is bookkeeping, not effort, and on its own
-    # (no queries) must spend no age-out budget any more than an identity-only call
-    # does (round C1, Astra S2: an incomplete-only call was silently stamping
-    # last_searched_at and counting toward AGE_OUT_PASSES with no query ever run).
+    # exhausted — is "searched". A bare `incomplete` (no queries: the pass ran out of
+    # room before ever reaching this item) is bookkeeping, not effort, and spends no
+    # age-out budget, exactly like an identity-only call (round C1, Astra S2: this was
+    # silently stamping last_searched_at and counting toward AGE_OUT_PASSES with no
+    # query ever run). An incomplete call WITH queries is different: effort WAS spent,
+    # so it counts toward age-out exactly like a completed fruitless search, unless it
+    # found a candidate (round C2 ruling, Astra + Terra: a query-bearing incomplete
+    # pass must not bypass age-out indefinitely — only the no-query case is free).
     effort = bool(queries) or found_candidate or exhausted
     # D10: search bookkeeping is machine-authored, so it needs the pass token like any
     # other machine write — except a quiet revive ("have another look", no search effort),
@@ -58,8 +61,6 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
         search["last_searched_at"] = db.now()
         if found_candidate:
             streak = 0
-        elif incomplete:
-            pass  # the pass did not finish this item; not yet a completed fruitless search
         elif not revive and pass_id and search.get("last_counted_pass") != pass_id:
             streak += 1
             search["last_counted_pass"] = pass_id

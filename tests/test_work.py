@@ -73,17 +73,23 @@ class TestSearchBookkeeping(Base):
         self.assertNotIn("last_searched_at", json.loads(p["search_json"] or "{}"))
         self.assertEqual([i["pid"] for i in work.triage(self.conn)], [self.pid])
 
-    def test_incomplete_with_queries_counts_the_queries_not_a_fruitless_search(self):
-        # the other half of the same finding: queries DID run this pass, so they are
-        # recorded, but the item was not finished -- it resumes next pass -- so it is not
-        # yet a completed fruitless search and must not move the age-out streak.
-        for _ in range(work.AGE_OUT_PASSES + 2):
+    def test_incomplete_with_queries_ages_out_like_a_completed_search(self):
+        # round C2 (Astra + Terra): the other half of the same finding, ruled the other
+        # way -- queries DID run this pass, so effort WAS spent; a query-bearing
+        # incomplete pass counts toward age-out exactly like a completed fruitless
+        # search (unless it found a candidate), or a payment could sit "incomplete"
+        # forever and never be judged. Only the no-query case (above) is free.
+        for _ in range(work.AGE_OUT_PASSES):
             work.record_search(self.conn, pid=self.pid, token=self.token,
                                queries=["from:adobe"], incomplete=True)
             self.token = self.pass_()
         p = lineage.projection(self.conn, self.pid)
-        self.assertEqual((p["search_state"], p["passes_without_candidate"]), ("active", 0))
+        self.assertEqual((p["search_state"], p["status"]), ("aged-out", "open"))
         self.assertEqual(json.loads(p["search_json"])["queries"], ["from:adobe"])
+        # still open and listed -- age-out rations search effort, not the fact itself
+        out = work.list_quarter_state(self.conn, quarter="2026-Q3")
+        self.assertIn(self.pid, [i["pid"] for i in out["items"]])
+        self.assertEqual([i["pid"] for i in work.triage(self.conn)], [])
 
     def test_refuses_without_a_pass_token_unless_a_quiet_revive(self):
         # fix round 1, finding 4 (D10): search bookkeeping is machine-authored and needs the
