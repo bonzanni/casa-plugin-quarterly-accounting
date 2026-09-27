@@ -104,6 +104,31 @@ class TestDecisionTable(unittest.TestCase):
         self.assertEqual(ex.derive(D, {"awaiting-operator", "salary"}, chain_overrides=ov).row, 4)
         self.assertEqual(ex.derive(D, {"salary", "tax"}, chain_overrides=ov).row, 5)
 
+    def test_colliding_normalized_scopes_raise(self):
+        # `refund` and `income, refund` both normalize to ({7}, {refund}):
+        # decisive() keys row 7 on the flow tag alone, so the extra `income`
+        # chain tag on the second scope is dropped and the two collide.
+        refund_pair = [self.ov({"refund"}, "credit-note", REQ),
+                       self.ov({"income", "refund"}, "none", None)]
+        with self.assertRaises(ValueError):
+            ex.derive(D, {"refund"}, chain_overrides=refund_pair)
+
+        # `bank, fees` and `card, fees` both normalize to ({10}, {fees}): row
+        # 10 is keyed on the statement marker alone, so the differing
+        # `bank`/`card` tags are dropped and the two collide.
+        fees_pair = [self.ov({"bank", "fees"}, "statement", OPT),
+                     self.ov({"card", "fees"}, "none", None)]
+        with self.assertRaises(ValueError):
+            ex.derive(D, {"fees"}, chain_overrides=fees_pair)
+
+    def test_scope_with_no_classification_tag_is_not_an_override(self):
+        # Workflow markers and owner::name tags carry no classification
+        # content; a scope reduced to nothing must not become a catch-all
+        # for rows 11/13 (an empty key is a subset of every override key).
+        self.assertIsNone(ex.normalize_scope(frozenset({"awaiting-operator"})))
+        self.assertIsNone(ex.normalize_scope(frozenset({"acct::open"})))
+        self.assertIsNone(ex.normalize_scope(frozenset()))
+
 
 class TestParityWithBankFeed(TempEnv):
     def test_classification_state_matches_bank_feed(self):

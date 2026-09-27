@@ -114,6 +114,8 @@ def derive(direction: str, tags, *, exempt: bool = False,
     if chosen is None:                                           # row 5
         return Expectation(None, "required", 5, conflict=True)
     row, key = chosen
+    chain_overrides = tuple(chain_overrides)
+    _reject_colliding_scopes(chain_overrides)
     best = None
     for rows, okey, kind, tier in chain_overrides:
         if row not in rows or not okey <= key:
@@ -123,6 +125,25 @@ def derive(direction: str, tags, *, exempt: bool = False,
             best = (rank, kind, tier)
     kind, tier = (best[1], best[2]) if best else DEFAULTS[row]
     return _make(kind, tier, row)
+
+
+def _reject_colliding_scopes(chain_overrides) -> None:
+    """Two chain overrides that normalize to the same (rows, key) are
+    indistinguishable to the tie-break below, which would then let iteration
+    order silently pick a winner (round p2 finding: `refund` and
+    `income, refund` both normalize to `({7}, {refund})`; `bank, fees` and
+    `card, fees` both normalize to `({10}, {fees})`). This is a store-level
+    invariant (`set_expectation` replaces any override with the same
+    normalized key) that `derive`, being pure, has no memory to enforce
+    itself — so it refuses to guess instead."""
+    seen = set()
+    for rows, okey, _kind, _tier in chain_overrides:
+        scope = (rows, okey)
+        if scope in seen:
+            raise ValueError(
+                "chain overrides collide at rows=%r key=%r — more than one "
+                "override normalizes to the same scope" % (rows, okey))
+        seen.add(scope)
 
 
 KEYED_ROWS = (6, 7, 8, 9, 10, 12)
@@ -136,7 +157,14 @@ def normalize_scope(scope_tags) -> tuple | None:
     `income, salary`). A scope whose tags select a keyed row (a flow
     correction, a payroll/statement/no-document marker) applies there only;
     a plain chain applies to "anything else" in both directions (rows 11, 13).
-    None when the scope's own tags conflict."""
+    None when the scope's own tags conflict, or when it carries no
+    classification tag at all (workflow markers and `owner::name` tags don't
+    count): such a scope would otherwise normalize to `({11, 13}, frozenset())`,
+    an empty key that every row-11/13 override key is a superset of — a
+    catch-all that silences every such transaction (round p2 finding)."""
+    scope_tags = frozenset(t for t in scope_tags if is_classification_tag(t))
+    if not scope_tags:
+        return None
     picks = [decisive(scope_tags, d) for d in ("DBIT", "CRDT")]
     if any(p is None for p in picks):
         return None
