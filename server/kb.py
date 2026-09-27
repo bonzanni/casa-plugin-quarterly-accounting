@@ -95,15 +95,19 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
     if window_days is not None and not (1 <= int(window_days) <= 60):
         raise db.Refusal("window_days is between 1 and 60")
     existing = _entry(conn, name)
-    for p in patterns:
-        other = counterparty_for(conn, p)
-        if other is not None and (existing is None or other["cp_id"] != existing["cp_id"]):
-            raise db.Refusal(f"the bank text {p!r} already belongs to {other['name']}")
+    held = json.loads(existing["patterns_json"]) if existing is not None else []
+    merged = sorted(set(held) | {p.strip() for p in patterns})
+    # Every bank text resolves to at most one entry (fix wave B, Astra S1; round
+    # B2, Terra S1): ALL of this upsert's names and patterns — the ones it adds and
+    # the ones the entry already holds — are checked against every OTHER entry's,
+    # on create and on update. A collision would leave a ruling stored on one
+    # entry that lookup never reaches. Refused, not merged: the operator names the
+    # owner, and set_expectation by that bank text already lands on it.
+    _refuse_shared_bank_text(conn, existing, [name.strip()] + merged)
     if existing is None:
         conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
                      " VALUES (?, '[]', ?)", (name.strip(), db.now()))
         existing = _entry(conn, name)
-    merged = sorted(set(json.loads(existing["patterns_json"])) | {p.strip() for p in patterns})
     fields = {"patterns_json": json.dumps(merged), "source": source,
               "document_link": document_link, "link_note": link_note,
               "search_hint": search_hint, "notes": notes, "window_days": window_days}
@@ -113,6 +117,22 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
                  % ", ".join(f"{k}=?" for k in sets), (*sets.values(), existing["cp_id"]))
     lineage.settle_all(conn)
     return get_counterparty(conn, name) or {}
+
+
+def _texts(name, patterns) -> set:
+    return {t for t in (norm(name), *(norm(p) for p in patterns)) if t}
+
+
+def _refuse_shared_bank_text(conn, entry, texts) -> None:
+    mine = {norm(t): t for t in texts if norm(t)}
+    for r in conn.execute("SELECT * FROM counterparties ORDER BY cp_id"):
+        if entry is not None and r["cp_id"] == entry["cp_id"]:
+            continue
+        shared = set(mine) & _texts(r["name"], json.loads(r["patterns_json"]))
+        if shared:
+            raise db.Refusal(f"the bank text {mine[min(shared)]!r} already belongs to "
+                             f"{r['name']}; change {r['name']} instead, or give this "
+                             "counterparty another name")
 
 
 def _require_delivered_render(conn, render_id) -> None:

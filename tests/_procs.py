@@ -43,6 +43,79 @@ def open_fresh(path, barrier):
     conn.close()
 
 
+def _report(out, fn):
+    try:
+        out.put(("ok", fn()))
+    except BaseException as exc:             # the parent asserts on what happened
+        out.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def gate_paused(path, decided, resume, out):
+    """bank_write_gate, paused right after _decide_gate returned its verdict
+    and before that verdict is persisted (fix wave B, Astra S1)."""
+    import db
+    import passes
+    real = passes._decide_gate
+
+    def paused(conn):
+        verdict = real(conn)
+        decided.set()
+        resume.wait(30)
+        return verdict
+    passes._decide_gate = paused
+    conn = db.open_store(path)
+    try:
+        _report(out, lambda: passes.bank_write_gate(conn))
+    finally:
+        conn.close()
+
+
+def ingest_paused(source_path, installed, resume, out):
+    """ingest_document, paused after its bytes are installed and before the
+    index row commits (fix wave B, Astra + Terra S1)."""
+    import db
+    import documents
+    real = documents._install
+
+    def paused(*a, **kw):
+        final = real(*a, **kw)
+        installed.set()
+        resume.wait(30)
+        return final
+    documents._install = paused
+    conn = db.open_store()
+    try:
+        _report(out, lambda: documents.ingest_document(
+            conn, source_path=source_path, kind="invoice", source="gmail",
+            extraction_author="resident"))
+    finally:
+        conn.close()
+
+
+def reset_paused(committed, resume, out):
+    """reset_store, paused after its row wipe committed and before documents/
+    is removed (fix wave B, Terra's variant)."""
+    import shutil
+
+    import binding
+    import db
+    real = shutil.rmtree
+    first = []
+
+    def paused(*a, **kw):
+        if not first:
+            first.append(1)
+            committed.set()
+            resume.wait(30)
+        return real(*a, **kw)
+    shutil.rmtree = paused
+    conn = db.open_store()
+    try:
+        _report(out, lambda: binding.reset_store(conn))
+    finally:
+        conn.close()
+
+
 def machine_pair(path, pid, doc_id, token, expected_revision, snapshot, out):
     import db
     import matches
