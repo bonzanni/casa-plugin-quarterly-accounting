@@ -4253,35 +4253,44 @@ def get_counterparty(conn, text):
 def upsert_counterparty(conn, name, *, patterns=(), source=None, document_link=None,
                         link_note=None, search_hint=None, notes=None, window_days=None,
                         token=None) -> dict:
-    import lineage
     import passes
+    with db.tx(conn):
+        passes.check_token(conn, token)
+        return upsert_in_tx(conn, name, patterns=patterns, source=source,
+                            document_link=document_link, link_note=link_note,
+                            search_hint=search_hint, notes=notes, window_days=window_days)
+
+
+def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, link_note=None,
+                 search_hint=None, notes=None, window_days=None) -> dict:
+    """The upsert inside the caller's transaction (apply_reply's identity clause
+    checks the shown revision in the same transaction as this write)."""
+    import lineage
     if not (name or "").strip():
         raise db.Refusal("a counterparty needs a name")
     if source not in (None, "email", "portal"):
         raise db.Refusal("source is 'email' or 'portal'")
     if window_days is not None and not (1 <= int(window_days) <= 60):
         raise db.Refusal("window_days is between 1 and 60")
-    with db.tx(conn):
-        passes.check_token(conn, token)
+    existing = _entry(conn, name)
+    for p in patterns:
+        other = counterparty_for(conn, p)
+        if other is not None and (existing is None or other["cp_id"] != existing["cp_id"]):
+            raise db.Refusal(f"the bank text {p!r} already belongs to {other['name']}")
+    if existing is None:
+        conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
+                     " VALUES (?, '[]', ?)", (name.strip(), db.now()))
         existing = _entry(conn, name)
-        for p in patterns:
-            other = counterparty_for(conn, p)
-            if other is not None and (existing is None or other["cp_id"] != existing["cp_id"]):
-                raise db.Refusal(f"the bank text {p!r} already belongs to {other['name']}")
-        if existing is None:
-            conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
-                         " VALUES (?, '[]', ?)", (name.strip(), db.now()))
-            existing = _entry(conn, name)
-        merged = sorted(set(json.loads(existing["patterns_json"])) | {p.strip() for p in patterns})
-        fields = {"patterns_json": json.dumps(merged), "source": source,
-                  "document_link": document_link, "link_note": link_note,
-                  "search_hint": search_hint, "notes": notes, "window_days": window_days}
-        sets = {k: v for k, v in fields.items() if v is not None}
-        sets["updated_at"] = db.now()
-        conn.execute("UPDATE counterparties SET %s WHERE cp_id=?"
-                     % ", ".join(f"{k}=?" for k in sets), (*sets.values(), existing["cp_id"]))
-        lineage.settle_all(conn)
-        return get_counterparty(conn, name) or {}
+    merged = sorted(set(json.loads(existing["patterns_json"])) | {p.strip() for p in patterns})
+    fields = {"patterns_json": json.dumps(merged), "source": source,
+              "document_link": document_link, "link_note": link_note,
+              "search_hint": search_hint, "notes": notes, "window_days": window_days}
+    sets = {k: v for k, v in fields.items() if v is not None}
+    sets["updated_at"] = db.now()
+    conn.execute("UPDATE counterparties SET %s WHERE cp_id=?"
+                 % ", ".join(f"{k}=?" for k in sets), (*sets.values(), existing["cp_id"]))
+    lineage.settle_all(conn)
+    return get_counterparty(conn, name) or {}
 
 
 def _require_delivered_render(conn, render_id) -> None:
@@ -6221,10 +6230,11 @@ procedure SKILL.md prescribes; the skill must say exactly this, in words:
   list_projections -> for each item:
     get_transaction(row_id); "no transaction #N" -> record_observation(not_found)
     else record_observation(observed_tags, observed_notes)
-    apply the returned instructions in order: untag, tag, add_note — each
-      with workflow + expected_generation exactly as returned
+    make the ONE returned write (untag, tag or add_note) with workflow +
+      expected_generation exactly as returned
     a write that did not take -> record_observation(write_error=<reply>)
-    after any write, read back and record_observation again (plan §D14)
+    read the row again and record_observation again; repeat until nothing is
+      returned (plan §D14; round p5: never two writes without a read between)
 """
 from __future__ import annotations
 
@@ -6241,32 +6251,37 @@ def _read(bf, row_id):
 
 
 def observe_and_repair(conn, bf, token, item) -> dict:
+    """Read, record, make the ONE returned write, read again, record again —
+    until the server returns nothing to do (at most untag, tag and note)."""
     pid, row_id = item["pid"], item["row_id"]
     if item["ended"] == "erased":
         return {}
     got = _read(bf, row_id)
     if got is None:
         return sweep.record_observation(conn, pid=pid, token=token, not_found=True)
-    tags, notes, first_seen = got
-    r = sweep.record_observation(conn, pid=pid, token=token, observed_tags=tags,
-                                 observed_notes=notes, observed_first_seen=first_seen)
-    ins = r.get("instructions") or {}
-    if not ins:
-        return r
-    kw = {"workflow": ins["workflow"], "expected_generation": ins["expected_generation"]}
-    if ins.get("untag"):
-        out = bf.call("untag_transaction", row_ids=[row_id], tags=ins["untag"], **kw)
-        if set(ins["untag"]) & set(bf.tags(row_id)):
-            return sweep.record_observation(conn, pid=pid, token=token, write_error=out)
-    if ins.get("tag"):
-        out = bf.call("tag_transaction", row_ids=[row_id], tags=ins["tag"], **kw)
-        if not set(ins["tag"]) <= set(bf.tags(row_id)):
-            return sweep.record_observation(conn, pid=pid, token=token, write_error=out)
-    if ins.get("add_note"):
-        bf.call("add_note", row_ids=[row_id], note=ins["add_note"], author="agent", **kw)
-    tags, notes, first_seen = _read(bf, row_id)
-    return sweep.record_observation(conn, pid=pid, token=token, observed_tags=tags,
-                                    observed_notes=notes, observed_first_seen=first_seen)
+    r = {}
+    for _ in range(4):
+        tags, notes, first_seen = got
+        r = sweep.record_observation(conn, pid=pid, token=token, observed_tags=tags,
+                                     observed_notes=notes, observed_first_seen=first_seen)
+        ins = r.get("instructions") or {}
+        if not ins:
+            return r
+        kw = {"workflow": ins["workflow"], "expected_generation": ins["expected_generation"]}
+        if "untag" in ins:
+            out = bf.call("untag_transaction", row_ids=[row_id], tags=ins["untag"], **kw)
+            if set(ins["untag"]) & set(bf.tags(row_id)):
+                return sweep.record_observation(conn, pid=pid, token=token, write_error=out)
+        elif "tag" in ins:
+            out = bf.call("tag_transaction", row_ids=[row_id], tags=ins["tag"], **kw)
+            if not set(ins["tag"]) <= set(bf.tags(row_id)):
+                return sweep.record_observation(conn, pid=pid, token=token, write_error=out)
+        else:
+            bf.call("add_note", row_ids=[row_id], note=ins["add_note"], author="agent", **kw)
+        got = _read(bf, row_id)
+        if got is None:
+            return sweep.record_observation(conn, pid=pid, token=token, not_found=True)
+    return r
 
 
 def sweep_cycle(conn, bf, token, limit=25) -> int:
@@ -6545,6 +6560,28 @@ class TestEndsAndErasure(Base):
         with self.assertRaises(db.Refusal):
             sweep.list_projections(self.conn, token=self.token)
 
+    def test_a_ledger_that_changes_after_the_first_write_takes_no_second(self):
+        # round p5 (Terra S1): the row's identity changes between two repair writes
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.new_pass()
+        item = sweep.list_projections(self.conn, token=self.token)["projections"][0]
+        rid = item["row_id"]
+        real_call = self.bf.call
+
+        def swapping_call(tool, **args):
+            out = real_call(tool, **args)
+            if tool in ("tag_transaction", "untag_transaction"):
+                self.bf.conn.execute("UPDATE transactions SET first_seen='2030-01-01T00:00:00Z'"
+                                     " WHERE row_id=?", (rid,))
+                self.bf.conn.commit()
+            return out
+        self.bf.call = swapping_call
+        with self.assertRaises(db.Refusal):
+            sim.observe_and_repair(self.conn, self.bf, self.token, item)
+        self.assertEqual(self.owned(rid), ["acct::open"])               # the one write
+        self.assertFalse([n for n in self.bf.notes(rid) if n.startswith("Accounting revision")])
+        self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
+
     def test_not_found_for_a_row_still_in_the_snapshot_is_refused(self):
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
         self.new_pass()
@@ -6804,12 +6841,15 @@ def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=N
         note = lineage.note_text(conn, pid)
         note_needed = note is not None and note not in (observed_notes or [])
         gate = passes.bank_write_gate(conn)
+        # ONE write per observation (round p5, Terra S1): the specialist makes it,
+        # re-reads the row and records it before the next, so a ledger that changes
+        # under the pass can take at most the one write D4 states as residual.
         instructions = {}
-        if proj["ended"] != "erased" and (to_remove or to_add or note_needed):
-            if gate["allowed"]:
-                instructions = {"untag": to_remove, "tag": to_add,
-                                "add_note": note if note_needed else None,
-                                "workflow": gate["workflow"],
+        if proj["ended"] != "erased" and gate["allowed"]:
+            step = ({"untag": to_remove} if to_remove else {"tag": to_add} if to_add
+                    else {"add_note": note} if note_needed else None)
+            if step is not None:
+                instructions = {**step, "workflow": gate["workflow"],
                                 "expected_generation": gate["expected_generation"]}
         _advance(conn, pid)
         return {"pid": pid, "status": red.status, "desired": sorted(red.desired),
@@ -8159,6 +8199,27 @@ class TestGrammar(Base):
         self.assertIn("rebuild 2026-Q3", out["instructions"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM packages").fetchone()[0], 0)
 
+    def test_identity_on_an_unseen_or_changed_item_applies_nothing(self):
+        self.deliver()
+        pid = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)    # never shown
+        out = reply.apply_reply(self.conn, "the BCK*XYZ one is my accountant")
+        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
+        self.deliver()
+        self.row(self.n, counterparty="BCK*XYZ", amount_minor=17000, booking_date="2026-09-16",
+                 value_date="2026-09-16")                                # changed since shown
+        self.settle(pid)
+        out = reply.apply_reply(self.conn, "the BCK*XYZ one is my accountant")
+        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
+
+    def test_an_unresolved_correction_blocks_its_rebuild(self):
+        self.deliver()
+        self.item("Zapier", 9900, "2026-09-17")                            # unseen
+        out = reply.apply_reply(self.conn, "Zapier is wrong; rebuild it")
+        self.assertEqual(out["instructions"], [])
+        self.assertIn("Not rebuilding yet", out["receipt"])
+
     def test_a_bare_number_is_not_a_line_reference(self):
         self.item("Zapier", 9900, "2026-09-17")
         self.deliver()
@@ -8344,6 +8405,7 @@ class _Run:
         self.conn = conn
         self.lines, self.applied, self.asks, self.reshow, self.instructions = [], [], [], [], []
         self.touched_quarters = set()
+        self.unresolved = 0               # corrections in this reply that did not apply
 
     def result(self, not_a_reply=False) -> dict:
         for q in sorted(self.touched_quarters):
@@ -8367,9 +8429,11 @@ class _Run:
             word = "changed since you saw it" if isinstance(exc, authorship.Stale) else \
                 "hasn't been shown to you in this form yet"
             self.lines.append(f"{views.headline(d)} {word} — here it is now; nothing applied.")
+            self.unresolved += 1
             return None
         except db.Refusal as exc:
             self.lines.append(f"{views.headline(d)}: not applied — {exc}")
+            self.unresolved += 1
             return None
         self.applied.append({"pid": d["pid"], **res})
         self.lines.append(ok_line(res))
@@ -8454,6 +8518,7 @@ def _apply(conn, run, verb, m, items):
             if d is None:
                 run.asks.append(problem)
                 run.lines.append(problem)
+                run.unresolved += 1
                 continue
             _one(conn, run, verb, d, m)
         return
@@ -8503,6 +8568,11 @@ def _apply(conn, run, verb, m, items):
         run.lines.append(res["note"])
         return
     if verb == "rebuild":
+        if run.unresolved:
+            # spec: "An unresolved correction blocks its dependent rebuild and says so."
+            run.lines.append("Not rebuilding yet: a correction above did not apply. Say "
+                             "\"rebuild it\" again once it has.")
+            return
         # "rebuild it" means the quarter this reply just touched, else the current one
         qs = [_quarter(m.group("q"))] if m.group("q") else (
             sorted(run.touched_quarters) or [_quarter(None)])
@@ -8569,8 +8639,12 @@ def _one(conn, run, verb, d, m):
     elif verb == "identity":
         who = m.group("who").strip()
         def ident():
-            kb.upsert_counterparty(conn, who, patterns=[d["bank_counterparty"]])
+            # bound to what the operator was shown, in the same transaction as the
+            # write (round p5, Astra S2: an unseen or changed item was still renamed)
+            render_id, rev = _bind_projection(conn, d)
             with db.tx(conn):
+                authorship.require_projection_shown(conn, d["pid"], render_id, rev)
+                kb.upsert_in_tx(conn, who, patterns=[d["bank_counterparty"]])
                 conn.execute("UPDATE projections SET identity_question=0 WHERE pid=?", (d["pid"],))
                 lineage.settle(conn, d["pid"])
             return {"identity": who}
@@ -10629,17 +10703,17 @@ You receive a `pass_token`. Pass it to every plugin write.
    are close to your turn budget. For each item: `get_transaction(row_id)`, then
    `record_observation(pid, pass_token, observed_tags=<every tag>, observed_notes=<every note
    shown>, observed_first_seen=<the row's first_seen>)`. If it answers that the ledger changed
-   during this pass, stop the pass at once. If `bank_writes` is not allowed, make no bank-feed write and report its reason. Otherwise apply the
-   returned `instructions` exactly, in order:
-   - `untag_transaction(row_ids=[row_id], tags=untag, workflow=…, expected_generation=…)`
-   - `tag_transaction(row_ids=[row_id], tags=tag, workflow=…, expected_generation=…)`
+   during this pass, stop the pass at once. If `bank_writes` is not allowed, make no bank-feed write and report its reason. Otherwise make the ONE write the returned `instructions` name, exactly:
+   - `untag_transaction(row_ids=[row_id], tags=untag, workflow=…, expected_generation=…)`, or
+   - `tag_transaction(row_ids=[row_id], tags=tag, workflow=…, expected_generation=…)`, or
    - `add_note(row_ids=[row_id], note=add_note, author="agent", workflow=…, expected_generation=…)`
 
-   Pass `workflow` and `expected_generation` exactly as returned, on every write. If a write
-   does not take, `record_observation(pid, pass_token, write_error=<bank-feed's reply>)`. If
-   bank-feed rejects a write because the ledger was restored, stop the pass at once and report
-   "the ledger was restored since this pass began — reset the accounting store". After any
-   write, read the row again and record it.
+   Pass `workflow` and `expected_generation` exactly as returned, on every write. If the write
+   does not take, `record_observation(pid, pass_token, write_error=<bank-feed's reply>)`.
+   Otherwise read the row again with `get_transaction` and record it again; repeat until
+   nothing is returned. Never make two writes without a read between them. If bank-feed
+   rejects a write because the ledger was restored, stop the pass at once and report "the
+   ledger was restored since this pass began — reset the accounting store".
 6. **Triage.** `list_quarter_state(triage=true)` lists, required first, the payments that
    need a document and have none of the right kind. For each, compare against
    `list_unmatched_documents` and the KB (`get_counterparty`), reading candidate PDFs with
