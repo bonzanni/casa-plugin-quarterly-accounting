@@ -72,3 +72,56 @@ class StoreCase(TempEnv):
                             data={"generation": generation, "registered": registered or {},
                                   "instance": instance or self.LEDGER})
         return token
+
+    _doc_n = 0
+
+    def row(self, row_id, **over):
+        import db
+        r = {"row_id": row_id, "account_id": "acc-biz", "first_seen": "2026-07-01T00:00:00Z",
+             "booking_date": "2026-07-03", "value_date": "2026-07-03", "amount_minor": 10000,
+             "currency": "EUR", "direction": "DBIT", "status": "BOOK", "counterparty": "Adobe",
+             "remittance": "", "state": "active", "superseded_by": None, "needs_review": 0,
+             "review_reason": None, "snapshot_id": 0}
+        r.update(over)
+        with db.tx(self.conn):
+            self.conn.execute("INSERT OR REPLACE INTO bank_rows(%s) VALUES (%s)"
+                              % (",".join(r), ",".join("?" * len(r))), tuple(r.values()))
+        return r
+
+    def lineage_for(self, row_id):
+        import db
+        with db.tx(self.conn):
+            cur = self.conn.execute("INSERT INTO projections(dest_row_id, admitted_at)"
+                                    " VALUES (?, ?)", (row_id, db.now()))
+            pid = cur.lastrowid
+            self.conn.execute("INSERT INTO aliases(row_id, pid, first_seen) VALUES (?,?,?)",
+                              (row_id, pid, "2026-07-01T00:00:00Z"))
+        return pid
+
+    def doc(self, kind="invoice", **over):
+        import db
+        StoreCase._doc_n += 1
+        d = {"sha256": "%064x" % (StoreCase._doc_n + id(self)), "ext": "pdf", "size": 10,
+             "kind": kind, "counterparty": "Adobe", "issuer": "Adobe",
+             "document_date": "2026-07-02", "document_number": "N%d" % StoreCase._doc_n,
+             "amount_minor": 10000, "currency": "EUR", "recipient": "Voorbeeld BV",
+             "source": "gmail", "extraction_author": "resident",
+             "ingested_at": db.now(), "ingest_quarter": "2026-Q3"}
+        d.update(over)
+        with db.tx(self.conn):
+            cur = self.conn.execute("INSERT INTO documents(%s) VALUES (%s)"
+                                    % (",".join(d), ",".join("?" * len(d))), tuple(d.values()))
+        return cur.lastrowid
+
+    def classify(self, pid, tags):
+        import db
+        import json
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET class_tags_json=?, class_observed_at=?"
+                              " WHERE pid=?", (json.dumps(sorted(tags)), db.now(), pid))
+
+    def settle(self, pid):
+        import db
+        import lineage
+        with db.tx(self.conn):
+            return lineage.settle(self.conn, pid)
