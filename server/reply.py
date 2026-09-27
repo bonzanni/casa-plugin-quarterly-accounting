@@ -200,6 +200,51 @@ def _delivered_package_for(conn, quarter):
                         " ORDER BY d.settled_at DESC LIMIT 1", (quarter,)).fetchone()
 
 
+def _cut(line: str) -> list:
+    """A line over the limit (a "Which one?" listing a hundred charges) split
+    at its "; " separators, else at spaces, else at the unit bound — never a
+    piece over TELEGRAM_LIMIT, and no text lost."""
+    if views.utf16_len(line) <= views.TELEGRAM_LIMIT:
+        return [line]
+    for sep in ("; ", " "):
+        parts = line.split(sep)
+        if len(parts) > 1 and all(views.utf16_len(p) <= views.TELEGRAM_LIMIT for p in parts):
+            out, cur = [], parts[0]
+            for p in parts[1:]:
+                if views.utf16_len(cur + sep + p) <= views.TELEGRAM_LIMIT:
+                    cur += sep + p
+                else:
+                    out.append(cur + sep.rstrip())
+                    cur = p
+            return out + [cur]
+    out, cur = [], ""
+    for ch in line:
+        if views.utf16_len(cur + ch) > views.TELEGRAM_LIMIT:
+            out.append(cur)
+            cur = ""
+        cur += ch
+    return out + [cur]
+
+
+def _pages(lines: list) -> list:
+    """The receipt as Telegram-sized messages (fix wave D, Astra S2): EVERY
+    line, in order, packed at whole lines into pages of at most TELEGRAM_LIMIT
+    UTF-16 units. Paged, never summarised: spec §Flows asks for "one receipt,
+    generated from what actually committed, naming vendor and effect", with
+    "the exceptions [riding] in the same receipt" — a summary would drop the
+    names that make a misread reply visible. `receipt` is the first page; the
+    caller sends `receipt_pages` in order."""
+    pages, cur = [], []
+    for piece in (p for line in lines for p in _cut(line)):
+        if cur and views.utf16_len("\n".join(cur + [piece])) > views.TELEGRAM_LIMIT:
+            pages.append("\n".join(cur))
+            cur = []
+        cur.append(piece)
+    if cur:
+        pages.append("\n".join(cur))
+    return pages
+
+
 class _Run:
     def __init__(self, conn):
         self.conn = conn
@@ -225,7 +270,9 @@ class _Run:
             if pk is not None:
                 self.lines.append(f"The package sent on {dates.short_day(pk['settled_at'])} no "
                                   "longer matches — say \"rebuild it\" for a fresh one.")
-        return {"receipt": "\n".join(self.lines), "applied": self.applied, "asks": self.asks,
+        pages = _pages(self.lines)
+        return {"receipt": pages[0] if pages else "", "receipt_pages": pages,
+                "applied": self.applied, "asks": self.asks,
                 "reshow": self.reshow, "instructions": self.instructions,
                 "not_a_reply": not_a_reply}
 

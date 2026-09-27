@@ -531,6 +531,52 @@ class TestFixWaveD(Base):
         self.assertEqual(db.last_delivered(self.conn)["render_id"], first)
 
 
+class TestReceiptPages(Base):
+    """fix wave D (Astra S2): 100 rejections committed, then a 4,199-unit
+    receipt nobody could be sent. The receipt is paged at whole lines; every
+    committed effect and every exception is still named, in order."""
+    def setUp(self):
+        super().setUp()
+        self.pids = [self.item("Vendor %03d Holding" % i, 10000 + i, "2026-09-%02d" % (1 + i % 28))
+                     for i in range(1, 101)]
+        self.show(*self.pids)
+
+    def test_a_hundred_rejections_give_pages_within_the_limit(self):
+        text = " ".join("Vendor %03d Holding is wrong." % i for i in range(1, 101))
+        self.assertLess(views.utf16_len(text), views.TELEGRAM_LIMIT)
+        out = reply.apply_reply(self.conn, text)
+        self.assertEqual(len(out["applied"]), 100)
+        self.assertEqual(self.operator_entries(), 100)
+        pages = out["receipt_pages"]
+        self.assertGreater(len(pages), 1)
+        for page in pages:
+            self.assertLessEqual(views.utf16_len(page), views.TELEGRAM_LIMIT)
+            self.assert_operator_words(page)
+        self.assertEqual(out["receipt"], pages[0])
+        lines = "\n".join(pages).splitlines()
+        self.assertEqual(len(lines), 100)
+        for i in range(1, 101):
+            self.assertEqual(sum(1 for ln in lines
+                                 if ln.startswith("Unpaired Vendor %03d Holding" % i)), 1, i)
+
+    def test_one_overlong_line_is_split_and_nothing_is_lost(self):
+        long = "Which one? " + "; ".join("Vendor %03d Holding · EUR 100.%02d · %d Sep" % (i, i % 100, i % 28 + 1)
+                                           for i in range(1, 200)) + " — say it with the amount or the date."
+        pages = reply._pages([long, "Confirmed Adobe."])
+        for page in pages:
+            self.assertLessEqual(views.utf16_len(page), views.TELEGRAM_LIMIT)
+        self.assertEqual("".join(p.replace("\n", "") for p in pages).replace(" ", ""),
+                         (long + "Confirmed Adobe.").replace(" ", ""))
+
+    def test_a_short_receipt_is_one_page(self):
+        out = reply.apply_reply(self.conn, "Vendor 001 Holding is wrong.")
+        self.assertEqual(out["receipt_pages"], [out["receipt"]])
+
+    def test_a_non_reply_has_no_pages(self):
+        out = reply.apply_reply(self.conn, "is this about Adobe?")
+        self.assertEqual((out["receipt"], out["receipt_pages"]), ("", []))
+
+
 class TestIntegration(Base):
     def test_a_counted_but_unprinted_payment_is_reshown_not_changed(self):
         # a never-searched payment is counted ("not searched"), not printed: the
