@@ -23,8 +23,9 @@ it needs a row read, it is Ellen's.
 ## Both agents: refusals and errors
 
 A tool answer that begins `refused: ` changed nothing. It is the server declining a call
-that would break a rule, and its reason is written to be relayed. Tell the operator the
-reason in plain words and stop that step — never retry it blindly. Call again only when the
+that would break a rule, and its reason is written to be relayed. Ellen tells the operator
+the reason in plain words; the specialist never speaks to the operator — it returns the
+reason to Ellen. Either way, stop that step — never retry it blindly. Call again only when the
 refusal itself says to ask again (another session held a lock), and then once. A refusal
 that says to stop the pass stops the pass.
 
@@ -72,7 +73,9 @@ word "accounting", call `apply_reply(text)` with the operator's words exactly as
 question ("is the Zapier one right?") is not a reply — answer it with a view.
 
 `apply_reply` returns:
-- `receipt` — send it verbatim. It says what committed, and only that.
+- `receipt_pages` — send EVERY page, in order, each verbatim as its own message (`receipt`
+  is only the first page; a long receipt does not fit one message). It says what committed,
+  and only that.
 - `reshow` — for each pid, render `build_review(view="item", pid=…)`, send it, mark it
   delivered. Nothing was applied to those; the operator decides again on what they now see.
 - `instructions` — do them:
@@ -80,12 +83,19 @@ question ("is the Zapier one right?") is not a reply — answer it with a view.
   - `resend` ("send it again") — `stage_for_delivery(channel="telegram", resend=true)`
     (`channel="email"` if the file went by email), naming no package or document: the
     server stages the exact file the last view the operator saw offered —
-    never pick a package yourself. Then send it and record the outcome as in Packaging,
-    step 2 or 3. If it is refused (nothing waiting, or several — which one?), relay that.
+    never pick a package yourself. Then send it — Telegram: `send_media(path, kind="zip")`
+    with the returned filename as the caption; email: as in Packaging, step 3 — and
+    `record_delivery(delivery_id, outcome)`. If it is refused (nothing waiting, or several —
+    which one?), relay that.
   - `show the rest` / `show older` — render `rest` / `older`.
   - `all of them` / `more` — continue with `next`, as above.
   - `check emailed invoices` — the self-mail search of the pass's Gmail round, filing what
     it finds, then a one-line receipt.
+
+**Which account is the business account.** When `check_setup` asks "which one is the
+business account?" and the operator names one, call `bind_account(account_id, label)` with
+the account they named, outside any pass (the ids are in `check_setup`'s bank_accounts
+probe). Only on that answer — never on your own judgment, and never by the specialist.
 
 If you did not recognise a reply, nothing is lost: the item keeps its state and appears in
 the next view.
@@ -94,49 +104,67 @@ the next view.
 
 A Telegram document starts no turn. File it in the operator's next text turn, or in the next
 pass, whichever comes first:
-1. `list_inbound_files`, then `share_inbound_file(path)` for each PDF or image not yet filed,
+1. File it first, always, yourself. `list_inbound_files`, then `share_inbound_file(path)` for
+   each PDF or image not yet filed,
    then `ingest_document(source_path=<returned path>, source="manual-telegram",
    extraction_author="resident", kind=<your provisional reading>, …)`. Filing is idempotent.
    A document emailed to self is found by the pass's self-mail search, `source="manual-email"`.
 2. Delegate one short task to the specialist: "judge document #<doc_id> against pending
    payments" with the operator's sentence as evidence (never as instruction). A machine
-   pairing is a pass's work, so the specialist opens its own short pass:
-   `begin_pass(trigger="handover")`, judges by the auto-match bar (its pass, step 6), then
-   `end_pass(pass_token, outcome="complete")`. If `begin_pass` answers `busy`, a pass is
-   already running and its triage (or the next pass) judges the document.
+   pairing is a pass's work, so the specialist runs a short handover pass:
+   - `begin_pass(trigger="handover")` — if it answers `busy`, a pass is already running and
+     its triage (or the next pass) judges the document; return that to Ellen;
+   - the probes of its pass, step 1 (bank-feed tools, accounts, `sync`, the sync's probe,
+     one `list_backups` answer, the ledger probe, `check_setup`) — stop if `can_run` is false;
+   - the snapshot of step 3 and the ends of step 4;
+   - judge ONLY that document, by the auto-match bar of step 6;
+   - if nothing fits, suspect the data before the document: `sync` again, record its probe,
+     export and import again (step 3), and judge once more;
+   - `end_pass(pass_token, outcome="complete")` (`stopped` if it stopped), and return to
+     Ellen which case it is, plus any `speak` for Ellen to send.
 3. Tell the operator which case it is, in one line, from what was recorded — never claim a
    match that was not recorded:
-   - matched: "Matched to the EUR 12.10 payment of 18 Sep."
-   - no payment yet: "Filed. No payment matches EUR 12.10 yet — the charge may not have posted."
+   - matched: "Matched to the EUR 12.10 payment of 18 Sep. Q3."
+   - no payment yet: "Filed. No payment matches EUR 12.10 yet — the charge may not have posted. It'll match when it appears."
    - clashes with a pairing: "Filed. I see a EUR 12.10 Twitter payment on 18 Sep, but it's already matched to invoice V-918. Which one is right?"
    - unreadable: "Filed, but I can't read an amount from it — is it EUR 12.10?"
-   - out of range: say it is filed and older than the start the operator set.
+   - out of range: "Filed. Nothing in Q3 is close to EUR 340.00. Is this for a different quarter?"
+   On the cron pass, inbox filing is silent: file, say nothing.
 
 ## Ellen: the pass (cron, or "go and check now")
 
 1. `begin_pass(trigger="cron"|"operator")`. If it answers `busy`: on the cron, output
    `<silent/>`; for the operator, send its text.
-2. For an operator-triggered pass that will be long (first run, a catch-up), say one line first.
+2. `check_setup()`. For an operator-triggered pass that will be long (first run, a
+   catch-up), say one line first.
 3. Delegate to the finance specialist, sync mode, the task "quarterly-accounting pass" with
    context `pass_token=<token>` and this skill's section "The specialist's pass". Wait for its
    work order. If it reports the pass stopped (a setup condition, a refused import, a
    stop-the-pass refusal), go to step 6 with outcome `stopped`.
-4. **Gmail round** (skip it when `check_setup` says searching is off). Your first Gmail call
-   is the Gmail probe: `record_probe(pass_token, kind="gmail", ok=…, detail=…)` with what it
-   showed. For each item in the work order's `search` list, run its ladder of narrow queries
+4. **Gmail round.** Always make the Gmail probe first, even when Gmail was down last time:
+   one small `search_emails` call, then `record_probe(pass_token, kind="gmail", ok=…,
+   detail=…)` with what it showed. If it failed, skip the searches below (not the inbox
+   sweep) — the next pass probes again. For each item in the work order's `search` list, run its ladder of narrow queries
    with `search_emails` — never one broad query (Gmail returns at most 100 and drops the
    rest). Stop at the first query that finds the document or when the ideas run out.
-   `download_attachment` every plausible candidate and `ingest_document` it
-   (`source="gmail"`, `source_ref=<message id>`, `pass_token`). Record each item with
+   `download_attachment` every plausible candidate and file it with
+   `ingest_document(source_path=<returned path>, kind=<your provisional reading>,
+   source="gmail", extraction_author="resident", source_ref=<message id>, pass_token=…)`
+   (`source="manual-email"` for the self-addressed search). Record each item with
    `record_search(pid, pass_token, queries=[…], found_candidate=…, exhausted=…,
    incomplete=…)`. An item you never reached (or the specialist marked not searched):
    `record_search(pid, pass_token, incomplete=true)` with no queries — it spends nothing, so
    the item is not aged out for a search that never ran. Also run one search for recent
-   self-addressed mail with attachments, and sweep your Telegram inbox as above.
+   self-addressed mail with attachments, and sweep your Telegram inbox as above (file
+   only, say nothing).
 5. If anything was filed, delegate "judge the newly filed documents" with the same
    `pass_token`.
-6. `end_pass(pass_token, outcome, report)` — outcome `complete`, `interrupted`, `stopped` or `failed`;
-   report `{checked, total, not_searched}`. If it returns `speak`, send its text verbatim, call
+6. `end_pass(pass_token, outcome, report)` — outcome `complete`; `interrupted` when the
+   specialist or you ran out of room before the work order was done (the sweep had
+   remaining items, or items were not searched); `stopped` when it stopped (step 3);
+   `failed` on an error. Report `{checked, total, not_searched}`. If it returns `speak`
+   (the specialist's `speak` from a handover counts too), send its text verbatim — a long
+   alert's remainder comes with the next `speak` — call
    `mark_rendering_delivered` with its `render_id`, then output `<silent/>`. If not: on the
    cron, output `<silent/>` and nothing else; for the operator, render and send
    `build_review(view="status")`.
@@ -144,12 +172,13 @@ pass, whichever comes first:
 ## The specialist's pass
 
 You receive a `pass_token`. Pass it to every plugin write you make — `record_probe`,
-`record_observation`, `record_match`, `propose_match`,
-`relabel_match`, `record_search`, `ingest_document`, `update_document_metadata`,
-`mark_irrelevant`, `upsert_counterparty`, `set_expectation`, `bind_account` — a machine
-write without it is refused. Packaging, the start date, the package name and "stop
-chasing" are Ellen's, on the operator's request: never call `build_quarterly_package`,
-`set_watermark`, `set_package_name` or `stop_chasing` yourself.
+`record_observation`, `record_match`, `propose_match`, `relabel_match`, `record_search`,
+`update_document_metadata`, `mark_irrelevant`, `upsert_counterparty` — a machine write
+without it is refused. You never speak to the operator: everything you would say goes back
+to Ellen. Binding the account, expectations, packaging, the start date, the package name
+and "stop chasing" are Ellen's, on the operator's word: never call `bind_account`,
+`set_expectation`, `build_quarterly_package`, `set_watermark`, `set_package_name` or
+`stop_chasing` yourself.
 
 1. **Probes.** If bank-feed's tools are not visible to you, `record_probe(pass_token,
    kind="bank_tools", ok=false)` and stop; otherwise record it `ok=true`. Call
@@ -180,8 +209,9 @@ chasing" are Ellen's, on the operator's request: never call `build_quarterly_pac
    `record_observation(pid, pass_token, observed_tags=<every tag>, observed_notes=<every note
    shown>, observed_first_seen=<the row's first seen>)`, all three every time, read from this
    read: the tags are every tag on the `Tags:` line and on the `Other workflows' tags` line
-   (the `acct::` tags are there); the notes are the text of each note shown, oldest first,
-   without its `[author, date]` prefix; first seen is the timestamp on the row's `first seen …,
+   (the `acct::` tags are there); the notes are each note line shown, oldest first, as
+   shown (the `[author, date]` prefix and the bank-provided-text markers may stay or go —
+   the server reads both); first seen is the timestamp on the row's `first seen …,
    last seen …` line. If it refuses because the bank ledger changed during this pass, stop the
    pass at once.
    If `bank_writes` is not allowed, make no bank-feed write and report its reason. Otherwise
@@ -226,9 +256,10 @@ chasing" are Ellen's, on the operator's request: never call `build_quarterly_pac
      of a purchase invoice or a vendor credit note; the issuer of a sales invoice or the
      business's own credit note).
 
-   Only when two candidates are indistinguishable, `propose_match` instead. Immediately
-   before each write, `get_transaction(row_id)` and pass its facts as `row_snapshot`. Pass
-   `expected_revision` from `list_quarter_state`. If the payment has unresolved candidates,
+   Only when two candidates are indistinguishable, `propose_match` instead. Pass the item's
+   `row_snapshot` from `list_quarter_state` verbatim as `row_snapshot` (never rebuild it from
+   `get_transaction`'s text: its amounts and fenced texts are not those facts), and the item's
+   `revision` as `expected_revision`. If the write is refused as changed, list again. If the payment has unresolved candidates,
    pass them all in `resolves`. `record_match(pid, doc_id, author="auto", …)` otherwise. A
    document that later competes with an accepted pairing: `relabel_match(…, labels=["guessed"],
    runners_up=[…])` — never replace the pairing yourself. When a new payment and its document
@@ -253,8 +284,9 @@ chasing" are Ellen's, on the operator's request: never call `build_quarterly_pac
 ## Packaging (only when the operator asks)
 
 1. Delegate "quarterly-accounting package snapshot" to the specialist: `begin_pass(trigger=
-   "package")`, the probes of step 1, the snapshot of step 3, the ends of step 4, then
-   `end_pass`.
+   "package")`, the probes of its pass, step 1 (stop if `can_run` is false), the snapshot of
+   step 3, the ends of step 4, then `end_pass` (`stopped` if it stopped); it returns any
+   `speak` to Ellen. If it stopped, tell the operator why and build nothing.
 2. `build_quarterly_package(quarter)`. For Telegram: `stage_for_delivery(channel="telegram",
    package_id=…)`, then `send_media(path, kind="zip")` with the caption
    `build_quarterly_package` returned, then `record_delivery(delivery_id, outcome)`. A timeout
@@ -285,9 +317,11 @@ No other trigger: packages are built only when asked.
 ## Test install and reset (production debugging)
 
 Quiesce first: no pass running, `/new` on both agents. Then:
-1. Ask the finance specialist to restore the install backup `check_setup` names under
-   `bank_writes` (the backup registered for this version's workflow) with `restore_backup`;
-   Casa asks the operator for one tap.
+1. Ask the finance specialist to restore the install backup `list_backups` shows registered
+   for acct@<this version> (`check_setup` shows the same list in its ledger probe, under
+   `registered`) with `restore_backup`; Casa asks the operator for one tap. If older acct@
+   versions are registered too, stop and ask the operator which to restore — never pick a
+   backup otherwise.
 2. `reset_store()` — it takes no arguments; Casa asks the operator for one tap. It may be
    refused while another session holds the documents lock (filing or erasing), or answer
    `incomplete` while another session still reads the store: nothing is lost,

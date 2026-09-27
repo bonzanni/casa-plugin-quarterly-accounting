@@ -24,12 +24,14 @@ EXTERNAL = {"sync", "list_accounts", "list_backups", "export_history", "get_tran
 # Sentences the skill tells Ellen to say in her own words; they reach the operator.
 OPERATOR_LINES = (
     "I can't read the accounting right now",
-    "Matched to the EUR 12.10 payment of 18 Sep.",
-    "Filed. No payment matches EUR 12.10 yet — the charge may not have posted.",
+    "Matched to the EUR 12.10 payment of 18 Sep. Q3.",
+    "Filed. No payment matches EUR 12.10 yet — the charge may not have posted. It'll match "
+    "when it appears.",
     "Filed. I see a EUR 12.10 Twitter payment on 18 Sep, but it's already matched to "
     "invoice V-918. Which one is right?",
     "Filed, but I can't read an amount from it — is it EUR 12.10?",
     "Nothing more to show.",
+    "Filed. Nothing in Q3 is close to EUR 340.00. Is this for a different quarter?",
 )
 
 
@@ -54,7 +56,7 @@ class TestSkill(TempEnv):
                                         "instructions", "speak", "reshow", "true", "false",
                                         "bank_writes", "request_id", "labels", "runners_up",
                                         "can_run", "remaining_in_cycle", "erase_candidates",
-                                        "expected_ledger"}:
+                                        "expected_ledger", "receipt_pages"}:
                 continue
             if "_" in n:
                 self.assertIn(n, ours | EXTERNAL, n)
@@ -139,6 +141,39 @@ class TestSkill(TempEnv):
                 self.assertIsNone(re.search(r"(?<![A-Za-z])" + re.escape(word) + r"(?![A-Za-z])",
                                             line), (word, line))
             self.assertIsNone(re.search(r"\bline \d", line), line)
+
+    # --- fix round 1 (Task 22 review) ---------------------------------------------------
+    def section(self, head, until):
+        return SKILL[SKILL.index(head):SKILL.index(until)]
+
+    def test_every_receipt_page_is_sent(self):
+        self.assertIn("`receipt_pages` — send EVERY page, in order", SKILL)
+
+    def test_the_gmail_probe_is_always_made(self):
+        rnd = self.section("**Gmail round.**", "\n5. ")
+        self.assertIn("Always make the Gmail probe first", rnd)
+        self.assertNotIn("skip it when", rnd)
+
+    def test_row_snapshot_comes_from_the_listing(self):
+        triage = self.section("**Triage.**", "7. **Identity")
+        self.assertIn("`row_snapshot` from `list_quarter_state` verbatim", triage)
+        self.assertNotIn("pass its facts as `row_snapshot`", SKILL)
+
+    def test_the_specialist_never_binds_or_sets_expectations(self):
+        spec = " ".join(self.section("## The specialist's pass", "1. **Probes.**").split())
+        self.assertIn("never call `bind_account`, `set_expectation`", spec)
+        self.assertIn("never by the specialist", SKILL)
+
+    def test_the_handover_suspects_the_data_first(self):
+        doc = self.section("## Ellen: a document the operator hands over", "## Ellen: the pass")
+        self.assertIn('begin_pass(trigger="handover")', doc)
+        self.assertIn("suspect the data before the document: `sync` again", doc)
+        self.assertIn("stop if `can_run` is false", doc)
+
+    def test_reset_never_picks_among_versions(self):
+        section = SKILL[SKILL.index("## Test install and reset"):]
+        self.assertIn("never pick a\n   backup otherwise", section)
+        self.assertNotIn("under\n   `bank_writes`", section)
 
 
 if __name__ == "__main__":

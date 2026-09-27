@@ -234,8 +234,11 @@ def _lead(conn):
         return [setup["header"], *setup["conditions"], "Nothing else to do until then."], False, None
     gmail = setup["probes"].get("gmail")
     gmail_down = gmail is not None and not gmail["ok"]
-    last = conn.execute("SELECT * FROM passes WHERE ended_at IS NOT NULL ORDER BY ended_at DESC,"
-                        " generation DESC LIMIT 1").fetchone()
+    # A package snapshot or a document handover is not a review pass: it must not
+    # erase an interrupted review's block (Task 22 review, item 5).
+    last = conn.execute("SELECT * FROM passes WHERE ended_at IS NOT NULL"
+                        " AND trigger NOT IN ('package', 'handover')"
+                        " ORDER BY ended_at DESC, generation DESC LIMIT 1").fetchone()
     interrupted = None
     if last is not None and last["outcome"] == "interrupted":
         rep = json.loads(last["report_json"] or "{}")
