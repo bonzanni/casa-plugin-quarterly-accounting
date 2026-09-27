@@ -310,6 +310,14 @@ def open_store(path=None, bound_s: float = LOCK_BOUND_S) -> sqlite3.Connection:
     return conn
 
 
+def _rollback_if_open(conn) -> None:
+    """ROLLBACK only while a transaction is still open: SQLite may already have
+    rolled it back itself (an I/O error, a full disk), and a ROLLBACK then raises
+    "no transaction is active", masking the error that caused it (fix wave F)."""
+    if conn.in_transaction:
+        conn.execute("ROLLBACK")
+
+
 @contextlib.contextmanager
 def tx(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S):
     if conn.in_transaction:
@@ -318,9 +326,16 @@ def tx(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S):
     try:
         yield conn
     except BaseException:
-        conn.execute("ROLLBACK")
+        _rollback_if_open(conn)
         raise
-    conn.execute("COMMIT")
+    # A COMMIT that fails leaves the transaction open on this connection; the tool
+    # layer keeps ONE connection per process (tools._CONN), so every later call would
+    # answer "tx() does not nest" until a restart. Roll it back, then re-raise.
+    try:
+        conn.execute("COMMIT")
+    except BaseException:
+        _rollback_if_open(conn)
+        raise
 
 
 def next_seq(conn: sqlite3.Connection) -> int:

@@ -142,6 +142,24 @@ class TestKB(StoreCase):
                            kind="receipt", tier="required", author="specialist")
         self.assertEqual(lineage.projection(self.conn, self.pid)["exp_kind"], "receipt")
 
+    def test_a_specialist_never_overwrites_the_operators_ruling(self):
+        # fix wave F: "no invoices ever for Zapier" is the operator's; a specialist's
+        # later set_expectation (or its removal) is refused, and the ruling stands
+        kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
+        kb.set_expectation(self.conn, scope_type="counterparty", scope="Zapier", kind="none",
+                           author="operator", render_id="r1")
+        for kind, tier in (("receipt", "required"), ("default", None)):
+            with self.assertRaisesRegex(db.Refusal, "the operator"):
+                kb.set_expectation(self.conn, scope_type="counterparty", scope="Zapier",
+                                   kind=kind, tier=tier, author="specialist")
+        self.assertEqual(lineage.projection(self.conn, self.pid)["exp_kind"], "none")
+        e = kb.get_counterparty(self.conn, "Zapier")
+        self.assertEqual(e["exp_author"], "operator")
+        # the operator may change their own ruling
+        kb.set_expectation(self.conn, scope_type="counterparty", scope="Zapier",
+                           kind="receipt", tier="required", author="operator", render_id="r1")
+        self.assertEqual(lineage.projection(self.conn, self.pid)["exp_kind"], "receipt")
+
     def test_chain_override_replaces_the_previous_normalized_scope(self):
         # carried ruling (Task 4 review): "refund" and "income, refund" both
         # normalize to ({7}, {refund}); the later ruling wins and derive

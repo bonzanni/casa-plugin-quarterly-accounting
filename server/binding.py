@@ -123,8 +123,14 @@ def check_setup(conn) -> dict:
         # version's writes still present" — a report, not a stop
         conditions.append("The older version's writes are still present in bank-feed's ledger ("
                           + ", ".join(gate["older_workflows"]) + ").")
+    last = conn.execute("SELECT pass_id, trigger, outcome, ended_at, report_json FROM passes"
+                        " WHERE ended_at IS NOT NULL ORDER BY generation DESC LIMIT 1").fetchone()
+    last_pass = None if last is None else {
+        "pass_id": last["pass_id"], "trigger": last["trigger"], "outcome": last["outcome"],
+        "ended_at": last["ended_at"], "report": json.loads(last["report_json"] or "{}")}
     return {"bound": dict(b) if b else None, "probes": probes, "conditions": conditions,
-            "can_run": can_run, "header": header, "searching": searching, "bank_writes": gate}
+            "can_run": can_run, "header": header, "searching": searching, "bank_writes": gate,
+            "last_pass": last_pass}
 
 
 _TABLES_TO_WIPE = ("binding", "passes", "probes", "documents", "counterparties",

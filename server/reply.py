@@ -120,14 +120,12 @@ def _say(conn, exc) -> str:
 
 
 def _quarter(token: str | None) -> str:
+    """The quarter a reply names (the grammar only lets "qN" or "qN YYYY"
+    through), by the one rule the tool layer shares (dates.normalize_quarter)."""
     today = db.now()[:10]
     if not token:
         return dates.quarter_of(today)
-    m = re.match(r"q([1-4])(?:\s+(\d{4}))?$", token)
-    n, year = int(m.group(1)), int(m.group(2) or today[:4])
-    if not m.group(2) and f"{year}-Q{n}" > dates.quarter_of(today):
-        year -= 1
-    return f"{year}-Q{n}"
+    return dates.normalize_quarter(token, today)
 
 
 def _open_items(conn) -> list:

@@ -104,7 +104,10 @@ def _freeze(conn, quarter: str) -> dict:
             "p.package_id WHERE p.quarter=? AND d.status='delivered' ORDER BY d.settled_at DESC,"
             " p.package_id DESC LIMIT 1", (quarter,)).fetchone()
         # the import every line's freshness was judged against (round E3, Terra S1)
-        return {"snapshot_id": lineage.latest_import(conn),
+        # every row's date and amount: notes.md names a successor by them, never by id
+        facts = {r["row_id"]: {"date": dates.effective_date(r), "amount_minor": r["amount_minor"],
+                               "currency": r["currency"]} for r in rows}
+        return {"snapshot_id": lineage.latest_import(conn), "facts": facts,
                 "binding": dict(b), "lines": lines, "history": history, "unmatched": unmatched,
                 "bank_through": snap["bank_through"] if snap else None,
                 "prev": dict(prev) if prev else None}
@@ -121,6 +124,11 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         r, d = ln["row"], ln["d"]
         status = "UNTRACKED" if d is None else STATUS.get(d["status"], "UNTRACKED")
         exp = d["expectation"] if d else {"kind": None, "tier": None}
+        # the kind the accountant's copy stands for (fix wave F): the one it ships under,
+        # else — shipped unclassified — the last one known. The delivered kind check
+        # compares against this, so a row shipped unread is not "categorised differently"
+        # when its next read finds the kind it already had.
+        known_kind = exp["kind"] or (d["last_known_kind"] if d else None)
         # Classification is reported from the expectation alone (fix wave D, Astra S1):
         # an unknown expectation is UNCLASSIFIED whether or not a pairing is retained
         # (round-42 ruling keeps the pairing and its last known kind verdict; spec
@@ -136,7 +144,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         stale = d is not None and not d["fresh"] and d["status"] not in ("ineligible", "exempt")
         if stale:
             status, exp = "UNCLASSIFIED", {"kind": None, "tier": None}
-        docname, confidence, link, notes = "", "", "", []
+        docname, confidence, link, notes, set_aside = "", "", "", [], []
         if not stale and d is not None and d["status"] == "matched" and d["current"]:
             doc = ln["docs"][d["current"]["match_id"]]
             folder = route(doc["kind"], exp["tier"] or "required")
@@ -152,11 +160,15 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
             for mid, doc in sorted(ln["docs"].items()):
                 name = _place("unresolved", doc, used, named, dates.effective_date(r))
                 files[name] = documents_bytes(doc)
-                unresolved_lines.append((d, name))
+                set_aside.append(name)
+                # a row not re-read ships its documents set aside, named in its own
+                # section: they are not candidates that failed to match (fix wave F)
+                if not stale:
+                    unresolved_lines.append((d, name))
         if d is not None:
             link = d["link"] or ""
             if stale:
-                unread.append(d)
+                unread.append((d, set_aside))
             elif status == "MISSING":
                 missing.append((d, link))
             elif status == "UNCLASSIFIED":
@@ -164,7 +176,10 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
             elif status == "OPTIONAL-MISSING":
                 nice.append(d)
             if d["broken_floor"]:
-                anomalies.append(f"{_head(d)}: bank-feed's history is broken ({d['broken_floor']}).")
+                why = ("its replacements loop back on themselves"
+                       if d["broken_floor"].endswith("(a cycle)")
+                       else "the row that replaces it is missing")
+                anomalies.append(f"{_head(d)}: bank-feed's history is broken ({why}).")
             if d["unprojectable"]:
                 anomalies.append(f"{_head(d)}: the bank ledger could not take its tag.")
         vendor = d["counterparty"] if d else (r["counterparty"] or "")
@@ -173,7 +188,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                       confidence, exp["kind"] or "", exp["tier"] or "", docname, link,
                       "; ".join(notes)])
         manifest_rows.append({"row_id": r["row_id"], "pid": d["pid"] if d else None,
-                              "facts_fp": db.canonical(R.facts_of(r)), "kind": exp["kind"]})
+                              "facts_fp": db.canonical(R.facts_of(r)), "kind": exp["kind"],
+                              "last_known_kind": known_kind, "not_reread": bool(stale)})
     buf = io.StringIO(newline="")
     csv.writer(buf, lineterminator="\n").writerows(table)
     files["ledger.csv"] = buf.getvalue().encode("utf-8")
@@ -191,7 +207,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
               for d, name in unclassified] or ["- none"]
     if unread:
         notes += ["", "## Not re-read since the last bank check", ""]
-        notes += [f"- {_head(d)}" for d in unread]
+        notes += [f"- {_head(d)}" + (f" — holds {', '.join(names)}, set aside until it is "
+                                     "re-read" if names else "") for d, names in unread]
     notes += ["", "## Nice to have, not found", ""]
     notes += [f"- {_head(d)} — {d['expectation']['kind']}" for d in nice] or ["- none"]
     notes += ["", "## Unresolved candidates", ""]
@@ -203,9 +220,10 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     notes += [f"- {a}" for a in anomalies] or ["- none"]
     if frozen["history"]:
         notes += ["", "## Bank rows kept as history (not summed)", ""]
-        notes += [f"- #{h['row_id']} {h['state']} {dates.effective_date(h) or ''} "
-                  f"{amounts.fmt(h['amount_minor'], h['currency'])}"
-                  + (f" → #{h['superseded_by']}" if h["superseded_by"] else "")
+        # rows named by date and amount, never by bank-feed's row id (fix wave F)
+        notes += [f"- {_row_words(h)} — {h['state']}"
+                  + (_successor(frozen["facts"].get(h["superseded_by"]))
+                     if h["superseded_by"] else "")
                   for h in frozen["history"]]
     if oversize_note:
         notes += ["", "## Too large to send", ""] + [f"- {x}" for x in oversize_note]
@@ -231,6 +249,19 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
               "missing": len(missing), "unclassified": len(unclassified), "unread": len(unread)}
     return (deterministic_zip(files), digest, partial,
             {"rows": manifest_rows, "documents": sorted(matched_docs), "counts": counts})
+
+
+def _row_words(r) -> str:
+    day = dates.effective_date(r)
+    return (f"{dates.short_day(day) if day else 'no date'} · "
+            f"{amounts.fmt(r['amount_minor'], r['currency'])}")
+
+
+def _successor(f) -> str:
+    if f is None:
+        return ", replaced by a row the bank no longer shows"
+    day = dates.short_day(f["date"]) if f["date"] else "undated"
+    return f", replaced by the {day} {amounts.fmt(f['amount_minor'], f['currency'])} row"
 
 
 def _head(d) -> str:

@@ -116,12 +116,16 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
     with db.custody_lock():
         with db.tx(conn):
             passes.check_token(conn, token)
-            _install(data, sha, ext)
-            existing = conn.execute("SELECT doc_id FROM documents WHERE sha256=?",
+            existing = conn.execute("SELECT doc_id, ext FROM documents WHERE sha256=?",
                                     (sha,)).fetchone()
             if existing is not None:
+                # the same bytes filed under another extension are the held file: it is
+                # (re)installed under the held name, never beside it as a second copy no
+                # row names (fix wave F)
+                _install(data, sha, "." + existing["ext"])
                 return {"doc_id": existing[0], "sha256": sha, "created": False,
                         "collisions": collisions(conn, existing[0])}
+            _install(data, sha, ext)
             cur = conn.execute(
                 "INSERT INTO documents(sha256, ext, size, kind, counterparty, issuer,"
                 " document_date, document_number, amount_minor, currency, recipient, source,"
@@ -219,14 +223,15 @@ def _reap(conn, older_than_s: int) -> int:
     root = _root()
     if not root.exists():
         return 0
-    held = {r[0] for r in conn.execute("SELECT sha256 FROM documents")}
+    # a file is held by its exact name, <sha>.<ext>: the same hash under another
+    # extension (left by an earlier version's re-filing) is claimed by no row
+    held = {f"{r[0]}.{r[1]}" for r in conn.execute("SELECT sha256, ext FROM documents")}
     cutoff = time.time() - older_than_s
     removed = 0
     for f in root.rglob("*"):
         if not f.is_file() or f.stat().st_mtime > cutoff:
             continue
-        stem = f.name.split(".")[0]
-        if f.name.startswith(".part-") or stem not in held:
+        if f.name.startswith(".part-") or f.name not in held:
             f.unlink()
             removed += 1
     return removed

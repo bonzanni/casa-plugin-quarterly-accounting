@@ -99,6 +99,31 @@ class TestContents(Base):
         self.assertEqual(rows[0]["amount"], "99.00")
         self.assertIn("superseded", z.read("notes.md").decode())
 
+    def test_notes_name_rows_by_date_and_amount_never_by_machine_id(self):
+        # fix wave F: "#12 → #13 (absent)" and "#1 superseded" are machine row ids
+        import re
+        self.row(1, state="superseded", superseded_by=4, status="PDNG", amount_minor=9900,
+                 booking_date=None, value_date="2026-07-02")
+        self.row(3, state="superseded", superseded_by=77, amount_minor=5000,
+                 booking_date="2026-07-04", value_date="2026-07-04")
+        self.n = 3
+        pid = self.line(amount_minor=9900, booking_date="2026-07-03", value_date="2026-07-03")
+        broken = self.line(amount_minor=1234, booking_date="2026-07-05", value_date="2026-07-05")
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET broken_floor=? WHERE pid=?",
+                              ("#4 → #78 (absent)", broken))
+        self.assertTrue(pid)
+        _, z = self.build()
+        notes = z.read("notes.md").decode()
+        self.assertIsNone(re.search(r"#\d", notes), notes)
+        history = notes.split("## Bank rows kept as history (not summed)")[1].split("\n\n")[1]
+        self.assertIn("2 Jul · EUR 99.00 — superseded, replaced by the 3 Jul EUR 99.00 row",
+                      history)
+        self.assertIn("4 Jul · EUR 50.00 — superseded, replaced by a row the bank no longer shows",
+                      history)
+        self.assertIn("Adobe · EUR 12.34 · 5 Jul: bank-feed's history is broken (the row that "
+                      "replaces it is missing).", notes)
+
     def test_statuses_and_notes_order(self):
         kbline = self.line(counterparty="Adobe")
         self.line(tags=(), counterparty="Mystery")

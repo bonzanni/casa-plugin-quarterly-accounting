@@ -362,7 +362,11 @@ def check_delivered_kind_half(conn, pid: int) -> int:
     the expectation kind a delivered row shipped under, against the one the
     lineage's latest classification observation derives (spec §"What a pass
     works on"; round 26 — the snapshot carries no tags). Unknown is not a
-    change (the last known kind stands).
+    change (the last known kind stands). A row shipped unclassified — its
+    expectation unknown, or not re-read since the import — is compared against
+    the last kind known when it shipped (delivered_rows.kind); one shipped with
+    no kind ever known is skipped: there is nothing to have changed from (fix
+    wave F: a row read again unchanged raised "now categorised differently").
 
     delivered_rows.pid is not re-pointed by a merge, so a delivered row
     belongs to this lineage when its pid RESOLVES to it (as in
@@ -379,7 +383,8 @@ def check_delivered_kind_half(conn, pid: int) -> int:
             " (SELECT max(p2.package_id) FROM packages p2 JOIN deliveries d2"
             "  ON d2.package_id=p2.package_id AND d2.status='delivered' GROUP BY p2.quarter)"
             " ORDER BY d.package_id, d.row_id").fetchall():
-        if lineage.resolve_pid(conn, d["pid"]) != pid or d["kind"] == p["exp_kind"]:
+        if lineage.resolve_pid(conn, d["pid"]) != pid or d["kind"] is None \
+                or d["kind"] == p["exp_kind"]:
             continue
         key = f"delivered:{d['package_id']}:{d['row_id']}:kind:{p['exp_kind']}"
         cur = conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"

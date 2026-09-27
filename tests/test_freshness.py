@@ -157,7 +157,13 @@ class TestTerraPartialSweepThenTriage(ToolPass):
         doc = self.file(amount_minor=1000, document_date="2026-07-06")   # an invoice
         token = self.begin("cron")
         self.assertEqual(self.sweep(token, budget=1), 1)             # Zapier read, Adobe not
-        tri = {d["pid"]: d for d in call("list_quarter_state", triage=True)["triage"]}
+        # fix wave F: the triage listing leaves out what was not re-read (not_fresh counts
+        # it); the server guard below still refuses a caller that judges it anyway
+        default = call("list_quarter_state", triage=True)
+        self.assertNotIn(self.pid_of(ids["A1"]), [d["pid"] for d in default["triage"]])
+        self.assertEqual(default["not_fresh"], 1)
+        tri = {d["pid"]: d for d in call("list_quarter_state", triage=True,
+                                         fresh_only=False)["triage"]}
         stale = tri[self.pid_of(ids["A1"])]
         self.assertEqual(stale["expectation"]["kind"], "invoice")    # the stale picture
         self.assertFalse(stale["fresh"])

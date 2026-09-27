@@ -585,8 +585,7 @@ def _compose(conn, view, q, items, members, lead):
         # the packages it printed: "send it again" resolves against those only
         # (delivery.resend_target).
         import delivery
-        secs.append(_Section("", [_Block([f"{fname} may not have arrived —",
-                                          'say "send it again".'], order=("", pkg_id),
+        secs.append(_Section("", [_Block(delivery.offer_lines(fname), order=("", pkg_id),
                                          offer=pkg_id)
                                   for pkg_id, fname in delivery.uncertain(conn, q)]))
     if view in ("status", "all", "missing", "quarter"):

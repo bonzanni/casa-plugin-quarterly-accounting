@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 
+import dates
 import db
 import ledger
 import lineage
@@ -81,25 +82,44 @@ def _due(conn) -> list:
         " ORDER BY pid", (lineage.latest_import(conn),))]
 
 
-def list_projections(conn, *, token, limit: int = PAGE) -> dict:
+def _in_quarter(conn, pid: int, quarter: str) -> bool:
+    """The lineage's payment falls in `quarter` by its effective date — the live
+    row's, or (a row absent from the snapshot) its last known facts'."""
+    p = lineage.projection(conn, pid)
+    row = lineage.live_row(conn, p) or json.loads(p["last_facts_json"] or "{}")
+    eff = dates.effective_date(row) if row else None
+    start, end = dates.quarter_bounds(quarter)
+    return eff is not None and start <= eff < end
+
+
+def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
     """The next page of the sweep's cycle: the lineages still due a read since
     the latest import (_due), from the durable cursor, then wrapping to the
     prefix an earlier, interrupted cycle skipped. remaining_in_cycle 0 means
     every managed lineage was read since the latest import. bank_writes is this
     pass's gate (allowed, workflow, expected_generation, expected_ledger); every
     tag, untag and note write the sweep asks for carries all three exactly as
-    given."""
+    given.
+
+    `quarter` (fix wave F, throughput) narrows the page to that quarter's
+    payments: a package needs only its own rows fresh, and freshness stays per
+    lineage. remaining_in_cycle then counts that quarter's; the cycle itself
+    completes only when no lineage of any quarter is due."""
     if token is None:
         raise db.Refusal("the sweep belongs to a pass: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
         _require_proven_import(conn)
         cur = _cursor(conn)
-        due = _due(conn)
-        if not due:
+        due_all = _due(conn)
+        due = due_all if quarter is None else [p for p in due_all
+                                                if _in_quarter(conn, p, quarter)]
+        if not due_all:
             if cur["cycle_started_at"]:
                 conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=NULL,"
                              " last_cycle_completed_at=? WHERE id=1", (db.now(),))
+            order = []
+        elif not due:
             order = []
         else:
             after = [p for p in due if p > cur["last_pid"]]
@@ -118,7 +138,7 @@ def list_projections(conn, *, token, limit: int = PAGE) -> dict:
                           "note": lineage.note_text(conn, pid), "revision": p["revision"],
                           "unprojectable": p["unprojectable"]})
         return {"workflow": version.WORKFLOW, "bank_writes": gate, "projections": items,
-                "remaining_in_cycle": len(order) - len(page),
+                "quarter": quarter, "remaining_in_cycle": len(order) - len(page),
                 "snapshot_id": lineage.latest_import(conn), "notice": NOTICE}
 
 

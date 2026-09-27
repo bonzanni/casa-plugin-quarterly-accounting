@@ -16,6 +16,18 @@ class TestDates(unittest.TestCase):
             with self.assertRaises(ValueError):
                 dates.parse_quarter(bad)
 
+    def test_the_operators_quarter_words_normalize_to_the_canonical_form(self):
+        # fix wave F (3): the tool layer takes "Q3", "Q3 2026" and "2026-Q3"
+        today = "2026-09-28"
+        for said, canonical in (("2026-Q3", "2026-Q3"), ("2026-q3", "2026-Q3"),
+                                ("Q3", "2026-Q3"), ("q2", "2026-Q2"), (" Q3 2026 ", "2026-Q3"),
+                                ("Q1 2025", "2025-Q1"),
+                                # a bare quarter later than today's is last year's (reply rule)
+                                ("Q4", "2025-Q4"), ("Q4 2026", "2026-Q4")):
+            self.assertEqual(dates.normalize_quarter(said, today), canonical, said)
+        for bad in ("third quarter", "Q5", "2026Q3", "Q3-2026", "", None, 3, "2026-Q3x"):
+            self.assertIsNone(dates.normalize_quarter(bad, today), bad)
+
     def test_bounds(self):
         self.assertEqual(dates.quarter_bounds("2026-Q4"), ("2026-10-01", "2027-01-01"))
         self.assertEqual(dates.quarter_start("2026-08-14"), "2026-07-01")

@@ -4,6 +4,7 @@ replaced by tests/sim.triage (the auto-match bar on filed metadata); every
 bank-feed interaction is the real one."""
 import csv
 import io
+import json
 import re
 import unittest
 import zipfile
@@ -372,11 +373,9 @@ class TestRestoreAndReset(Base):
         self.assertNotIn("acct::matched", bf.tags(rid))
 
 
-class TestPackagingSeesTheClassification(Base):
-    """Round E1 (Astra S1): the CSV import carries no classification tags; only the
-    sweep's per-row read refreshes the classification the expectation and the kind
-    guard use. Packaging, driven through the tool layer against the real bank-feed
-    and its RENDERED get_transaction text, must sweep between import and build."""
+class ToolFlow(Base):
+    """The skill's flows driven through the tool layer (qa_server.handle) against the
+    real bank-feed and its RENDERED get_transaction text. No tests of its own."""
     def setUp(self):
         super().setUp()
         from tests.test_tools import _fresh_conn
@@ -410,12 +409,17 @@ class TestPackagingSeesTheClassification(Base):
         first_seen = re.search(r"first seen (\S+), last seen", text).group(1)
         return tags, notes, first_seen
 
-    def sweep(self, token):
-        """SKILL.md's sweep (the specialist's pass, step 5), through the tools."""
+    def sweep(self, token, budget=None, **scope):
+        """SKILL.md's sweep (the specialist's pass, step 5), through the tools: until
+        remaining_in_cycle is 0, or `budget` rows were read (the room ran out).
+        Returns what remains. `scope` is list_projections' quarter=, if any."""
         bf = self.bf
+        n = 0
         while True:
-            page = self.call("list_projections", pass_token=token)
+            page = self.call("list_projections", pass_token=token,
+                             **({"limit": budget - n} if budget is not None else {}), **scope)
             for item in page["projections"]:
+                n += 1
                 row_id = item["row_id"]
                 for _ in range(4):
                     text = bf.call("get_transaction", row_id=row_id)
@@ -440,13 +444,13 @@ class TestPackagingSeesTheClassification(Base):
                     else:
                         bf.call("add_note", row_ids=[row_id], note=ins["add_note"],
                                 author="agent", **kw)
-            if page["remaining_in_cycle"] == 0:
-                return
+            if page["remaining_in_cycle"] == 0 or (budget is not None and n >= budget):
+                return page["remaining_in_cycle"]
 
-    def package(self, sweep):
-        """SKILL.md's Packaging, step 1 (the specialist's package snapshot), then step 2."""
+    def snapshot_pass(self, trigger="package"):
+        """Ellen's begin_pass, then the specialist's probes (step 1) and snapshot (step 3)."""
         bf = self.bf
-        token = self.call("begin_pass", trigger="package")["pass_token"]
+        token = self.call("begin_pass", trigger=trigger)["pass_token"]
         accounts = [{"account_id": r["account_id"], "category": r["category"], "label": r["name"]}
                     for r in bf.conn.execute("SELECT account_id, category, name FROM accounts")]
         self.call("record_probe", pass_token=token, kind="bank_tools", ok=True)
@@ -459,6 +463,11 @@ class TestPackagingSeesTheClassification(Base):
         imp = self.call("import_ledger_export", path=bf.export(), pass_token=token,
                         ledger_instance=bf.last_export_instance)
         self.assertEqual(imp["erase_candidates"], [])
+        return token
+
+    def package(self, sweep):
+        """SKILL.md's Packaging, step 1 (the specialist's package snapshot), then step 2."""
+        token = self.snapshot_pass()
         if sweep:
             self.sweep(token)
         self.call("end_pass", pass_token=token, outcome="complete")
@@ -467,6 +476,13 @@ class TestPackagingSeesTheClassification(Base):
         rows = list(csv.DictReader(io.StringIO(z.read("ledger.csv").decode())))
         return sorted(n for n in z.namelist() if "/" in n), rows
 
+
+
+class TestPackagingSeesTheClassification(ToolFlow):
+    """Round E1 (Astra S1): the CSV import carries no classification tags; only the
+    sweep's per-row read refreshes the classification the expectation and the kind
+    guard use. Packaging, driven through the tool layer against the real bank-feed
+    and its RENDERED get_transaction text, must sweep between import and build."""
     def matched_then_reclassified(self):
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="A1", amount=1000, counterparty="Adobe")])
@@ -495,6 +511,113 @@ class TestPackagingSeesTheClassification(Base):
         self.assertEqual(files, ["unresolved/2026-07-05_Adobe_10.00.pdf"])
         self.assertEqual([(r["status"], r["expectation_kind"]) for r in rows],
                          [("UNCLASSIFIED", "")])
+
+
+class TestWaveF(ToolFlow):
+    """Fix wave F, end to end through the tools against the real bank-feed."""
+    def two_matched(self):
+        bf = self.bf
+        bf.fetch([bf.row("2026-07-05", ref="A1", amount=1000, counterparty="Adobe"),
+                  bf.row("2026-07-06", ref="B1", amount=2000, counterparty="Adobe")])
+        for r in self.active():
+            self.classify(r["row_id"], "software")
+        self.first_pass()
+        self.file(amount_minor=1000, document_date="2026-07-05")
+        self.file(amount_minor=2000, document_date="2026-07-06")
+        self.assertEqual(len(sim.run_pass(self.conn, bf)["triage"]["matched"]), 2)
+
+    def deliver(self, pkg):
+        staged = self.call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"])
+        return self.call("record_delivery", delivery_id=staged["delivery_id"],
+                         outcome="delivered")
+
+    def test_a_row_shipped_unread_raises_no_false_changed_alert(self):
+        # (1) the package pass's sweep has room for one of the two payments: the other
+        # ships unclassified (not re-read since the import). The next pass reads it and
+        # nothing changed — the accountant's copy is not "categorised differently".
+        self.two_matched()
+        token = self.snapshot_pass()
+        self.assertEqual(self.sweep(token, budget=1), 1)
+        self.call("end_pass", pass_token=token, outcome="interrupted")
+        pkg = self.call("build_quarterly_package", quarter="2026-Q3")
+        z = zipfile.ZipFile(pkg["path"])
+        rows = list(csv.DictReader(io.StringIO(z.read("ledger.csv").decode())))
+        self.assertEqual(sorted(r["status"] for r in rows), ["MATCHED", "UNCLASSIFIED"])
+        notes = z.read("notes.md").decode()
+        unread = notes.split("## Not re-read since the last bank check")[1].split("\n## ")[0]
+        self.assertIn("unresolved/", unread)                 # its set-aside invoice, named there
+        unresolved = notes.split("## Unresolved candidates")[1].split("\n## ")[0]
+        self.assertEqual(unresolved.strip(), "- none")        # it is no unresolved candidate
+        self.deliver(pkg)
+        end = sim.run_pass(self.conn, self.bf)["end"]
+        self.assertIsNone(end["speak"], end)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 0)
+
+    def test_a_reclassified_row_shipped_unread_is_still_alerted(self):
+        # the kind check stays: against the last known kind, a real change is reported
+        self.two_matched()
+        token = self.snapshot_pass()
+        self.sweep(token, budget=1)
+        self.call("end_pass", pass_token=token, outcome="interrupted")
+        stale = [r[0] for r in self.conn.execute(
+            "SELECT pid FROM projections WHERE class_observed_snapshot <"
+            " (SELECT max(snapshot_id) FROM snapshots)")]
+        self.assertEqual(len(stale), 1)
+        pkg = self.call("build_quarterly_package", quarter="2026-Q3")
+        self.deliver(pkg)
+        rid = sim.lineage_row(self.conn, stale[0])
+        self.bf.call("untag_transaction", row_ids=[rid], tags=["software"])
+        self.classify(rid, "refund")
+        sim.run_pass(self.conn, self.bf)
+        changes = [json.loads(a[0])["change"] for a in self.conn.execute(
+            "SELECT detail FROM alerts WHERE kind='delivered-changed'")]
+        self.assertEqual(changes, ["reclassified"])
+
+    def test_the_package_pass_sweeps_only_its_quarter(self):
+        # (2a) a package needs only its own rows fresh
+        bf = self.bf
+        bf.fetch([bf.row("2026-05-05", ref="Q2", amount=500, counterparty="Adobe"),
+                  bf.row("2026-07-05", ref="Q3", amount=1000, counterparty="Adobe")])
+        for r in self.active():
+            self.classify(r["row_id"], "software")
+        self.first_pass()
+        token = self.snapshot_pass()
+        page = self.call("list_projections", pass_token=token, quarter="Q3")
+        q3 = [p for p in work.quarter_pids(self.conn, "2026-Q3")]
+        self.assertEqual([i["pid"] for i in page["projections"]], q3)
+        cursor = "SELECT cycle_started_at, last_cycle_completed_at FROM cursor"
+        before = tuple(self.conn.execute(cursor).fetchone())
+        self.assertEqual(self.sweep(token, quarter="2026-Q3"), 0)
+        empty = self.call("list_projections", pass_token=token, quarter="2026-Q3")
+        self.assertEqual((empty["projections"], empty["remaining_in_cycle"]), ([], 0))
+        # the other quarter's payments are still owed a read: the cycle is not complete
+        self.assertEqual(tuple(self.conn.execute(cursor).fetchone()), before)
+        self.assertIsNotNone(before[0])
+        rest = self.call("list_projections", pass_token=token)
+        self.assertEqual([i["pid"] for i in rest["projections"]],
+                         work.quarter_pids(self.conn, "2026-Q2"))
+        end = self.call("end_pass", pass_token=token, outcome="complete", report={})
+        report = json.loads(self.conn.execute("SELECT report_json FROM passes WHERE pass_id=?",
+                                              (end["ended"],)).fetchone()[0])
+        # (2d) the pass records its throughput
+        self.assertEqual((report["swept_this_pass"], report["remaining_in_cycle"]), (1, 1))
+        self.assertEqual(self.call("check_setup")["last_pass"]["report"]["swept_this_pass"], 1)
+        pkg = self.call("build_quarterly_package", quarter="2026-Q3")
+        self.assertNotIn("not re-read", pkg["caption"])
+
+    def test_give_me_q3(self):
+        # (3) the skill's literal wording: "give me Q3" -> build_quarterly_package(quarter="Q3")
+        from unittest import mock
+        import datetime as _dt
+        self.two_matched()
+        token = self.snapshot_pass()
+        self.sweep(token, quarter="Q3")
+        self.call("end_pass", pass_token=token, outcome="complete")
+        autumn = _dt.datetime(2026, 10, 5, 9, 0, tzinfo=_dt.timezone.utc)
+        with mock.patch.object(db, "_clock", lambda: autumn):
+            pkg = self.call("build_quarterly_package", quarter="Q3")
+        self.assertTrue(pkg["filename"].endswith("-2026-Q3-2026-10-05.zip"), pkg["filename"])
+        self.assertEqual(self.deliver(pkg)["status"], "delivered")
 
 
 if __name__ == "__main__":

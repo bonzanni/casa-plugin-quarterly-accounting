@@ -204,6 +204,11 @@ def set_expectation_in_tx(conn, *, scope_type, scope, kind, tier=None, author,
             conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
                          " VALUES (?, '[]', ?)", (scope.strip(), db.now()))
             e = _entry(conn, scope)
+        if author == "specialist" and e["exp_author"] == "operator":
+            # the operator's ruling on this payee ("no invoices ever for X") is theirs
+            # to change; a specialist's write never silently replaces it (fix wave F)
+            raise db.Refusal(f"the operator set what {e['name']} needs; only the operator "
+                             "changes it — nothing was changed")
         if kind == "default":
             conn.execute("UPDATE counterparties SET exp_kind=NULL, exp_tier=NULL,"
                          " exp_author=NULL, updated_at=? WHERE cp_id=?", (db.now(), e["cp_id"]))

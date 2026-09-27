@@ -222,5 +222,56 @@ class TestConcurrency(TempEnv):
         self.assertEqual(before, after)
 
 
+class _CommitFails:
+    """A store connection whose COMMIT fails once (a full disk, an I/O error),
+    as the persistent tools._CONN would meet it."""
+    def __init__(self, conn, exc):
+        self._conn, self._exc = conn, exc
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, *args):
+        if sql == "COMMIT" and self._exc is not None:
+            exc, self._exc = self._exc, None
+            raise exc
+        return self._conn.execute(sql, *args)
+
+
+class TestTransactionFailure(TempEnv):
+    """Fix wave F (6): a failed COMMIT must not leave the transaction open (every
+    later call on the persistent connection answered "tx() does not nest" until a
+    restart), and a ROLLBACK after SQLite already rolled back must not mask the
+    original error."""
+    def setUp(self):
+        super().setUp()
+        self.conn = db.open_store()
+        self.addCleanup(self.conn.close)
+
+    def value(self):
+        return self.conn.execute("SELECT value FROM counters WHERE name='seq'").fetchone()[0]
+
+    def test_a_failed_commit_rolls_back_reraises_and_the_next_call_works(self):
+        before = self.value()
+        wrapped = _CommitFails(self.conn, sqlite3.OperationalError("disk I/O error"))
+        with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O error"):
+            with db.tx(wrapped):
+                db.next_seq(self.conn)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.value(), before)               # nothing of it landed
+        with db.tx(self.conn):                               # not wedged: no "does not nest"
+            db.next_seq(self.conn)
+        self.assertEqual(self.value(), before + 1)
+
+    def test_an_error_after_sqlite_already_rolled_back_is_the_one_raised(self):
+        with self.assertRaisesRegex(ValueError, "the original"):
+            with db.tx(self.conn):
+                self.conn.execute("ROLLBACK")                # SQLite gave the transaction up
+                raise ValueError("the original")
+        self.assertFalse(self.conn.in_transaction)
+        with db.tx(self.conn):
+            db.next_seq(self.conn)
+
+
 if __name__ == "__main__":
     unittest.main()

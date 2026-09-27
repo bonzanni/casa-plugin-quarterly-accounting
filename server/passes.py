@@ -20,6 +20,7 @@ import db
 import version
 
 STALE_AFTER_S = 3 * 3600
+OUTCOMES = ("complete", "interrupted", "stopped", "failed")
 PROBE_KINDS = ("bank_tools", "bank_accounts", "bank_sync", "ledger", "gmail")
 
 
@@ -74,16 +75,41 @@ def check_token(conn, token) -> None:
                          "its marker, or the store was reset); stop — nothing was written")
 
 
+def throughput(conn, pass_id: str) -> dict:
+    """What this pass's sweep got through (fix wave F): the lineages read since an
+    import THIS pass made (a read stamps the latest import, and only this pass's
+    reads can stamp one of its own imports), and what the cycle still owes —
+    None when the pass imported nothing. The first test-install pass measures
+    throughput with it; check_setup shows the last pass's report."""
+    import sweep
+    swept = conn.execute("SELECT COUNT(*) FROM projections WHERE merged_into IS NULL AND"
+                         " class_observed_snapshot IN (SELECT snapshot_id FROM snapshots"
+                         " WHERE pass_id=?)", (pass_id,)).fetchone()[0]
+    imported = conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?",
+                            (pass_id,)).fetchone() is not None
+    return {"swept_this_pass": swept,
+            "remaining_in_cycle": len(sweep._due(conn)) if imported else None}
+
+
 def end_pass(conn, token, outcome: str, report: dict) -> dict:
     import alerts
     import documents
+    if outcome not in OUTCOMES:
+        raise db.Refusal(f"outcome is one of {', '.join(OUTCOMES)}")
     with db.tx(conn):
         check_token(conn, token)
         m = _marker(conn)
+        full = {**(report or {}), **throughput(conn, m["pass_id"])}
         conn.execute("UPDATE passes SET ended_at=?, outcome=?, report_json=? WHERE pass_id=?",
-                     (db.now(), outcome, db.canonical(report or {}), m["pass_id"]))
+                     (db.now(), outcome, db.canonical(full), m["pass_id"]))
         conn.execute("UPDATE pass_marker SET live=0 WHERE id=1")
-    documents.reap_orphans(conn)
+    # The pass ended in the commit above. The reap is housekeeping: another session
+    # holding the documents lock past the bound must not make this answer "NOT
+    # applied — ask again" (fix wave F); the next pass's end reaps instead.
+    try:
+        documents.reap_orphans(conn)
+    except db.Busy:
+        pass
     return {"ended": m["pass_id"], "outcome": outcome, "speak": alerts.pending_rendering(conn)}
 
 

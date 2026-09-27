@@ -231,15 +231,45 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
                      " delivery_id=?", (outcome, message_id, db.now(), delivery_id))
         if outcome == "delivered" and d["package_id"] is not None:
             # the rows exactly as the package froze them: facts_fp is
-            # db.canonical(reducer.facts_of(row)), what ledger's delivered checks compare
+            # db.canonical(reducer.facts_of(row)), what ledger's delivered checks compare;
+            # kind is the one the accountant's copy stands for — shipped under, else the
+            # last known (a row shipped unclassified or not re-read; fix wave F)
             pk = conn.execute("SELECT manifest_json FROM packages WHERE package_id=?",
                               (d["package_id"],)).fetchone()
             for r in json.loads(pk[0])["rows"]:
                 conn.execute("INSERT OR REPLACE INTO delivered_rows(package_id, row_id, pid,"
                              " facts_fp, kind) VALUES (?,?,?,?,?)",
-                             (d["package_id"], r["row_id"], r["pid"], r["facts_fp"], r["kind"]))
+                             (d["package_id"], r["row_id"], r["pid"], r["facts_fp"],
+                              r["kind"] or r.get("last_known_kind")))
             conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
-        return {"delivery_id": delivery_id, "status": outcome}
+        out = {"delivery_id": delivery_id, "status": outcome}
+        if outcome == "uncertain" and d["package_id"] is not None:
+            out["speak"] = _offer_again(conn, d["package_id"])
+        return out
+
+
+def offer_lines(filename: str) -> list:
+    """The words that offer a package whose send may not have arrived — the same
+    in the status view and in the offer record_delivery returns."""
+    return [f"{filename} may not have arrived —", 'say "send it again".']
+
+
+def _offer_again(conn, package_id) -> dict:
+    """The rendering that offers a package whose send timed out (fix wave F):
+    "send it again" binds to what the most recent DELIVERED rendering offered
+    (resend_target), and right after a timeout none had offered it, so the
+    operator's "send it again" was refused. Composed through the one fit
+    (views.fit_message) and recorded like any rendering, with scope
+    offers=[that package]; Ellen sends it and marks it delivered."""
+    import views
+    fname = conn.execute("SELECT filename FROM packages WHERE package_id=?",
+                         (package_id,)).fetchone()[0]
+    text = views.fit_message(offer_lines(fname))
+    rid = f"r{db.next_seq(conn)}"
+    conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
+                 " membership_json) VALUES (?, 'offer', ?, ?, ?, '[]')",
+                 (rid, db.canonical({"offers": [package_id]}), db.now(), text))
+    return {"render_id": rid, "text": text}
 
 
 _LATEST = ("SELECT d.package_id, d.status, p.filename, p.quarter FROM deliveries d JOIN packages p"

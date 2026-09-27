@@ -35,6 +35,31 @@ def parse_quarter(q: str) -> tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
+_Q_WORDS = re.compile(r"^(?:(?P<y1>\d{4})-q(?P<n1>[1-4])|q(?P<n2>[1-4])(?:\s+(?P<y2>\d{4}))?)$")
+
+
+def normalize_quarter(text, today: str) -> str | None:
+    """The quarter an operator's words name, in the canonical YYYY-Qn — or None
+    when they name none. Accepted: "2026-Q3", "Q3 2026" and a bare "Q3" (case
+    and surrounding spaces ignored). A bare quarter later than today's is last
+    year's: "Q4" said in September means the Q4 that has happened (the reply
+    grammar's rule, now shared with the tool layer; fix wave F)."""
+    if not isinstance(text, str):
+        return None
+    m = _Q_WORDS.match(text.strip().lower())
+    if m is None:
+        return None
+    if m.group("y1"):
+        return f"{m.group('y1')}-Q{m.group('n1')}"
+    n = int(m.group("n2"))
+    if m.group("y2"):
+        return f"{m.group('y2')}-Q{n}"
+    year = int(today[:4])
+    if f"{year}-Q{n}" > quarter_of(today):
+        year -= 1
+    return f"{year}-Q{n}"
+
+
 def quarter_bounds(q: str) -> tuple[str, str]:
     year, n = parse_quarter(q)
     start = _dt.date(year, 3 * (n - 1) + 1, 1)

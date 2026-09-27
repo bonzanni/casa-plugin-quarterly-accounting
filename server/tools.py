@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import alerts  # noqa: F401  (registered indirectly through end_pass)
 import binding
+import dates
 import db
 import delivery
 import documents
@@ -92,6 +93,38 @@ def _deliverable(tool: str, out):
     return out
 
 
+QUARTER_WORDS = "a quarter is written like 2026-Q3 (Q3 and Q3 2026 are fine too)"
+
+
+def _quarter(args, name="quarter"):
+    """A quarter argument in the canonical YYYY-Qn (fix wave F): the model passes the
+    operator's words ("give me Q3"), so "Q3", "Q3 2026" and "2026-Q3" are taken, by
+    the reply grammar's rule; anything else is a refusal in words, never an error."""
+    v = args.get(name)
+    if v is None or v == "":
+        return None
+    q = dates.normalize_quarter(v, db.now()[:10])
+    if q is None:
+        raise db.Refusal(f"{QUARTER_WORDS}, not \"{v}\"")
+    return q
+
+
+def _when(args) -> str:
+    """set_watermark's start: a quarter (as _quarter) or a day, YYYY-MM-DD."""
+    v = args["when"]
+    q = dates.normalize_quarter(v, db.now()[:10])
+    if q is not None:
+        return q
+    try:
+        if not isinstance(v, str) or len(v) != 10:
+            raise ValueError
+        dates.parse_day(v)
+    except ValueError:
+        raise db.Refusal(f"the start is a quarter ({QUARTER_WORDS}) or a day like 2026-04-01, "
+                         f"not \"{v}\"") from None
+    return v
+
+
 def _pick(args, names):
     return {n: args[n] for n in names if n in args and args[n] is not None}
 
@@ -103,6 +136,7 @@ O = {"type": "object"}
 A = {"type": "array", "items": {"type": "string"}}
 AI = {"type": "array", "items": {"type": "integer"}}
 TOKEN = {"type": "integer", "description": "the pass_token from begin_pass"}
+Q = {"type": "string", "description": "YYYY-Qn, e.g. 2026-Q3 (Qn and Qn YYYY accepted)"}
 
 
 def obj(props, required=()):
@@ -308,12 +342,13 @@ def t_import(args):
           "where the last one stopped; remaining_in_cycle 0 = every one was), and the "
           "snapshot_id to pass to record_observation. For each: row_id to "
           "read with get_transaction, desired tags, the accounting note. bank_writes says whether "
-          "you may write and with which workflow and expected_generation.",
-          obj({"pass_token": TOKEN, "limit": I}, ("pass_token",)))
+          "you may write and with which workflow and expected_generation. quarter: only that "
+          "quarter's payments (the package pass: a package needs only its own rows read).",
+          obj({"pass_token": TOKEN, "limit": I, "quarter": Q}, ("pass_token",)))
 def t_list_proj(args):
     _need(args, "pass_token")
     return sweep.list_projections(conn(), token=_int(args, "pass_token"),
-                                  limit=_limit(args, 25))
+                                  limit=_limit(args, 25), quarter=_quarter(args))
 
 
 @register("record_observation",
@@ -349,8 +384,9 @@ def t_begin(args):
 
 
 @register("end_pass",
-          "End the pass (outcome: complete, interrupted, failed; report counts: checked, total, "
-          "not_searched). Returns `speak`: text to send the operator (the only unprompted "
+          "End the pass (outcome: complete, interrupted, stopped, failed; report counts: checked, "
+          "total, not_searched — the server adds what the sweep read this pass and what it still "
+          "owes). Returns `speak`: text to send the operator (the only unprompted "
           "message this plugin has) or null. If you send it, call mark_rendering_delivered.",
           obj({"pass_token": TOKEN, "outcome": S, "report": O}, ("pass_token", "outcome")))
 def t_end(args):
@@ -394,12 +430,12 @@ def t_bind(args):
 
 
 @register("set_watermark",
-          "Move the start earlier (YYYY-Qn or YYYY-MM-DD): 'start from Q2'. Later is not "
-          "offered.",
+          "Move the start earlier (a quarter — YYYY-Qn, e.g. 2026-Q2; Qn and Qn YYYY accepted — "
+          "or YYYY-MM-DD): 'start from Q2'. Later is not offered.",
           obj({"when": S}, ("when",)))
 def t_watermark(args):
     _need(args, "when")
-    return work.set_watermark(conn(), args["when"])
+    return work.set_watermark(conn(), _when(args))
 
 
 @register("set_package_name",
@@ -443,21 +479,25 @@ def t_search(args):
 @register("stop_chasing",
           "'stop chasing Q2': that quarter's missing items stay listed and ship as MISSING but "
           "are never searched again.",
-          obj({"quarter": S}, ("quarter",)))
+          obj({"quarter": Q}, ("quarter",)))
 def t_stop(args):
     _need(args, "quarter")
-    return work.stop_chasing(conn(), args["quarter"])
+    return work.stop_chasing(conn(), _quarter(args))
 
 
 # --- views and replies -------------------------------------------------------------
 @register("list_quarter_state",
           "Every payment of a quarter with its state, or triage=true for what needs searching "
-          "(required first, every quarter). Read it fresh for every question; never answer from "
-          "memory. Counts and totals come from build_review.",
-          obj({"quarter": S, "triage": B}))
+          "(required first; every quarter unless quarter is given): only the payments read since "
+          "the latest import (fresh_only=false for all; not_fresh counts the others), at most "
+          "limit (default 50; truncated and remaining say what was left out). Read it fresh for "
+          "every question; never answer from memory. Counts and totals come from build_review.",
+          obj({"quarter": Q, "triage": B, "fresh_only": B, "limit": I}))
 def t_state(args):
-    return work.list_quarter_state(conn(), args.get("quarter"),
-                                   triage_only=_bool(args, "triage", False))
+    return work.list_quarter_state(conn(), _quarter(args),
+                                   triage_only=_bool(args, "triage", False),
+                                   fresh_only=_bool(args, "fresh_only", True),
+                                   limit=_limit(args, work.TRIAGE_LIMIT))
 
 
 @register("build_review",
@@ -466,7 +506,7 @@ def t_state(args):
           "mark_rendering_delivered with its render_id. If the send fails, do not. When the "
           "operator says \"all of them\" or \"more\", call build_review again with exactly the "
           "arguments in `next` (view, quarter, page, after); `next` is null when nothing is left.",
-          obj({"view": S, "quarter": S, "pid": I, "page": I,
+          obj({"view": S, "quarter": Q, "pid": I, "page": I,
                "after": {"type": "array", "description": "the cursor from the previous `next`, "
                                                           "passed back unchanged"}}))
 def t_review(args):
@@ -474,7 +514,7 @@ def t_review(args):
     if after is not None and not isinstance(after, list):
         raise db.Refusal("after is the cursor a previous page's `next` returned")
     return _deliverable("build_review", views.build_review(
-        conn(), view=args.get("view") or "status", quarter=args.get("quarter"),
+        conn(), view=args.get("view") or "status", quarter=_quarter(args),
         pid=_int(args, "pid"), page=_int(args, "page"), after=after))
 
 
@@ -504,10 +544,10 @@ def t_reply(args):
 @register("build_quarterly_package",
           "Build the quarter's zip from what is known now (partial while the quarter runs). "
           "Returns its path and the caption to send with it.",
-          obj({"quarter": S}, ("quarter",)))
+          obj({"quarter": Q}, ("quarter",)))
 def t_build(args):
     _need(args, "quarter")
-    return package.build_quarterly_package(conn(), args["quarter"])
+    return package.build_quarterly_package(conn(), _quarter(args))
 
 
 @register("stage_for_delivery",
@@ -535,11 +575,14 @@ def t_stage(args):
 
 @register("record_delivery",
           "Record a send's outcome: delivered (email: only with the message id), uncertain (a "
-          "timeout — never resend by yourself), failed. During a pass, pass the pass_token.",
+          "timeout — never resend by yourself), failed. For a package recorded uncertain it "
+          "returns `speak`: send its text verbatim, then mark_rendering_delivered with its "
+          "render_id — it is what lets the operator say \"send it again\". During a pass, pass "
+          "the pass_token.",
           obj({"delivery_id": I, "outcome": S, "message_id": S, "pass_token": TOKEN},
               ("delivery_id", "outcome")))
 def t_record_delivery(args):
     _need(args, "delivery_id", "outcome")
-    return delivery.record_delivery(conn(), delivery_id=_int(args, "delivery_id"),
-                                    outcome=args["outcome"], message_id=args.get("message_id"),
-                                    pass_token=_int(args, "pass_token"))
+    return _deliverable("record_delivery", delivery.record_delivery(
+        conn(), delivery_id=_int(args, "delivery_id"), outcome=args["outcome"],
+        message_id=args.get("message_id"), pass_token=_int(args, "pass_token")))

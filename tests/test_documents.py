@@ -35,6 +35,26 @@ class TestCustody(StoreCase):
         self.assertEqual(stored.parent.name, first["sha256"][:2])
         self.assertEqual(stored.name, first["sha256"] + ".pdf")
 
+    def test_the_same_bytes_under_another_extension_reuse_the_held_file(self):
+        # fix wave F: the second filing left <sha>.png beside <sha>.pdf, which no row
+        # names and the reaper never removed (its stem is a held hash)
+        first = ingest(self.conn, self.publish("scan.pdf", PDF))
+        again = ingest(self.conn, self.publish("scan.png", PDF))
+        self.assertEqual(again["doc_id"], first["doc_id"])
+        d = self.data / "documents" / first["sha256"][:2]
+        self.assertEqual(sorted(f.name for f in d.iterdir()), [f"{first['sha256']}.pdf"])
+
+    def test_the_reaper_removes_a_held_hash_under_a_name_no_row_claims(self):
+        first = ingest(self.conn, self.publish("scan.pdf", PDF))
+        d = self.data / "documents" / first["sha256"][:2]
+        stray = d / f"{first['sha256']}.png"                  # left by an earlier version
+        stray.write_bytes(PDF)
+        old = time.time() - 7200
+        os.utime(stray, (old, old))
+        os.utime(d / f"{first['sha256']}.pdf", (old, old))
+        self.assertEqual(documents.reap_orphans(self.conn), 1)
+        self.assertEqual(sorted(f.name for f in d.iterdir()), [f"{first['sha256']}.pdf"])
+
     def test_a_path_outside_the_handoff_folder_is_refused(self):
         outside = self.tmp / "secret.pdf"
         outside.write_bytes(PDF)

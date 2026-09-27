@@ -131,6 +131,7 @@ class TestDeliverableBoundary(TempEnv):
 
     def test_every_operator_text_key_is_checked(self):
         from unittest import mock
+        import delivery
         import passes
         import reply
         import views
@@ -141,6 +142,10 @@ class TestDeliverableBoundary(TempEnv):
                   {"pass_token": 1, "outcome": "complete"}),
                  ("apply_reply", reply, "apply_reply",
                   {"receipt": "ok", "receipt_pages": ["ok", big]}, {"text": "all good"}),
+                 # fix wave F: the offer an uncertain package send returns
+                 ("record_delivery", delivery, "record_delivery",
+                  {"speak": {"render_id": "r1", "text": big}},
+                  {"delivery_id": 1, "outcome": "uncertain"}),
                  ("apply_reply", reply, "apply_reply",
                   {"receipt": big, "receipt_pages": [big]}, {"text": "all good"})]
         for tool, mod, fn, out, args in cases:
@@ -355,7 +360,7 @@ class TestArgumentTypes(ToolCase):
         import tools  # noqa: F401
         bools = [(n, k) for n, t in qa_server.TOOLS.items()
                  for k, v in t["schema"]["properties"].items() if v.get("type") == "boolean"]
-        self.assertEqual(len(bools), 11, bools)
+        self.assertEqual(len(bools), 12, bools)             # fix wave F: + fresh_only
         for n, k in bools:
             res = _tool(n, **{k: "false"})
             text = res["content"][0]["text"]

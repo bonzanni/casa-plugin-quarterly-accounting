@@ -56,7 +56,7 @@ class TestSkill(TempEnv):
                                         "instructions", "speak", "reshow", "true", "false",
                                         "bank_writes", "request_id", "labels", "runners_up",
                                         "can_run", "remaining_in_cycle", "erase_candidates",
-                                        "expected_ledger", "receipt_pages"}:
+                                        "expected_ledger", "receipt_pages", "not_fresh"}:
                 continue
             if "_" in n:
                 self.assertIn(n, ours | EXTERNAL, n)
@@ -224,6 +224,45 @@ class TestSkill(TempEnv):
                       "bank was re-read before it was sent", pack)
         self.assertIn("A send already under way at the moment of the check cannot be stopped",
                       pack)
+
+
+    # --- fix wave F -----------------------------------------------------------------------
+    def test_ellen_holds_the_package_and_handover_passes(self):
+        # (5) a delegation that dies must not strand the marker: Ellen begins and ends
+        for head, until, trigger in (("## Ellen: a document the operator hands over",
+                                      "## Ellen: the pass", "handover"),
+                                     ("## Packaging", "## Install", "package")):
+            sec = " ".join(self.section(head, until).split())
+            self.assertIn(f'`begin_pass(trigger="{trigger}")` yourself', sec, head)
+            self.assertRegex(sec.lower(), r"then `end_pass(\([^)]*\))?` yourself", head)
+            self.assertIn("never calls `begin_pass` or `end_pass` here", sec, head)
+            self.assertIn("`failed` if the delegation errored or ran out of turns", sec, head)
+        spec = " ".join(self.section("## The specialist's pass", "## Packaging").split())
+        self.assertNotIn("begin_pass(", spec)
+
+    def test_the_package_pass_sweeps_its_quarter(self):
+        pack = " ".join(self.section("## Packaging", "## Install").split())
+        self.assertIn("`list_projections(pass_token, quarter=<the quarter>)`", pack)
+
+    def test_the_sweep_is_batched_and_ends_interrupted_when_the_budget_runs_out(self):
+        sweep = " ".join(self.section("5. **Sweep.**", "6. **Triage.**").split())
+        self.assertIn("Work in batches", sweep)
+        self.assertIn("one write per row, then that row read again", sweep)
+        self.assertIn("the pass ends `interrupted`", sweep)
+        triage = " ".join(self.section("**Triage.**", "7. **Identity").split())
+        self.assertIn("at most 50 at a time", triage)
+        self.assertIn("`truncated`", triage)
+
+    def test_a_post_triage_sweep_mirrors_what_triage_decided(self):
+        # aligned to tests/sim.run_pass: triage, then the sweep once more
+        ident = " ".join(self.section("7. **Identity", "8. **Return").split())
+        self.assertIn("run it once more", ident)
+
+    def test_the_quarter_format_and_the_uncertain_offer(self):
+        self.assertIn('("give me Q3" is `quarter="Q3"`)', " ".join(SKILL.split()))
+        pack = " ".join(self.section("## Packaging", "## Install").split())
+        self.assertIn("`record_delivery` then returns `speak`", pack)
+        self.assertIn("that is what \"send it again\" binds to", pack)
 
 
 if __name__ == "__main__":
