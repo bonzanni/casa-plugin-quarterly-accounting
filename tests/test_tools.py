@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import unittest
@@ -239,16 +240,103 @@ class TestPaging(ToolCase):
             work.record_search(self.conn, pid=pid, token=token, queries=["x"])
         r = _json("build_review", view="missing", quarter="2026-Q3")
         self.assertIn('say "all of them"', r["text"])
-        seen, pages = set(), 0
+        seen, pages = set(re.findall(r"Vend\d{3}", r["text"])), 0
         nxt = r["next"]
         while nxt is not None:
             self.assertLess(pages, 50, "paging never ends: `next` is not honoured")
             r = _json("build_review", **json.loads(json.dumps(nxt)))   # as Ellen passes it
             pages += 1
-            seen |= {w for w in r["text"].split() if w.startswith("Vend")}
+            seen |= set(re.findall(r"Vend\d{3}", r["text"]))
             nxt = r["next"]
         self.assertGreater(pages, 1)
         self.assertEqual(len(seen), 200)
+
+
+class TestMachineWritesNeedAPass(ToolCase):
+    """D10: a specialist's write belongs to a pass (spec: a stale pass is refused
+    at every write into this plugin's own store); operator-side writes carry none."""
+    def test_a_specialist_filing_without_a_token_is_refused(self):
+        path = self.publish("s.pdf", b"%PDF-1.4\ns\n%%EOF\n")
+        self.assertEqual(_text("ingest_document", source_path=path, kind="invoice",
+                               source="gmail", extraction_author="specialist"),
+                         "refused: a specialist's filing belongs to a pass: pass the pass_token")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 0)
+        self.bind()
+        token = self.pass_()
+        self.assertIn("doc_id", _json("ingest_document", source_path=path, kind="invoice",
+                                      source="gmail", extraction_author="specialist",
+                                      pass_token=token))
+
+    def test_a_specialist_expectation_without_a_token_is_refused(self):
+        self.assertEqual(_text("set_expectation", scope_type="counterparty", scope="Adobe",
+                               kind="none", author="specialist"),
+                         "refused: a specialist's expectation belongs to a pass: pass the "
+                         "pass_token")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0],
+                         0)
+
+    def test_every_optional_token_write_says_to_pass_it(self):
+        import tools  # noqa: F401
+        optional = [n for n, t in qa_server.TOOLS.items()
+                    if "pass_token" in t["schema"]["properties"]
+                    and "pass_token" not in t["schema"]["required"]]
+        self.assertEqual(len(optional), 10, optional)
+        for n in optional:
+            self.assertIn("During a pass, pass the pass_token.",
+                          qa_server.TOOLS[n]["description"], n)
+
+
+class TestArgumentTypes(ToolCase):
+    def test_every_boolean_refuses_a_string(self):
+        import tools  # noqa: F401
+        bools = [(n, k) for n, t in qa_server.TOOLS.items()
+                 for k, v in t["schema"]["properties"].items() if v.get("type") == "boolean"]
+        self.assertEqual(len(bools), 11, bools)
+        for n, k in bools:
+            res = _tool(n, **{k: "false"})
+            text = res["content"][0]["text"]
+            if text.startswith("refused: missing argument"):
+                req = qa_server.TOOLS[n]["schema"]["required"]
+                filler = {"pid": 1, "doc_id": 1, "pass_token": 1, "kind": "gmail",
+                          "expected_revision": 0, "render_id": "r1", "channel": "telegram"}
+                res = _tool(n, **{r: filler[r] for r in req if r != k}, **{k: "false"})
+                text = res["content"][0]["text"]
+            self.assertEqual(text, f"refused: {k} must be true or false", (n, k))
+
+    def test_the_string_false_marks_nothing_irrelevant(self):
+        doc = self.doc()
+        self.assertEqual(_text("mark_irrelevant", doc_id=doc, irrelevant="false"),
+                         "refused: irrelevant must be true or false")
+        self.assertEqual(_text("mark_irrelevant", doc_id=doc, irrelevant="true"),
+                         "refused: irrelevant must be true or false")
+        self.assertFalse(self.conn.execute("SELECT irrelevant FROM documents WHERE doc_id=?",
+                                           (doc,)).fetchone()[0])
+
+    def test_the_string_false_spends_no_search_effort(self):
+        self.bind()
+        token = self.pass_()
+        self.row(1)
+        pid = self.lineage_for(1)
+        before = self.conn.execute("SELECT passes_without_candidate, search_state FROM"
+                                   " projections WHERE pid=?", (pid,)).fetchone()
+        self.assertEqual(_text("record_search", pid=pid, pass_token=token, exhausted="false"),
+                         "refused: exhausted must be true or false")
+        self.assertEqual(tuple(before), tuple(self.conn.execute(
+            "SELECT passes_without_candidate, search_state FROM projections WHERE pid=?",
+            (pid,)).fetchone()))
+
+    def test_limit_is_one_or_more(self):
+        self.bind()
+        token = self.pass_()
+        for bad in (0, -1):
+            self.assertEqual(_text("list_unmatched_documents", limit=bad),
+                             "refused: limit is 1 or more")
+            self.assertEqual(_text("list_projections", pass_token=token, limit=bad),
+                             "refused: limit is 1 or more")
+
+    def test_import_names_every_missing_argument(self):
+        self.assertEqual(_text("import_ledger_export"),
+                         "refused: missing argument(s): path, pass_token, ledger_instance")
 
 
 class TestSetupSentence(ToolCase):
