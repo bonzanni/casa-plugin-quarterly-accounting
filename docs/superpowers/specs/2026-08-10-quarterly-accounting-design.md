@@ -44,7 +44,9 @@ states it (792a5fa). **Converged at round 43: Astra SHIP, Terra SHIP, at 792a5fa
 nothing at S1/S2. The #56 floor stays mandatory: the newest bank-feed is below it.
 Revised 2026-09-22 — re-verified against casa **v0.328.0** and bank-feed **0.10.1**
 after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31 landed.
-Required floors: casa **0.326.0**, bank-feed **the release closing casa-specialist-finance#56** (§Casa baseline; 0.10.0 until #39 shipped, then 0.11.0).
+Required floors: casa **0.326.0**, bank-feed **0.13.0** (casa-specialist-finance component 0.14.0, which closed #56; §Casa baseline).
+Re-verified 2026-09-27 against casa **v0.328.6** and component **0.14.4**: nothing in between
+changes a contract this document relies on.
 Revised 2026-09-20 — re-verified against casa **v0.323.0**. Both scheduled-turn
 dependencies landed; the contracts they landed with (one attention lane, durable
 asks, background jobs) change the weekly pass. See “Casa baseline”.
@@ -303,10 +305,10 @@ attaches handoff files. bank-feed's `export_history` publishes its ledger export
 Casa's `share_inbound_file` copies a file the operator sent in Telegram there. This
 plugin vendors `casa_handoff.py` verbatim.
 
-**bank-feed floor: the release that closes
-[#56](https://github.com/bonzanni/casa-specialist-finance/issues/56)** (not shipped as of
-2026-09-25; the newest release, component 0.13.2 / bank-feed 0.12.2, is below it). This
-plugin is not released against anything lower. Five fixes sit at or below the floor, each
+**bank-feed floor: 0.13.0** (casa-specialist-finance component 0.14.0, 2026-09-25), the
+release that closed [#56](https://github.com/bonzanni/casa-specialist-finance/issues/56):
+"no surviving row's superseded_by names an erased row". This plugin is not released
+against anything lower. Five fixes sit at or below the floor, each
 load-bearing (re-verified 2026-09-24 against component 0.13.2):
 
 | bank-feed | Fix | Why this plugin needs it |
@@ -314,7 +316,7 @@ load-bearing (re-verified 2026-09-24 against component 0.13.2):
 | 0.8.1 | [#30](https://github.com/bonzanni/casa-specialist-finance/issues/30) — a pending row is superseded once; a stale second supersession is refused (`StalePlan`) | Otherwise overlapping syncs strand migrated annotations on a row no lineage walk reaches. |
 | 0.9.0 | [#31](https://github.com/bonzanni/casa-specialist-finance/issues/31) — `owner::name` tags are another workflow's | The whole `acct::` vocabulary below depends on it. |
 | **0.10.0** | `export_history` publishes into Casa's handoff folder | `import_ledger_export` takes the export only through `casa_handoff.capture` and refuses any other path. On 0.9.x the export lands in bank-feed's private data directory, so **packaging fails closed**. |
-| **the #56 release** (not yet shipped) | [#56](https://github.com/bonzanni/casa-specialist-finance/issues/56) — `purge` deletes a supersession chain whole or not at all | Ending a lineage on an erased row (§Match records, "A lineage can end") is only sound when an erasure cannot cut a chain. Below it, a date `purge` can delete a superseded predecessor and keep its successor, and the plugin would retire decisions about a payment that still exists (round 41). |
+| **0.13.0** | [#56](https://github.com/bonzanni/casa-specialist-finance/issues/56) — `purge` deletes a supersession chain whole or not at all | Ending a lineage on an erased row (§Match records, "A lineage can end") is only sound when an erasure cannot cut a chain. Below it, a date `purge` can delete a superseded predecessor and keep its successor, and the plugin would retire decisions about a payment that still exists (round 41). |
 | **0.11.0** | [#39](https://github.com/bonzanni/casa-specialist-finance/issues/39) — backups, a protected restore, and the restore point minted on a workflow's first write; `workflow` and `expected_generation` on `tag_transaction`, `untag_transaction` and `add_note` | Every accounting write carries both (§Setup, "Test install"). Below it the `workflow` argument is refused, and the pass says the ledger is below the floor rather than writing unfenced. |
 
 An earlier revision named 0.9.0 as the floor — correct for the namespace, one version
@@ -3179,7 +3181,7 @@ and is resent only when the operator asks, as that exact file.
 | ha-casa-app | [#573](https://github.com/bonzanni/ha-casa-app/issues/573) scheduled-turn `ask_user` — the half split out of #485. | **Shipped** — closed 2026-08-15. No longer needed by v1 (no button questions), kept here because the v1 spec was built on its absence. |
 | ha-casa-app | [#486](https://github.com/bonzanni/ha-casa-app/issues/486) shared handoff area (shipped, Casa 0.326.0), [#487](https://github.com/bonzanni/ha-casa-app/issues/487) specialist→resident requests. | gmail→store custody goes through the handoff folder (gmail 0.9.0); specialist asks stay structured work orders (#487 still open, still not a dependency). |
 | casa-specialist-finance (bank-feed) | **Backups and workflow restore points** (operator, 2026-09-22; §Setup, "Test install"): a new subsystem — `backup(reason)`, `list_backups` (timestamp, size, reason, restore events and registered workflow strings, from a durable index kept beside the database), `restore_backup(id)` as a protected tool restored in place as transactional SQL (attach the backup, replace every ordinary table's rows, `sqlite_sequence` last, the `notes_fts` index rebuilt rather than copied, a `ledger_meta` marker holding the restore operation id) inside one `BEGIN IMMEDIATE` with the consent-binding preflight in the same transaction — not the backup API, which refuses a destination with an open transaction; consistent copies under the write lock (WAL); reasons `weekly` / `install:<workflow>` / `manual`; bounded retention for `weekly`, unbounded for install backups; the weekly backup taken from the finance pass. **The first write carrying an unregistered workflow string mints `install:<workflow>` inside that write's lock, before the write**; a namespaced tag write without a workflow string is refused; a restore unregisters the workflows whose install backups are at or after the restored point. `tag_transaction`, `untag_transaction` and `add_note` gain optional `workflow` and `expected_generation` arguments; a write carrying a workflow string must carry `expected_generation`, and is rejected when it differs from the ledger's restore generation. | **Shipped** — filed 2026-09-22 as [casa-specialist-finance#39](https://github.com/bonzanni/casa-specialist-finance/issues/39), merged 2026-09-23 as component 0.12.0 (bank-feed 0.11.0, the floor). This plugin never writes to bank-feed without it: a bank-feed that refuses the `workflow` argument is below the floor, and the pass says so. |
-| casa-specialist-finance (bank-feed) | **Lineage-closed `purge`**: a row is deleted only when its whole supersession chain is; a NULL `booking_date` counts as not before the cutoff; the reply counts the rows before the cutoff kept to keep chains whole (operator ruling 2026-09-25, round 41). | **Filed 2026-09-25 as [casa-specialist-finance#56](https://github.com/bonzanni/casa-specialist-finance/issues/56).** A dependency: the bank-feed floor is the release that closes it (§Casa baseline). |
+| casa-specialist-finance (bank-feed) | **Lineage-closed `purge`**: a row is deleted only when its whole supersession chain is; a NULL `booking_date` counts as not before the cutoff; the reply counts the rows before the cutoff kept to keep chains whole (operator ruling 2026-09-25, round 41). | **Shipped 2026-09-25** as component 0.14.0 (bank-feed 0.13.0, the floor), [casa-specialist-finance#56](https://github.com/bonzanni/casa-specialist-finance/issues/56). |
 | ha-casa-app | **"Forget everything retained since <timestamp>"** — a time-bounded memory wipe, so a test window's retained engagements can be dropped without wiping the bank. | **Filed 2026-09-22 as [ha-casa-app#1045](https://github.com/bonzanni/ha-casa-app/issues/1045)**. Not a dependency: the residual is stated in §Setup, "Test install". |
 | Resident config | **One** weekly trigger (§Setup), plugin assignment to both roles. No quarter-end trigger: packaging happens only when the operator asks. | Operator/configurator action at install time. |
 
