@@ -31,7 +31,7 @@ _AMOUNT = re.compile(r"(?:eur\s*|€\s*)?(\d{1,3}(?:,\d{3})*\.\d{2}|\d+[.,]\d{2}
 _DATE = re.compile(r"\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b")
 _T = r"(?:the\s+)?(?P<t>.+?)(?:\s+one)?"
 PATTERNS = [
-    ("bulk_except", re.compile(r"all (?:good|fine|correct|right) (?:except|but) .+")),
+    ("bulk_except", re.compile(r"all (?:good|fine|correct|right) (?:except|but) (?P<t>.+)")),
     ("all_good", re.compile(r"all (?:good|fine|correct|right)")),
     ("unpair", re.compile(_T + r"\s+(?:is|are)\s+(?:wrong|not right|incorrect)")),
     ("unpair", re.compile(r"no to\s+(?:the\s+)?(?P<t>.+?)(?:\s+one)?")),
@@ -57,12 +57,16 @@ CLASS_SCOPES = {"payslips": ("salary", "payroll"), "statements": ("fees", "inter
 def _clauses(text: str) -> list:
     """Sentences, lower-cased; a sentence ending in "?" keeps its "?" so the
     caller can tell a question from a correction."""
-    t = re.sub(r"^\s*accounting\s*:\s*", "", text.strip(), flags=re.I)
+    # spec §Recognising a reply: "accounting" ANYWHERE binds the message to this
+    # plugin; it is the escape word, not part of any clause
+    t = re.sub(r"[,:]?\s*\baccounting\b\s*[,:]?", " ", text.strip(), flags=re.I)
     parts = re.split(r"(?<!\d)\.(?!\d)|;|\n|(?<=\?)", t)
-    return [re.sub(r"\s+", " ", p).strip().lower() for p in parts if p.strip()]
+    out = [re.sub(r"\s+", " ", p).strip(" ,:").lower() for p in parts]
+    return [p for p in out if p]
 
 
-_KIND_WORDS = {"sales-invoice": "sales invoice", "credit-note": "credit note"}
+_KIND_TOKEN = re.compile(r"\b(an?) (" + "|".join(sorted(views.KIND_WORD, key=len, reverse=True))
+                         + r")\b")
 
 
 def _say(conn, exc) -> str:
@@ -79,11 +83,15 @@ def _say(conn, exc) -> str:
         except db.Refusal:
             return "another payment"
     msg = re.sub(r"(?:another )?payment #(\d+)", payment, msg)
-    msg = re.sub(r"\s*(?:pairing|document|transaction)?\s*#\d+", "", msg)
+    noun = {"pairing": "pairing", "document": "document", "transaction": "payment"}
+    msg = re.sub(r"\bno (pairing|document|transaction) #\d+",
+                 lambda m: f"no such {noun[m.group(1)]}", msg)
+    msg = re.sub(r"\b(?:the |this |that )?(pairing|document|transaction) #\d+",
+                 lambda m: f"that {noun[m.group(1)]}", msg)
+    msg = re.sub(r"\s*#\d+", "", msg)
     msg = re.sub(r"'([^']*)'", "\u201c\\1\u201d", msg)
     msg = msg.replace("the operator", "you")
-    for k, w in _KIND_WORDS.items():
-        msg = msg.replace(k, w)
+    msg = _KIND_TOKEN.sub(lambda m: f"{m.group(1)} {views.KIND_WORD[m.group(2)]}", msg)
     return re.sub(r"\b([aA]) (?=[aeiouAEIOU])", r"\1n ", msg)
 
 
@@ -299,7 +307,10 @@ def apply_reply(conn, text: str) -> dict:
 
 def _apply(conn, run, verb, m, items):
     if verb == "bulk_except":
-        run.lines.append("Nothing applied for that: say \"all good\" and \"the Zapier one is "
+        t = re.sub(r"^the\s+|\s+one$", "", m.group("t").strip())
+        d, _ = _resolve(conn, t, items)
+        who = d["counterparty"] if d is not None else t
+        run.lines.append(f"Nothing applied for that: say \"all good\" and \"the {who} one is "
                          "wrong\" as two sentences, or only the one that is wrong.")
         run.unresolved += 1
         return
@@ -342,7 +353,16 @@ def _apply(conn, run, verb, m, items):
         said = kb.norm(m.group("t"))
         name = next((d["counterparty"] for d in items
                      if said in (kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"]))),
-                    m.group("t").strip())
+                    None)
+        if name is None:
+            known = kb.counterparty_for(conn, said)
+            if known is None:
+                # none -> say so, never create a payee from a typo (fix round 1)
+                run.lines.append(f"Nothing open matches “{m.group('t').strip()}”, and I know no "
+                                 "payee by that name — nothing applied.")
+                run.unresolved += 1
+                return
+            name = known["name"]
         _broad(conn, run, lambda: kb.set_expectation_in_tx(
                    conn, scope_type="counterparty", scope=name, kind="none",
                    author="operator", render_id=_last_delivered(conn)),
@@ -449,6 +469,24 @@ def _last_delivered(conn):
     return r[0] if r else None
 
 
+def _set_aside_all(conn, d) -> dict:
+    """"Wrong" on a payment with several displayed candidates sets them ALL
+    aside or none (fix round 1): inside one transaction every candidate is
+    checked against the revision the operator was shown BEFORE the first
+    write; any refusal rolls the whole set back and the payment is re-shown."""
+    with db.tx(conn):
+        bound = []
+        for c in d["candidates"]:
+            rid, rev = _bind_match(conn, d, c["match_id"])
+            authorship.require_match_shown(conn, d["pid"], c["match_id"], rid, rev)
+            bound.append((c["match_id"], rid, rev))
+        effects = []
+        for mid, rid, rev in bound:
+            effects += matches.reject_in_tx(conn, match_id=mid, expected_revision=rev,
+                                            render_id=rid)["effects"]
+        return {"set_aside": [b[0] for b in bound], "effects": effects}
+
+
 def _one(conn, run, verb, d, m):
     cur = d["current"]
     if verb == "unpair":
@@ -459,18 +497,18 @@ def _one(conn, run, verb, d, m):
                 render_id=_bind_match(conn, d, cur["match_id"])[0]),
                 lambda res: f"Unpaired {views.headline(d)}.")
         elif d["candidates"]:
-            for c in d["candidates"]:
-                run.guarded(d, lambda c=c: matches.reject_match(
-                    conn, match_id=c["match_id"],
-                    expected_revision=_bind_match(conn, d, c["match_id"])[1],
-                    render_id=_bind_match(conn, d, c["match_id"])[0]),
-                    lambda res: f"Set aside a candidate for {views.headline(d)}.")
+            n = len(d["candidates"])
+            run.guarded(d, lambda: _set_aside_all(conn, d),
+                        lambda res: f"Set aside {'both' if n == 2 else n} candidate"
+                        f"{'s' if n != 1 else ''} for {views.headline(d)}.")
         else:
             run.lines.append(f"{views.headline(d)} has nothing paired to remove — say it needs no "
                              "document, or hand me the invoice.")
+            run.unresolved += 1                   # a no-op correction blocks its rebuild
     elif verb == "confirm":
         if cur is None:
             run.lines.append(f"{views.headline(d)} has no single pairing to approve.")
+            run.unresolved += 1
         elif not views._needs_check(d):
             run.lines.append(f"{views.headline(d)} was already fine.")
         else:

@@ -358,5 +358,88 @@ class TestPreflightRulings(Base):
         self.assertIn("\"all good\"", out["receipt"])
 
 
+
+class TestFixRound1(Base):
+    def candidates(self):
+        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        docs = []
+        for _ in range(2):
+            docs.append(self.doc())
+            matches.record_match(self.conn, pid=pid, doc_id=docs[-1], author="auto",
+                                 expected_revision=self.rev(pid), token=self.token,
+                                 row_snapshot=self.snapshot(pid))
+        self.deliver(view="check")
+        return pid, docs
+
+    def states(self):
+        return [r[0] for r in self.conn.execute("SELECT state FROM match_state ORDER BY match_id")]
+
+    def test_candidates_are_set_aside_all_or_none(self):
+        import documents
+        pid, docs = self.candidates()
+        documents.update_document_metadata(self.conn, docs[0], document_date="2026-09-01")
+        before = self.states()
+        out = reply.apply_reply(self.conn, "the Adobe one is wrong")
+        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        self.assertEqual(self.states(), before)
+        self.assertNotIn("rejected", self.states())
+        self.assertIn("changed since you saw it", out["receipt"])
+        self.assertNotIn("Set aside", out["receipt"])
+
+    def test_unchanged_candidates_are_all_set_aside(self):
+        pid, _ = self.candidates()
+        out = reply.apply_reply(self.conn, "the Adobe one is wrong")
+        self.assertEqual(self.states(), ["rejected", "rejected"])
+        self.assertIn("Set aside both candidates for Adobe", out["receipt"])
+        self.assertEqual(len(out["applied"]), 1)
+        del pid
+
+    def test_a_numbered_refusal_keeps_its_noun(self):
+        self.item("Zapier", 9900, "2026-09-17")
+        self.deliver()
+        with mock.patch.object(matches, "reject_match",
+                               side_effect=db.Refusal("there is no pairing #12")):
+            out = reply.apply_reply(self.conn, "the Zapier one is wrong")
+        self.assertIn("there is no such pairing", out["receipt"])
+        self.assertEqual(reply._say(self.conn, db.Refusal("see document #4 first")),
+                         "see that document first")
+
+    def test_machine_kinds_become_words(self):
+        said = reply._say(self.conn, db.Refusal(
+            "this payment needs a credit-note, and this is a other"))
+        self.assertEqual(said, "this payment needs a credit note, and this is a document")
+
+    def test_a_rule_for_an_unknown_vendor_creates_nothing(self):
+        self.item("Adobe", 18000, "2026-09-16", paired=False)
+        self.deliver()
+        out = reply.apply_reply(self.conn, "no invoices ever for Adbe")
+        self.assertEqual(out["applied"], [])
+        self.assertIn("Nothing open matches", out["receipt"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
+
+    def test_a_no_op_correction_blocks_its_rebuild(self):
+        self.item("Zapier", 9900, "2026-09-17", paired=False)
+        self.deliver()
+        for text in ("Zapier is wrong; rebuild it", "Zapier is good; rebuild it"):
+            out = reply.apply_reply(self.conn, text)
+            self.assertEqual(out["instructions"], [], text)
+            self.assertIn("Not rebuilding yet", out["receipt"], text)
+
+    def test_the_escape_word_binds_anywhere(self):
+        z = self.item("Zapier", 9900, "2026-09-17")
+        self.deliver()
+        out = reply.apply_reply(self.conn, "the Zapier one is wrong, accounting")
+        self.assertIsNone(self.author(z))
+        self.assertIn("Unpaired Zapier", out["receipt"])
+        self.assertNotIn("didn't understand", out["receipt"])
+
+    def test_bulk_except_cites_the_vendor_written(self):
+        self.item("Vercel", 1210, "2026-09-18")
+        self.deliver()
+        out = reply.apply_reply(self.conn, "all good except the Vercel")
+        self.assertIn('"the Vercel one is wrong"', out["receipt"])
+        self.assertNotIn("Zapier", out["receipt"])
+
+
 if __name__ == "__main__":
     unittest.main()
