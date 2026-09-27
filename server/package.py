@@ -52,11 +52,24 @@ def doc_filename(doc: dict, used: set, fallback_date: str) -> str:
     amount = f"{doc['amount_minor'] // 100}.{doc['amount_minor'] % 100:02d}" \
         if doc.get("amount_minor") is not None else "0.00"
     base = f"{doc.get('document_date') or fallback_date}_{_slug(doc.get('issuer') or doc.get('counterparty'))}_{amount}"
+    # `used` holds casefolded names: Adobe_… and ADOBE_… are one file on a
+    # case-insensitive filesystem (Windows/macOS extraction), and one would
+    # silently replace the other there.
     name = f"{base}.{doc['ext']}"
-    if name in used:
-        name = f"{base}_{doc['sha256'][:8]}.{doc['ext']}"
-    used.add(name)
+    n = 1
+    while name.casefold() in used:
+        n += 1
+        name = f"{base}_{doc['sha256'][:8]}{'' if n == 2 else f'-{n - 1}'}.{doc['ext']}"
+    used.add(name.casefold())
     return name
+
+
+def _place(folder: str, doc: dict, used: set, named: dict, fallback_date: str) -> str:
+    """One document gets ONE name per folder, however many lines carry it."""
+    key = (folder, doc["doc_id"])
+    if key not in named:
+        named[key] = f"{folder}/{doc_filename(doc, used, fallback_date)}"
+    return named[key]
 
 
 def _freeze(conn, quarter: str) -> dict:
@@ -99,7 +112,7 @@ def _freeze(conn, quarter: str) -> dict:
 
 
 def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple:
-    files, used, manifest_rows, matched_docs = {}, set(), [], []
+    files, used, named, manifest_rows, matched_docs = {}, set(), {}, [], []
     missing, unclassified, nice, unresolved_lines, anomalies = [], [], [], [], []
     table = [list(COLUMNS)]
     for ln in frozen["lines"]:
@@ -112,7 +125,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         if d is not None and d["status"] == "matched" and d["current"]:
             doc = ln["docs"][d["current"]["match_id"]]
             folder = route(doc["kind"], exp["tier"] or "required")
-            docname = f"{folder}/{doc_filename(doc, used, dates.effective_date(r))}"
+            docname = _place(folder, doc, used, named, dates.effective_date(r))
             files[docname] = documents_bytes(doc)
             matched_docs.append(doc["sha256"])
             confidence = "; ".join(x for x in d["current"]["labels"] if x != "clean")
@@ -120,7 +133,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 notes.append("confirmed by the operator")
         elif d is not None and ln["docs"]:
             for mid, doc in sorted(ln["docs"].items()):
-                name = f"unresolved/{doc_filename(doc, used, dates.effective_date(r))}"
+                name = _place("unresolved", doc, used, named, dates.effective_date(r))
                 files[name] = documents_bytes(doc)
                 unresolved_lines.append((d, name))
         if d is not None:

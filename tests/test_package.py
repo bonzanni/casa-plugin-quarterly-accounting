@@ -137,6 +137,41 @@ class TestContents(Base):
         self.assertEqual(cells, [[package.xml_safe(c) for c in r] for r in csv_rows])
         self.assertIn("Line\rbreak  odd", cells[1])
 
+    def test_names_differing_only_by_case_are_distinct_after_casefold(self):
+        # fix round 1: Adobe_… and ADOBE_… are one file on Windows/macOS
+        a, b = self.line(), self.line()
+        self.pair(a, self.file_doc(issuer="Adobe", body=b"1"))
+        self.pair(b, self.file_doc(issuer="ADOBE", body=b"2"))
+        _, z = self.build()
+        names = [n for n in z.namelist() if n.startswith("invoices/")]
+        self.assertEqual(len(names), 2)
+        self.assertEqual(len({n.casefold() for n in names}), 2)
+
+    def test_doc_filename_never_repeats_a_name_casefolded(self):
+        used = set()
+        doc = {"amount_minor": 100, "document_date": "2026-07-02", "issuer": "X",
+               "ext": "pdf", "sha256": "ab" * 32}
+        names = [package.doc_filename(doc, used, "2026-07-02") for _ in range(4)]
+        self.assertEqual(len({n.casefold() for n in names}), 4)
+
+    def test_one_document_on_several_lines_gets_one_name_per_folder(self):
+        # fix round 1: a candidate on two lines shipped twice in unresolved/ (X, X_h8)
+        a, b = self.line(), self.line()
+        doc = self.file_doc()
+        with db.tx(self.conn):
+            for pid in (a, b):
+                mid = self.conn.execute("INSERT INTO matches(pid_created, doc_id, created_seq)"
+                                        " VALUES (?,?,?)", (pid, doc, db.next_seq(self.conn))
+                                        ).lastrowid
+                self.conn.execute("INSERT INTO match_state(match_id, pid, doc_id, state, author,"
+                                  " activation) VALUES (?,?,?,'conflicted','auto',1)",
+                                  (mid, pid, doc))
+        _, z = self.build()
+        names = [n for n in z.namelist() if n.startswith("unresolved/")]
+        self.assertEqual(names, ["unresolved/2026-07-02_Adobe_100.00.pdf"])
+        notes = z.read("notes.md").decode()
+        self.assertEqual(notes.count("unresolved/2026-07-02_Adobe_100.00.pdf"), 2)
+
     def test_same_day_same_amount_same_vendor_documents_get_distinct_names(self):
         a, b = self.line(), self.line()
         self.pair(a, self.file_doc(body=b"1"))
