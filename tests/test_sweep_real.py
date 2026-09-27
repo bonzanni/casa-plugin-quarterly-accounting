@@ -376,6 +376,83 @@ class TestEndsAndErasure(Base):
             sweep.record_observation(self.conn, pid=self.pid_of(self.rid()), token=self.token,
                                      not_found=True)
 
+    def ended_residue(self, pid):
+        return [tuple(r) for r in self.conn.execute(
+            "SELECT reason, detail FROM residue WHERE pid=? AND reason='ended' ORDER BY rowid",
+            (pid,))]
+
+    def test_a_vanished_row_purged_later_stays_vanished_and_gains_no_residue(self):
+        # fix round 1: _confirm_erased on an already-ended lineage recorded a false
+        # "ended erased" residue on every pass
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")], cap=bankfeed.CAP_UNKNOWN)
+        self.new_pass()
+        self.cycle()
+        pid = self.pid_of(self.rid())
+        self.bf.fetch([], cap=bankfeed.CAP_UNKNOWN)
+        self.new_pass()
+        self.cycle()
+        self.bf.purge_before("2026-12-31")
+        for _ in range(3):
+            self.new_pass()
+            self.cycle()
+        out = sweep.record_observation(self.conn, pid=pid, token=self.token, not_found=True)
+        self.assertEqual((out["ended"], out["instructions"]), ("vanished", {}))
+        self.assertEqual(lineage.projection(self.conn, pid)["ended"], "vanished")
+        self.assertEqual(self.ended_residue(pid), [("ended", "vanished")])
+
+    def test_confirming_an_erasure_twice_records_one_end(self):
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.new_pass()
+        self.cycle()
+        pid = self.pid_of(self.rid())
+        self.bf.purge_before("2026-08-01")
+        self.new_pass()
+        self.assertEqual(lineage.projection(self.conn, pid)["ended"], "erased")
+        out = sweep.record_observation(self.conn, pid=pid, token=self.token, not_found=True)
+        self.assertEqual(out["instructions"], {})
+        self.assertEqual(self.ended_residue(pid), [("ended", "erased")])
+
+    def test_an_observation_of_an_erased_lineage_reads_and_writes_nothing(self):
+        # spec §The sweep step 2: an erased row id may name another ledger's payment;
+        # an observation of it is a no-op, never an identity check that stops the pass
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.new_pass()
+        self.cycle()
+        pid = self.pid_of(self.rid())
+        self.bf.purge_before("2026-08-01")
+        self.new_pass()
+        before = lineage.projection(self.conn, pid)
+        out = sweep.record_observation(self.conn, pid=pid, token=self.token,
+                                       observed_tags=["acct::open"], observed_notes=[],
+                                       observed_first_seen="2030-01-01T00:00:00Z")
+        self.assertEqual(out["instructions"], {})
+        self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
+        after = lineage.projection(self.conn, pid)
+        self.assertEqual((after["observed_tags_json"], after["revision"]),
+                         (before["observed_tags_json"], before["revision"]))
+
+    def test_a_note_that_did_not_land_is_recorded_not_retried(self):
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.new_pass()
+        item = sweep.list_projections(self.conn, token=self.token)["projections"][0]
+        real_call = self.bf.call
+        notes = []
+
+        def refusing_note(tool, **args):
+            if tool == "add_note":
+                notes.append(tool)
+                return "refused: the journal is full"
+            return real_call(tool, **args)
+        self.bf.call = refusing_note
+        try:
+            out = sim.observe_and_repair(self.conn, self.bf, self.token, item)
+        finally:
+            self.bf.call = real_call
+        self.assertEqual(notes, ["add_note"])
+        self.assertEqual(out.get("recorded"), "the write was refused; reported, not retried")
+        self.assertIn("journal is full",
+                      lineage.projection(self.conn, item["pid"])["last_error"])
+
 
 class TestUnknownExpectation(Base):
     def test_purge_erase_keeps_machine_matches_and_only_a_retagged_row_is_retired(self):

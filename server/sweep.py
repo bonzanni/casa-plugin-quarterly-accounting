@@ -82,9 +82,21 @@ def _advance(conn, pid: int) -> None:
     conn.execute("UPDATE cursor SET last_pid=max(last_pid, ?) WHERE id=1", (pid,))
 
 
+def _ended_noop(conn, p) -> dict:
+    """An observation of a lineage that has already ended changes nothing: an
+    erased one's row id may name another payment (spec §The sweep, step 2), and
+    a vanished one whose row later left the ledger stays vanished."""
+    _advance(conn, p["pid"])
+    return {"pid": p["pid"], "status": p["status"], "ended": p["ended"],
+            "desired": json.loads(p["desired_json"]), "instructions": {},
+            "bank_writes": None, "read_back": False}
+
+
 def _confirm_erased(conn, pid: int) -> dict:
     cur = passes.current_pass(conn)
     p = lineage.projection(conn, pid)
+    if p["ended"]:
+        return _ended_noop(conn, p)
     if cur is None or cur["snapshot_id"] is None or not cur["account_seen"]:
         raise db.Refusal("nothing can be judged ended without this pass's own snapshot of the "
                          "bound account (not checked)")
@@ -114,6 +126,8 @@ def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=N
         passes.check_token(conn, token)
         pid = lineage.resolve_pid(conn, pid)
         proj = lineage.projection(conn, pid)
+        if proj["ended"] == "erased":
+            return _ended_noop(conn, proj)
         if not_found:
             return _confirm_erased(conn, pid)
         _require_proven_import(conn)

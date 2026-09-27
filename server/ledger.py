@@ -58,9 +58,10 @@ def parse(name: str, data: bytes) -> list:
 
 
 def end_lineage(conn, pid: int, how: str, snapshot_id=None) -> None:
-    conn.execute("UPDATE projections SET ended=?, ended_at=?, ended_snapshot=? WHERE pid=?"
-                 " AND ended IS NULL", (how, db.now(), snapshot_id, pid))
-    lineage.add_residue(conn, pid, "ended", how)
+    cur = conn.execute("UPDATE projections SET ended=?, ended_at=?, ended_snapshot=? WHERE pid=?"
+                       " AND ended IS NULL", (how, db.now(), snapshot_id, pid))
+    if cur.rowcount == 1:          # a lineage ends once; a second call records nothing
+        lineage.add_residue(conn, pid, "ended", how)
 
 
 def merge(conn, survivor: int, loser: int) -> None:

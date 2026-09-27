@@ -8,7 +8,8 @@ procedure SKILL.md prescribes; the skill must say exactly this, in words:
     else record_observation(observed_tags, observed_notes)
     make the ONE returned write (untag, tag or add_note) with workflow,
       expected_generation and expected_ledger exactly as returned
-    a write that did not take -> record_observation(write_error=<reply>)
+    a write that did not take (the tags or the note are not on the row after it)
+      -> record_observation(write_error=<reply>); nothing more for that row
     read the row again and record_observation again; repeat until nothing is
       returned (plan §D14; round p5: never two writes without a read between)
 """
@@ -54,7 +55,10 @@ def observe_and_repair(conn, bf, token, item) -> dict:
             if not set(ins["tag"]) <= set(bf.tags(row_id)):
                 return sweep.record_observation(conn, pid=pid, token=token, write_error=out)
         else:
-            bf.call("add_note", row_ids=[row_id], note=ins["add_note"], author="agent", **kw)
+            out = bf.call("add_note", row_ids=[row_id], note=ins["add_note"], author="agent",
+                          **kw)
+            if ins["add_note"] not in bf.notes(row_id):
+                return sweep.record_observation(conn, pid=pid, token=token, write_error=out)
         got = _read(bf, row_id)
         if got is None:
             return sweep.record_observation(conn, pid=pid, token=token, not_found=True)

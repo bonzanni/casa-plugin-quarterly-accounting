@@ -233,6 +233,18 @@ class TestDeliveredBankHalf(Base):
         self.assertEqual(out["delivered_changes"], 0)
 
 
+class TestEndLineage(Base):
+    def test_a_lineage_ends_once_and_records_one_residue(self):
+        self.imp([{"row_id": 1}])
+        (pid,) = self.live()
+        with db.tx(self.conn):
+            ledger.end_lineage(self.conn, pid, "vanished")
+            ledger.end_lineage(self.conn, pid, "erased")
+        self.assertEqual(lineage.projection(self.conn, pid)["ended"], "vanished")
+        self.assertEqual([tuple(r) for r in self.conn.execute(
+            "SELECT reason, detail FROM residue WHERE pid=? AND reason='ended'", (pid,))],
+            [("ended", "vanished")])
+
 class TestDeliveredKindHalf(Base):
     deliver = TestDeliveredBankHalf.deliver
     alerts = TestDeliveredBankHalf.alerts
