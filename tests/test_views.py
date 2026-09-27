@@ -349,13 +349,13 @@ class TestSheet(Base):
             self.assertIn(views.CLIP_MARK, r["text"])
             self.assertEqual(r["printed"], 1)
 
-    def test_the_fit_is_the_net_under_the_line_clip(self):
-        # fix wave D round 2: with the per-line clip disabled, the final fit alone
+    def test_the_fit_is_the_net_under_the_field_clip(self):
+        # fix wave D round 2/3: with the link field clip disabled, the final fit alone
         # keeps the text deliverable, and a cut text binds nothing (D3).
         kb.upsert_counterparty(self.conn, "Adobe", source="portal",
                                document_link="https://adobe.example/" + "x" * 5000)
         pid = self.add()
-        with mock.patch.object(views, "LINE_MAX", 10 ** 6):
+        with mock.patch.object(views, "LINK_MAX", 10 ** 6):
             for r in (self.render(), self.render("item", pid=pid), self.render("all")):
                 self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
                 self.assertEqual(r["printed"], 0)

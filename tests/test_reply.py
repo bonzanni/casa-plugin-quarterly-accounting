@@ -596,6 +596,39 @@ class TestReceiptSplit(Base):
             ln for ln in [ask, "Unpaired Figma · EUR 18.15 · 15 Sep."]))
 
 
+class TestFieldClip(Base):
+    """fix wave D round 3: a whole line clipped at 600 units stayed bound although
+    what identified it (amount, date, a second candidate) was cut away. Only
+    free-text FIELDS are clipped; identifying fields always print."""
+    def test_two_payees_with_one_long_prefix_each_show_amount_and_date(self):
+        prefix = "Consolidated Holding Services " * 24              # ~720 characters
+        a = self.item(prefix + "Alpha", 10101, "2026-09-03")
+        b = self.item(prefix + "Beta", 20202, "2026-09-04")
+        r = self.deliver()
+        flat = " ".join(r["text"].split())
+        self.assertIn("EUR 101.01 · 3 Sep", flat)
+        self.assertIn("EUR 202.02 · 4 Sep", flat)
+        self.assertIn(views.CLIP_MARK, r["text"])                 # the payee field was clipped
+        self.assertLess(views.utf16_len(r["text"]), 1500)
+        self.assertEqual(sorted(views.render_items(self.conn, r["render_id"])), sorted([a, b]))
+        reply.apply_reply(self.conn, "all good")
+        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("operator", "operator"))
+
+    def test_a_long_invoice_number_never_hides_the_next_candidate(self):
+        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        for number in ("N" * 590, "HIDDEN-B"):
+            d = self.doc(document_number=number)
+            matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
+                                 expected_revision=self.rev(pid), token=self.token,
+                                 row_snapshot=self.snapshot(pid))
+        r = self.deliver(view="check")
+        self.assertIn("HIDDEN-B", r["text"])
+        self.assertIn(views.CLIP_MARK, r["text"])
+        self.assertLess(views.utf16_len(r["text"]), 1000)
+        out = reply.apply_reply(self.conn, "the Adobe one is wrong")
+        self.assertIn("Set aside both candidates", out["receipt"])
+
+
 class TestIntegration(Base):
     def test_a_counted_but_unprinted_payment_is_reshown_not_changed(self):
         # a never-searched payment is counted ("not searched"), not printed: the

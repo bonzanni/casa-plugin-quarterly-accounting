@@ -179,6 +179,31 @@ class TestUnboundedDetail(StoreCase):
         self.check("\U0001f6a8" * 3000)
 
 
+class TestOversizedParkedRendering(StoreCase):
+    """fix wave D round 3 (Astra S2): an undelivered alert rendering saved
+    oversized by earlier code is never reused; it is re-composed through the fit."""
+    def setUp(self):
+        super().setUp()
+        self.bind()
+
+    def test_an_oversized_parked_rendering_is_recomposed(self):
+        t = self.pass_()
+        passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
+        first = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        with db.tx(self.conn):                  # what pre-fix code could have saved
+            self.conn.execute("UPDATE renders SET text=? WHERE render_id=?",
+                              ("x" * 5000, first["render_id"]))
+        t = self.pass_()
+        passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
+        again = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        self.assertNotEqual(again["render_id"], first["render_id"])
+        self.assertLessEqual(views.utf16_len(again["text"]), views.TELEGRAM_LIMIT)
+        self.assertIn("Gmail", again["text"])
+        views.mark_rendering_delivered(self.conn, again["render_id"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM alerts WHERE sent_at IS NULL")
+                         .fetchone()[0], 0)
+
+
 class TestAlertRace(StoreCase):
     """end_pass commits pass_marker.live=0 before calling pending_rendering, so
     a second pass can begin, re-observe the same still-failing occurrence and

@@ -38,11 +38,11 @@ CHANGE_WORD = {"corrected": "corrected by the bank", "superseded": "replaced by 
                "vanished": "withdrawn by the bank", "erased": "erased from the ledger",
                "reclassified": "now categorised differently"}
 MORE_CLOSING = "More changed than fits in one message — the rest comes with the next check."
-# Displayed detail with no natural bound is clipped (views.clip, with its mark)
-# before composing (fix wave D round 2): a probe's diagnostic, and any one
-# sentence or package heading. So every occurrence fits a message on its own.
+# Only free-text FIELDS are clipped (fix wave D round 3): a probe's diagnostic
+# here, and in views.headline the payee text. The payment's amount and date,
+# the package's name (a 32-character slug) and the change are never clipped,
+# so every occurrence prints what identifies it and fits a message on its own.
 DETAIL_MAX = 300
-LINE_MAX = views.LINE_MAX
 
 
 def _units(conn, rows) -> list:
@@ -54,8 +54,8 @@ def _units(conn, rows) -> list:
         if a["kind"] in COLLECTION:
             detail = views.clip(json.loads(a["detail"])["detail"] or "", DETAIL_MAX)
             paren = f" ({detail})" if detail else ""
-            line = views.clip(COLLECTION[a["kind"]].format(paren=paren), LINE_MAX)
-            out.append((a["alert_id"], None, views._wrap(line)))
+            out.append((a["alert_id"], None,
+                        views._wrap(COLLECTION[a["kind"]].format(paren=paren))))
     changed = []
     for a in rows:
         if a["kind"] == "delivered-changed":
@@ -65,8 +65,7 @@ def _units(conn, rows) -> list:
         pid = conn.execute("SELECT pid FROM aliases WHERE row_id=?", (c["row_id"],)).fetchone()
         head = views.headline(work.describe(conn, pid[0])) if pid else f"payment #{c['row_id']}"
         word = CHANGE_WORD.get(c["change"], c["change"])
-        line = views.clip(f"{head} — {word}", LINE_MAX)
-        out.append((a["alert_id"], (pkg, c["quarter"]), views._wrap(line)))
+        out.append((a["alert_id"], (pkg, c["quarter"]), views._wrap(f"{head} — {word}")))
     return out
 
 
@@ -76,7 +75,7 @@ def _lines(units) -> tuple:
     lines, owners, pkg = [], [], None
 
     def put(text, owner=None):
-        for w in views._wrap(views.clip(text, LINE_MAX)):
+        for w in views._wrap(text):
             lines.append(w)
             owners.append(owner)
 
@@ -149,8 +148,10 @@ def pending_rendering(conn):
             rid = next(iter(parked))
             r = conn.execute("SELECT text, scope_json FROM renders WHERE render_id=? AND"
                              " delivered_at IS NULL", (rid,)).fetchone()
+            # reused only if it is still deliverable: a rendering saved oversized by
+            # earlier code is re-composed through the fit instead (round 3)
             if r is not None and sorted(json.loads(r["scope_json"]).get("alerts", [])) \
-                    == sorted(ids):
+                    == sorted(ids) and views.utf16_len(r["text"]) <= views.TELEGRAM_LIMIT:
                 return {"render_id": rid, "text": r["text"]}
         rid = f"r{db.next_seq(conn)}"
         conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"

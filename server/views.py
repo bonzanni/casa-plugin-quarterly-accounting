@@ -40,6 +40,21 @@ def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+# Only unbounded free-text FIELDS are clipped, each to its own bound (fix wave D
+# round 3): a payee / bank counterparty text, a document number or recipient, a
+# runner-up description, a residue detail — FIELD_MAX; a link — LINK_MAX. What
+# identifies an item or a candidate (amount, currency, date, kind, the "Could
+# be:" enumeration itself) is never clipped, so a bound item always prints
+# everything that identifies it (D3). A whole line is never clipped: that cut
+# the amount and date, or a second candidate, off lines that stayed bound.
+FIELD_MAX = 60
+LINK_MAX = 200
+
+
+def field(text, units: int = FIELD_MAX) -> str:
+    return clip(text, units) if text else text
+
+
 def _wrap(line: str) -> list:
     if len(line) <= WIDTH:
         return [line]
@@ -68,7 +83,7 @@ def _money(d) -> str:
 
 
 def headline(d: dict, view_quarter=None) -> str:
-    parts = [d["counterparty"], _money(d), _day(d["date"])]
+    parts = [field(d["counterparty"]), _money(d), _day(d["date"])]
     kind = d["expectation"]["kind"]
     if kind and kind not in ("invoice", "none"):
         parts.append(KIND_WORD[kind])
@@ -85,7 +100,7 @@ def _a(word: str) -> str:
 
 def _docname(doc: dict) -> str:
     w = KIND_WORD.get(doc["kind"], "document")
-    return f"{w} {doc['number']}" if doc.get("number") else w
+    return f"{w} {field(doc['number'])}" if doc.get("number") else w
 
 
 def evidence(d: dict) -> list:
@@ -108,7 +123,7 @@ def evidence(d: dict) -> list:
             # a no-ref line never named its invoice, yet "all good" confirmed it)
             out.insert(0, f"Paired with {name} ({_day(doc['date'])}).")
         if "guessed" in labels:
-            others = "; ".join(cur["runners_up"])
+            others = "; ".join(field(x) for x in cur["runners_up"])
             out.append(f"Picked {name} ({_day(doc['date'])}); {others} also fits." if others
                        else f"Picked {name} among several that fit.")
         if "no-ref" in labels:
@@ -117,7 +132,7 @@ def evidence(d: dict) -> list:
             out.append("The search was cut short, so this may not be the only fit.")
         if "recipient?" in labels:
             out.append(f"{name[0].upper() + name[1:]} names "
-                       f"{doc.get('recipient') or 'someone else'}, not the business.")
+                       f"{field(doc.get('recipient')) or 'someone else'}, not the business.")
         if d["status"] == "proposed" and len(out) == 1:
             out.append("Not sure — say if it's wrong.")
     if d["candidates"]:
@@ -184,7 +199,7 @@ def _missing_detail(d) -> list:
     elif d["search"].get("incomplete"):
         out.append("Search incomplete — resumes next pass.")
     if d["link"]:
-        out.append(d["link"])
+        out.append(field(d["link"], LINK_MAX))
     if d["search_state"] == "accepted-missing":
         out.append("No longer chased.")
     return out
@@ -301,7 +316,7 @@ def _residue_blocks(conn) -> tuple:
             freed = conn.execute("SELECT COUNT(*) FROM log WHERE pid=? AND kind='retire' AND"
                                  " cause='row-ended'", (r["pid"],)).fetchone()[0]
             tail = "its document is free again" if freed else "nothing was paired to it"
-            line = f"{head} left the bank ledger ({r['detail']}) — {tail}"
+            line = f"{head} left the bank ledger ({field(r['detail'])}) — {tail}"
         elif r["reason"] == "occupied":
             line = f"{head} — that document is already on another payment"
         elif r["reason"] == "kind-mismatch":
@@ -459,7 +474,8 @@ def _compose(conn, view, q, items, members, lead):
                            else "Everything matched cleanly.")
             if printed_guessed:
                 # the example names an item this very text shows
-                out.append(f'Tell me if one is wrong — "the {printed_guessed[0]} one is wrong".')
+                out.append(f'Tell me if one is wrong — "the {field(printed_guessed[0])} one is '
+                           'wrong".')
         if view in ("status", "all", "missing") and missing:
             out.append("Download the PDFs and email them to yourself, then")
             out.append('say "check emailed invoices" to file them now.')
@@ -468,16 +484,8 @@ def _compose(conn, view, q, items, members, lead):
     return parts
 
 
-# Any one displayed line is clipped (clip, with its mark) before wrapping: bank
-# counterparty texts and extracted document fields have no natural bound, and
-# a block of a few bounded lines always fits a page, so paging always advances
-# and what a page prints can be bound (fix wave D round 2).
-LINE_MAX = 600
-
-
 def _text(lines) -> str:
-    return "\n".join(w for line in lines
-                     for w in (_wrap(clip(line, LINE_MAX)) if line else [""]))
+    return "\n".join(w for line in lines for w in (_wrap(line) if line else [""]))
 
 
 def _emit(parts, picks, *, announce, more=None, cap=None, all_sections_empty_msgs=True):

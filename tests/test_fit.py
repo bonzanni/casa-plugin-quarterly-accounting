@@ -124,9 +124,22 @@ class TestViewsProperty(Base):
                 if nxt is not None:
                     self.assertTrue('say "more"' in r["text"] or 'say "all of them"' in r["text"],
                                     (view, r["text"][-120:]))
+                flat = _flat(r["text"])
                 for pid in views.render_items(self.conn, r["render_id"]):
-                    shown = views.clip(names[pid], views.LINE_MAX).split(" ")[0]
-                    self.assertIn(shown, r["text"], (view, pid))
+                    # every bound item prints what identifies it: amount and date
+                    d = work.describe(self.conn, pid)
+                    self.assertIn(views._money(d) + " · " + views._day(d["date"]), flat,
+                                  (view, pid))
+                    self.assertIn(names[pid][:20], flat, (view, pid))
+                    # and every pairing it binds is printed by its document's name
+                    row = self.conn.execute("SELECT match_revisions_json FROM render_items"
+                                            " WHERE render_id=? AND pid=?",
+                                            (r["render_id"], pid)).fetchone()
+                    for mid in json.loads(row[0]):
+                        doc = self.conn.execute(
+                            "SELECT d.document_number FROM match_state m JOIN documents d"
+                            " ON d.doc_id=m.doc_id WHERE m.match_id=?", (int(mid),)).fetchone()
+                        self.assertIn(_flat(views.field(doc[0]))[:20], flat, (view, pid, mid))
                 if nxt is None or "after" not in nxt:
                     break
                 page, after = nxt["page"], nxt["after"]
