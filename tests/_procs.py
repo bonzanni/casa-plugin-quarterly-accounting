@@ -41,3 +41,18 @@ def open_fresh(path, barrier):
     barrier.wait(30)
     conn = db.open_store(path)
     conn.close()
+
+
+def machine_pair(path, pid, doc_id, token, expected_revision, snapshot, out):
+    import db
+    import matches
+    conn = db.open_store(path)
+    try:
+        r = matches.record_match(conn, pid=pid, doc_id=doc_id, author="auto",
+                                 expected_revision=expected_revision, row_snapshot=snapshot,
+                                 token=token)
+        out.put(("ok", r["match_id"], r["state"]))
+    except Exception as exc:          # reported to the parent, never swallowed
+        out.put(("error", type(exc).__name__, str(exc)))
+    finally:
+        conn.close()
