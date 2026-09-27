@@ -160,8 +160,25 @@ def _parse_target(phrase: str) -> dict:
     return {"vendor": kb.norm(p) or None, "amount": amount, "day": day}
 
 
-def _matches(d, t) -> bool:
-    if t["vendor"] and t["vendor"] not in (kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"])):
+def _names(d, seen=None) -> set:
+    """Every name a payment answers to: its stored names, and the name the
+    latest delivered rendering showed it as (round 7: "A·B" is shown "A•B",
+    so "the A•B one" may mean either payment)."""
+    out = {kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"])}
+    if seen and str(d["pid"]) in seen:
+        out.add(kb.norm(seen[str(d["pid"])]))
+    return out
+
+
+def _seen_names(conn) -> dict:
+    """pid (str) -> the payee name the latest delivered rendering printed."""
+    import json
+    last = db.last_delivered(conn)
+    return json.loads(last["scope_json"]).get("names", {}) if last is not None else {}
+
+
+def _matches(d, t, seen=None) -> bool:
+    if t["vendor"] and t["vendor"] not in _names(d, seen):
         return False
     if t["amount"] is not None and d["amount_minor"] != t["amount"]:
         return False
@@ -190,7 +207,8 @@ def _resolve(conn, phrase, items):
     rendering printed, exactly (round 6: a payee literally named "Adobe ref
     e40c" is not a ref). Several readings, or several payments: ask."""
     t = _parse_target(phrase)
-    hits = [d for d in items if _matches(d, t)]
+    seen_names = _seen_names(conn)
+    hits = [d for d in items if _matches(d, t, seen_names)]
     refs = _delivered_refs(conn)
     m = _REF.search(phrase)
     if m and m.group(1) in refs:
@@ -198,7 +216,7 @@ def _resolve(conn, phrase, items):
         rt = _parse_target(rest)
         rt_ok = rt["vendor"] or rt["amount"] is not None or rt["day"] is not None
         hits += [d for d in items if d["pid"] == refs[m.group(1)]
-                 and (not rt_ok or _matches(d, rt) or (rt["vendor"] is None
+                 and (not rt_ok or _matches(d, rt, seen_names) or (rt["vendor"] is None
                                                        and _matches_loose(d, rt)))]
     seen, uniq = set(), []
     for d in hits:
@@ -209,8 +227,7 @@ def _resolve(conn, phrase, items):
     if len(hits) == 1:
         return hits[0], None
     if not hits:
-        same = [d for d in items if t["vendor"] and t["vendor"] in
-                (kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"]))]
+        same = [d for d in items if t["vendor"] and t["vendor"] in _names(d, seen_names)]
         msg = f"Nothing open matches “{phrase}”."
         if same:
             msg += " Open for that name: " + "; ".join(views.headline(d) for d in same) + "."
@@ -470,9 +487,16 @@ def _apply(conn, run, verb, m, items):
         return
     if verb == "never":
         said = kb.norm(m.group("t"))
-        name = next((d["counterparty"] for d in items
-                     if said in (kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"]))),
-                    None)
+        seen_names = _seen_names(conn)
+        fits = sorted({d["counterparty"] for d in items if said in _names(d, seen_names)})
+        if len(fits) > 1:           # the name the operator saw fits several payees: ask
+            ask = (f"Which one? “{m.group('t').strip()}” could be " + " or ".join(
+                views.field(n) for n in fits) + " — nothing applied.")
+            run.asks.append(ask)
+            run.lines.append(ask)
+            run.unresolved += 1
+            return
+        name = fits[0] if fits else None
         if name is None:
             known = kb.counterparty_for(conn, said)
             if known is None:

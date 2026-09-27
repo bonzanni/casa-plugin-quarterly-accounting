@@ -879,6 +879,7 @@ def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=
     # between composing and recording bound the operator to an unseen document).
     with db.tx(conn):
         members, chosen, scope, nxt = [], [], {"quarter": q, "pid": pid}, None
+        items = []
         if lead[0] is not None:
             text = fit_message(_text(lead[0]), FIT_CLOSING)
             scope["stop"] = True
@@ -940,6 +941,12 @@ def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=
             refs = {_NAMES.pids[p]: p for p in printed if _NAMES.pids.get(p)}
             if refs:
                 scope["refs"] = refs
+            # the payee name each bound payment was SHOWN as: a reply resolves names
+            # against what the operator saw, as well as the stored names (round 7)
+            by_pid = {d["pid"]: d for d in items}
+            seen = {str(p): field(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
+            if seen:
+                scope["names"] = seen
         rid = f"r{db.next_seq(conn)}"
         conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                      " membership_json) VALUES (?,?,?,?,?,?)",

@@ -441,3 +441,52 @@ class TestBindable(unittest.TestCase):
         text = "Adobe\nEUR 1.00 · 1\nSep"
         self.assertEqual(views._bindable([self.blk(1, "Adobe · EUR 1.00 · 1 Sep", {})], text),
                          {1: set()})
+
+
+class TestSeenNameProperty(Base):
+    """fix wave D round 7: a reply resolves names against what the operator
+    SAW as well as the stored names. Payees whose literal values display alike
+    ("A·B" and "A•B"): a correction never lands on a payment other than the
+    one meant — it applies to exactly that one, or asks and applies nothing."""
+    def test_a_correction_never_lands_on_another_payment(self):
+        rng = random.Random(7)
+        family = ("A\u00b7B", "A\u2022B", "a\u2022b", "A\u00b7 B", "A \u2022B")
+        pids = {}
+        for i in range(rng.randint(6, 12)):
+            name = rng.choice(family)
+            amount = rng.choice((5445, 7000))
+            day = rng.choice(("2026-09-14", "2026-09-16"))
+            self.n += 1
+            self.row(self.n, counterparty=name, amount_minor=amount, booking_date=day,
+                     value_date=day)
+            pid = self.lineage_for(self.n)
+            self.classify(pid, {"software"})
+            self.settle(pid)
+            d = self.doc(counterparty=name, issuer=name, amount_minor=amount,
+                         document_date=day, document_number="N%d" % i)
+            matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
+                                 expected_revision=self.rev(pid), row_snapshot=self.snapshot(pid),
+                                 token=self.token, labels=("guessed",))
+            pids[pid] = (name, amount, day)
+
+        def paired(p):
+            return self.conn.execute("SELECT 1 FROM match_state WHERE pid=? AND state IN"
+                                     " ('matched','proposed')", (p,)).fetchone() is not None
+        for _ in range(12):
+            r = views.build_review(self.conn, view="status", quarter="2026-Q3")
+            views.mark_rendering_delivered(self.conn, r["render_id"])
+            live = [p for p in pids if paired(p)]
+            if not live:
+                break
+            target = rng.choice(live)
+            name, amount, day = pids[target]
+            shown = views.field(name)
+            words = [shown] + rng.choice(([], ["%.2f" % (amount / 100)],
+                                          ["%.2f" % (amount / 100), views._day(day)]))
+            before = {p: paired(p) for p in pids}
+            out = reply.apply_reply(self.conn, "the %s one is wrong" % " ".join(words))
+            changed = [p for p in pids if before[p] != paired(p)]
+            self.assertLessEqual(set(changed), {target}, (words, out["receipt"]))
+            if not changed:
+                self.assertTrue(out["asks"] or out["reshow"] or "not applied" in out["receipt"],
+                                out["receipt"])

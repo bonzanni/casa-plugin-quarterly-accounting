@@ -821,6 +821,39 @@ class TestIdentity(Base):
         out = reply.apply_reply(self.conn, "the Adobe one is wrong")
         self.assertIn("Set aside 5 candidates", out["receipt"])
 
+    def test_a_name_that_displays_like_another_asks(self):
+        # round 7 (Astra S1): "A·B" displays as "A•B"; "the A•B one is wrong" unpaired the
+        # literal "A•B" while the payment shown as "A•B" stayed — no question asked
+        a = self.item("A\u00b7B", 5445, "2026-09-14", labels=("guessed",))
+        b = self.item("A\u2022B", 7000, "2026-09-16", labels=("guessed",))
+        r = self.deliver()
+        self.assertEqual(" ".join(r["text"].split()).count("A\u2022B \u00b7 EUR"), 2)
+        out = reply.apply_reply(self.conn, "the A\u2022B one is wrong")
+        self.assertEqual(out["applied"], [])
+        self.assertIn("Which one?", out["receipt"])
+        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
+        out = reply.apply_reply(self.conn, "the A\u2022B 54.45 one is wrong")
+        self.assertIsNone(self.author(a))                       # the amount tells them apart
+        self.assertEqual(self.author(b)[0], "auto")
+
+    def test_a_name_that_displays_like_another_asks_with_equal_facts(self):
+        a = self.item("A\u00b7B", 5445, "2026-09-14", labels=("guessed",))
+        b = self.item("A\u2022B", 5445, "2026-09-14", labels=("guessed",))
+        r = self.deliver()
+        self.assertEqual(" ".join(r["text"].split()).count(" \u00b7 ref "), 2)
+        out = reply.apply_reply(self.conn, "the A\u2022B one is wrong")
+        self.assertEqual(out["applied"], [])
+        self.assertIn("or the ref", out["receipt"])
+        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
+
+    def test_a_rule_for_a_name_that_displays_like_another_asks(self):
+        self.item("A\u00b7B", 5445, "2026-09-14", labels=("guessed",))
+        self.item("A\u2022B", 7000, "2026-09-16", labels=("guessed",))
+        self.deliver()
+        out = reply.apply_reply(self.conn, "no invoices ever for A\u2022B")
+        self.assertEqual(out["applied"], [])
+        self.assertIn("Which one?", out["receipt"])
+
     def test_a_four_hex_digest_collision_is_lengthened(self):
         # round 5 (Astra S1): "A"*65+"149" and +"257" share the digest 0844
         n1, n2 = "A" * 65 + "149", "A" * 65 + "257"
