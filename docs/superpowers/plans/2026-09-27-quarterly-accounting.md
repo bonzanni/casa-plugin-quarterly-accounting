@@ -23,6 +23,16 @@ The agents drive the whole flow through the skill:
 
 **Spec:** `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.md` (converged at round 43, tree 792a5fa; floor pinned in 99c259b). Executors read the spec section each task names **before** writing code. Where this plan and the spec disagree, the spec wins, except where §"Decisions and errata" below says otherwise and gives the reason.
 
+**Review status:** converged at round p10 (tree b93f71a). Astra (`gpt-6-astra`, medium) and Terra (`gpt-5.6-terra`, medium) both **SHIP**, nothing at S1/S2.
+- Both executed the plan literally in disposable copies against the real bank-feed (component v0.14.4), and the full suite was green: 306 tests.
+- Every mutated guard failed its test: occupancy, both shown-revision bindings, not-found evidence, the restore gate, revive.
+- Rounds p1–p9 are recorded in each fix commit's message (`git log 1cbda9c..b93f71a`).
+- Ledger identity (D4) was generalized after three rounds found the same shape. Reply binding (`_broad`) was generalized after two.
+- **Owed before execution — operator decisions:**
+  - D1: 33 tools (spec erratum).
+  - D4: the "the bank ledger was reset" sentence; the upstream bank-feed ledger id and `expected_ledger` write precondition, to be filed if accepted.
+  - D8 and D9: spec errata.
+
 ## Global Constraints
 
 - Python **3.11**, **standard library only** in `server/`. No `requirements.txt`, no vendored third-party code in `server/`. `casa_handoff.py` is vendored **verbatim** from bank-feed (spec §Casa baseline).
