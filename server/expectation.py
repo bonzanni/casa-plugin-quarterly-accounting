@@ -87,8 +87,11 @@ def decisive(tags, direction: str):
         if stmt:
             return 10, stmt
         return 11, tags
+    # Row 12 is the chain `income, interest` / `income, dividend`
+    # specifically (spec lines 907-908) — the marker alone, without the
+    # `income` root, is row 13's "unknown chain" (S1, round on 61bcbaa).
     nodoc = tags & CRDT_NO_DOCUMENT
-    if nodoc:
+    if nodoc and "income" in tags:
         return 12, nodoc
     return 13, tags
 

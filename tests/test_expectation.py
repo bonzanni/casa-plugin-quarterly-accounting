@@ -44,6 +44,11 @@ ORACLE = [
     (C, {"income", "dividend"}, {}, ("none", None, 12, False)),
     (C, {"income", "consulting"}, {}, ("sales-invoice", REQ, 13, False)),
     (C, {"income", "salary"}, {}, ("sales-invoice", REQ, 13, False)),
+    # S1 (Astra round on 61bcbaa): `interest`/`dividend` without the `income`
+    # root is row 13's "unknown chain", not row 12 — row 12 is specifically
+    # the chain `income, interest` / `income, dividend` (spec lines ~907-908).
+    (C, {"interest"}, {}, ("sales-invoice", REQ, 13, False)),
+    (C, {"dividend"}, {}, ("sales-invoice", REQ, 13, False)),
 ]
 
 
@@ -91,6 +96,21 @@ class TestDecisionTable(unittest.TestCase):
                                    chain_overrides=ov).row, 2)
         self.assertEqual(ex.derive(D, {"transport"}, exempt=True, counterparty_override=cp,
                                    chain_overrides=ov).row, 1)
+
+    def test_chain_override_for_income_interest_still_lands_on_row_12(self):
+        # D6 coherence (S1 fix): the row-12 key is the marker alone
+        # ({"interest"}/{"dividend"}), matching how rows 7/9/10 key on their
+        # marker rather than the full chain — so an override scoped
+        # `income, interest` normalizes to key {interest} and still governs
+        # a CRDT that actually carries `income, interest`.
+        ov = [self.ov({"income", "interest"}, "statement", OPT)]
+        got = ex.derive(C, {"income", "interest"}, chain_overrides=ov)
+        self.assertEqual((got.kind, got.row), ("statement", 12))
+        # a bare `interest` CRDT (no `income`) is row 13, untouched by the
+        # override even though its key ({interest}) matches: 13 isn't in
+        # the override's normalized rows because it selects row 10 (not a
+        # keyed row 13) on the DBIT side of normalize_scope.
+        self.assertEqual(ex.derive(C, {"interest"}, chain_overrides=ov).row, 13)
 
     def test_scope_normalization(self):
         self.assertEqual(ex.normalize_scope(frozenset({"salary"})), (frozenset({9}), frozenset({"salary"})))
