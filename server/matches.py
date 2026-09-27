@@ -220,15 +220,22 @@ def confirm_match(conn, *, match_id, expected_revision, render_id) -> dict:
 
 def reject_match(conn, *, match_id, expected_revision, render_id) -> dict:
     with db.tx(conn):
-        s = _state(conn, match_id)
-        pid = _operator_pid(conn, s["pid"])
-        authorship.require_match_shown(conn, pid, match_id, render_id, expected_revision)
-        if s["state"] not in ("matched", "proposed", "conflicted"):
-            raise db.Refusal("there is no pairing to remove there")
-        before = _states(conn, pid)
-        lineage.append(conn, pid, "unpair", "operator", match_id=match_id, render_id=render_id)
-        red = lineage.settle(conn, pid)
-        return _result(conn, pid, red, match_id, _effects(before, _states(conn, pid)))
+        return reject_in_tx(conn, match_id=match_id, expected_revision=expected_revision,
+                            render_id=render_id)
+
+
+def reject_in_tx(conn, *, match_id, expected_revision, render_id) -> dict:
+    """reject_match inside the caller's transaction (apply_reply sets aside
+    every displayed candidate of a payment, all or none)."""
+    s = _state(conn, match_id)
+    pid = _operator_pid(conn, s["pid"])
+    authorship.require_match_shown(conn, pid, match_id, render_id, expected_revision)
+    if s["state"] not in ("matched", "proposed", "conflicted"):
+        raise db.Refusal("there is no pairing to remove there")
+    before = _states(conn, pid)
+    lineage.append(conn, pid, "unpair", "operator", match_id=match_id, render_id=render_id)
+    red = lineage.settle(conn, pid)
+    return _result(conn, pid, red, match_id, _effects(before, _states(conn, pid)))
 
 
 def set_exemption(conn, *, pid, exempt, expected_revision, render_id) -> dict:

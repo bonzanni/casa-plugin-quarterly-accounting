@@ -32,7 +32,8 @@ KIND_WORD = {"invoice": "invoice", "sales-invoice": "sales invoice", "credit-not
              "other": "document"}
 # Machinery the operator never has to learn (spec §"The reversibility ladder").
 FORBIDDEN = ("proposed", "conflicted", "revision", "projection", "CAS", "no-ref",
-             "partial-search", "recipient?", "acct::", "pid", "match_id")
+             "partial-search", "recipient?", "acct::", "pid", "match_id",
+             "render_id")
 
 
 def utf16_len(text: str) -> int:
