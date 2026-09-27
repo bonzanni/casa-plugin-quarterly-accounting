@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import fcntl
 import json
 import os
 import pathlib
@@ -18,6 +19,7 @@ import sqlite3
 import time
 
 DB_NAME = "accounting.sqlite"
+CUSTODY_LOCK = ".custody.lock"
 SCHEMA_VERSION = 1
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
@@ -304,3 +306,34 @@ def next_seq(conn: sqlite3.Connection) -> int:
     assert conn.in_transaction, "the sequence is allocated inside the write transaction"
     conn.execute("UPDATE counters SET value = value + 1 WHERE name='seq'")
     return conn.execute("SELECT value FROM counters WHERE name='seq'").fetchone()[0]
+
+
+@contextlib.contextmanager
+def custody_lock(bound_s: float = LOCK_BOUND_S):
+    """The interprocess lock over the files this store holds custody of
+    (documents/, packages/) together with the rows that claim them (fix wave B,
+    Astra + Terra S1). An ingest holds it from installing the bytes through
+    committing the index row; reset_store holds it across its row wipe AND the
+    file erasure; reap_orphans across its scan. So no index row can name bytes a
+    concurrent reset or reap removed, under any interleaving. An flock on a lock
+    file in the data dir: the kernel releases it when its holder dies, so a crash
+    never leaves it held. Lock order: this lock FIRST, then the SQLite write lock
+    (tx) — never taken while a write transaction is open. Past the bound: Busy,
+    and nothing was changed."""
+    d = data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    fd = os.open(d / CUSTODY_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + bound_s
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise Busy("another session is filing or erasing documents past "
+                               f"{bound_s:g} s; this change was NOT applied — ask again")
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)                    # closing the descriptor releases the lock

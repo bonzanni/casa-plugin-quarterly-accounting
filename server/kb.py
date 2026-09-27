@@ -95,6 +95,15 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
     if window_days is not None and not (1 <= int(window_days) <= 60):
         raise db.Refusal("window_days is between 1 and 60")
     existing = _entry(conn, name)
+    # Every bank text resolves to at most one entry (fix wave B, Astra S1): a new
+    # canonical name that is already another entry's pattern would make a second
+    # entry whose rulings lookup never reaches. Refused, not merged — the operator
+    # names the owner; set_expectation by that bank text already lands on it.
+    owner = counterparty_for(conn, name) if existing is None else None
+    if owner is not None:
+        raise db.Refusal(f"the bank text {name.strip()!r} already belongs to {owner['name']}; "
+                         f"change {owner['name']} instead, or give this counterparty another "
+                         "name")
     for p in patterns:
         other = counterparty_for(conn, p)
         if other is not None and (existing is None or other["cp_id"] != existing["cp_id"]):

@@ -1,9 +1,12 @@
+import multiprocessing
 import os
+import threading
 import time
 import unittest
 from unittest import mock
 
 from tests._base import StoreCase
+from tests import _procs
 import db  # noqa: E402
 import documents  # noqa: E402
 import lineage  # noqa: E402
@@ -106,5 +109,70 @@ class TestCuration(StoreCase):
             documents.update_document_metadata(self.conn, self.doc_id, sha256="x")
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+class TestCustodyUnderConcurrency(StoreCase):
+    """fix wave B (Astra + Terra S1): after an ingest, a reset or a reap returns,
+    no index row may name bytes that are gone — under any interleaving."""
+
+    def _rows_without_bytes(self):
+        return [r["doc_id"] for r in self.conn.execute("SELECT doc_id FROM documents")
+                if not documents.path_of(self.conn, r["doc_id"]).exists()]
+
+    def _race(self, child_target, child_args, paused, other):
+        ctx = multiprocessing.get_context("spawn")
+        ev, resume, out = ctx.Event(), ctx.Event(), ctx.Queue()
+        child = ctx.Process(target=child_target, args=(*child_args, ev, resume, out))
+        child.start()
+        self.addCleanup(child.join, 30)
+        self.addCleanup(resume.set)
+        self.assertTrue(ev.wait(30), f"the child never reached {paused}")
+        got = {}
+
+        def run():
+            c = db.open_store()
+            try:
+                got["other"] = other(c)
+            except BaseException as exc:
+                got["other"] = exc
+            finally:
+                c.close()
+        t = threading.Thread(target=run)
+        t.start()
+        t.join(1.0)                  # pre-fix, the other operation completes here
+        resume.set()
+        child.join(30)
+        t.join(30)
+        child_result = out.get(timeout=5)
+        self.assertEqual(child_result[0], "ok", child_result)
+        self.assertNotIsInstance(got["other"], BaseException, got.get("other"))
+        return child_result[1], got["other"]
+
+    def test_a_reset_during_an_ingest_never_leaves_a_row_over_missing_bytes(self):
+        import binding
+        path = self.publish("a.pdf", PDF)
+        _, reset = self._race(_procs.ingest_paused, (path,), "the install",
+                              binding.reset_store)
+        self.assertEqual(reset["erasure"], "complete", reset)
+        self.assertEqual(self._rows_without_bytes(), [])
+
+    def test_an_ingest_during_a_reset_never_has_its_bytes_deleted_afterwards(self):
+        path = self.publish("a.pdf", PDF)
+        _, res = self._race(_procs.reset_paused, (), "the row wipe",
+                            lambda c: ingest(c, path))
+        self.assertTrue(res["created"])
+        self.assertEqual(self._rows_without_bytes(), [])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)
+
+    def test_a_reap_during_a_re_ingest_of_an_old_orphan_keeps_its_bytes(self):
+        # a crash left an orphan; re-filing the same bytes re-uses the installed
+        # file (its old mtime untouched), so a reap must not unlink it mid-ingest
+        sha = __import__("hashlib").sha256(PDF).hexdigest()
+        orphan = documents._install(PDF, sha, ".pdf")
+        old = time.time() - 7200
+        os.utime(orphan, (old, old))
+        path = self.publish("a.pdf", PDF)
+        _, reaped = self._race(_procs.ingest_paused, (path,), "the install",
+                               lambda c: documents.reap_orphans(c, older_than_s=3600))
+        self.assertEqual(reaped, 0)
+        self.assertEqual(self._rows_without_bytes(), [])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)

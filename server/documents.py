@@ -107,25 +107,31 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
     if ext not in ALLOWED_EXT:
         raise db.Refusal(f"{name}: only PDFs, images and XML invoices are filed")
     sha = hashlib.sha256(data).hexdigest()
-    _install(data, sha, ext)
-    with db.tx(conn):
-        passes.check_token(conn, token)
-        existing = conn.execute("SELECT doc_id FROM documents WHERE sha256=?", (sha,)).fetchone()
-        if existing is not None:
-            return {"doc_id": existing[0], "sha256": sha, "created": False,
-                    "collisions": collisions(conn, existing[0])}
-        cur = conn.execute(
-            "INSERT INTO documents(sha256, ext, size, kind, counterparty, issuer, document_date,"
-            " document_number, amount_minor, currency, recipient, source, source_ref,"
-            " acquisition_json, extraction_author, original_name, ingested_at, ingest_quarter)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (sha, ext.lstrip("."), len(data), kind, counterparty, issuer, document_date,
-             document_number, amount_minor, currency, recipient, source, source_ref,
-             db.canonical(acquisition) if acquisition is not None else None,
-             extraction_author, name, db.now(), dates.quarter_of(db.now()[:10])))
-        doc_id = cur.lastrowid
-        return {"doc_id": doc_id, "sha256": sha, "created": True,
-                "collisions": collisions(conn, doc_id)}
+    # Bytes installed before the row (a crash leaves an orphan to reap, never a
+    # row over missing bytes); the custody lock spans both, so a concurrent
+    # reset_store or reap_orphans cannot remove the bytes in between.
+    with db.custody_lock():
+        _install(data, sha, ext)
+        with db.tx(conn):
+            passes.check_token(conn, token)
+            existing = conn.execute("SELECT doc_id FROM documents WHERE sha256=?",
+                                    (sha,)).fetchone()
+            if existing is not None:
+                return {"doc_id": existing[0], "sha256": sha, "created": False,
+                        "collisions": collisions(conn, existing[0])}
+            cur = conn.execute(
+                "INSERT INTO documents(sha256, ext, size, kind, counterparty, issuer,"
+                " document_date, document_number, amount_minor, currency, recipient, source,"
+                " source_ref, acquisition_json, extraction_author, original_name, ingested_at,"
+                " ingest_quarter)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sha, ext.lstrip("."), len(data), kind, counterparty, issuer, document_date,
+                 document_number, amount_minor, currency, recipient, source, source_ref,
+                 db.canonical(acquisition) if acquisition is not None else None,
+                 extraction_author, name, db.now(), dates.quarter_of(db.now()[:10])))
+            doc_id = cur.lastrowid
+            return {"doc_id": doc_id, "sha256": sha, "created": True,
+                    "collisions": collisions(conn, doc_id)}
 
 
 def _doc(conn, doc_id):
@@ -199,7 +205,14 @@ def reap_orphans(conn, older_than_s: int = 3600) -> int:
     """Remove files under documents/ that no index row claims and that are
     older than the bound (a crash between install and index, or a stray
     .part- temp). A file younger than the bound may be an ingest in flight in
-    another process, so it is left alone."""
+    another process, so it is left alone. Under the custody lock: an ingest
+    re-filing bytes a crash left behind re-uses that (old) file, and must not
+    lose it between its install and its index commit."""
+    with db.custody_lock():
+        return _reap(conn, older_than_s)
+
+
+def _reap(conn, older_than_s: int) -> int:
     root = _root()
     if not root.exists():
         return 0

@@ -1,9 +1,12 @@
 import datetime as dt
 import json
+import multiprocessing
+import threading
 import unittest
 from unittest import mock
 
 from tests._base import StoreCase
+from tests import _procs
 import binding  # noqa: E402
 import db  # noqa: E402
 import passes  # noqa: E402
@@ -216,6 +219,55 @@ class TestBankWriteGate(StoreCase):
         self.assertEqual(g["older_workflows"], ["acct@0.0.9"])
 
 
+class TestGateConcurrency(StoreCase):
+    def test_a_poison_committed_while_another_process_decides_is_never_overwritten(self):
+        # fix wave B (Astra S1): A decided "allowed" and paused before persisting;
+        # B committed poison; A resumed and persisted its allow over the refusal.
+        self.bind()
+        self.pass_(generation=0, registered={})
+        path = str(self.data / db.DB_NAME)
+        ctx = multiprocessing.get_context("spawn")
+        decided, resume, out = ctx.Event(), ctx.Event(), ctx.Queue()
+        a = ctx.Process(target=_procs.gate_paused, args=(path, decided, resume, out))
+        a.start()
+        self.addCleanup(a.join, 30)
+        self.addCleanup(resume.set)
+        self.assertTrue(decided.wait(30), "the gate never reached its decision")
+
+        def poisoner():
+            c = db.open_store(path)
+            try:
+                with db.tx(c):
+                    passes.poison(c, "SENTINEL-POISON: a bank-feed write failed")
+                    raise db.Refusal("a bank-feed write failed")
+            except db.Refusal:
+                pass
+            finally:
+                c.close()
+        b = threading.Thread(target=poisoner)
+        b.start()
+        b.join(1.0)                 # pre-fix, the poison lands here, while A is paused
+        resume.set()
+        a.join(30)
+        b.join(30)
+        self.assertEqual(out.get(timeout=5)[0], "ok")
+        refused = self.conn.execute(
+            "SELECT COUNT(*) FROM passes WHERE json_extract(gate_json, '$.allowed') = 0"
+        ).fetchone()[0]
+        self.assertEqual(refused, 1)
+        g = passes.bank_write_gate(self.conn)
+        self.assertFalse(g["allowed"])
+        self.assertIn("SENTINEL-POISON", g["reason"])
+
+    def test_the_gate_reuses_an_open_caller_transaction(self):
+        # an import calls it inside its own write transaction; it must not nest tx()
+        self.bind()
+        self.pass_(generation=0, registered={})
+        with db.tx(self.conn):
+            self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
+        self.assertIsNotNone(passes.current_pass(self.conn)["gate_json"])
+
+
 class TestSelfCheck(StoreCase):
     def test_conditions_each_have_their_own_sentence(self):
         t = passes.begin_pass(self.conn, "cron")["pass_token"]
@@ -254,6 +306,9 @@ class TestReset(StoreCase):
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
                               " VALUES ('SENTINEL-NAME', '[]', 'x')")
+        # fix wave B (Astra S2): a pass trigger is operator data too, and the pass
+        # marker row outlived the wipe of the passes table
+        t0 = passes.begin_pass(self.conn, "operator: check SENTINEL-CLIENT's invoice")["pass_token"]
         reader = sqlite3.connect(str(self.data / db.DB_NAME), isolation_level=None)
         reader.execute("BEGIN")
         reader.execute("SELECT COUNT(*) FROM counterparties").fetchone()   # holds a snapshot
@@ -265,6 +320,11 @@ class TestReset(StoreCase):
         self.assertEqual(out["erasure"], "complete")
         for f in self.data.glob(db.DB_NAME + "*"):
             self.assertNotIn(b"SENTINEL-NAME", f.read_bytes(), f.name)
+            self.assertFalse(b"SENTINEL-CLIENT" in f.read_bytes(), f.name)
+        self.assertIsNone(self.conn.execute("SELECT * FROM pass_marker").fetchone())
+        started = passes.begin_pass(self.conn, "cron")      # a new pass still starts,
+        self.assertEqual(started["status"], "started")      # on a fresh generation
+        self.assertGreater(started["pass_token"], t0)
 
     def test_reset_wipes_to_fresh_and_fences_a_stale_pass(self):
         self.bind()

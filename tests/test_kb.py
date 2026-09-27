@@ -30,6 +30,31 @@ class TestKB(StoreCase):
         with self.assertRaises(db.Refusal):
             kb.upsert_counterparty(self.conn, "Other", patterns=["bck*zapier"])
 
+    def test_a_canonical_name_that_is_another_entrys_bank_text_is_refused(self):
+        # fix wave B (Astra S1): "BCK*ZAPIER" as a second entry's NAME hid its
+        # `none` ruling behind Zapier's pattern — the payment still derived invoice
+        kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
+        with self.assertRaises(db.Refusal) as cm:
+            kb.upsert_counterparty(self.conn, "bck*zapier")
+        self.assertIn("Zapier", str(cm.exception))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 1)
+        # the ruling, addressed by the bank text, lands on the one owner and applies
+        kb.set_expectation(self.conn, scope_type="counterparty", scope="BCK*ZAPIER",
+                           kind="none", author="operator", render_id="r1")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 1)
+        self.assertEqual(lineage.projection(self.conn, self.pid)["exp_kind"], "none")
+
+    def test_a_pattern_that_is_another_entrys_name_is_refused(self):
+        kb.upsert_counterparty(self.conn, "BCK*ZAPIER")
+        with self.assertRaises(db.Refusal):
+            kb.upsert_counterparty(self.conn, "Zapier", patterns=["bck*zapier"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 1)
+
+    def test_an_entry_may_list_its_own_name_as_a_pattern(self):
+        kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
+        kb.upsert_counterparty(self.conn, "Zapier", patterns=["ZAPIER"], notes="monthly")
+        self.assertEqual(kb.get_counterparty(self.conn, "zapier")["notes"], "monthly")
+
     def test_portal_source_settles_to_portal_tag(self):
         kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"], source="portal",
                                document_link="https://zapier.example/app/invoices")

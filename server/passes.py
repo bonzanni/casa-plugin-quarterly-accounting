@@ -145,15 +145,29 @@ def bank_write_gate(conn) -> dict:
     refused fresh store that then imported a snapshot became "populated" and
     the next call allowed the writes the first had refused). The import is
     refused while the gate refuses, so the condition cannot erase itself
-    across passes either."""
+    across passes either.
+
+    The read of the stored verdict, the decision and its persistence run under
+    ONE write lock — the caller's transaction when one is open (an import),
+    else a transaction of its own (check_setup, or ledger.py before it opens
+    its import transaction). Otherwise a decision computed before a concurrent
+    poison() committed was persisted after it, overwriting the pass's refusal
+    with an allow (fix wave B, Astra S1, reproduced across processes)."""
+    if conn.in_transaction:
+        return _gate_in_tx(conn)
+    with db.tx(conn):
+        return _gate_in_tx(conn)
+
+
+def _gate_in_tx(conn) -> dict:
     cur = current_pass(conn)
     if cur is not None and cur["gate_json"]:
         return json.loads(cur["gate_json"])
     out = _decide_gate(conn)
     probe = conn.execute("SELECT pass_id FROM probes WHERE kind='ledger'").fetchone()
     if cur is not None and probe is not None and probe["pass_id"] == cur["pass_id"]:
-        _write(conn, "UPDATE passes SET gate_json=? WHERE pass_id=?",
-               (db.canonical(out), cur["pass_id"]))
+        conn.execute("UPDATE passes SET gate_json=? WHERE pass_id=?",
+                     (db.canonical(out), cur["pass_id"]))
     return out
 
 

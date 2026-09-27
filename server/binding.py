@@ -144,28 +144,35 @@ def reset_store(conn) -> dict:
     refused at its next write. Then the documents and packages are deleted and
     the freed pages reclaimed (VACUUM, WAL truncate), so erased rows do not
     stay readable in free pages. `complete` only when every step finished."""
-    with db.tx(conn):
-        for t in _TABLES_TO_WIPE:
-            conn.execute(f"DELETE FROM {t}")
-        conn.execute("DELETE FROM sqlite_sequence WHERE name IN (%s)"
-                     % ",".join("'%s'" % t for t in _TABLES_TO_WIPE))
-        conn.execute("UPDATE counters SET value=0 WHERE name='seq'")
-        conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
-        conn.execute("UPDATE pass_marker SET live=0")
-        conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=NULL,"
-                     " last_cycle_completed_at=NULL")
-        # A "restored" or "other-ledger" refusal concerned the store just wiped; a
-        # dirty-ledger one concerns the ledger, which a store reset does not clean.
-        conn.execute("DELETE FROM meta WHERE key='gate_refusal' AND"
-                     " json_extract(value, '$.kind')<>'dirty-ledger'")
     problems = []
-    for sub in ("documents", "packages"):
-        try:
-            shutil.rmtree(db.data_dir() / sub)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            problems.append(f"{sub}/ could not be removed: {exc}")
+    # The custody lock spans the row wipe AND the file erasure (fix wave B, Astra +
+    # Terra S1): an ingest either commits its row before the wipe (and both go) or
+    # installs its bytes after the erasure (and both stay).
+    with db.custody_lock():
+        with db.tx(conn):
+            for t in _TABLES_TO_WIPE:
+                conn.execute(f"DELETE FROM {t}")
+            conn.execute("DELETE FROM sqlite_sequence WHERE name IN (%s)"
+                         % ",".join("'%s'" % t for t in _TABLES_TO_WIPE))
+            conn.execute("UPDATE counters SET value=0 WHERE name='seq'")
+            conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
+            # the marker row carries the last pass's trigger, id and start time —
+            # operator data (fix wave B, Astra S2); the monotonic generation that
+            # fences a running pass lives in counters, bumped above
+            conn.execute("DELETE FROM pass_marker")
+            conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=NULL,"
+                         " last_cycle_completed_at=NULL")
+            # A "restored" or "other-ledger" refusal concerned the store just wiped; a
+            # dirty-ledger one concerns the ledger, which a store reset does not clean.
+            conn.execute("DELETE FROM meta WHERE key='gate_refusal' AND"
+                         " json_extract(value, '$.kind')<>'dirty-ledger'")
+        for sub in ("documents", "packages"):
+            try:
+                shutil.rmtree(db.data_dir() / sub)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                problems.append(f"{sub}/ could not be removed: {exc}")
     try:
         conn.execute("VACUUM")
         busy, log_frames, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
