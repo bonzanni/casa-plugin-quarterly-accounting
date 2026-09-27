@@ -64,25 +64,35 @@ The spec is converged. Turning it into code surfaced the points below. Each is e
   - The spec requires the grammar to be "an executable contract", with pinned tests: "Zapier and Vercel" applies nothing, "all good" confirms only what was shown, and a receipt is "generated from what actually committed".
   - A contract that lives only in model prose cannot be pinned. So `apply_reply(text)` parses the whole reply against the most recent **delivered** rendering and the store's current open items. It applies every clause that resolves, bound to the **shown** revisions, and returns the receipt built from the committed results.
   - Ellen's job reduces to recognising that a message is a reply (model judgment, stated as such in spec §"Recognising a reply") and passing the text verbatim.
-- **D3: Revisions are digest-driven.**
+- **D3: Revisions are digest-driven, and a correction binds only what a delivered view displayed.**
   - Every projection and every match stores a `digest`, a canonical JSON of everything the operator could be shown about it, plus a `revision` that increments exactly when the digest changes. "Bumped by every change to the proposition" is then total by construction.
   - The server enforces "the revision the operator was SHOWN is what binds":
     - an operator write must carry a `render_id` that is the most recent **delivered** rendering showing that item;
     - its `expected_revision` must equal both the revision recorded in that rendering and the current revision.
-- **D4: "Ledger instance" is row-identity continuity.**
-  - bank-feed exposes no instance id. Each alias stores the `first_seen` of its row. An import refuses, and ends nothing, when a held alias's `row_id` reappears with a different `first_seen`: the same id now names another row, as happens after a restore reallocates ids or on a recreated database.
-  - A different mode's ledger (sandbox vs real) is already stopped by the self-check, because the bound account is absent there, so nothing is imported or ended.
-  - A row-id high-water check was considered and rejected. `purge` can delete the newest rows, and an honest snapshot's maximum id then drops below any high-water mark.
+  - Revised after round p1 (Astra, two S1s):
+    - `build_review` composes the text and records its revisions under one write lock, so they cannot describe different facts.
+    - A rendering records a pairing's revision only if its text displays that pairing. A pairing the operator never saw is re-shown, never corrected.
+- **D4: Ledger identity needs positive evidence.**
+  - bank-feed exposes no instance id. When the store has live lineages, an import must find at least one of:
+    - a live alias row whose `first_seen` is unchanged;
+    - a restore point of this plugin's workflow that an **earlier** pass saw in this ledger;
+    - the operator's one-shot "the bank ledger was reset".
+  - Without any of them, nothing is imported and nothing ends.
+  - An alias whose `row_id` reappears with a different `first_seen` is always refused.
+  - Revised after round p1: continuity of surviving aliases alone let an empty ledger with the same account end every lineage (Astra S1).
+  - **Operator decision:** the spec lets the pass after `delete_all_data` proceed on its own. Here it needs that one sentence, because from the export alone the case is indistinguishable from a different ledger.
+  - The clean fix is an instance id exposed by bank-feed, to be filed upstream if the operator agrees.
   - `first_seen` is not rewritten by bank-feed's update paths. Task 2 pins that against the vendored `apply_plan`.
 - **D5: The sweep runs inside the specialist delegation, after the import.**
   - The sweep's per-row reads are what refresh the classification observation, and triage needs a fresh expectation. So one delegation runs, in order: sync, then the classifier, then `export_history` and `import_ledger_export` (admission, resolution, merges, vanished ends, erase candidates), then erase confirmations, then the sweep (observations and tag repair), then triage.
   - This matches spec §Weekly pass step 2 and the round-41 ruling that ends commit at the import. §Weekly pass step 1's "repair sweep, then delegate" wording predates both; Ellen holds no bank-feed tools, so she could not run a sweep herself anyway.
-- **D6: Chain overrides match by decisive row and key.**
-  - `set_expectation(scope=<chain>)` normalises its scope with the same decision procedure the rows use:
-    - the decisive row (6–13);
-    - a key: the flow tag for rows 6–8, the marker tags for rows 9, 10 and 12, the classification-tag set for rows 11 and 13.
-  - An override applies to a row when the row numbers are equal and the override's key is a subset of the row's key. The most specific override wins; ties break on the sorted key.
-  - So an override written for `income, refund` lands on key `{refund}` at row 7 and applies to a CRDT tagged `refund` alone, which the round-27 test requires.
+- **D6: Chain overrides are normalized once, when set.**
+  - `set_expectation(scope=<chain>)` stores the rows the override applies at, and the key a row's own key must contain. Both are computed by `expectation.normalize_scope`:
+    - a scope that selects a keyed row (a flow correction, or a payroll, statement or no-document marker) applies at that row only;
+    - a plain chain applies to rows 11 and 13.
+  - At a row, the most specific override wins; ties break on the sorted key.
+  - An override written for `income, refund` lands on key `{refund}` at row 7. It therefore applies to a CRDT tagged `refund` alone, as the round-27 test requires.
+  - "Payslips don't matter" (scope `salary`) applies at row 9 only, never to a client's `income, salary` credit. Round p1: re-deriving the row per direction had silenced those sales invoices.
 - **D7: What counts as a classification conflict (row 5).**
   - Flow corrections are `internal-transfer`, `cash-withdrawal`, `refund` and `reimbursement`. More than one of them is a conflict.
   - With none, a DBIT carrying both a payroll marker (`salary`/`payroll`) and a statement marker (`fees`/`interest`/`tax`) is a conflict.
@@ -97,12 +107,13 @@ The spec is converged. Turning it into code surfaced the points below. Each is e
   - `begin_pass` returns `pass_token`, which is the pass generation. Every write tool accepts an optional `pass_token`, and a stale one is refused on every write into this store (spec §"Running the pass on demand").
   - Operator-side writes outside a pass (Ellen's corrections and filings) carry none.
   - Machine-authored writes (`author=auto`) **require** one.
-- **D11: The bank-write gate is computed by the server.**
+- **D11: The bank-write gate is decided by the server, once per pass.**
   - `check_setup` returns `bank_writes: allowed | refused(<sentence>)` and the `expected_generation` to pass. It computes them from:
-    - the ledger probe the specialist recorded this pass (`list_backups` parsed by the specialist into generation and registered workflows);
+    - the ledger probe the specialist recorded this pass (`list_backups` parsed into generation and registered workflows);
     - the store's remembered generation;
     - whether the store is populated.
-  - The skill writes only when it says `allowed` (spec §Setup "Test install"; §Error handling "No clean ledger, no external write").
+  - The verdict is stored on the pass, and a refusal is sticky for the pass. While it refuses, `import_ledger_export` imports nothing and `can_run` is false.
+  - Revised after round p1 (Astra S1): an import had populated a refused fresh store and turned the refusal into permission.
 - **D12: Match identity.**
   - A match id is created per (lineage at creation, document).
   - `confirm_match` and an operator `record_match` naming the same document on the same lineage re-use that id as a **new activation**. The activation is the sequence number of the writer entry.
@@ -181,7 +192,7 @@ Module names must not collide with bank-feed's, because tests load both into one
 **Spec:** §Architecture "Placement"; §Tool surface (last paragraph: house disciplines); §Privacy; §Setup ("declares no required environment variables", "No `casa.setupTool`").
 
 **Files:**
-- Create: `.claude-plugin/plugin.json`, `.mcp.json`, `.gitignore`, `server/version.py`, `server/qa_server.py`, `server/db.py` (only `Refusal` for now), `server/tools.py`, `server/casa_handoff.py`, `scripts/check_tool_agreement.py`, `scripts/scan_identifiers.py`, `.githooks/pre-commit`, `.github/workflows/ci.yml`, `tests/__init__.py` (empty), `tests/_base.py`
+- Create: `.claude-plugin/plugin.json`, `.mcp.json`, `.gitignore`, `server/version.py`, `server/qa_server.py`, `server/db.py` (only `Refusal` for now), `server/tools.py`, `scripts/check_tool_agreement.py`, `scripts/scan_identifiers.py`, `.githooks/pre-commit`, `.github/workflows/ci.yml`, `tests/__init__.py` (empty), `tests/_base.py`
 - Test: `tests/test_scaffold.py`
 
 **Interfaces:**
@@ -458,11 +469,7 @@ from __future__ import annotations
 from qa_server import register  # noqa: F401
 ```
 
-`server/casa_handoff.py`: copy the file byte for byte:
-
-```bash
-git -C ../casa-specialist-finance show v0.14.4:plugins/bank-feed/server/casa_handoff.py > server/casa_handoff.py
-```
+`server/casa_handoff.py` is copied in Task 2, from the vendored tree. Task 1 reaches no other repository.
 
 `scripts/check_tool_agreement.py`:
 
@@ -671,12 +678,14 @@ git commit -m "feat: plugin scaffold — stdlib dispatcher, manifest, tool-list 
 #!/usr/bin/env bash
 # scripts/vendor-bankfeed.sh <tag>  — copy casa-specialist-finance's
 # plugins/bank-feed at <tag> into tests/upstream/component-<tag>/ (test-only;
-# MIT, same author). FINANCE_REPO defaults to ../casa-specialist-finance.
-# Reads through `git archive`, never the other repo's worktree, which other
-# sessions may have checked out at anything.
+# MIT, same author). FINANCE_REPO must name a local clone that already has the
+# tag. Reads only through `git archive` — never the other repo's worktree,
+# which other sessions may have checked out at anything — and never fetches.
 set -euo pipefail
 tag="${1:?usage: vendor-bankfeed.sh <tag>}"
-repo="${FINANCE_REPO:-../casa-specialist-finance}"
+repo="${FINANCE_REPO:?set FINANCE_REPO to a local casa-specialist-finance clone}"
+git -C "$repo" rev-parse -q --verify "refs/tags/$tag" >/dev/null \
+  || { echo "tag $tag is not in $repo — fetch it there yourself; this script never does" >&2; exit 1; }
 dest="tests/upstream/component-${tag}"
 rm -rf "$dest"
 mkdir -p "$dest"
@@ -690,9 +699,10 @@ echo "vendored $tag ($sha) into $dest"
 Run it for both trees:
 ```bash
 chmod +x scripts/vendor-bankfeed.sh
-git -C ../casa-specialist-finance fetch --tags origin
+export FINANCE_REPO=<absolute path of the local casa-specialist-finance clone>
 scripts/vendor-bankfeed.sh v0.14.4
 scripts/vendor-bankfeed.sh v0.13.2
+cp tests/upstream/component-v0.14.4/plugins/bank-feed/server/casa_handoff.py server/casa_handoff.py
 ```
 Expected: two `vendored …` lines. `tests/upstream/component-v0.14.4/plugins/bank-feed/.claude-plugin/plugin.json` says `"version": "0.13.4"`.
 
@@ -887,6 +897,15 @@ class Ledger:
         stored = self.rows(account=account or self.ACCOUNT)
         plan = ingest.reconcile(stored, fetched, interval, cap)
         stats = apply.apply_plan(self.conn, account or self.ACCOUNT, plan)
+        # What a successful sync leaves behind: transaction freshness, without
+        # which the read tools refuse the account as never fetched (upstream
+        # tests/_toolbase.py Base.synced). If list_transactions still refuses,
+        # read tools_read's freshness predicate at the vendored tag and mirror it.
+        now = "2026-09-20T08:00:00Z"
+        self.conn.execute("INSERT OR REPLACE INTO sync_state(account_id, resource,"
+                          " last_attempt_at, last_success_at, completeness)"
+                          " VALUES (?, 'transactions', ?, ?, 'complete')",
+                          (account or self.ACCOUNT, now, now))
         self.conn.commit()
         return stats
 
@@ -942,7 +961,7 @@ class Ledger:
         out = {}
         if "Registered workflows:" in text and "Registered workflows: none" not in text:
             block = text.split("Registered workflows:", 1)[1].split("Restores:", 1)[0]
-            for line in block.strip().splitlines():
+            for line in block.splitlines():          # keep the indentation the regex needs
                 m = re.match(r"\s+(\S+) -> (\S+)", line)
                 if m:
                     out[m.group(1)] = m.group(2)
@@ -977,7 +996,7 @@ If `test_first_seen_survives_an_in_place_update` fails, stop and report: D4 need
 - [ ] **Step 6: Commit**
 
 ```bash
-git add scripts/vendor-bankfeed.sh tests/upstream tests/bankfeed.py tests/test_bankfeed_harness.py
+git add scripts/vendor-bankfeed.sh tests/upstream tests/bankfeed.py tests/test_bankfeed_harness.py server/casa_handoff.py
 git commit -m "test: vendored real bank-feed (component v0.14.4 floor, v0.13.2 below-floor) and harness"
 ```
 
@@ -1171,7 +1190,8 @@ git commit -m "feat: quarter identifiers, effective dates, amount formatting"
   - `expectation.classification_state(tags) -> "terminal"|"parked"|"classified"|"workable"`
   - `expectation.is_classification_tag(tag) -> bool`
   - `expectation.decisive(tags, direction) -> (row, frozenset) | None`
-  - `expectation.derive(direction, tags, *, exempt=False, counterparty_override=None, chain_overrides=()) -> Expectation`, where `counterparty_override` is `(kind, tier)` or `("none", None)`, and `chain_overrides` is an iterable of `(scope_tags: frozenset, kind, tier)`
+  - `expectation.derive(direction, tags, *, exempt=False, counterparty_override=None, chain_overrides=()) -> Expectation`, where `counterparty_override` is `(kind, tier)` or `("none", None)`, and `chain_overrides` is an iterable of `(rows: frozenset[int], key: frozenset, kind, tier)`
+  - `expectation.normalize_scope(scope_tags) -> (rows, key) | None` (computed once, when an override is set)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1239,35 +1259,46 @@ class TestDecisionTable(unittest.TestCase):
         self.assertTrue(ex.derive(D, {"transport"}).seeks_document)
         self.assertFalse(ex.derive(D, {"internal-transfer"}).seeks_document)
 
+    @staticmethod
+    def ov(scope, kind, tier):
+        rows, key = ex.normalize_scope(frozenset(scope))
+        return (rows, key, kind, tier)
+
     def test_chain_override_for_income_refund_applies_to_every_refund_row(self):
-        ov = [(frozenset({"income", "refund"}), "receipt", OPT)]
+        ov = [self.ov({"income", "refund"}, "receipt", OPT)]
         for direction, tags in ((C, {"refund"}), (C, {"income", "refund"}), (D, {"refund"})):
             got = ex.derive(direction, tags, chain_overrides=ov)
             self.assertEqual((got.kind, got.tier, got.row), ("receipt", OPT, 7), (direction, tags))
 
     def test_payslips_dont_matter(self):
-        ov = [(frozenset({"salary"}), "none", None)]
+        ov = [self.ov({"salary"}, "none", None)]
         got = ex.derive(D, {"income", "salary"}, chain_overrides=ov)
         self.assertEqual((got.kind, got.row), ("none", 9))
         # a CRDT carrying salary is decided at row 13, where a row-9 override never applies
         self.assertEqual(ex.derive(C, {"income", "salary"}, chain_overrides=ov).kind, "sales-invoice")
 
     def test_most_specific_chain_override_wins(self):
-        ov = [(frozenset({"transport"}), "receipt", OPT),
-              (frozenset({"transport", "fuel"}), "none", None)]
+        ov = [self.ov({"transport"}, "receipt", OPT),
+              self.ov({"transport", "fuel"}, "none", None)]
         self.assertEqual(ex.derive(D, {"transport", "fuel"}, chain_overrides=ov).kind, "none")
         self.assertEqual(ex.derive(D, {"transport", "train"}, chain_overrides=ov).kind, "receipt")
 
     def test_precedence_exemption_over_counterparty_over_chain(self):
-        ov = [(frozenset({"transport"}), "receipt", OPT)]
+        ov = [self.ov({"transport"}, "receipt", OPT)]
         cp = ("none", None)
         self.assertEqual(ex.derive(D, {"transport"}, counterparty_override=cp,
                                    chain_overrides=ov).row, 2)
         self.assertEqual(ex.derive(D, {"transport"}, exempt=True, counterparty_override=cp,
                                    chain_overrides=ov).row, 1)
 
+    def test_scope_normalization(self):
+        self.assertEqual(ex.normalize_scope(frozenset({"salary"})), (frozenset({9}), frozenset({"salary"})))
+        self.assertEqual(ex.normalize_scope(frozenset({"income", "refund"}))[0], frozenset({7}))
+        self.assertEqual(ex.normalize_scope(frozenset({"transport", "fuel"}))[0], frozenset({11, 13}))
+        self.assertIsNone(ex.normalize_scope(frozenset({"salary", "tax"})))
+
     def test_chain_overrides_never_reach_rows_3_to_5(self):
-        ov = [(frozenset({"salary"}), "none", None)]
+        ov = [self.ov({"salary"}, "none", None)]
         self.assertEqual(ex.derive(D, {"unclassifiable"}, chain_overrides=ov).row, 3)
         self.assertEqual(ex.derive(D, {"awaiting-operator", "salary"}, chain_overrides=ov).row, 4)
         self.assertEqual(ex.derive(D, {"salary", "tax"}, chain_overrides=ov).row, 5)
@@ -1417,15 +1448,35 @@ def derive(direction: str, tags, *, exempt: bool = False,
         return Expectation(None, "required", 5, conflict=True)
     row, key = chosen
     best = None
-    for scope, kind, tier in chain_overrides:
-        scoped = decisive(scope, direction)
-        if scoped is None or scoped[0] != row or not scoped[1] <= key:
+    for rows, okey, kind, tier in chain_overrides:
+        if row not in rows or not okey <= key:
             continue
-        rank = (len(scoped[1]), tuple(sorted(scoped[1])))
+        rank = (len(okey), tuple(sorted(okey)))
         if best is None or rank > best[0]:
             best = (rank, kind, tier)
     kind, tier = (best[1], best[2]) if best else DEFAULTS[row]
     return _make(kind, tier, row)
+
+
+KEYED_ROWS = (6, 7, 8, 9, 10, 12)
+
+
+def normalize_scope(scope_tags) -> tuple | None:
+    """Fix, ONCE, where an override written for `scope_tags` applies: the rows
+    it decides at, and the key a row's own key must contain. Computed when the
+    override is set, never re-derived per row (round p1: re-deriving "salary"
+    for a CRDT landed it on row 13 and silenced every sales invoice for
+    `income, salary`). A scope whose tags select a keyed row (a flow
+    correction, a payroll/statement/no-document marker) applies there only;
+    a plain chain applies to "anything else" in both directions (rows 11, 13).
+    None when the scope's own tags conflict."""
+    picks = [decisive(scope_tags, d) for d in ("DBIT", "CRDT")]
+    if any(p is None for p in picks):
+        return None
+    keyed = [(r, k) for r, k in picks if r in KEYED_ROWS]
+    if keyed:
+        return frozenset(r for r, _ in keyed), keyed[0][1]
+    return frozenset({11, 13}), picks[0][1]
 ```
 
 - [ ] **Step 4: Run it to verify it passes**
@@ -1541,6 +1592,11 @@ class TestTransitions(unittest.TestCase):
     def test_machine_write_while_operator_current_lands_conflicted(self):
         st = F.fold([pair(1, 10), propose(2, 11)])
         self.assertEqual(states(st), {10: "matched", 11: "conflicted"})
+
+    def test_machine_reproposal_of_the_operators_pairing_changes_nothing(self):
+        st = F.fold([pair(1, 10), propose(2, 10), auto_pair(3, 10)])
+        c = st.cands[10]
+        self.assertEqual((c.state, c.author, c.activation), ("matched", "operator", 1))
 
     def test_occupancy_retires_the_activation_conflicted(self):
         st = F.fold([auto_pair(5, 10, doc=99)], occupied=lambda d, m: d == 99)
@@ -1680,9 +1736,11 @@ class TestInvariants(unittest.TestCase):
         """Four decisions — machine A and operator pair B on lineage X,
         exempt then lift on lineage Y — in every sequence order where the
         lift follows the exemption (write-time precondition). Whatever the
-        order: at most one active pairing; never an active pairing under a
-        standing exemption; the merged log holds exactly the one lift
-        appended; merging X into Y or Y into X gives one state."""
+        order and whichever lineage is settled first: at most one active
+        pairing; never an active pairing under a standing exemption; the
+        merged log holds exactly the one lift appended. The two merge
+        directions are NOT asserted equal: they are different committed
+        histories, and spec §Match records says merge order is history."""
         names = ["A", "B", "E", "L"]
         for seqs in itertools.permutations([1, 2, 3, 4]):
             seq = dict(zip(names, seqs))
@@ -1690,7 +1748,6 @@ class TestInvariants(unittest.TestCase):
                 continue
             x = [auto_pair(seq["A"], 1), pair(seq["B"], 2)]
             y = [exempt(seq["E"]), lift(seq["L"])]
-            ends = []
             for first, second in ((x, y), (y, x)):
                 s = Store()
                 merged, _ = s.settle(first)
@@ -1698,8 +1755,8 @@ class TestInvariants(unittest.TestCase):
                 self.assertLessEqual(len(st.active()), 1, seq)
                 self.assertFalse(st.exemption is not None and st.active(), seq)
                 self.assertEqual(sum(e.kind == "lift" for e in merged), 1, seq)
-                ends.append(states(st))
-            self.assertEqual(ends[0], ends[1], seq)
+                again = F.fold(merged)                # the same committed log folds the same
+                self.assertEqual(states(again), states(st), seq)
 
 
 if __name__ == "__main__":
@@ -1825,12 +1882,18 @@ def _step(st: FoldState, e: Entry, occupied) -> None:
             named = st.cands.get(mid)
             if named is not None:
                 named.state = "rejected"                          # the writer's own decision
+        # Operator precedence is judged BEFORE the machine entry touches any
+        # candidate (round p1, Astra S1): a machine entry naming the pairing
+        # the operator holds would otherwise replace the operator's activation.
+        op = st.operator_current()
+        if op is not None and op.match_id == e.match_id:
+            return                    # the operator's pairing of this document stands, unchanged
         m = Cand(e.match_id, e.doc_id, "auto",
                  "matched" if e.kind == "pair" else "proposed", e.seq, e.fp)
         st.cands[e.match_id] = m
         if st.exemption is not None:
             _retire(st, m, "rejected", "exempt")
-        elif st.operator_current() is not None:
+        elif op is not None:
             _retire(st, m, "conflicted", "operator-current")
         else:
             if occupied(e.doc_id, e.match_id):
@@ -2462,7 +2525,9 @@ CREATE TABLE IF NOT EXISTS binding (
   package_name_announced INTEGER NOT NULL DEFAULT 0,
   watermark_announced INTEGER NOT NULL DEFAULT 0,
   row_high_water INTEGER NOT NULL DEFAULT 0,
-  ledger_generation INTEGER);
+  ledger_generation INTEGER,
+  ledger_marks_json TEXT NOT NULL DEFAULT '{}',   -- restore-point id -> pass that first saw it
+  ledger_reset_ack INTEGER NOT NULL DEFAULT 0);   -- the operator said the ledger was reset
 
 CREATE TABLE IF NOT EXISTS pass_marker (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -2473,6 +2538,7 @@ CREATE TABLE IF NOT EXISTS passes (
   started_at TEXT NOT NULL, ended_at TEXT, outcome TEXT,
   account_seen INTEGER NOT NULL DEFAULT 0,
   snapshot_id INTEGER,
+  gate_json TEXT,                -- this pass's bank-write verdict, decided once (sticky refusal)
   report_json TEXT);
 CREATE TABLE IF NOT EXISTS probes (
   kind TEXT PRIMARY KEY, ok INTEGER NOT NULL, detail TEXT, data_json TEXT,
@@ -2497,6 +2563,7 @@ CREATE TABLE IF NOT EXISTS counterparties (
   window_days INTEGER NOT NULL DEFAULT 10, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS chain_overrides (
   scope TEXT PRIMARY KEY, kind TEXT NOT NULL, tier TEXT,
+  rows_json TEXT NOT NULL, key_json TEXT NOT NULL,   -- expectation.normalize_scope, fixed at set time
   author TEXT NOT NULL, set_at TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -2718,6 +2785,7 @@ git commit -m "feat: store schema v1, bounded BEGIN IMMEDIATE, cross-process seq
   - `binding.bind_account(conn, account_id, label, token=None) -> dict`
   - `binding.slug(label) -> str`
   - `binding.set_package_name(conn, name) -> dict`
+  - `binding.acknowledge_ledger_reset(conn) -> dict` (the operator's "the bank ledger was reset")
   - `binding.check_setup(conn) -> dict`
   - `binding.reset_store(conn, confirm: bool) -> dict`
 - `tests._base.StoreCase(TempEnv)` adds:
@@ -2877,6 +2945,13 @@ class TestBankWriteGate(StoreCase):
         g = passes.bank_write_gate(self.conn)
         self.assertTrue(g["allowed"])
         self.assertEqual(g["older_workflows"], ["acct@0.0.9"])
+
+    def test_a_refusal_is_sticky_for_the_pass(self):
+        self.pass_(generation=1, registered={version.WORKFLOW: "b-1"})
+        self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
+        self._populate()                                   # e.g. something imported anyway
+        self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
+        self.assertFalse(binding.check_setup(self.conn)["can_run"])
 
     def test_no_ledger_probe_this_pass_is_refused(self):
         passes.begin_pass(self.conn, "cron")
@@ -3070,9 +3145,56 @@ def store_populated(conn) -> bool:
                              " OR EXISTS (SELECT 1 FROM documents)").fetchone()[0])
 
 
+def _write(conn, sql, args=()) -> None:
+    """Callable inside a write transaction (record_observation, an import) or
+    outside one (check_setup)."""
+    if conn.in_transaction:
+        conn.execute(sql, args)
+    else:
+        with db.tx(conn):
+            conn.execute(sql, args)
+
+
 def bank_write_gate(conn) -> dict:
     """May this pass write to bank-feed, and with which expected_generation?
-    Computed here so the skill obeys one answer (plan §D11)."""
+    Computed here so the skill obeys one answer (plan §D11).
+
+    The verdict is decided ONCE per pass, from that pass's own ledger probe,
+    and a refusal is sticky for the rest of the pass (round p1, Astra S1: a
+    refused fresh store that then imported a snapshot became "populated" and
+    the next call allowed the writes the first had refused). The import is
+    refused while the gate refuses, so the condition cannot erase itself
+    across passes either."""
+    cur = current_pass(conn)
+    if cur is not None and cur["gate_json"]:
+        return json.loads(cur["gate_json"])
+    out = _decide_gate(conn)
+    probe = conn.execute("SELECT pass_id FROM probes WHERE kind='ledger'").fetchone()
+    if cur is not None and probe is not None and probe["pass_id"] == cur["pass_id"]:
+        _write(conn, "UPDATE passes SET gate_json=? WHERE pass_id=?",
+               (db.canonical(out), cur["pass_id"]))
+        if out["allowed"]:
+            _write(conn, "UPDATE binding SET ledger_generation=? WHERE id=1",
+                   (out["expected_generation"],))
+            _remember_marks(conn, cur["pass_id"])
+    return out
+
+
+def _remember_marks(conn, pass_id) -> None:
+    """Restore points of this plugin's workflows seen in the bound ledger, each
+    with the pass that first saw it: evidence of ledger identity for a later
+    import (plan §D4)."""
+    import binding
+    probe = conn.execute("SELECT data_json FROM probes WHERE kind='ledger'").fetchone()
+    registered = json.loads(probe["data_json"] or "{}").get("registered") or {}
+    marks = json.loads(binding.get(conn)["ledger_marks_json"] or "{}")
+    for wf, backup in registered.items():
+        if wf.startswith("acct@"):
+            marks.setdefault(backup, pass_id)
+    _write(conn, "UPDATE binding SET ledger_marks_json=? WHERE id=1", (db.canonical(marks),))
+
+
+def _decide_gate(conn) -> dict:
     import binding
     out = {"allowed": False, "reason": None, "expected_generation": None,
            "workflow": version.WORKFLOW, "install_backup": None, "older_workflows": []}
@@ -3095,7 +3217,7 @@ def bank_write_gate(conn) -> dict:
     populated = store_populated(conn)
     remembered = b["ledger_generation"]
     if populated and remembered is not None and gen != remembered:
-        out["reason"] = ("the ledger was restored since this pass's store last ran "
+        out["reason"] = ("the ledger was restored since this store last ran "
                          f"(restore generation {remembered} → {gen}) — reset the accounting "
                          "store (reset_store) before anything is written")
         return out
@@ -3103,13 +3225,6 @@ def bank_write_gate(conn) -> dict:
         out["reason"] = (f"the ledger still carries writes from {version.WORKFLOW} after its "
                          f"restore point — restore backup {registered[version.WORKFLOW]} first")
         return out
-    # Remember the generation this store now runs against. Callable inside a
-    # write transaction (record_observation) or outside one (check_setup).
-    if conn.in_transaction:
-        conn.execute("UPDATE binding SET ledger_generation=? WHERE id=1", (gen,))
-    else:
-        with db.tx(conn):
-            conn.execute("UPDATE binding SET ledger_generation=? WHERE id=1", (gen,))
     out.update(allowed=True, expected_generation=gen)
     return out
 ```
@@ -3161,6 +3276,19 @@ def bind_account(conn, account_id: str, label: str = "", token=None) -> dict:
             return {"bound": account_id, "changed": False}
         _bind(conn, account_id, label)
         return {"bound": account_id, "changed": True, "watermark": get(conn)["watermark"]}
+
+
+def acknowledge_ledger_reset(conn) -> dict:
+    """The operator's word that the bank ledger was wiped on purpose
+    (delete_all_data, or everything purged before this plugin ever wrote):
+    the next import may end every lineage it cannot find (plan §D4)."""
+    with db.tx(conn):
+        if get(conn) is None:
+            raise db.Refusal("no account is bound yet")
+        conn.execute("UPDATE binding SET ledger_reset_ack=1 WHERE id=1")
+    return {"acknowledged": True,
+            "note": "At the next check, payments no longer in the bank ledger are closed and "
+                    "their documents freed."}
 
 
 def set_package_name(conn, name: str) -> dict:
@@ -3217,8 +3345,13 @@ def check_setup(conn) -> dict:
         conditions.append("Gmail isn't reachable — matching runs on documents already held; "
                           "searching is off.")
     gate = passes.bank_write_gate(conn)
+    header = "Not set up yet."
+    ledger_read = (probes.get("ledger") or {}).get("this_pass")
+    if can_run and ledger_read and not gate["allowed"]:
+        conditions.append("Stopped before writing anything: " + gate["reason"] + ".")
+        can_run, header = False, "Stopped."
     return {"bound": dict(b) if b else None, "probes": probes, "conditions": conditions,
-            "can_run": can_run, "searching": searching, "bank_writes": gate}
+            "can_run": can_run, "header": header, "searching": searching, "bank_writes": gate}
 
 
 _TABLES_TO_WIPE = ("binding", "passes", "probes", "documents", "counterparties",
@@ -3291,7 +3424,7 @@ git commit -m "feat: pass marker and token, observed probes, bank-write gate, de
   - `kb.counterparty_for(conn, bank_counterparty) -> Row|None` (exact match, case- and whitespace-insensitive, on the name or any pattern)
   - `kb.override_of(cp_row) -> (kind, tier)|None`
   - `kb.is_portal(cp_row) -> bool`
-  - `kb.chain_overrides(conn) -> list[(frozenset, kind, tier)]`
+  - `kb.chain_overrides(conn) -> list[(rows: frozenset, key: frozenset, kind, tier)]`
   - `kb.display_name(conn, bank_counterparty) -> str`
   - `lineage.projection(conn, pid) -> Row` (raises `Refusal` if absent)
   - `lineage.resolve_pid(conn, pid) -> int` (follows `merged_into`)
@@ -3604,7 +3737,8 @@ def parse_scope(scope: str) -> frozenset:
 
 
 def chain_overrides(conn) -> list:
-    return [(parse_scope(r["scope"]), r["kind"], r["tier"])
+    return [(frozenset(json.loads(r["rows_json"])), frozenset(json.loads(r["key_json"])),
+             r["kind"], r["tier"])
             for r in conn.execute("SELECT * FROM chain_overrides ORDER BY scope")]
 
 
@@ -4117,14 +4251,18 @@ def set_expectation(conn, *, scope_type, scope, kind, tier=None, author, render_
             tags = parse_scope(scope)
             if not tags or not all(_TAG.match(t) for t in tags):
                 raise db.Refusal("a chain is comma-separated classification tags")
-            if ex.decisive(tags, "DBIT") is None or ex.decisive(tags, "CRDT") is None:
+            norm = ex.normalize_scope(tags)
+            if norm is None:
                 raise db.Refusal("those tags select different rows of the mapping; name one chain")
+            rows, okey = norm
             key = ", ".join(sorted(tags))
             if kind == "default":
                 conn.execute("DELETE FROM chain_overrides WHERE scope=?", (key,))
             else:
-                conn.execute("INSERT OR REPLACE INTO chain_overrides(scope, kind, tier, author,"
-                             " set_at) VALUES (?,?,?,?,?)", (key, kind, tier, author, db.now()))
+                conn.execute("INSERT OR REPLACE INTO chain_overrides(scope, kind, tier, rows_json,"
+                             " key_json, author, set_at) VALUES (?,?,?,?,?,?,?)",
+                             (key, kind, tier, json.dumps(sorted(rows)), json.dumps(sorted(okey)),
+                              author, db.now()))
         else:
             e = _entry(conn, scope) or counterparty_for(conn, scope)
             if e is None:
@@ -4717,10 +4855,43 @@ class TestResolution(Base):
 
 
 class TestInstance(Base):
-    def test_an_empty_snapshot_after_a_purge_is_not_an_instance_change(self):
+    def test_an_unproven_ledger_ends_nothing(self):
+        # round p1 (Astra S1): a different ledger with the same account and none of our rows
+        self.imp([{"row_id": 1}])
+        self.token = self.pass_()
+        with self.assertRaises(db.Refusal):
+            self.imp([{"row_id": 7, "first_seen": "2026-08-01T00:00:00Z"}])
+        self.assertIsNone(list(self.live().values())[0]["ended"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 1)
+
+    def test_a_restore_point_seen_in_an_earlier_pass_is_evidence(self):
         self.imp([{"row_id": 40}])
+        self.token = self.pass_(registered={"acct@0.1.0": "b-1"})
+        self.imp([{"row_id": 40}])
+        self.token = self.pass_(registered={"acct@0.1.0": "b-1"})   # everything purged since
         out = self.imp([])
         self.assertEqual([c["row_id"] for c in out["erase_candidates"]], [40])
+
+    def test_a_restore_point_first_seen_this_pass_is_not_evidence(self):
+        self.imp([{"row_id": 40}])
+        self.token = self.pass_(registered={"acct@0.1.0": "b-9"})
+        with self.assertRaises(db.Refusal):
+            self.imp([])
+
+    def test_the_operators_word_is_evidence_once(self):
+        import binding
+        self.imp([{"row_id": 1}])
+        self.token = self.pass_()
+        binding.acknowledge_ledger_reset(self.conn)
+        out = self.imp([])
+        self.assertEqual(len(out["erase_candidates"]), 1)
+        self.assertEqual(binding.get(self.conn)["ledger_reset_ack"], 0)
+
+    def test_nothing_is_imported_while_the_gate_refuses(self):
+        self.token = self.pass_(generation=1, registered={"acct@0.1.0": "b-1"})
+        with self.assertRaises(db.Refusal):
+            self.imp([{"row_id": 1}])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0], 0)
 
     def test_a_reused_row_id_is_refused_and_ends_nothing(self):
         self.imp([{"row_id": 1}])
@@ -4756,8 +4927,16 @@ class Base(StoreCase):
         self.bind(account=bankfeed.Ledger.ACCOUNT)
 
     def imp(self):
-        t = self.pass_()
+        t = self.pass_(generation=self.bf.generation(), registered=self.bf.registered())
         return ledger.import_ledger_export(self.conn, path=self.bf.export(), token=t)
+
+    def mint(self):
+        """This plugin's first write mints its restore point in the ledger; the
+        pass after it records that point as ledger-identity evidence (§D4)."""
+        rid = self.bf.rows(state="active")[0]["row_id"]
+        self.bf.call("tag_transaction", row_ids=[rid], tags=["acct::open"],
+                     workflow="acct@0.1.0", expected_generation=self.bf.generation())
+        self.imp()
 
     def live(self):
         return {r["pid"]: dict(r) for r in self.conn.execute(
@@ -4806,6 +4985,7 @@ class TestReal(Base):
         self.imp()
         (pid,) = self.live()
         old_id = self.live()[pid]["dest_row_id"]
+        self.mint()
         self.bf.purge_before("2026-08-01")
         out = self.imp()
         self.assertEqual([c["pid"] for c in out["erase_candidates"]], [pid])
@@ -4984,6 +5164,32 @@ def check_delivered_bank_half(conn, by_id: dict) -> int:
     return new
 
 
+def _require_same_ledger(conn, b, cur_pass, anchored: bool) -> None:
+    """Positive evidence that this is the ledger instance the store was built
+    on (spec §Setup: "the bound account in the bound ledger instance"; plan
+    §D4). A store with live lineages needs one of: a surviving alias row with
+    the same first_seen; a restore point of this plugin's workflow that an
+    EARLIER pass saw in this ledger; or the operator's word that the ledger
+    was reset (consumed here). Without any, nothing is imported and nothing
+    ends — absence from an unproven ledger is not erasure (round p1)."""
+    live = conn.execute("SELECT COUNT(*) FROM projections WHERE merged_into IS NULL AND"
+                        " ended IS NULL").fetchone()[0]
+    if not live or anchored:
+        return
+    marks = json.loads(b["ledger_marks_json"] or "{}")
+    probe = conn.execute("SELECT data_json FROM probes WHERE kind='ledger'").fetchone()
+    registered = json.loads(probe["data_json"] or "{}").get("registered") or {}
+    if any(marks.get(bid) not in (None, cur_pass["pass_id"]) for bid in registered.values()):
+        return
+    if b["ledger_reset_ack"]:
+        conn.execute("UPDATE binding SET ledger_reset_ack=0 WHERE id=1")
+        return
+    raise db.Refusal("I can't confirm this is the bank ledger this store was built on: none of "
+                     "its payments and none of its restore points are in it. Nothing was "
+                     "imported or ended. If the ledger was wiped on purpose, the operator says "
+                     "\"the bank ledger was reset\".")
+
+
 def import_ledger_export(conn, *, path: str, token) -> dict:
     import binding
     import passes
@@ -5003,14 +5209,21 @@ def import_ledger_export(conn, *, path: str, token) -> dict:
         if not cur_pass["account_seen"]:
             raise db.Refusal("the bound account was not seen in this pass's list_accounts, so "
                              "nothing was imported and nothing was ended (not checked)")
+        gate = passes.bank_write_gate(conn)
+        if not gate["allowed"]:
+            raise db.Refusal("nothing imported: " + gate["reason"])
         mine = [r for r in rows if r["account_id"] == b["account_id"]]
         by_id = {r["row_id"]: r for r in mine}
         max_id = max((r["row_id"] for r in rows), default=0)
-        for a in conn.execute("SELECT row_id, first_seen FROM aliases"):
+        anchored = False
+        for a in conn.execute("SELECT a.row_id, a.first_seen FROM aliases a JOIN projections p"
+                              " ON p.pid=a.pid WHERE p.merged_into IS NULL AND p.ended IS NULL"):
             r = by_id.get(a["row_id"])
             if r is not None and a["first_seen"] and r["first_seen"] != a["first_seen"]:
                 raise db.Refusal(f"row #{a['row_id']} now names a different transaction than "
                                  "the one this store holds — nothing was imported")
+            anchored = anchored or r is not None
+        _require_same_ledger(conn, b, cur_pass, anchored)
         old_facts = {r["row_id"]: dict(r) for r in conn.execute("SELECT * FROM bank_rows")}
         sync = conn.execute("SELECT ok, pass_id FROM probes WHERE kind='bank_sync'").fetchone()
         prev = conn.execute("SELECT bank_through FROM snapshots ORDER BY snapshot_id DESC"
@@ -5306,6 +5519,17 @@ class TestMachineWrites(Base):
         self.assertEqual((self.state(a), self.state(b), r["state"]),
                          ("rejected", "rejected", "proposed"))
 
+    def test_a_machine_write_on_the_operators_own_pairing_is_refused(self):
+        d = self.doc()
+        rid = self.show(self.pid)
+        mid = matches.record_match(self.conn, pid=self.pid, doc_id=d, author="operator",
+                                   expected_revision=self.rev(self.pid), render_id=rid)["match_id"]
+        with self.assertRaises(db.Refusal):
+            self.auto(doc_id=d, kind="propose")
+        self.assertEqual(self.conn.execute("SELECT state, author FROM match_state WHERE"
+                                           " match_id=?", (mid,)).fetchone()[:],
+                         ("matched", "operator"))
+
     def test_resolves_after_the_operator_confirmed_one_is_refused_whole(self):
         a = self.auto(doc_id=self.doc())["match_id"]
         b = self.auto(doc_id=self.doc())["match_id"]
@@ -5330,6 +5554,22 @@ class TestOperatorWrites(Base):
         with self.assertRaises(authorship.Stale):
             matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(), author="operator",
                                  expected_revision=shown_rev, render_id=rid)
+
+    def test_the_current_revision_with_an_old_render_is_refused(self):
+        # the shown-revision comparison is what fails here: the caller passes the
+        # CURRENT revision, as a caller that resolved against live state would
+        d = self.doc()
+        mid = self.auto(doc_id=d, kind="propose")["match_id"]
+        rid = self.show(self.pid)
+        matches.relabel_match(self.conn, match_id=mid, labels=("guessed",), token=self.token)
+        with self.assertRaises(authorship.Stale):
+            matches.set_exemption(self.conn, pid=self.pid, exempt=True,
+                                  expected_revision=self.rev(self.pid), render_id=rid)
+        with self.assertRaises(authorship.Stale):
+            matches.reject_match(self.conn, match_id=mid,
+                                 expected_revision=self.rev(match_id=mid), render_id=rid)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE author='operator'")
+                         .fetchone()[0], 0)
 
     def test_a_render_id_for_another_item_is_refused(self):
         self.row(2)
@@ -5652,6 +5892,10 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
         if kind == "pair" and documents.collisions(conn, doc_id):
             raise db.Refusal("another document carries the same issuer and number: propose it "
                              "instead, or resolve the duplicate first")
+        op = st.operator_current()
+        if op is not None and op.doc_id == doc_id:
+            raise db.Refusal("the operator already paired this document with this payment; a "
+                             "machine write never touches that pairing")
         conflicted = st.conflicted_ids()
         if set(resolves or ()) != conflicted:
             raise db.Refusal("this payment has unresolved candidates "
@@ -5907,9 +6151,16 @@ class Base(StoreCase):
         self.bind(account=bankfeed.Ledger.ACCOUNT)
 
     def new_pass(self):
+        """A pass up to the sweep, in the skill's order: probes, gate, import, then
+        the erase candidates confirmed with get_transaction BEFORE anything else."""
         self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered())
         self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
-        return ledger.import_ledger_export(self.conn, path=self.bf.export(), token=self.token)
+        out = ledger.import_ledger_export(self.conn, path=self.bf.export(), token=self.token)
+        for c in out["erase_candidates"]:
+            if self.bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
+                sweep.record_observation(self.conn, pid=c["pid"], token=self.token,
+                                         not_found=True)
+        return out
 
     def cycle(self):
         return sim.sweep_cycle(self.conn, self.bf, self.token)
@@ -6037,7 +6288,7 @@ class TestCapacity(Base):
         again = sweep.record_observation(self.conn, pid=item["pid"], token=self.token,
                                          observed_tags=self.bf.tags(r),
                                          observed_notes=self.bf.notes(r))
-        self.assertNotIn("tag", again["instructions"] or {})
+        self.assertEqual((again["instructions"] or {}).get("tag", []), [])
 
 
 class TestEndsAndErasure(Base):
@@ -6066,13 +6317,14 @@ class TestEndsAndErasure(Base):
         rid = self.show(old_pid)
         matches.record_match(self.conn, pid=old_pid, doc_id=d, author="operator",
                              expected_revision=self.rev(old_pid), render_id=rid)
+        self.new_pass()                  # a pass that sees this plugin's restore point (§D4)
         self.bf.purge_before("2026-08-01")                         # before the pass
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])      # this pass's own sync
         self.bf.call("tag_transaction", row_ids=[self.rid()], tags=["software"])  # classifier
-        out = self.new_pass()
+        out = self.new_pass()                                      # confirms the end first
         self.assertEqual([c["pid"] for c in out["erase_candidates"]], [old_pid])
-        self.cycle()                                               # confirms the end
         self.assertEqual(lineage.projection(self.conn, old_pid)["ended"], "erased")
+        self.cycle()
         self.assertEqual(documents.status(self.conn, d), "unmatched")
         new_pid = self.pid_of(self.rid())
         r = matches.record_match(self.conn, pid=new_pid, doc_id=d, author="auto",
@@ -6802,7 +7054,8 @@ class TestCoverage(Base):
         pid = self.add()
         with db.tx(self.conn):
             self.conn.execute("UPDATE projections SET class_observed_at=NULL WHERE pid=?", (pid,))
-        self.assertIn("classification through 13 Sep · 1 never checked", self.render()["text"])
+        flat = self.render()["text"].replace("\n", " · ")     # the line wraps at " · "
+        self.assertIn("classification through 13 Sep · 1 never checked", flat)
 
     def test_empty_scope(self):
         text = self.render()["text"]
@@ -6950,6 +7203,43 @@ class TestRenderLog(Base):
     def test_same_store_same_bytes(self):
         self.add()
         self.assertEqual(self.render()["text"], self.render()["text"])
+
+    def test_composition_holds_the_write_lock(self):
+        import sqlite3
+        self.add()
+        other = sqlite3.connect(str(self.data / db.DB_NAME), timeout=0.1, isolation_level=None)
+        real = views._compose
+        seen = []
+
+        def composing(*a, **kw):
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("ROLLBACK")
+                seen.append("wrote")
+            except sqlite3.OperationalError:
+                seen.append("locked")
+            return real(*a, **kw)
+        from unittest import mock
+        with mock.patch.object(views, "_compose", composing):
+            self.render()
+        self.assertEqual(set(seen), {"locked"})
+
+    def test_a_view_binds_only_the_pairings_it_displays(self):
+        pid = self.add()
+        for _ in range(2):                                   # two candidates collide
+            matches.record_match(self.conn, pid=pid, doc_id=self.doc(), author="auto",
+                                 expected_revision=self.rev(pid), token=self.token,
+                                 row_snapshot=self.snapshot(pid))
+        r = self.render("missing")
+        views.mark_rendering_delivered(self.conn, r["render_id"])
+        shown = self.conn.execute("SELECT match_revisions_json FROM shown WHERE pid=?",
+                                  (pid,)).fetchone()[0]
+        self.assertEqual(json.loads(shown), {})
+        r = self.render("check")
+        views.mark_rendering_delivered(self.conn, r["render_id"])
+        shown = self.conn.execute("SELECT match_revisions_json FROM shown WHERE pid=?",
+                                  (pid,)).fetchone()[0]
+        self.assertEqual(len(json.loads(shown)), 2)
 
 
 if __name__ == "__main__":
@@ -7156,7 +7446,7 @@ def coverage(conn, members) -> str:
 def _lead(conn):
     setup = binding.check_setup(conn)
     if not setup["can_run"]:
-        return ["Not set up yet.", *setup["conditions"], "Nothing else to do until then."], True
+        return [setup["header"], *setup["conditions"], "Nothing else to do until then."], True
     out = []
     gmail = setup["probes"].get("gmail")
     if gmail is not None and not gmail["ok"]:
@@ -7197,7 +7487,17 @@ def _residue_lines(conn) -> tuple:
     return lines, ids
 
 
-def _section(out, printed, title, ds, detail, cap, q):
+def _shown_pairings(d) -> set:
+    ids = {c["match_id"] for c in d["candidates"]}
+    if d["current"] is not None:
+        ids.add(d["current"]["match_id"])
+    return ids
+
+
+def _section(out, printed, title, ds, detail, cap, q, shows_pairings=False):
+    """`printed` maps pid -> the match ids whose proposition the text displays.
+    Only those are bound for a later correction (round p1, Astra S1: a missing
+    view that bound candidates it never showed let "Adobe is wrong" reject them)."""
     if not ds:
         return
     if len(ds) > cap:
@@ -7212,13 +7512,15 @@ def _section(out, printed, title, ds, detail, cap, q):
             out.append("")
         out.append(headline(d, q))
         out.extend(detail(d))
-        printed.append(d["pid"])
+        printed.setdefault(d["pid"], set())
+        if shows_pairings:
+            printed[d["pid"]] |= _shown_pairings(d)
     if len(ds) > cap:
         out.append(f'+{len(ds) - cap} more — say "all of them"')
 
 
 def _compose(conn, view, q, items, members, lead, cap):
-    out, printed = list(lead), []
+    out, printed = list(lead), {}
     extras = {"residue": [], "announce_watermark": False}
     cur = [d for d in items if d["quarter"] == q]
     older_missing = [d for d in items if d["quarter"] and d["quarter"] < q and _is_missing(d)]
@@ -7239,7 +7541,7 @@ def _compose(conn, view, q, items, members, lead, cap):
         out.extend(evidence(d))
         if _is_missing(d):
             out.extend(_missing_detail(d))
-        printed.append(d["pid"])
+        printed[d["pid"]] = _shown_pairings(d)
         return out, printed, extras
 
     titles = {"status": f"Accounting · {dates.quarter_label(q)}",
@@ -7275,10 +7577,10 @@ def _compose(conn, view, q, items, members, lead, cap):
     if view in ("status", "all"):
         _section(out, printed, "WHAT IS THIS?", conflicts,
                  lambda d: ["The categories on it disagree — which is it?"], cap, q)
-        _section(out, printed, "I GUESSED THESE", guessed, evidence, cap, q)
+        _section(out, printed, "I GUESSED THESE", guessed, evidence, cap, q, shows_pairings=True)
     if view == "check":
         if guessed:
-            _section(out, printed, "", guessed, evidence, cap, q)
+            _section(out, printed, "", guessed, evidence, cap, q, shows_pairings=True)
         else:
             out.append("Nothing to check.")
     if view == "rest":
@@ -7348,30 +7650,34 @@ def build_review(conn, view="status", quarter=None, pid=None) -> dict:
         raise db.Refusal("an item view names one transaction")
     q = quarter or dates.quarter_of(db.now()[:10])
     dates.parse_quarter(q)
-    lead, stop = _lead(conn)
-    members, printed, extras = [], [], {}
-    if stop:
-        text = "\n".join(lead)
-    else:
-        members = membership(conn, view, q, pid)
-        items = [work.describe(conn, p) for p in members]
-        cap = 10 ** 6 if view in ("all", "item") else CAP
-        while True:
-            lines, printed, extras = _compose(conn, view, q, items, members, lead, cap)
-            text = "\n".join(w for line in lines for w in (_wrap(line) if line else [""]))
-            if utf16_len(text) <= TELEGRAM_LIMIT or cap <= 1:
-                break
-            cap = CAP if cap > CAP else cap - 1
+    lead, stop = _lead(conn)            # may record the pass's gate: outside the read below
+    # Compose and persist under ONE write lock, so the revisions recorded are
+    # exactly those of the facts the text shows (round p1, Astra S1: a write
+    # between composing and recording bound the operator to an unseen document).
     with db.tx(conn):
+        members, printed, extras = [], {}, {}
+        if stop:
+            text = "\n".join(lead)
+        else:
+            members = membership(conn, view, q, pid)
+            items = [work.describe(conn, p) for p in members]
+            cap = 10 ** 6 if view in ("all", "item") else CAP
+            while True:
+                lines, printed, extras = _compose(conn, view, q, items, members, lead, cap)
+                text = "\n".join(w for line in lines for w in (_wrap(line) if line else [""]))
+                if utf16_len(text) <= TELEGRAM_LIMIT or cap <= 1:
+                    break
+                cap = CAP if cap > CAP else cap - 1
         rid = f"r{db.next_seq(conn)}"
         conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                      " membership_json) VALUES (?,?,?,?,?,?)",
                      (rid, view, db.canonical({"quarter": q, "pid": pid, **extras}), db.now(),
                       text, json.dumps(members)))
-        for p in dict.fromkeys(printed):
+        for p, shown_ids in printed.items():
             prev = conn.execute("SELECT revision FROM projections WHERE pid=?", (p,)).fetchone()[0]
             mrevs = {str(r[0]): r[1] for r in conn.execute(
-                "SELECT match_id, revision FROM match_state WHERE pid=?", (p,))}
+                "SELECT match_id, revision FROM match_state WHERE pid=?", (p,))
+                if r[0] in shown_ids}
             conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
                          " match_revisions_json) VALUES (?,?,?,?)",
                          (rid, p, prev, db.canonical(mrevs)))
@@ -7578,6 +7884,18 @@ class TestGrammar(Base):
         self.assertIsNone(self.author(v))
         self.assertEqual(self.author(z)[0], "auto")
 
+    def test_candidates_not_displayed_are_reshown_not_rejected(self):
+        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        for _ in range(2):
+            matches.record_match(self.conn, pid=pid, doc_id=self.doc(), author="auto",
+                                 expected_revision=self.rev(pid), token=self.token,
+                                 row_snapshot=self.snapshot(pid))
+        self.deliver(view="missing")
+        out = reply.apply_reply(self.conn, "the Adobe one is wrong")
+        self.assertEqual(out["reshow"], [pid])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM match_state WHERE"
+                                           " state='rejected'").fetchone()[0], 0)
+
     def test_a_question_is_never_a_correction(self):
         z = self.item("Zapier", 9900, "2026-09-17")
         self.deliver()
@@ -7700,6 +8018,7 @@ PATTERNS = [
     ("stop", re.compile(r"stop chasing\s+(?P<q>q[1-4](?:\s+\d{4})?)")),
     ("start", re.compile(r"start from\s+(?P<q>q[1-4](?:\s+\d{4})?)")),
     ("name", re.compile(r"call the zips\s+(?P<n>.+)")),
+    ("ledger_reset", re.compile(r"the bank ledger was (?:reset|wiped)")),
     ("revive", re.compile(r"have another look at\s+(?:the\s+)?(?P<t>.+?)(?:\s+one)?")),
     ("rebuild", re.compile(r"rebuild(?:\s+it|\s+(?P<q>q[1-4](?:\s+\d{4})?))?")),
     ("resend", re.compile(r"send it again")),
@@ -7953,6 +8272,11 @@ def _apply(conn, run, verb, m, items):
         res = binding.set_package_name(conn, m.group("n"))
         run.applied.append(res)
         run.lines.append(f"The zips are now called {res['package_name']}-….zip.")
+        return
+    if verb == "ledger_reset":
+        res = binding.acknowledge_ledger_reset(conn)
+        run.applied.append(res)
+        run.lines.append(res["note"])
         return
     if verb == "rebuild":
         # "rebuild it" means the quarter this reply just touched, else the current one
@@ -8351,10 +8675,11 @@ class Base(StoreCase):
 
     def file_doc(self, kind="invoice", body=b"", **meta):
         import documents
-        path = self.publish("d%d.pdf" % self.n, PDF + body + str(meta).encode())
+        self.docs = getattr(self, "docs", 0) + 1       # distinct numbers: no identity collision
+        path = self.publish("d%d.pdf" % self.docs, PDF + body + str(meta).encode())
         args = dict(source_path=path, kind=kind, source="gmail", extraction_author="resident",
                     counterparty="Adobe", issuer="Adobe", amount_minor=10000, currency="EUR",
-                    document_date="2026-07-02", document_number="N%d" % self.n)
+                    document_date="2026-07-02", document_number="N%d" % self.docs)
         args.update(meta)
         return documents.ingest_document(self.conn, **args)["doc_id"]
 
@@ -8951,7 +9276,9 @@ git commit -m "feat: deterministic quarterly package — frozen inputs, total ro
 
 ```bash
 mkdir -p tests/upstream/gmail-v0.9.0
-git -C ../casa-plugin-gmail show v0.9.0:server/sent_log.py > tests/upstream/gmail-v0.9.0/sent_log.py
+: "${GMAIL_REPO:?set GMAIL_REPO to a local casa-plugin-gmail clone that has tag v0.9.0}"
+git -C "$GMAIL_REPO" show v0.9.0:server/sent_log.py > tests/upstream/gmail-v0.9.0/sent_log.py.tmp
+mv tests/upstream/gmail-v0.9.0/sent_log.py.tmp tests/upstream/gmail-v0.9.0/sent_log.py
 printf 'repo: bonzanni/casa-plugin-gmail\ntag: v0.9.0\ncommit: fce8ed4\npath: server/sent_log.py\npurpose: test-only; pins why an uncertain email is never retried automatically\n' > tests/upstream/gmail-v0.9.0/UPSTREAM.txt
 ```
 
@@ -9029,7 +9356,7 @@ class TestEmail(Base):
                                           package_id=self.pkg["package_id"])
         self.assertTrue(out["path"].startswith(str(self.handoff)))
         self.assertTrue(out["request_id"])
-        self.assertIn("your own", out["note"])
+        self.assertIn("operator's own address", out["note"])
 
     def test_email_is_delivered_only_with_a_message_id(self):
         out = delivery.stage_for_delivery(self.conn, channel="email",
@@ -9907,6 +10234,9 @@ class TestSkill(TempEnv):
         named = set(re.findall(r"`([a-z_]+)\(", SKILL)) | set(re.findall(r"`([a-z_]+)`", SKILL))
         ours = set(qa_server.TOOLS)
         for n in named:
+            params = {k for t in qa_server.TOOLS.values() for k in t["schema"]["properties"]}
+            if n in params:
+                continue
             if n.endswith("_") or n in {"workflow", "expected_generation", "pass_token",
                                         "render_id", "row_snapshot", "resolves", "not_found",
                                         "write_error", "observed_tags", "observed_notes",
@@ -10110,7 +10440,8 @@ You receive a `pass_token`. Pass it to every plugin write.
    document that later competes with an accepted pairing: `relabel_match(…, labels=["guessed"],
    runners_up=[…])` — never replace the pairing yourself. When a new payment and its document
    cannot be told apart from an already-paired payment and its document (same vendor, same
-   amount, same dates), propose both: `propose_match` for the new payment, and `propose_match`
+   amount, same dates) and that pairing was made by the machine (never one the operator
+   confirmed), propose both: `propose_match` for the new payment, and `propose_match`
    again on the paired payment with its own document, which turns that pairing back into a
    proposal the operator is shown.
 7. **Identity and portals.** A payee you cannot identify: `record_search(pid, pass_token,
@@ -10267,6 +10598,8 @@ def _identical_pairing(conn, item, doc):
     for pid in [r[0] for r in conn.execute("SELECT pid FROM projections WHERE status='matched'"
                                            " AND merged_into IS NULL AND pid<>?", (item["pid"],))]:
         other = work.describe(conn, pid)
+        if other["current"]["author"] != "auto":
+            continue                  # an operator's pairing is never demoted by the machine
         od = other["current"]["document"]
         if (other["counterparty"], other["amount_minor"], other["date"]) == (
                 item["counterparty"], item["amount_minor"], item["date"]) and (
@@ -10282,6 +10615,9 @@ def run_pass(conn, bf, trigger="cron", sync=None) -> dict:
     if sync is not None:
         sync()
     gate = binding.check_setup(conn)["bank_writes"]
+    if not gate["allowed"]:
+        end = passes.end_pass(conn, token, "stopped", {})
+        return {"token": token, "import": None, "gate": gate, "triage": None, "end": end}
     imp = ledger.import_ledger_export(conn, path=bf.export(), token=token)
     for c in imp["erase_candidates"]:
         if bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
@@ -10436,6 +10772,7 @@ class TestEndsE2E(Base):
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="R1", status="PDNG", amount=1000)])
         self.first_pass()
+        sim.run_pass(self.conn, bf)          # sees this plugin's restore point (§D4 evidence)
         (old_pid,) = lineage.live_pids(self.conn)
         stored = bf.rows(account=bankfeed.Ledger.ACCOUNT)
         plan = ingest.reconcile(stored, [bf.row("2026-07-06", ref="R1", amount=1000)],
@@ -10500,9 +10837,14 @@ class TestRestoreAndReset(Base):
         weekly = [b for b in self._backups() if b != install][-1]
         bf.call("restore_backup", backup_id=weekly)
         binding.reset_store(self.conn, confirm=True)
+        tags_before = {r["row_id"]: bf.tags(r["row_id"]) for r in self.active()}
         out = sim.run_pass(self.conn, bf)
         self.assertFalse(out["gate"]["allowed"])
         self.assertIn(f"restore backup {install}", out["gate"]["reason"])
+        self.assertEqual({r["row_id"]: bf.tags(r["row_id"]) for r in self.active()}, tags_before)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0], 0)
+        out = sim.run_pass(self.conn, bf)                   # and the next pass refuses again
+        self.assertFalse(out["gate"]["allowed"])
 
     def test_a_restore_after_the_generation_was_read_rejects_the_write(self):
         bf = self.bf
