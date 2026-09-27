@@ -54,6 +54,15 @@ CLASS_SCOPES = {"payslips": ("salary", "payroll"), "statements": ("fees", "inter
                 "receipts": ("reimbursement",)}
 
 
+# A period ends a sentence ("Zapier is fine.Vercel is wrong" is two), except
+# between digits (99.00, 1.234,56, 14.09) or where it opens a file extension
+# (accounting.zip, invoice.pdf). The extensions are a closed list, not "any
+# 1-5 letters", because a vendor name after a missing space is the same shape
+# ("Zapier is fine.Adobe is wrong" must stay two sentences) (fix round 3).
+_EXTENSIONS = ("zip", "pdf", "csv", "xlsx", "xls", "txt", "png", "jpg", "jpeg", "heic",
+               "doc", "docx", "xml", "json", "eml")
+_SENTENCE_END = re.compile(r"(?:(?<!\d)\.|\.(?!\d))(?!(?:%s)\b)|;|\n|(?<=\?)"
+                           % "|".join(_EXTENSIONS), re.I)
 _ESCAPE_LEAD = re.compile(r"^accounting\s*[:,\-\u2013\u2014]\s*")
 _ESCAPE_TAIL = re.compile(r"\s*,\s*accounting$")
 
@@ -68,7 +77,7 @@ def _clauses(text: str) -> list:
     inside a clause's content ("the ABC Accounting Services one", fix round 2).
     A period ends a sentence only before whitespace or the end, so a name like
     "accounting.zip" and an amount like "99.00" stay whole."""
-    parts = re.split(r"\.(?=\s|$)|;|\n|(?<=\?)", text.strip())
+    parts = re.split(_SENTENCE_END, text.strip())
     out = []
     for p in parts:
         c = re.sub(r"\s+", " ", p).strip(" ,:").lower()

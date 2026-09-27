@@ -465,5 +465,35 @@ class TestFixRound2(Base):
                          binding.slug("accounting.zip"))
 
 
+
+class TestFixRound3(Base):
+    def both_apply(self, text):
+        z = self.item("Zapier", 9900, "2026-09-17")
+        v = self.item("Vercel", 1210, "2026-09-18")
+        self.deliver()
+        out = reply.apply_reply(self.conn, text)
+        self.assertEqual(len(out["applied"]), 2, out["receipt"])
+        self.assertEqual(self.author(z)[0], "operator")
+        self.assertIsNone(self.author(v))
+
+    def test_a_period_without_a_space_still_ends_a_sentence(self):
+        self.both_apply("Zapier is fine.Vercel is wrong")
+
+    def test_a_period_and_a_space_ends_a_sentence(self):
+        self.both_apply("Zapier is fine. Vercel is wrong")
+
+    def test_numbers_and_file_names_stay_inside_their_clause(self):
+        self.assertEqual(reply._clauses("call the zips accounting.zip"),
+                         ["call the zips accounting.zip"])
+        self.assertEqual(reply._clauses("the Adobe 99.00 one is wrong.the 1.234,56 one is"
+                                         " good. the 14.09 one needs no invoice"),
+                         ["the adobe 99.00 one is wrong", "the 1.234,56 one is good",
+                          "the 14.09 one needs no invoice"])
+        self.assertEqual(reply._clauses("send invoice.pdf again.Adobe is wrong"),
+                         ["send invoice.pdf again", "adobe is wrong"])
+        self.assertEqual(reply._clauses("Zapier is fine.Adobe is wrong"),
+                         ["zapier is fine", "adobe is wrong"])
+
+
 if __name__ == "__main__":
     unittest.main()
