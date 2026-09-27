@@ -88,6 +88,8 @@ question ("is the Zapier one right?") is not a reply — answer it with a view.
     `record_delivery(delivery_id, outcome)`. If it is refused (nothing waiting, or several —
     which one?), relay that.
   - `show the rest` / `show older` — render `rest` / `older`.
+  - `show item <pid>` — render `build_review(view="item", pid=<pid>)`, send it, mark it
+    delivered (the operator asked for the candidates of that payment).
   - `all of them` / `more` — continue with `next`, as above.
   - `check emailed invoices` — the self-mail search of the pass's Gmail round, filing what
     it finds, then a one-line receipt.
