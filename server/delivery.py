@@ -33,8 +33,18 @@ def outbox_dir() -> pathlib.Path:
     return pathlib.Path(os.environ.get("CASA_PLUGIN_OUTBOX_DIR") or "/data/plugin-outbox")
 
 
-def _to_outbox(name: str, data: bytes) -> pathlib.Path:
+def _to_outbox(name: str, data: bytes) -> tuple:
+    """(path, created). Called under the custody lock, so no other staging
+    races it. A file already at `name` is never replaced: the same bytes (a
+    resend of a retained package whose earlier copy is still waiting) are
+    reused and are not this call's to remove; other bytes are refused, so one
+    staged delivery can never overwrite another's file."""
     d = outbox_dir()
+    if (d / name).exists():
+        if (d / name).read_bytes() == data:
+            return d / name, False
+        raise db.Refusal(f"another file named {name} is still waiting to be sent; "
+                         "send or clear that one first")
     fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{name}.part-")
     try:
         with os.fdopen(fd, "wb") as f:
@@ -49,7 +59,7 @@ def _to_outbox(name: str, data: bytes) -> pathlib.Path:
         except FileNotFoundError:
             pass
         raise
-    return d / name
+    return d / name, True
 
 
 def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_token=None) -> dict:
@@ -78,14 +88,22 @@ def _stage(conn, channel, package_id, doc_id, pass_token) -> dict:
         d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
         if d is None:
             raise db.Refusal(f"there is no document #{doc_id}")
-        name = package.doc_filename(dict(d), set(), (d["ingested_at"] or "")[:10])
+        # named clear of every file still in the outbox (casefolded, as
+        # doc_filename compares): two invoices of one vendor, day and amount
+        # otherwise share a name, and the second would replace the first's bytes
+        try:
+            taken = {n.casefold() for n in os.listdir(outbox_dir())} if channel == "telegram" \
+                else set()
+        except FileNotFoundError:
+            taken = set()
+        name = package.doc_filename(dict(d), taken, (d["ingested_at"] or "")[:10])
         data = documents.path_of(conn, doc_id).read_bytes()
     if channel == "email" and len(data) > GMAIL_ATTACHMENT_LIMIT:
         raise db.Refusal(f"{name} is over the 25 MB email attachment limit "
                          f"({len(data) / 1e6:.1f} MB); it is kept here")
-    request_id = None
+    request_id, created = None, False
     if channel == "telegram":
-        path = _to_outbox(name, data)
+        path, created = _to_outbox(name, data)
         note = "send it with send_media(kind='zip' or 'pdf'), then record_delivery"
     else:
         try:
@@ -103,7 +121,7 @@ def _stage(conn, channel, package_id, doc_id, pass_token) -> dict:
                                (package_id, doc_id, channel, str(path), request_id,
                                 db.now())).lastrowid
     except BaseException:
-        if channel == "telegram":      # nothing in the log names it: never leave it to be sent
+        if created:                     # nothing in the log names it: never leave it to be sent
             try:
                 os.unlink(path)
             except FileNotFoundError:
@@ -150,21 +168,55 @@ _LATEST = ("SELECT d.package_id, d.status, p.filename, p.quarter FROM deliveries
 
 
 def resendable(conn, quarter=None):
-    """The package whose LATEST send is the most recent one that may have
-    arrived (uncertain or delivered). A package whose latest send failed is
-    skipped whatever its older sends said (round p8, Terra S2)."""
+    """The most recent package whose latest send is uncertain, else the most
+    recent one whose latest send was delivered (the brief's interface). A
+    package whose latest send failed is skipped whatever its older sends said
+    (round p8, Terra S2). What "send it again" resends is resend_target, which
+    binds to what the operator was shown, not this."""
     sql, args = _LATEST, []
     if quarter:
         sql += " AND p.quarter=?"
         args.append(quarter)
-    for r in conn.execute(sql + " ORDER BY d.delivery_id DESC", args):
-        if r["status"] in ("uncertain", "delivered"):
-            return r["package_id"]
+    rows = conn.execute(sql + " ORDER BY d.delivery_id DESC", args).fetchall()
+    for want in ("uncertain", "delivered"):
+        for r in rows:
+            if r["status"] == want:
+                return r["package_id"]
     return None
 
 
-def uncertain(conn) -> list:
+def uncertain(conn, quarter=None) -> list:
     """Packages whose most recent send is uncertain (offered in words), as
-    (package_id, filename), oldest package first."""
+    (package_id, filename), oldest package first; `quarter` scopes them to a
+    quarter-scoped view."""
+    sql, args = _LATEST + " AND d.status='uncertain'", []
+    if quarter:
+        sql += " AND p.quarter=?"
+        args.append(quarter)
     return [(r["package_id"], r["filename"])
-            for r in conn.execute(_LATEST + " AND d.status='uncertain' ORDER BY d.package_id")]
+            for r in conn.execute(sql + " ORDER BY d.package_id", args)]
+
+
+def resend_target(conn) -> int:
+    """What "send it again" resends: the package the most recent DELIVERED
+    rendering offered (D3: an operator's words bind to what they were shown).
+    An offered package whose latest send has since been delivered is no longer
+    waiting. None waiting, or several, is a refusal in the operator's words —
+    several are told apart by the date in their filenames (spec §"What the
+    operator never has to learn")."""
+    last = conn.execute("SELECT scope_json FROM renders WHERE delivered_at IS NOT NULL"
+                        " ORDER BY delivered_at DESC, rowid DESC LIMIT 1").fetchone()
+    offered = json.loads(last["scope_json"]).get("offers", []) if last else []
+    waiting = []
+    for pid in offered:
+        r = conn.execute(_LATEST + " AND d.package_id=?", (pid,)).fetchone()
+        if r is not None and r["status"] != "delivered":
+            waiting.append(r)
+    if not waiting:
+        raise db.Refusal("nothing is waiting to be sent again")
+    if len(waiting) > 1:
+        names = [r["filename"] for r in waiting]
+        raise db.Refusal("more than one package may not have arrived: "
+                         + ", ".join(names[:-1]) + f" and {names[-1]} — which one? "
+                         "Say it by the date in its name.")
+    return waiting[0]["package_id"]

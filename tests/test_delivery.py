@@ -252,5 +252,106 @@ class TestEmail(Base):
         self.assertEqual(os.path.basename(out["path"]), "2026-07-02_Adobe_1.00.pdf")
 
 
+class TestResendTarget(Base):
+    def send(self, pkg_id, outcome):
+        d = delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg_id)
+        delivery.record_delivery(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
+        for f in os.listdir(self.outbox):          # Casa consumes the outbox copy on send
+            os.unlink(self.outbox / f)
+
+    def shown(self, quarter="2026-Q3"):
+        r = views.build_review(self.conn, view="status", quarter=quarter)
+        views.mark_rendering_delivered(self.conn, r["render_id"])
+        return r["text"]
+
+    def test_the_offered_uncertain_package_not_a_newer_delivered_one(self):
+        a = self.pkg
+        self.send(a["package_id"], "uncertain")
+        b = package.build_quarterly_package(self.conn, "2026-Q3")
+        self.send(b["package_id"], "delivered")
+        text = self.shown()
+        self.assertIn(a["filename"], text)
+        self.assertNotIn(b["filename"], text)
+        self.assertEqual(delivery.resend_target(self.conn), a["package_id"])
+        self.assertEqual(delivery.resendable(self.conn), a["package_id"])
+
+    def test_two_offered_asks_which_by_the_names(self):
+        a = self.pkg
+        b = package.build_quarterly_package(self.conn, "2026-Q3")
+        self.send(a["package_id"], "uncertain")
+        self.send(b["package_id"], "uncertain")
+        self.shown()
+        with self.assertRaises(db.Refusal) as cm:
+            delivery.resend_target(self.conn)
+        self.assertIn(a["filename"], str(cm.exception))
+        self.assertIn(b["filename"], str(cm.exception))
+        self.assertIn("which one", str(cm.exception))
+
+    def test_an_offer_never_delivered_binds_nothing(self):
+        self.send(self.pkg["package_id"], "uncertain")
+        views.build_review(self.conn, view="status", quarter="2026-Q3")
+        with self.assertRaises(db.Refusal) as cm:
+            delivery.resend_target(self.conn)
+        self.assertIn("nothing is waiting to be sent again", str(cm.exception))
+
+    def test_once_the_resend_arrived_nothing_is_waiting(self):
+        self.send(self.pkg["package_id"], "uncertain")
+        self.shown()
+        self.send(delivery.resend_target(self.conn), "delivered")
+        with self.assertRaises(db.Refusal):
+            delivery.resend_target(self.conn)
+
+    def test_the_offer_is_scoped_to_the_views_quarter(self):
+        self.send(self.pkg["package_id"], "uncertain")
+        self.assertNotIn("send it again", self.shown("2026-Q4"))
+        self.assertEqual(delivery.uncertain(self.conn, "2026-Q4"), [])
+        with self.assertRaises(db.Refusal):
+            delivery.resend_target(self.conn)
+
+
+class TestOutboxNames(Base):
+    def ingest(self, body):
+        import documents
+        path = self.publish("inv.pdf", body)
+        return documents.ingest_document(self.conn, source_path=path, kind="invoice",
+                                         source="gmail", extraction_author="resident",
+                                         counterparty="Adobe", amount_minor=100,
+                                         document_date="2026-07-02")["doc_id"]
+
+    def test_two_invoices_sharing_a_name_never_overwrite_each_other(self):
+        first = b"%PDF-1.4\nAAA\n%%EOF\n"
+        o1 = delivery.stage_for_delivery(self.conn, channel="telegram", doc_id=self.ingest(first))
+        o2 = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                         doc_id=self.ingest(b"%PDF-1.4\nBBB\n%%EOF\n"))
+        self.assertNotEqual(o1["path"], o2["path"])
+        self.assertEqual(pathlib.Path(o1["path"]).read_bytes(), first)
+        paths = [r[0] for r in self.conn.execute("SELECT staged_path FROM deliveries")]
+        self.assertEqual(sorted(paths), sorted([o1["path"], o2["path"]]))
+
+    def test_other_bytes_under_a_packages_name_are_refused_and_kept(self):
+        other = self.outbox / self.pkg["filename"]
+        other.write_bytes(b"not this package")
+        with self.assertRaises(db.Refusal):
+            delivery.stage_for_delivery(self.conn, channel="telegram",
+                                        package_id=self.pkg["package_id"])
+        self.assertEqual(other.read_bytes(), b"not this package")
+
+    def test_a_refused_log_write_never_removes_a_copy_it_did_not_create(self):
+        first = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                            package_id=self.pkg["package_id"])
+        import passes
+        calls = []
+
+        def check(conn, token):
+            calls.append(token)
+            if len(calls) == 2:                     # refused at the log write
+                raise db.Refusal("stale")
+        with mock.patch.object(passes, "check_token", check):
+            with self.assertRaises(db.Refusal):
+                delivery.stage_for_delivery(self.conn, channel="telegram",
+                                            package_id=self.pkg["package_id"])
+        self.assertTrue(os.path.exists(first["path"]))
+
+
 if __name__ == "__main__":
     unittest.main()

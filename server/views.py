@@ -270,11 +270,13 @@ def _degraded_block(gmail_down, interrupted, missing, unsearched) -> list:
 
 class _Block:
     """One printed item: its lines, and what printing it binds on delivery."""
-    __slots__ = ("lines", "pid", "pairings", "residue", "amount", "order", "name", "guessed")
+    __slots__ = ("lines", "pid", "pairings", "residue", "amount", "order", "name", "guessed",
+                 "offer")
 
     def __init__(self, lines, *, pid=None, pairings=(), residue=None, amount=0, order=("", 0),
-                 name=None, guessed=False):
+                 name=None, guessed=False, offer=None):
         self.lines, self.pid, self.pairings, self.residue = list(lines), pid, set(pairings), residue
+        self.offer = offer              # a package offered for "send it again"
         self.amount, self.order, self.name, self.guessed = amount or 0, order, name, guessed
 
 
@@ -398,11 +400,14 @@ def _compose(conn, view, q, items, members, lead):
         secs.append(_Section("", res))
         # a send that may not have arrived is offered, never resent by itself
         # (spec §Packaging, "Delivery"); a block like any other, so the cap,
-        # the paging and the final fit all apply to it
+        # the paging and the final fit all apply to it. The rendering records
+        # the packages it printed: "send it again" resolves against those only
+        # (delivery.resend_target).
         import delivery
         secs.append(_Section("", [_Block([f"{fname} may not have arrived —",
-                                          'say "send it again".'], order=("", pkg_id))
-                                  for pkg_id, fname in delivery.uncertain(conn)]))
+                                          'say "send it again".'], order=("", pkg_id),
+                                         offer=pkg_id)
+                                  for pkg_id, fname in delivery.uncertain(conn, q)]))
     if view in ("status", "all", "missing", "quarter"):
         secs.append(_Section("MISSING", _item_blocks(missing, _missing_detail, q), gap=True))
     if view in ("status", "all"):
@@ -656,6 +661,7 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
                 scope["announce_watermark"] = True
             if view in ("status", "all"):
                 scope["residue"] = [c.residue for c in chosen if c.residue is not None]
+                scope["offers"] = [c.offer for c in chosen if c.offer is not None]
                 if page in (None, 1):
                     scope["residue_silent"] = parts["silent"]
         rid = f"r{db.next_seq(conn)}"
