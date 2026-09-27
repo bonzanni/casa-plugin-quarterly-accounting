@@ -50,6 +50,8 @@ changes a contract this document relies on.
 Implementation plan: `docs/superpowers/plans/2026-09-27-quarterly-accounting.md`, converged at
 round p10 (b93f71a). Errata D1, D4, D8 and D9 were accepted and applied 2026-09-27; see the plan's
 "Decisions and errata".
+Revised the same day for bank-feed 0.15.0–0.18.0 (#69 ledger instance id; the two erasers) and
+Casa's uninstall eraser (`reset_store`). The plan re-converged at round p13 (ac9b598).
 Revised 2026-09-20 — re-verified against casa **v0.323.0**. Both scheduled-turn
 dependencies landed; the contracts they landed with (one attention lane, durable
 asks, background jobs) change the weekly pass. See “Casa baseline”.

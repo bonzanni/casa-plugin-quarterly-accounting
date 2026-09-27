@@ -33,7 +33,10 @@ The agents drive the whole flow through the skill:
   - D4 now binds to the instance id, and writes carry `expected_ledger`.
   - The bank-feed floor is 0.15.0; the vendored test tree is component v0.19.0.
   - `reset_store` is the argument-free, protected `casa.eraseTool`.
-- The revision is a changed mechanism, so it goes through plan rounds again (p11 onward).
+- The revision **re-converged at round p13 (tree ac9b598): Astra SHIP, Terra SHIP**, nothing at S1/S2.
+  - Rounds p11–p12 were SHIP WITH FIXES, all folded in.
+  - Both reviewers executed all 24 tasks against component v0.19.0: 312 tests green.
+  - Every guard mutation failed its test (occupancy, shown revision, not-found evidence, restore gate, erased-lineage read, WAL-busy eraser, and the `expected_ledger` fence on untag, tag and note).
 - **Operator rulings, 2026-09-27:** D1, D8, D9 accepted; D4 accepted with the reset sentence (upstream #69, now shipped); `reset_store` as the eraser. The errata are applied to the spec.
 - Execution is subagent-driven, from a fresh session.
 
