@@ -35,6 +35,10 @@ class TempEnv(unittest.TestCase):
         os.environ["CASA_HANDOFF_DIR"] = str(self.handoff)
         os.environ["CASA_PLUGIN_OUTBOX_DIR"] = str(self.outbox)
 
+    def publish(self, name, data, producer="gmail"):
+        import casa_handoff
+        return casa_handoff.publish(producer, name, data=data)["path"]
+
 
 class StoreCase(TempEnv):
     def setUp(self):
