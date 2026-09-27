@@ -302,5 +302,112 @@ class TestRace(Base):
                                            " match_id=?", (loser,)).fetchone()[0], "occupied")
 
 
+class TestFixRound1(Base):
+    def residue(self, reason="exempt-doc"):
+        return self.conn.execute("SELECT COUNT(*) FROM residue WHERE reason=?",
+                                 (reason,)).fetchone()[0]
+
+    def test_relabelling_a_rejected_pairing_is_refused_and_moves_nothing(self):
+        mid = self.auto(doc_id=self.doc(), kind="propose")["match_id"]
+        rid = self.show(self.pid)
+        matches.reject_match(self.conn, match_id=mid, expected_revision=self.rev(match_id=mid),
+                             render_id=rid)
+        rid = self.show(self.pid)
+        shown = self.rev(self.pid)
+        with self.assertRaises(db.Refusal):
+            matches.relabel_match(self.conn, match_id=mid, labels=("guessed",), token=self.token)
+        self.assertEqual(self.rev(self.pid), shown)
+        r = matches.set_exemption(self.conn, pid=self.pid, exempt=True,
+                                  expected_revision=shown, render_id=rid)
+        self.assertEqual(r["status"], "exempt")
+
+    def test_a_standing_pairing_is_still_relabelled(self):
+        mid = self.auto(doc_id=self.doc())["match_id"]
+        r = matches.relabel_match(self.conn, match_id=mid, labels=("no-ref",), token=self.token)
+        self.assertEqual(r["state"], "matched")
+        self.assertEqual(self.conn.execute("SELECT label FROM matches WHERE match_id=?",
+                                           (mid,)).fetchone()[0], "no-ref")
+
+    def test_exempt_residue_names_only_a_valid_document_once(self):
+        rid = self.show(self.pid)
+        matches.set_exemption(self.conn, pid=self.pid, exempt=True,
+                              expected_revision=self.rev(self.pid), render_id=rid)
+        irrelevant = self.doc()
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE documents SET irrelevant=1 WHERE doc_id=?", (irrelevant,))
+        for bad in (99999, irrelevant, self.doc(kind="payslip")):
+            for _ in range(2):
+                with self.assertRaises(db.Refusal):
+                    self.auto(doc_id=bad)
+        self.assertEqual(self.residue(), 0)
+        d = self.doc()
+        for _ in range(3):
+            self.assertFalse(self.auto(doc_id=d)["applied"])
+        self.assertEqual(self.residue(), 1)
+        self.assertFalse(self.auto(doc_id=self.doc())["applied"])     # another document: a line
+        self.assertEqual(self.residue(), 2)
+
+    def test_two_ids_for_one_document_reuse_the_latest_never_mint_a_third(self):
+        # what a merge of two lineages that each paired d leaves behind (plan §D12)
+        d = self.doc()
+        with db.tx(self.conn):
+            ids = []
+            for act in (5, 9):
+                mid = self.conn.execute("INSERT INTO matches(pid_created, doc_id, created_seq)"
+                                        " VALUES (?,?,0)", (self.pid, d)).lastrowid
+                self.conn.execute("INSERT INTO match_state(match_id, pid, doc_id, state, author,"
+                                  " activation) VALUES (?,?,?,'rejected','auto',?)",
+                                  (mid, self.pid, d, act))
+                ids.append(mid)
+        before = self.conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+        with db.tx(self.conn):
+            self.assertEqual(matches._match_id_for(self.conn, self.pid, d), ids[1])
+        r = self.auto(doc_id=d, kind="propose")
+        self.assertEqual(r["match_id"], ids[1])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0], before)
+
+    def test_operator_writes_naming_a_merged_pid_are_not_shown(self):
+        # the loser and the survivor on ONE delivered render; then the fan-in
+        # merges the loser. A write naming the loser must not be bound to the
+        # survivor's shown record, even with the survivor's revision in hand.
+        mid = self.auto(doc_id=self.doc(), kind="propose")["match_id"]
+        self.row(2)
+        other = self.lineage_for(2)
+        self.classify(other, {"software"})
+        self.settle(other)
+        rid = self.show(self.pid, other)
+        mrev = self.rev(match_id=mid)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET merged_into=? WHERE pid=?",
+                              (other, self.pid))
+        for rev in (self.rev(other), self.rev(self.pid)):   # survivor first: the hazard
+            with self.assertRaises(authorship.NotShown):
+                matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(),
+                                     author="operator", expected_revision=rev, render_id=rid)
+            with self.assertRaises(authorship.NotShown):
+                matches.set_exemption(self.conn, pid=self.pid, exempt=True,
+                                      expected_revision=rev, render_id=rid)
+        for fn in (matches.confirm_match, matches.reject_match):
+            with self.assertRaises(authorship.NotShown):
+                fn(self.conn, match_id=mid, expected_revision=mrev, render_id=rid)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE author='operator'")
+                         .fetchone()[0], 0)
+
+    def test_a_snapshot_of_a_row_no_longer_active_is_refused(self):
+        snap = dict(self.snapshot(self.pid), state="superseded")
+        with self.assertRaises(db.Refusal) as caught:
+            matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(), author="auto",
+                                 expected_revision=self.rev(self.pid), row_snapshot=snap,
+                                 token=self.token)
+        self.assertIn("snapshot", str(caught.exception))
+
+    def test_an_older_render_after_a_newer_delivered_one_is_not_shown(self):
+        old = self.show(self.pid)
+        self.show(self.pid)
+        with self.assertRaises(authorship.NotShown):
+            matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(), author="operator",
+                                 expected_revision=self.rev(self.pid), render_id=old)
+
+
 if __name__ == "__main__":
     unittest.main()

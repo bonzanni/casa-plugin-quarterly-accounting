@@ -29,11 +29,16 @@ def _labels(labels) -> str:
 
 
 def _match_id_for(conn, pid, doc_id) -> int:
-    rows = conn.execute("SELECT m.match_id FROM matches m JOIN match_state s ON"
-                        " s.match_id=m.match_id WHERE s.pid=? AND m.doc_id=?",
-                        (pid, doc_id)).fetchall()
-    if len(rows) == 1:
-        return rows[0][0]
+    """The lineage's id for this document (plan §D12: a pairing's identity is
+    re-used, never duplicated). A lineage can hold two ids for one document
+    after a merge of two lineages that each paired it; the one activated
+    latest is re-used, deterministically, and no third id is minted."""
+    row = conn.execute("SELECT m.match_id FROM matches m JOIN match_state s ON"
+                       " s.match_id=m.match_id WHERE s.pid=? AND m.doc_id=?"
+                       " ORDER BY s.activation DESC, m.match_id DESC LIMIT 1",
+                       (pid, doc_id)).fetchone()
+    if row is not None:
+        return row[0]
     return conn.execute("INSERT INTO matches(pid_created, doc_id, created_seq) VALUES (?,?,0)",
                         (pid, doc_id)).lastrowid
 
@@ -91,19 +96,13 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
         if proj["revision"] != expected_revision:
             raise authorship.Stale(pid, "this payment changed since list_projections; re-read it")
         st = lineage.fold_of(conn, pid)
-        if st.exemption is not None:
-            lineage.add_residue(conn, pid, "exempt-doc", f"document #{doc_id}")
-            return {"applied": False, "refused": "the operator exempted this payment; a document "
-                                                 "that turned up for it is shown as residue"}
         row = lineage.live_row(conn, proj)
         if proj["ended"] or not lineage.eligible(conn, row):
             raise db.Refusal("this payment is not managed any more (ended or ineligible)")
-        if row["status"] != "BOOK":
-            raise db.Refusal("a pending payment is not matched automatically")
-        if row_snapshot is None or R.facts_of(row_snapshot) != R.facts_of(row) \
-                or (row_snapshot.get("state") or "active") != "active":
-            raise db.Refusal("the row changed since this pass's snapshot (or was not re-read "
-                             "with get_transaction): re-import before matching")
+        # The document is validated BEFORE the exemption branch, so an exempt
+        # lineage's residue names only a real, relevant document of the kind the
+        # payment would need (fix round 1: nonexistent/irrelevant/wrong-kind
+        # documents left residue lines, one more every pass).
         exp = lineage.expectation_for(conn, proj, row, exempt=False)
         if exp.unknown:
             raise db.Refusal("not yet classified: nothing is matched to it until it is")
@@ -114,6 +113,19 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
             raise db.Refusal("that document was marked irrelevant")
         if doc["kind"] != exp.kind:
             raise db.Refusal(_why_not_kind(conn, proj, row, exp, doc))
+        if st.exemption is not None:
+            detail = f"document #{doc_id}"
+            if conn.execute("SELECT 1 FROM residue WHERE pid=? AND reason='exempt-doc' AND"
+                            " detail=?", (pid, detail)).fetchone() is None:
+                lineage.add_residue(conn, pid, "exempt-doc", detail)
+            return {"applied": False, "refused": "the operator exempted this payment; a document "
+                                                 "that turned up for it is shown as residue"}
+        if row["status"] != "BOOK":
+            raise db.Refusal("a pending payment is not matched automatically")
+        if row_snapshot is None or R.facts_of(row_snapshot) != R.facts_of(row) \
+                or (row_snapshot.get("state") or "active") != "active":
+            raise db.Refusal("the row changed since this pass's snapshot (or was not re-read "
+                             "with get_transaction): re-import before matching")
         if kind == "pair" and documents.collisions(conn, doc_id):
             raise db.Refusal("another document carries the same issuer and number: propose it "
                              "instead, or resolve the duplicate first")
@@ -160,6 +172,17 @@ def _operator_pair(conn, pid, doc_id, render_id, *, match_id=None):
     return _result(conn, pid, red, mid, _effects(before, _states(conn, pid)))
 
 
+def _operator_pid(conn, pid) -> int:
+    """The pid an operator write acts on. If it was merged into another
+    lineage, what the operator was shown was the loser's item, not the
+    survivor's: fail closed, so the merged item is shown again first."""
+    survivor = lineage.resolve_pid(conn, pid)
+    if survivor != pid:
+        raise authorship.NotShown(survivor, f"#{pid} was merged into #{survivor}; show the "
+                                            "merged item and apply nothing yet")
+    return pid
+
+
 def record_match(conn, *, pid, doc_id, author, expected_revision, render_id=None,
                  labels=("clean",), rationale="", runners_up=(), resolves=(), row_snapshot=None,
                  token=None) -> dict:
@@ -169,7 +192,7 @@ def record_match(conn, *, pid, doc_id, author, expected_revision, render_id=None
     if author != "operator":
         raise db.Refusal("author is 'auto' or 'operator'")
     with db.tx(conn):
-        pid = lineage.resolve_pid(conn, pid)
+        pid = _operator_pid(conn, pid)
         authorship.require_projection_shown(conn, pid, render_id, expected_revision)
         return _operator_pair(conn, pid, doc_id, render_id)
 
@@ -183,7 +206,7 @@ def propose_match(conn, *, pid, doc_id, expected_revision, labels=("clean",), ra
 def confirm_match(conn, *, match_id, expected_revision, render_id) -> dict:
     with db.tx(conn):
         s = _state(conn, match_id)
-        pid = lineage.resolve_pid(conn, s["pid"])
+        pid = _operator_pid(conn, s["pid"])
         authorship.require_match_shown(conn, pid, match_id, render_id, expected_revision)
         if s["state"] == "rejected":
             raise db.Refusal("that pairing was already removed")
@@ -198,7 +221,7 @@ def confirm_match(conn, *, match_id, expected_revision, render_id) -> dict:
 def reject_match(conn, *, match_id, expected_revision, render_id) -> dict:
     with db.tx(conn):
         s = _state(conn, match_id)
-        pid = lineage.resolve_pid(conn, s["pid"])
+        pid = _operator_pid(conn, s["pid"])
         authorship.require_match_shown(conn, pid, match_id, render_id, expected_revision)
         if s["state"] not in ("matched", "proposed", "conflicted"):
             raise db.Refusal("there is no pairing to remove there")
@@ -210,7 +233,7 @@ def reject_match(conn, *, match_id, expected_revision, render_id) -> dict:
 
 def set_exemption(conn, *, pid, exempt, expected_revision, render_id) -> dict:
     with db.tx(conn):
-        pid = lineage.resolve_pid(conn, pid)
+        pid = _operator_pid(conn, pid)
         authorship.require_projection_shown(conn, pid, render_id, expected_revision)
         st = lineage.fold_of(conn, pid)
         before = _states(conn, pid)
@@ -231,6 +254,13 @@ def relabel_match(conn, *, match_id, labels, rationale=None, runners_up=None, to
     with db.tx(conn):
         passes.check_token(conn, token)
         s = _state(conn, match_id)
+        if s["state"] not in ("matched", "proposed"):
+            # spec §Tool surface: relabel_match "re-labels an accepted match". A
+            # retired pairing's label is invisible, yet it is in settle's digest:
+            # relabelling one would make an operator's pending correction Stale
+            # over a change they cannot see (fix round 1).
+            raise db.Refusal(f"pairing #{match_id} is {s['state']}; only a standing pairing "
+                             "is relabelled")
         sets = {"label": _labels(labels)}
         if rationale is not None:
             sets["rationale"] = rationale
