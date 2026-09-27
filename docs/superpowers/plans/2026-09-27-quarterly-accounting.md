@@ -75,7 +75,7 @@ The spec is converged. Turning it into code surfaced the points below. Each is e
 - **D4: Ledger identity needs positive evidence.**
   - bank-feed exposes no instance id. When the store has live lineages, an import must find at least one of:
     - a live alias row whose `first_seen` is unchanged;
-    - a restore point of this plugin's workflow that an **earlier** pass saw in this ledger;
+    - a restore point of this plugin's workflow that an **earlier, identity-proven** import recorded;
     - the operator's one-shot "the bank ledger was reset".
   - Without any of them, nothing is imported and nothing ends.
   - An alias whose `row_id` reappears with a different `first_seen` is always refused.
@@ -2924,7 +2924,9 @@ class TestBankWriteGate(StoreCase):
 
     def test_restored_ledger_under_a_populated_store_stops(self):
         self.pass_(generation=0)
-        passes.bank_write_gate(self.conn)             # remembers generation 0
+        passes.bank_write_gate(self.conn)
+        with db.tx(self.conn):                       # what a successful import records
+            passes.remember_ledger(self.conn, passes.current_pass(self.conn)["pass_id"])
         self._populate()
         passes.end_pass(self.conn, passes.current_pass(self.conn)["generation"], "complete", {})
         self.pass_(generation=1, registered={})
@@ -2933,8 +2935,10 @@ class TestBankWriteGate(StoreCase):
         self.assertIn("reset", g["reason"].lower())
 
     def test_erasure_under_a_populated_store_is_not_a_restore(self):
-        self.pass_(generation=2, registered={version.WORKFLOW: "b1"})
+        self.pass_(generation=2, registered={})
         passes.bank_write_gate(self.conn)
+        with db.tx(self.conn):
+            passes.remember_ledger(self.conn, passes.current_pass(self.conn)["pass_id"])
         self._populate()
         passes.end_pass(self.conn, passes.current_pass(self.conn)["generation"], "complete", {})
         self.pass_(generation=2, registered={})      # delete_all_data erased registrations
@@ -2952,6 +2956,18 @@ class TestBankWriteGate(StoreCase):
         self._populate()                                   # e.g. something imported anyway
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
         self.assertFalse(binding.check_setup(self.conn)["can_run"])
+
+    def test_filing_a_document_between_passes_does_not_lift_a_refusal(self):
+        self.pass_(generation=1, registered={version.WORKFLOW: "b-1"})
+        self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO documents(sha256, ext, size, kind, source,"
+                              " extraction_author, ingested_at, ingest_quarter) VALUES"
+                              " ('ab', 'pdf', 1, 'invoice', 'gmail', 'resident', 'x', '2026-Q3')")
+        self.pass_(generation=1, registered={version.WORKFLOW: "b-1"})
+        self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
+        self.pass_(generation=2, registered={})                 # the operator restored
+        self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
 
     def test_no_ledger_probe_this_pass_is_refused(self):
         passes.begin_pass(self.conn, "cron")
@@ -3140,9 +3156,10 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None) 
 
 
 def store_populated(conn) -> bool:
+    """Lineage state only. Filed documents say nothing about which ledger this
+    store runs against, so they never change the gate's verdict (round p2)."""
     return bool(conn.execute("SELECT EXISTS (SELECT 1 FROM projections)"
-                             " OR EXISTS (SELECT 1 FROM log)"
-                             " OR EXISTS (SELECT 1 FROM documents)").fetchone()[0])
+                             " OR EXISTS (SELECT 1 FROM log)").fetchone()[0])
 
 
 def _write(conn, sql, args=()) -> None:
@@ -3173,25 +3190,24 @@ def bank_write_gate(conn) -> dict:
     if cur is not None and probe is not None and probe["pass_id"] == cur["pass_id"]:
         _write(conn, "UPDATE passes SET gate_json=? WHERE pass_id=?",
                (db.canonical(out), cur["pass_id"]))
-        if out["allowed"]:
-            _write(conn, "UPDATE binding SET ledger_generation=? WHERE id=1",
-                   (out["expected_generation"],))
-            _remember_marks(conn, cur["pass_id"])
     return out
 
 
-def _remember_marks(conn, pass_id) -> None:
-    """Restore points of this plugin's workflows seen in the bound ledger, each
-    with the pass that first saw it: evidence of ledger identity for a later
-    import (plan §D4)."""
+def remember_ledger(conn, pass_id) -> None:
+    """Called ONLY by an import that proved ledger identity, inside its
+    transaction (round p2, Astra S1: remembering at gate time let a rejected
+    ledger's restore point vouch for that same ledger one pass later). Records
+    the generation this store now runs against, and each restore point of this
+    plugin's workflows with the pass that first saw it (plan §D4)."""
     import binding
     probe = conn.execute("SELECT data_json FROM probes WHERE kind='ledger'").fetchone()
-    registered = json.loads(probe["data_json"] or "{}").get("registered") or {}
+    data = json.loads(probe["data_json"] or "{}")
     marks = json.loads(binding.get(conn)["ledger_marks_json"] or "{}")
-    for wf, backup in registered.items():
+    for wf, backup in (data.get("registered") or {}).items():
         if wf.startswith("acct@"):
             marks.setdefault(backup, pass_id)
-    _write(conn, "UPDATE binding SET ledger_marks_json=? WHERE id=1", (db.canonical(marks),))
+    conn.execute("UPDATE binding SET ledger_marks_json=?, ledger_generation=? WHERE id=1",
+                 (db.canonical(marks), int(data.get("generation", -1))))
 
 
 def _decide_gate(conn) -> dict:
@@ -3214,16 +3230,36 @@ def _decide_gate(conn) -> dict:
     out["install_backup"] = registered.get(version.WORKFLOW)
     out["older_workflows"] = sorted(w for w in registered
                                     if w.startswith("acct@") and w != version.WORKFLOW)
+    # A refusal persists ACROSS passes until the ledger condition that caused it
+    # clears (round p2, Astra S1: filing a document between passes had flipped
+    # "fresh" to "populated" and lifted a dirty-ledger refusal without a restore).
+    prior = conn.execute("SELECT value FROM meta WHERE key='gate_refusal'").fetchone()
+    if prior is not None:
+        pr = json.loads(prior[0])
+        if pr["kind"] == "restored" or (
+                pr["kind"] == "dirty-ledger" and gen == pr["generation"]
+                and registered.get(version.WORKFLOW) == pr["backup"]):
+            out["reason"] = pr["reason"]
+            return out
+        _write(conn, "DELETE FROM meta WHERE key='gate_refusal'")
     populated = store_populated(conn)
     remembered = b["ledger_generation"]
+    refusal = None
     if populated and remembered is not None and gen != remembered:
-        out["reason"] = ("the ledger was restored since this store last ran "
-                         f"(restore generation {remembered} → {gen}) — reset the accounting "
-                         "store (reset_store) before anything is written")
-        return out
-    if not populated and version.WORKFLOW in registered:
-        out["reason"] = (f"the ledger still carries writes from {version.WORKFLOW} after its "
-                         f"restore point — restore backup {registered[version.WORKFLOW]} first")
+        refusal = {"kind": "restored",
+                   "reason": ("the ledger was restored since this store last ran "
+                              f"(restore generation {remembered} → {gen}) — reset the "
+                              "accounting store (reset_store) before anything is written")}
+    elif not populated and version.WORKFLOW in registered:
+        refusal = {"kind": "dirty-ledger", "generation": gen,
+                   "backup": registered[version.WORKFLOW],
+                   "reason": (f"the ledger still carries writes from {version.WORKFLOW} after "
+                              f"its restore point — restore backup "
+                              f"{registered[version.WORKFLOW]} first")}
+    if refusal is not None:
+        _write(conn, "INSERT OR REPLACE INTO meta(key, value) VALUES ('gate_refusal', ?)",
+               (db.canonical(refusal),))
+        out["reason"] = refusal["reason"]
         return out
     out.update(allowed=True, expected_generation=gen)
     return out
@@ -3379,6 +3415,10 @@ def reset_store(conn, confirm: bool) -> dict:
         conn.execute("UPDATE pass_marker SET live=0")
         conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=NULL,"
                      " last_cycle_completed_at=NULL")
+        # A "restored" refusal concerned the store just wiped; a dirty-ledger one
+        # concerns the ledger, which a store reset does not clean.
+        conn.execute("DELETE FROM meta WHERE key='gate_refusal' AND"
+                     " json_extract(value, '$.kind')='restored'")
     for sub in ("documents", "packages"):
         shutil.rmtree(db.data_dir() / sub, ignore_errors=True)
     return {"reset": True, "note": "The accounting store is empty. The next pass refuses "
@@ -3997,6 +4037,11 @@ def settle(conn, pid: int) -> R.Reduction:
                          (c.match_id,)).fetchone()
         live = c.state in F.ACTIVE + ("conflicted",)
         digest = db.canonical({
+            # the live facts and expectation under the pairing, not only whether they
+            # still agree with its fingerprint (round p2, Astra S1: €100 -> €90 -> €80
+            # kept one revision, so a confirmation shown at €90 committed at €80)
+            "facts": inp.facts if live else None,
+            "exp": [exp.kind, exp.tier] if live else None,
             "state": c.state, "author": c.author, "activation": c.activation, "fp": c.fp,
             "verdict": R.kind_verdict(c, inp) if live else None,
             "row_ok": (json.loads(c.fp)["facts"] == inp.facts) if (live and c.fp) else None,
@@ -4878,6 +4923,15 @@ class TestInstance(Base):
         with self.assertRaises(db.Refusal):
             self.imp([])
 
+    def test_a_rejected_ledger_never_vouches_for_itself_later(self):
+        # round p2 (Astra S1): ledger B, empty, with its own restore point, two passes running
+        self.imp([{"row_id": 40}])
+        for _ in range(2):
+            self.token = self.pass_(registered={"acct@0.1.0": "b-other-ledger"})
+            with self.assertRaises(db.Refusal):
+                self.imp([])
+        self.assertIsNone(list(self.live().values())[0]["ended"])
+
     def test_the_operators_word_is_evidence_once(self):
         import binding
         self.imp([{"row_id": 1}])
@@ -5307,6 +5361,7 @@ def import_ledger_export(conn, *, path: str, token) -> dict:
 
         # 4. every live lineage re-reduced against this snapshot (fingerprints, eligibility)
         lineage.settle_all(conn)
+        passes.remember_ledger(conn, cur_pass["pass_id"])   # identity proved above
         out["delivered_changes"] = check_delivered_bank_half(conn, by_id)
         return out
 ```
@@ -5568,6 +5623,20 @@ class TestOperatorWrites(Base):
         with self.assertRaises(authorship.Stale):
             matches.reject_match(self.conn, match_id=mid,
                                  expected_revision=self.rev(match_id=mid), render_id=rid)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE author='operator'")
+                         .fetchone()[0], 0)
+
+    def test_successive_corrections_each_move_the_pairing(self):
+        mid = self.auto(doc_id=self.doc())["match_id"]
+        self.row(1, amount_minor=9000)
+        self.settle(self.pid)
+        rid = self.show(self.pid)
+        shown = self.rev(match_id=mid)
+        self.row(1, amount_minor=8000)
+        self.settle(self.pid)
+        self.assertGreater(self.rev(match_id=mid), shown)
+        with self.assertRaises(authorship.Stale):
+            matches.confirm_match(self.conn, match_id=mid, expected_revision=shown, render_id=rid)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE author='operator'")
                          .fetchone()[0], 0)
 
@@ -8139,6 +8208,8 @@ class _Run:
         try:
             res = fn()
         except (authorship.NotShown, authorship.Stale) as exc:
+            if d["pid"] in self.reshow:
+                return None                 # one payment is re-shown once, and said once
             self.reshow.append(d["pid"])
             word = "changed since you saw it" if isinstance(exc, authorship.Stale) else \
                 "hasn't been shown to you in this form yet"
