@@ -1,0 +1,5 @@
+repo: bonzanni/casa-specialist-finance
+tag: v0.13.2
+commit: 6e75fb3ac75a07c7a9deb68f18e4fc835299bc41
+path: plugins/bank-feed
+purpose: test-only real bank-feed; never imported by server/
