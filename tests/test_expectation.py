@@ -1,6 +1,5 @@
 """The decision table of spec §"Document expectation" as an executable
 oracle. Every row is exercised; the round-25/26/27 cases are named."""
-import pathlib
 import unittest
 
 from tests._base import TempEnv
@@ -108,8 +107,6 @@ class TestDecisionTable(unittest.TestCase):
 
 class TestParityWithBankFeed(TempEnv):
     def test_classification_state_matches_bank_feed(self):
-        if not (pathlib.Path(__file__).parent / "bankfeed.py").exists():
-            self.skipTest("tests/bankfeed.py arrives in Task 2")
         from tests import bankfeed
         bankfeed.load()
         import rules
