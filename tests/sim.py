@@ -6,7 +6,9 @@ procedure SKILL.md prescribes; the skill must say exactly this, in words:
   list_projections -> for each item (until remaining_in_cycle is 0 or the room runs
   out; triage then judges only fresh items — sweep_within, run_pass(sweep_budget=...)):
     get_transaction(row_id); "no transaction #N" -> record_observation(not_found)
-    else record_observation(observed_tags, observed_notes)
+    else record_observation(observed_tags, observed_notes, observed_first_seen)
+    every record_observation carries list_projections' snapshot_id (the import's
+      `snapshot` for an erase candidate); a newer import refuses it
     make the ONE returned write (untag, tag or add_note) with workflow,
       expected_generation and expected_ledger exactly as returned
     a write that did not take (the tags or the note are not on the row after it)
@@ -28,20 +30,25 @@ def _read(bf, row_id):
     return bf.tags(row_id), bf.notes(row_id), first_seen
 
 
-def observe_and_repair(conn, bf, token, item) -> dict:
+def observe_and_repair(conn, bf, token, item, snapshot_id) -> dict:
     """Read, record, make the ONE returned write, read again, record again —
-    until the server returns nothing to do (at most untag, tag and note)."""
+    until the server returns nothing to do (at most untag, tag and note). Every
+    record carries the snapshot_id list_projections returned."""
     pid, row_id = item["pid"], item["row_id"]
+
+    def rec(**kw):
+        return sweep.record_observation(conn, pid=pid, token=token, snapshot_id=snapshot_id,
+                                        **kw)
+
     if item["ended"] == "erased":
         return {}
     got = _read(bf, row_id)
     if got is None:
-        return sweep.record_observation(conn, pid=pid, token=token, not_found=True)
+        return rec(not_found=True)
     r = {}
     for _ in range(4):
         tags, notes, first_seen = got
-        r = sweep.record_observation(conn, pid=pid, token=token, observed_tags=tags,
-                                     observed_notes=notes, observed_first_seen=first_seen)
+        r = rec(observed_tags=tags, observed_notes=notes, observed_first_seen=first_seen)
         ins = r.get("instructions") or {}
         if not ins:
             return r
@@ -50,19 +57,19 @@ def observe_and_repair(conn, bf, token, item) -> dict:
         if "untag" in ins:
             out = bf.call("untag_transaction", row_ids=[row_id], tags=ins["untag"], **kw)
             if set(ins["untag"]) & set(bf.tags(row_id)):
-                return sweep.record_observation(conn, pid=pid, token=token, write_error=out)
+                return rec(write_error=out)
         elif "tag" in ins:
             out = bf.call("tag_transaction", row_ids=[row_id], tags=ins["tag"], **kw)
             if not set(ins["tag"]) <= set(bf.tags(row_id)):
-                return sweep.record_observation(conn, pid=pid, token=token, write_error=out)
+                return rec(write_error=out)
         else:
             out = bf.call("add_note", row_ids=[row_id], note=ins["add_note"], author="agent",
                           **kw)
             if ins["add_note"] not in bf.notes(row_id):
-                return sweep.record_observation(conn, pid=pid, token=token, write_error=out)
+                return rec(write_error=out)
         got = _read(bf, row_id)
         if got is None:
-            return sweep.record_observation(conn, pid=pid, token=token, not_found=True)
+            return rec(not_found=True)
     return r
 
 
@@ -71,7 +78,7 @@ def sweep_cycle(conn, bf, token, limit=25) -> int:
     while True:
         page = sweep.list_projections(conn, token=token, limit=limit)
         for item in page["projections"]:
-            observe_and_repair(conn, bf, token, item)
+            observe_and_repair(conn, bf, token, item, page["snapshot_id"])
             n += 1
         if page["remaining_in_cycle"] == 0:
             return n
@@ -85,7 +92,7 @@ def sweep_within(conn, bf, token, budget) -> int:
     while True:
         page = sweep.list_projections(conn, token=token, limit=max(1, min(25, budget - n)))
         for item in page["projections"]:
-            observe_and_repair(conn, bf, token, item)
+            observe_and_repair(conn, bf, token, item, page["snapshot_id"])
             n += 1
         if page["remaining_in_cycle"] == 0 or n >= budget:
             return page["remaining_in_cycle"]
@@ -249,7 +256,8 @@ def run_pass(conn, bf, trigger="cron", sync=None, sweep_budget=None) -> dict:
     try:
         for c in imp["erase_candidates"]:
             if bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
-                sweep.record_observation(conn, pid=c["pid"], token=token, not_found=True)
+                sweep.record_observation(conn, pid=c["pid"], token=token,
+                                         snapshot_id=imp["snapshot"], not_found=True)
         if sweep_budget is None:
             sweep_cycle(conn, bf, token)
             remaining = 0

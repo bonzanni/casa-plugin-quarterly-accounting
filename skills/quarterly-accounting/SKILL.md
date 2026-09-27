@@ -205,23 +205,27 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    If the import is refused, stop: return the refusal, and the pass ends `stopped` —
    nothing after this step runs.
 4. **Ends.** For each `erase_candidates` row: `get_transaction(row_id)`. If it answers
-   `no transaction #N`, call `record_observation(pid, pass_token, not_found=true)`. Do this
-   before any matching, so freed documents are free for this pass.
+   `no transaction #N`, call `record_observation(pid, pass_token, snapshot_id=<the import's
+   snapshot>, not_found=true)`. Do this before any matching, so freed documents are free for
+   this pass.
 5. **Sweep.** Repeat `list_projections(pass_token)` until `remaining_in_cycle` is 0 or you
    are close to your turn budget. It lists the payments not read since this pass's import
    (the import carries no classification, so what a payment wants is known only from a read
    made after it) — `remaining_in_cycle` 0 means every one was. A payment not read since the
-   import is never matched: the server refuses it. For each item, read the row with
+   import is never matched: the server refuses it. Every `record_observation` of the sweep
+   passes the `snapshot_id` that `list_projections` returned. For each item, read the row with
    `get_transaction(row_id)`. If it answers `no transaction #N`, record `not_found=true` as
    in step 4 and go on. Otherwise
-   `record_observation(pid, pass_token, observed_tags=<every tag>, observed_notes=<every note
+   `record_observation(pid, pass_token, snapshot_id, observed_tags=<every tag>, observed_notes=<every note
    shown>, observed_first_seen=<the row's first seen>)`, all three every time, read from this
    read: the tags are every tag on the `Tags:` line and on the `Other workflows' tags` line
    (the `acct::` tags are there); the notes are each note line shown, oldest first, as
    shown (the `[author, date]` prefix and the bank-provided-text markers may stay or go —
    the server reads both); first seen is the timestamp on the row's `first seen …,
    last seen …` line. If it refuses because the bank ledger changed during this pass, stop the
-   pass at once.
+   pass at once. If it refuses because the bank was re-read meanwhile (another import landed
+   after your read), nothing was recorded: call `list_projections` again and read the payment
+   again with its new `snapshot_id`.
    If `bank_writes` is not allowed, make no bank-feed write and report its reason. Otherwise
    make the ONE write the returned `instructions` name, exactly:
    - `untag_transaction(row_ids=[row_id], tags=untag, workflow=…, expected_generation=…, expected_ledger=…)`, or
@@ -236,7 +240,7 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    built on — if it was wiped on purpose, the operator says 'the bank ledger was reset'".
    Then read the row again with `get_transaction`. If the write did not take — a tag it
    removed is still there, a tag it added is missing, or the note is not among the notes —
-   `record_observation(pid, pass_token, write_error=<bank-feed's reply to the write>)` and go
+   `record_observation(pid, pass_token, snapshot_id, write_error=<bank-feed's reply>)` and go
    on to the next item: it is reported, never retried. If the row is gone, record
    `not_found=true`. Otherwise record it again with what that read shows (tags, notes and
    first seen, as above); repeat until nothing is returned (at most an untag, a tag and a
@@ -319,6 +323,8 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    package_id=…)`, then `send_media(path, kind="zip")` with the caption
    `build_quarterly_package` returned, then `record_delivery(delivery_id, outcome)`. A timeout
    is `uncertain`: do not send again unless the operator asks ("send it again", above).
+   If it is refused because the bank was re-read while building, nothing was kept: run
+   step 1 again (the re-read made every payment unread), then build again, once.
 3. "Email me the Q3 package": `stage_for_delivery(channel="email", package_id=…)`, then
    gmail's `send_email` to the operator's own address with the returned path attached and the
    returned `request_id`. Casa asks the operator for one tap showing the recipient. Then

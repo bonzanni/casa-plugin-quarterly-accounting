@@ -144,3 +144,36 @@ def pending_rendering(path, barrier, out):
     finally:
         conn.close()
 
+
+
+def import_export(export_path, token, instance, out):
+    """A second session's import_ledger_export under the same pass token (round
+    E3, Astra S1: an import landing between a read and its record)."""
+    import db
+    import ledger
+    conn = db.open_store()
+    try:
+        _report(out, lambda: ledger.import_ledger_export(
+            conn, path=export_path, token=token, ledger_instance=instance)["snapshot"])
+    finally:
+        conn.close()
+
+
+def build_paused(quarter, rendered, resume, out):
+    """build_quarterly_package, paused after its frozen inputs were rendered and
+    before the package is registered (round E3, Terra S1)."""
+    import db
+    import package
+    real = package._render
+
+    def paused(*a, **kw):
+        result = real(*a, **kw)
+        rendered.set()
+        resume.wait(30)
+        return result
+    package._render = paused
+    conn = db.open_store()
+    try:
+        _report(out, lambda: package.build_quarterly_package(conn, quarter))
+    finally:
+        conn.close()

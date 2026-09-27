@@ -8,15 +8,18 @@ qa_server.handle and the rendered get_transaction text where the skill is
 exercised."""
 import csv
 import io
+import multiprocessing
 import random
 import unittest
 import zipfile
 
 from tests import test_e2e
-from tests import sim
+from tests import _procs, sim, test_sweep_real
 import db  # noqa: E402
 import lineage  # noqa: E402
 import matches  # noqa: E402
+import package  # noqa: E402
+import sweep  # noqa: E402
 import work  # noqa: E402
 
 call = test_e2e.TestPackagingSeesTheClassification.call
@@ -47,12 +50,13 @@ class ToolPass(test_e2e.Base):
         self.assertEqual(imp["erase_candidates"], [])
         return token
 
-    def observe(self, token, item):
+    def observe(self, token, item, snapshot_id):
         """The skill's step 5 for ONE item, from the rendered text."""
         bf, row_id = self.bf, item["row_id"]
         for _ in range(4):
             tags, notes, first_seen = read(bf.call("get_transaction", row_id=row_id))
             r = call("record_observation", pid=item["pid"], pass_token=token,
+                     snapshot_id=snapshot_id,
                      observed_tags=tags, observed_notes=notes, observed_first_seen=first_seen)
             ins = r["instructions"]
             if not ins:
@@ -72,7 +76,7 @@ class ToolPass(test_e2e.Base):
             page = call("list_projections", pass_token=token,
                         limit=25 if budget is None else max(1, min(25, budget - n)))
             for item in page["projections"]:
-                self.observe(token, item)
+                self.observe(token, item, page["snapshot_id"])
                 n += 1
             if page["remaining_in_cycle"] == 0:
                 return 0
@@ -202,6 +206,160 @@ class TestPassWithAnUnfinishedSweep(ToolPass):
         self.assertEqual(self.outcome(out), "complete")
         self.assertEqual({p: lineage.projection(self.conn, p)["status"] for p in (z, a)},
                          {z: "matched", a: "matched"})
+
+
+class TestSnapshotBoundCommits(ToolPass):
+    """Round E3 (Astra S1, Terra S1): a read or a build validated against snapshot N is
+    refused at its commit once import N+1 has landed — never stamped fresh, never
+    registered."""
+    def import_in_another_process(self, token):
+        ctx = multiprocessing.get_context("spawn")
+        out = ctx.Queue()
+        proc = ctx.Process(target=_procs.import_export,
+                           args=(self.bf.export(), token, self.bf.last_export_instance, out))
+        proc.start()
+        proc.join(60)
+        got = out.get(timeout=5)
+        self.assertEqual(got[0], "ok", got)
+        return got[1]
+
+    def test_a_read_taken_before_another_sessions_import_is_refused(self):
+        ids = self.two_rows_matched()
+        bf, a = self.bf, ids["A1"]
+        token = self.begin("handover")
+        page = call("list_projections", pass_token=token)
+        n = page["snapshot_id"]
+        item = next(i for i in page["projections"] if i["row_id"] == a)
+        tags, notes, first_seen = read(bf.call("get_transaction", row_id=a))
+        self.assertIn("software", tags)                              # the read, rendered
+        bf.call("untag_transaction", row_ids=[a], tags=["software"])
+        self.classify(a, "refund")                                   # reclassified after it
+        self.assertEqual(self.import_in_another_process(token), n + 1)
+        out = _raw("record_observation", pid=item["pid"], pass_token=token, snapshot_id=n,
+                   observed_tags=tags, observed_notes=notes, observed_first_seen=first_seen)
+        self.assertEqual(out, "refused: the bank was re-read meanwhile — list the sweep again "
+                              "and read this payment again; nothing was recorded")
+        self.assertFalse(work.describe(self.conn, item["pid"])["fresh"])
+        self.assertEqual(self.sweep(token), 0)                       # read again, under N+1
+        call("end_pass", pass_token=token, outcome="complete")
+        _, files, rows, _ = self.zip_of()
+        self.assertEqual(files, [])
+        self.assertEqual({r["counterparty"]: (r["status"], r["expectation_kind"]) for r in rows},
+                         {"Adobe": ("MISSING", "credit-note"), "Zapier": ("MISSING", "invoice")})
+
+    def test_a_build_whose_snapshot_was_superseded_before_registration_is_refused(self):
+        ids = self.two_rows_matched()
+        bf, a = self.bf, ids["A1"]
+        token = self.begin("package")
+        self.assertEqual(self.sweep(token), 0)
+        call("end_pass", pass_token=token, outcome="complete")
+        bf.call("untag_transaction", row_ids=[a], tags=["software"])
+        self.classify(a, "refund")
+        token = self.begin("cron")                   # its import is N; the build freezes N
+        ctx = multiprocessing.get_context("spawn")
+        rendered, resume, out = ctx.Event(), ctx.Event(), ctx.Queue()
+        proc = ctx.Process(target=_procs.build_paused, args=("2026-Q3", rendered, resume, out))
+        proc.start()
+        self.addCleanup(proc.join, 30)
+        self.addCleanup(resume.set)
+        self.assertTrue(rendered.wait(60), "the build never rendered")
+        call("import_ledger_export", path=bf.export(), pass_token=token,
+             ledger_instance=bf.last_export_instance)                # N+1 lands meanwhile
+        resume.set()
+        proc.join(60)
+        got = out.get(timeout=5)
+        self.assertEqual(got, ("error", "Refusal: the bank was re-read while building — "
+                                        "build again"))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 0)
+        self.assertEqual(list((db.data_dir() / "packages").iterdir()), [])  # no orphan zip
+        self.assertEqual(self.sweep(token), 0)
+        call("end_pass", pass_token=token, outcome="complete")
+        _, files, rows, _ = self.zip_of()
+        self.assertEqual(files, [])
+        self.assertEqual({r["counterparty"]: r["expectation_kind"] for r in rows},
+                         {"Adobe": "credit-note", "Zapier": "invoice"})
+
+    def test_nothing_validated_under_snapshot_n_commits_after_import_n_plus_1(self):
+        bf = self.bf
+        bf.fetch([bf.row("2026-07-%02d" % (i + 1), ref="R%d" % i, amount=1000 + i,
+                         counterparty="Vendor%d" % i) for i in range(5)])
+        for r in self.active():
+            self.classify(r["row_id"], "software")
+        self.first_pass()
+        rng = random.Random(3)
+        refused = 0
+        for trial in range(4):
+            token = self.begin("cron")
+            self.sweep(token, budget=rng.randint(1, 5))
+            page = call("list_projections", pass_token=token)
+            n = page["snapshot_id"]
+            reads = []
+            for item in page["projections"]:
+                reads.append((item, read(bf.call("get_transaction", row_id=item["row_id"]))))
+            # the build freezes and renders under N, and N+1 lands before it registers
+            real = package._render
+
+            def racing(*a, **kw):
+                result = real(*a, **kw)
+                call("import_ledger_export", path=bf.export(), pass_token=token,
+                     ledger_instance=bf.last_export_instance)
+                return result
+            package._render = racing
+            try:
+                with self.assertRaises(db.Refusal):
+                    package.build_quarterly_package(self.conn, "2026-Q3")
+            finally:
+                package._render = real
+            self.assertEqual(list((db.data_dir() / "packages").iterdir()), [])
+            for item, (tags, notes, first_seen) in reads:
+                out = _raw("record_observation", pid=item["pid"], pass_token=token,
+                           snapshot_id=n, observed_tags=tags, observed_notes=notes,
+                           observed_first_seen=first_seen)
+                self.assertTrue(out.startswith("refused: the bank was re-read"), out)
+                refused += 1
+                self.assertFalse(work.describe(self.conn, item["pid"])["fresh"])
+            self.assertEqual(call("list_projections", pass_token=token)["snapshot_id"], n + 1)
+            call("end_pass", pass_token=token, outcome="interrupted")
+        self.assertGreater(refused, 0)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 0)
+
+
+class TestVanishedAndPurgedConverges(test_sweep_real.Base):
+    """Round E3 (Astra S2): vanished lineages whose rows were later purged never left
+    the due set (each confirmed absence only moved the cursor). A confirmed absence is
+    the import's sweep work for them: one budgeted pass converges, and they stay
+    `vanished`."""
+    def test_twenty_six_vanished_purged_rows_converge_in_one_budgeted_pass(self):
+        from tests import bankfeed
+        self.bf.fetch([self.bf.row("2026-07-%02d" % (1 + d % 28), ref="R%d" % d, amount=100 + d)
+                       for d in range(26)], cap=bankfeed.CAP_UNKNOWN)
+        self.new_pass()
+        self.cycle()
+        self.bf.fetch([], cap=bankfeed.CAP_UNKNOWN)
+        out = self.new_pass()
+        self.assertEqual(len(out["ended_vanished"]), 26)
+        self.cycle()
+        self.bf.purge_before("2026-08-01")
+        self.assertEqual(self.bf.rows(), [])
+        self.new_pass()
+        self.assertEqual(sim.sweep_within(self.conn, self.bf, self.token, 26), 0)
+        again = sweep.list_projections(self.conn, token=self.token)
+        self.assertEqual((again["projections"], again["remaining_in_cycle"]), ([], 0))
+        ends = {r[0] for r in self.conn.execute("SELECT ended FROM projections")}
+        self.assertEqual(ends, {"vanished"})
+
+    def test_a_vanished_row_still_in_the_snapshot_is_not_confirmed_absent(self):
+        from tests import bankfeed
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")], cap=bankfeed.CAP_UNKNOWN)
+        self.new_pass()
+        self.cycle()
+        self.bf.fetch([], cap=bankfeed.CAP_UNKNOWN)
+        self.new_pass()
+        pid = self.pid_of(self.bf.rows()[0]["row_id"])        # vanished, still exported
+        with self.assertRaises(db.Refusal):
+            sweep.record_observation(self.conn, pid=pid, token=self.token,
+                                     snapshot_id=self.snap_id, not_found=True)
+        self.assertIn(pid, sweep._due(self.conn))
 
 
 def _raw(name, **args):

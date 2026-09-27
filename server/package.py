@@ -103,7 +103,9 @@ def _freeze(conn, quarter: str) -> dict:
             "SELECT p.* , d.settled_at FROM packages p JOIN deliveries d ON d.package_id="
             "p.package_id WHERE p.quarter=? AND d.status='delivered' ORDER BY d.settled_at DESC,"
             " p.package_id DESC LIMIT 1", (quarter,)).fetchone()
-        return {"binding": dict(b), "lines": lines, "history": history, "unmatched": unmatched,
+        # the import every line's freshness was judged against (round E3, Terra S1)
+        return {"snapshot_id": lineage.latest_import(conn),
+                "binding": dict(b), "lines": lines, "history": history, "unmatched": unmatched,
                 "bank_through": snap["bank_through"] if snap else None,
                 "prev": dict(prev) if prev else None}
     finally:
@@ -310,11 +312,20 @@ def _build(conn, quarter: str) -> dict:
         os.fsync(f.fileno())
     caption = _caption(quarter, manifest, frozen["prev"], digest, partial, b, path.name,
                        oversize, len(data))
-    with db.tx(conn):
-        pkg_id = conn.execute(
-            "INSERT INTO packages(quarter, filename, path, built_at, partial, digest, size,"
-            " oversize, caption, manifest_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (quarter, path.name, str(path), stamp, int(partial), digest, len(data),
-             int(oversize), caption, db.canonical(manifest))).lastrowid
+    try:
+        with db.tx(conn):
+            if lineage.latest_import(conn) != frozen["snapshot_id"]:
+                # round E3 (Terra S1): an import landed between the freeze and this
+                # commit, so rows judged fresh may no longer be; never register or hand
+                # out a zip built from a superseded snapshot
+                raise db.Refusal("the bank was re-read while building — build again")
+            pkg_id = conn.execute(
+                "INSERT INTO packages(quarter, filename, path, built_at, partial, digest, size,"
+                " oversize, caption, manifest_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (quarter, path.name, str(path), stamp, int(partial), digest, len(data),
+                 int(oversize), caption, db.canonical(manifest))).lastrowid
+    except BaseException:
+        path.unlink(missing_ok=True)       # an unregistered zip is never left to hand out
+        raise
     return {"package_id": pkg_id, "filename": path.name, "path": str(path), "caption": caption,
             "oversize": oversize, "size": len(data), "digest": digest, "partial": partial}

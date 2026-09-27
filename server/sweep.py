@@ -118,7 +118,20 @@ def list_projections(conn, *, token, limit: int = PAGE) -> dict:
                           "note": lineage.note_text(conn, pid), "revision": p["revision"],
                           "unprojectable": p["unprojectable"]})
         return {"workflow": version.WORKFLOW, "bank_writes": gate, "projections": items,
-                "remaining_in_cycle": len(order) - len(page), "notice": NOTICE}
+                "remaining_in_cycle": len(order) - len(page),
+                "snapshot_id": lineage.latest_import(conn), "notice": NOTICE}
+
+
+def _require_snapshot(conn, snapshot_id) -> None:
+    """An observation is made against ONE import (round E3, Astra S1): the read it
+    records was taken after the import list_projections named. If another import
+    landed since, the read may predate it (a reclassification between the two),
+    so it is refused, never stamped fresh."""
+    if snapshot_id is None:
+        raise db.Refusal("pass the snapshot_id list_projections (or the import) returned")
+    if int(snapshot_id) != lineage.latest_import(conn):
+        raise db.Refusal("the bank was re-read meanwhile — list the sweep again and read this "
+                         "payment again; nothing was recorded")
 
 
 def _require_proven_import(conn) -> None:
@@ -148,7 +161,7 @@ def _ended_noop(conn, p) -> dict:
 def _confirm_erased(conn, pid: int) -> dict:
     cur = passes.current_pass(conn)
     p = lineage.projection(conn, pid)
-    if p["ended"]:
+    if p["ended"] == "erased":
         return _ended_noop(conn, p)
     if cur is None or cur["snapshot_id"] is None or not cur["account_seen"]:
         raise db.Refusal("nothing can be judged ended without this pass's own snapshot of the "
@@ -158,6 +171,13 @@ def _confirm_erased(conn, pid: int) -> dict:
     if present is not None:
         raise db.Refusal(f"row #{p['dest_row_id']} is in this pass's snapshot; it has not left "
                          "the ledger")
+    if p["ended"]:
+        # A vanished lineage whose row has since left the ledger (round E3, Astra S2):
+        # the confirmed absence is this import's sweep work for it — it leaves the due
+        # set — and it stays `vanished` (a row that vanished is not an erasure).
+        conn.execute("UPDATE projections SET class_observed_snapshot=?, observed_revision=?"
+                     " WHERE pid=?", (lineage.latest_import(conn), p["revision"], pid))
+        return _ended_noop(conn, p)
     ledger.end_lineage(conn, pid, "erased", cur["snapshot_id"])
     red = lineage.settle(conn, pid)
     _advance(conn, pid)
@@ -165,18 +185,22 @@ def _confirm_erased(conn, pid: int) -> dict:
             "instructions": {}, "bank_writes": None, "read_back": False}
 
 
-def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=None,
-                       not_found=False, write_error=None, observed_first_seen=None) -> dict:
+def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None,
+                       observed_notes=None, not_found=False, write_error=None,
+                       observed_first_seen=None) -> dict:
     """What get_transaction showed for one projection's row. Returns at most ONE
     write (untag, tag or add_note) with workflow, expected_generation and
     expected_ledger; the specialist makes it, reads the row again and records
     again until nothing is returned. not_found=True confirms an erasure (only
     for a row absent from this pass's own snapshot); write_error records a write
-    bank-feed refused, reported and never retried."""
+    bank-feed refused, reported and never retried. snapshot_id is the one
+    list_projections returned: the read belongs to that import, and is refused
+    if a newer one landed since."""
     if token is None:
         raise db.Refusal("an observation belongs to a pass: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
+        _require_snapshot(conn, snapshot_id)
         pid = lineage.resolve_pid(conn, pid)
         proj = lineage.projection(conn, pid)
         if proj["ended"] == "erased":

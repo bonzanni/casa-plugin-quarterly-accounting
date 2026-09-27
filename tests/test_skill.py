@@ -113,7 +113,7 @@ class TestSkill(TempEnv):
             self.assertIn(phrase, section, phrase)
         # read -> record -> write -> read again, in that order
         order = ["`get_transaction(row_id)`", "`record_observation(pid, pass_token, "
-                 "observed_tags=", "`untag_transaction(", "read the row again",
+                 "snapshot_id, observed_tags=", "`untag_transaction(", "read the row again",
                  "write_error=", "record it again"]
         sweep = section[section.index("**Sweep.**"):section.index("**Triage.**")]
         positions = [sweep.index(k) for k in order]
@@ -201,6 +201,15 @@ class TestSkill(TempEnv):
         self.assertIn("end the pass `interrupted`", doc)
         pack = " ".join(self.section("## Packaging", "## Install").split())
         self.assertIn("ships unclassified with its documents set aside", pack)
+
+    def test_every_observation_names_the_import_it_was_read_under(self):
+        # round E3 (Astra S1): a read recorded after a newer import is refused
+        section = " ".join(self.section("## The specialist's pass", "## Packaging").split())
+        self.assertIn("snapshot_id=<the import's snapshot>, not_found=true", section)
+        self.assertIn("passes the `snapshot_id` that `list_projections` returned", section)
+        self.assertIn("read the payment again with its new `snapshot_id`", section)
+        pack = " ".join(self.section("## Packaging", "## Install").split())
+        self.assertIn("refused because the bank was re-read while building", pack)
 
 
 if __name__ == "__main__":

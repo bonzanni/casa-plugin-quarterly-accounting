@@ -34,9 +34,10 @@ class Base(StoreCase):
         path = self.bf.export()
         out = ledger.import_ledger_export(self.conn, path=path, token=self.token,
                                           ledger_instance=self.bf.last_export_instance)
+        self.snap_id = out["snapshot"]
         for c in out["erase_candidates"]:
             if self.bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
-                sweep.record_observation(self.conn, pid=c["pid"], token=self.token,
+                sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=c["pid"], token=self.token,
                                          not_found=True)
         return out
 
@@ -163,7 +164,7 @@ class TestCapacity(Base):
         self.new_pass()
         page = sweep.list_projections(self.conn, token=self.token)
         item = page["projections"][0]
-        again = sweep.record_observation(self.conn, pid=item["pid"], token=self.token,
+        again = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=item["pid"], token=self.token,
                                          observed_tags=self.bf.tags(r),
                                          observed_notes=self.bf.notes(r),
                                          observed_first_seen=self.bf.rows()[0]["first_seen"])
@@ -222,7 +223,7 @@ class TestEndsAndErasure(Base):
         self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered(),
                                 instance=self.bf.instance())
         with self.assertRaises(db.Refusal):
-            sweep.record_observation(self.conn, pid=pid, token=self.token, not_found=True)
+            sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=pid, token=self.token, not_found=True)
         self.assertIsNone(lineage.projection(self.conn, pid)["ended"])
 
     def test_an_earlier_import_that_omitted_the_row_is_not_evidence_now(self):
@@ -248,7 +249,7 @@ class TestEndsAndErasure(Base):
         self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered(),
                                 instance=self.bf.instance())
         with self.assertRaises(db.Refusal):
-            sweep.record_observation(self.conn, pid=pid, token=self.token, not_found=True)
+            sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=pid, token=self.token, not_found=True)
         with self.assertRaises(db.Refusal):
             sweep.list_projections(self.conn, token=self.token)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM match_state WHERE state IN"
@@ -262,7 +263,7 @@ class TestEndsAndErasure(Base):
         page = sweep.list_projections(self.conn, token=self.token)
         item = page["projections"][0]
         with self.assertRaises(db.Refusal):
-            sweep.record_observation(self.conn, pid=item["pid"], token=self.token,
+            sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=item["pid"], token=self.token,
                                      observed_tags=[], observed_notes=[],
                                      observed_first_seen="2030-01-01T00:00:00Z")
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
@@ -289,7 +290,7 @@ class TestEndsAndErasure(Base):
             return out
         self.bf.call = swapping_call
         with self.assertRaises(db.Refusal):
-            sim.observe_and_repair(self.conn, self.bf, self.token, item)
+            sim.observe_and_repair(self.conn, self.bf, self.token, item, self.snap_id)
         self.assertEqual(writes, ["tag_transaction"])                  # exactly one write
         self.assertEqual(self.owned(rid), ["acct::open"])
         self.assertFalse([n for n in self.bf.notes(rid) if n.startswith("Accounting revision")])
@@ -330,7 +331,7 @@ class TestEndsAndErasure(Base):
         self.bf.call = reminting_call
         before = (sorted(self.bf.tags(rid)), list(self.bf.notes(rid)))
         try:
-            sim.observe_and_repair(self.conn, self.bf, self.token, item)
+            sim.observe_and_repair(self.conn, self.bf, self.token, item, self.snap_id)
         except db.Refusal:
             pass
         finally:
@@ -373,7 +374,7 @@ class TestEndsAndErasure(Base):
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
         self.new_pass()
         with self.assertRaises(db.Refusal):
-            sweep.record_observation(self.conn, pid=self.pid_of(self.rid()), token=self.token,
+            sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=self.pid_of(self.rid()), token=self.token,
                                      not_found=True)
 
     def test_omitted_observed_notes_is_refused_not_a_duplicate_note(self):
@@ -390,7 +391,7 @@ class TestEndsAndErasure(Base):
                                           (r,)).fetchone()[0]
         self.new_pass()
         with self.assertRaises(db.Refusal):
-            sweep.record_observation(self.conn, pid=self.pid_of(r), token=self.token,
+            sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=self.pid_of(r), token=self.token,
                                      observed_tags=self.bf.tags(r), observed_first_seen=first_seen)
         self.assertEqual(list(self.bf.notes(r)), before)          # no duplicate write happened
 
@@ -413,7 +414,7 @@ class TestEndsAndErasure(Base):
         for _ in range(3):
             self.new_pass()
             self.cycle()
-        out = sweep.record_observation(self.conn, pid=pid, token=self.token, not_found=True)
+        out = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=pid, token=self.token, not_found=True)
         self.assertEqual((out["ended"], out["instructions"]), ("vanished", {}))
         self.assertEqual(lineage.projection(self.conn, pid)["ended"], "vanished")
         self.assertEqual(self.ended_residue(pid), [("ended", "vanished")])
@@ -426,7 +427,7 @@ class TestEndsAndErasure(Base):
         self.bf.purge_before("2026-08-01")
         self.new_pass()
         self.assertEqual(lineage.projection(self.conn, pid)["ended"], "erased")
-        out = sweep.record_observation(self.conn, pid=pid, token=self.token, not_found=True)
+        out = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=pid, token=self.token, not_found=True)
         self.assertEqual(out["instructions"], {})
         self.assertEqual(self.ended_residue(pid), [("ended", "erased")])
 
@@ -440,7 +441,7 @@ class TestEndsAndErasure(Base):
         self.bf.purge_before("2026-08-01")
         self.new_pass()
         before = lineage.projection(self.conn, pid)
-        out = sweep.record_observation(self.conn, pid=pid, token=self.token,
+        out = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=pid, token=self.token,
                                        observed_tags=["acct::open"], observed_notes=[],
                                        observed_first_seen="2030-01-01T00:00:00Z")
         self.assertEqual(out["instructions"], {})
@@ -463,7 +464,7 @@ class TestEndsAndErasure(Base):
             return real_call(tool, **args)
         self.bf.call = refusing_note
         try:
-            out = sim.observe_and_repair(self.conn, self.bf, self.token, item)
+            out = sim.observe_and_repair(self.conn, self.bf, self.token, item, self.snap_id)
         finally:
             self.bf.call = real_call
         self.assertEqual(notes, ["add_note"])
@@ -512,7 +513,7 @@ class TestCursor(Base):
         self.new_pass()
         first = sweep.list_projections(self.conn, token=self.token, limit=25)
         for item in first["projections"]:
-            sim.observe_and_repair(self.conn, self.bf, self.token, item)
+            sim.observe_and_repair(self.conn, self.bf, self.token, item, self.snap_id)
         self.assertEqual(first["remaining_in_cycle"], 5)
         read_first = [i["pid"] for i in first["projections"]]
         self.new_pass()
@@ -525,12 +526,12 @@ class TestCursor(Base):
         self.assertEqual(pids[5:], read_first[:20])
         self.assertEqual(second["remaining_in_cycle"], 5)
         for item in second["projections"]:
-            sim.observe_and_repair(self.conn, self.bf, self.token, item)
+            sim.observe_and_repair(self.conn, self.bf, self.token, item, self.snap_id)
         third = sweep.list_projections(self.conn, token=self.token, limit=25)
         self.assertEqual([i["pid"] for i in third["projections"]], read_first[20:])
         self.assertEqual(third["remaining_in_cycle"], 0)
         for item in third["projections"]:
-            sim.observe_and_repair(self.conn, self.bf, self.token, item)
+            sim.observe_and_repair(self.conn, self.bf, self.token, item, self.snap_id)
         fourth = sweep.list_projections(self.conn, token=self.token, limit=25)
         self.assertEqual((fourth["projections"], fourth["remaining_in_cycle"]), ([], 0))
         c = self.conn.execute("SELECT last_cycle_completed_at FROM cursor").fetchone()[0]
@@ -582,13 +583,13 @@ class TestNoteAsRendered(Base):
         self.assertIn(sweep.FENCE_OPEN + "Accounting revision ", text)   # really fenced
         tags, notes, first_seen = self.parse(text)
         self.assertEqual(sorted(tags), sorted(self.bf.tags(rid)))
-        r = sweep.record_observation(self.conn, pid=self.pid_of(rid), token=self.token,
+        r = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=self.pid_of(rid), token=self.token,
                                      observed_tags=tags, observed_notes=notes,
                                      observed_first_seen=first_seen)
         self.assertEqual(r["instructions"], {})
         # markers removed by the reader: also the current note
         bare = [sweep.shown_note(n) for n in notes]
-        r = sweep.record_observation(self.conn, pid=self.pid_of(rid), token=self.token,
+        r = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=self.pid_of(rid), token=self.token,
                                      observed_tags=tags, observed_notes=bare,
                                      observed_first_seen=first_seen)
         self.assertEqual(r["instructions"], {})
@@ -601,7 +602,7 @@ class TestNoteAsRendered(Base):
         rid = self.rid()
         tags, notes, first_seen = self.parse(self.bf.call("get_transaction", row_id=rid))
         stale = [n.replace("Accounting revision ", "Accounting revision 0") for n in notes]
-        r = sweep.record_observation(self.conn, pid=self.pid_of(rid), token=self.token,
+        r = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=self.pid_of(rid), token=self.token,
                                      observed_tags=tags, observed_notes=stale,
                                      observed_first_seen=first_seen)
         self.assertIn("add_note", r["instructions"])

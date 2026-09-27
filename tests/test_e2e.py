@@ -421,10 +421,12 @@ class TestPackagingSeesTheClassification(Base):
                     text = bf.call("get_transaction", row_id=row_id)
                     if text.startswith("no transaction #"):
                         self.call("record_observation", pid=item["pid"], pass_token=token,
+                                  snapshot_id=page["snapshot_id"],
                                   not_found=True)
                         break
                     tags, notes, first_seen = self.read(text)
                     r = self.call("record_observation", pid=item["pid"], pass_token=token,
+                                  snapshot_id=page["snapshot_id"],
                                   observed_tags=tags, observed_notes=notes,
                                   observed_first_seen=first_seen)
                     ins = r["instructions"]
