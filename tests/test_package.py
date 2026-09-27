@@ -118,6 +118,39 @@ class TestContents(Base):
         self.assertIn("1 still missing, 1 not yet classified", out["caption"])
         del kbline
 
+    def test_a_retained_pairing_on_an_unknown_expectation_is_reported_unclassified(self):
+        # fix wave D (Astra S1): the round-42 ruling retains the pairing when the
+        # classification is removed; the package must still report the row as not yet
+        # classified (spec ~2742-2744, ~3032) and ship its document in its folder.
+        pid = self.line()
+        self.pair(pid, self.file_doc())
+        self.classify(pid, set())
+        self.settle(pid)
+        out, z = self.build()
+        rows = self.ledger_rows(z)
+        self.assertEqual([r["status"] for r in rows], ["UNCLASSIFIED"])
+        self.assertEqual(rows[0]["document"], "invoices/2026-07-02_Adobe_100.00.pdf")
+        self.assertIn("invoices/2026-07-02_Adobe_100.00.pdf", z.namelist())
+        notes = z.read("notes.md").decode()
+        section = notes.split("## Not yet classified")[1].split("##")[0]
+        self.assertEqual(section.strip().splitlines(),
+                         ["- Adobe · EUR 100.00 · 3 Jul — holds "
+                          "invoices/2026-07-02_Adobe_100.00.pdf"])
+        self.assertIn("1 not yet classified", out["caption"])
+        self.assertIn("1 with documents", out["caption"])
+
+    def test_a_retained_unconfirmed_pairing_on_an_unknown_expectation_is_unclassified(self):
+        pid = self.line()
+        self.pair(pid, self.file_doc(), how="propose")
+        self.classify(pid, set())
+        self.settle(pid)
+        out, z = self.build()
+        rows = self.ledger_rows(z)
+        self.assertEqual([r["status"] for r in rows], ["UNCLASSIFIED"])
+        self.assertEqual(rows[0]["document"], "")
+        self.assertTrue(any(n.startswith("unresolved/") for n in z.namelist()))
+        self.assertIn("1 not yet classified", out["caption"])
+
     def test_xlsx_cells_equal_the_csv(self):
         pid = self.line()
         self.pair(pid, self.file_doc())
