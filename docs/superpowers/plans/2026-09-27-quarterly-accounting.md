@@ -82,7 +82,9 @@ The spec is converged. Turning it into code surfaced the points below. Each is e
   - The acknowledgement is consumed by the next successful import, whatever admitted it.
   - Generalized after rounds p1–p3 found the same shape three times: identity checked only for live lineages, remembered from a rejected ledger, excused by a stale acknowledgement.
   - **Operator decision:** the spec lets the pass after `delete_all_data` proceed on its own. Here it needs that one sentence, because from the export alone the case is indistinguishable from a different ledger.
-  - The clean fix is an instance id exposed by bank-feed, to be filed upstream if the operator agrees.
+  - Every sweep observation also carries the row's `first_seen`. A mismatch stops the pass, and no further bank-feed write happens in it.
+  - **Residual, stated (round p4, Astra):** an import proves the ledger read at that moment, not the ledger that receives a later write. A ledger switched between an observation and its write can still take that one write. Only bank-feed can fence it atomically, alongside `expected_generation`.
+  - **Operator decision:** file upstream a bank-feed ledger instance id, reported by `list_backups` and checked on every annotation write as `expected_ledger`. It closes this residual and makes the `delete_all_data` sentence unnecessary.
   - `first_seen` is not rewritten by bank-feed's update paths. Task 2 pins that against the vendored `apply_plan`.
 - **D5: The sweep runs inside the specialist delegation, after the import.**
   - The sweep's per-row reads are what refresh the classification observation, and triage needs a fresh expectation. So one delegation runs, in order: sync, then the classifier, then `export_history` and `import_ledger_export` (admission, resolution, merges, vanished ends, erase candidates), then erase confirmations, then the sweep (observations and tag repair), then triage.
@@ -3194,6 +3196,21 @@ def bank_write_gate(conn) -> dict:
     return out
 
 
+def poison(conn, reason: str) -> None:
+    """Refuse every further bank-feed write in this pass (inside a transaction:
+    the caller's refusal would roll this back, so it commits on its own)."""
+    cur = current_pass(conn)
+    if cur is None:
+        return
+    verdict = db.canonical({"allowed": False, "reason": reason, "expected_generation": None,
+                            "workflow": version.WORKFLOW, "install_backup": None,
+                            "older_workflows": []})
+    conn.execute("UPDATE passes SET gate_json=?, snapshot_id=NULL WHERE pass_id=?",
+                 (verdict, cur["pass_id"]))
+    conn.execute("COMMIT")
+    conn.execute("BEGIN IMMEDIATE")
+
+
 def remember_ledger(conn, pass_id) -> None:
     """Called ONLY by an import that proved ledger identity, inside its
     transaction (round p2, Astra S1: remembering at gate time let a rejected
@@ -4871,6 +4888,22 @@ class TestResolution(Base):
         self.assertEqual(self.conn.execute("SELECT merged_into FROM projections WHERE pid=?",
                                            (p2,)).fetchone()[0], p1)
 
+    def test_a_rebound_ledgers_row_never_merges_into_an_ended_lineage(self):
+        # round p4 (Astra S1): after a re-bind, the new ledger allocates the old row id
+        import binding
+        self.imp([{"row_id": 2}])
+        (old,) = self.live()
+        self.token = self.pass_()
+        binding.acknowledge_ledger_reset(self.conn)
+        self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z"}])       # re-bound
+        self.token = self.pass_()
+        out = self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z"},
+                        {"row_id": 2, "first_seen": "2026-09-02T00:00:00Z"}])
+        self.assertEqual(out["merged"], [])
+        new = [p for p, r in self.live().items() if r["dest_row_id"] == 2 and p != old]
+        self.assertEqual(len(new), 1)
+        self.assertIsNone(self.live()[new[0]]["ended"])
+
     def test_a_vanished_destination_ends_the_lineage_at_the_import(self):
         self.imp([{"row_id": 1}])
         (pid,) = self.live()
@@ -5390,7 +5423,10 @@ def import_ledger_export(conn, *, path: str, token) -> dict:
         # 2. fan-in: lineages that now share a destination merge into the lowest pid
         groups: dict = {}
         for pid in lineage.live_pids(conn):
-            groups.setdefault(lineage.projection(conn, pid)["dest_row_id"], []).append(pid)
+            p = lineage.projection(conn, pid)
+            if p["ended"]:
+                continue          # an ended lineage's row id may name another ledger's row (round p4)
+            groups.setdefault(p["dest_row_id"], []).append(pid)
         for dest, pids in sorted(groups.items()):
             if len(pids) > 1:
                 survivor = min(pids)
@@ -6199,7 +6235,9 @@ def _read(bf, row_id):
     out = bf.call("get_transaction", row_id=row_id)
     if out.startswith("no transaction #"):
         return None
-    return bf.tags(row_id), bf.notes(row_id)
+    first_seen = bf.conn.execute("SELECT first_seen FROM transactions WHERE row_id=?",
+                                 (row_id,)).fetchone()[0]
+    return bf.tags(row_id), bf.notes(row_id), first_seen
 
 
 def observe_and_repair(conn, bf, token, item) -> dict:
@@ -6209,9 +6247,9 @@ def observe_and_repair(conn, bf, token, item) -> dict:
     got = _read(bf, row_id)
     if got is None:
         return sweep.record_observation(conn, pid=pid, token=token, not_found=True)
-    tags, notes = got
+    tags, notes, first_seen = got
     r = sweep.record_observation(conn, pid=pid, token=token, observed_tags=tags,
-                                 observed_notes=notes)
+                                 observed_notes=notes, observed_first_seen=first_seen)
     ins = r.get("instructions") or {}
     if not ins:
         return r
@@ -6226,9 +6264,9 @@ def observe_and_repair(conn, bf, token, item) -> dict:
             return sweep.record_observation(conn, pid=pid, token=token, write_error=out)
     if ins.get("add_note"):
         bf.call("add_note", row_ids=[row_id], note=ins["add_note"], author="agent", **kw)
-    tags, notes = _read(bf, row_id)
+    tags, notes, first_seen = _read(bf, row_id)
     return sweep.record_observation(conn, pid=pid, token=token, observed_tags=tags,
-                                    observed_notes=notes)
+                                    observed_notes=notes, observed_first_seen=first_seen)
 
 
 def sweep_cycle(conn, bf, token, limit=25) -> int:
@@ -6408,7 +6446,8 @@ class TestCapacity(Base):
         item = page["projections"][0]
         again = sweep.record_observation(self.conn, pid=item["pid"], token=self.token,
                                          observed_tags=self.bf.tags(r),
-                                         observed_notes=self.bf.notes(r))
+                                         observed_notes=self.bf.notes(r),
+                                         observed_first_seen=self.bf.rows()[0]["first_seen"])
         self.assertEqual((again["instructions"] or {}).get("tag", []), [])
 
 
@@ -6491,6 +6530,20 @@ class TestEndsAndErasure(Base):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM match_state WHERE state IN"
                                            " ('matched','proposed')").fetchone()[0], 1)
         self.assertEqual(documents.status(self.conn, d), "matched")
+
+    def test_a_different_transaction_under_the_row_id_stops_the_pass(self):
+        # round p4 (Astra S1, mitigated): the ledger switched after the import
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.new_pass()
+        page = sweep.list_projections(self.conn, token=self.token)
+        item = page["projections"][0]
+        with self.assertRaises(db.Refusal):
+            sweep.record_observation(self.conn, pid=item["pid"], token=self.token,
+                                     observed_tags=[], observed_notes=[],
+                                     observed_first_seen="2030-01-01T00:00:00Z")
+        self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
+        with self.assertRaises(db.Refusal):
+            sweep.list_projections(self.conn, token=self.token)
 
     def test_not_found_for_a_row_still_in_the_snapshot_is_refused(self):
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
@@ -6697,7 +6750,7 @@ def _confirm_erased(conn, pid: int) -> dict:
 
 
 def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=None,
-                       not_found=False, write_error=None) -> dict:
+                       not_found=False, write_error=None, observed_first_seen=None) -> dict:
     if token is None:
         raise db.Refusal("an observation belongs to a pass: pass the pass_token")
     with db.tx(conn):
@@ -6717,8 +6770,18 @@ def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=N
             return {"pid": pid, "status": proj["status"], "desired": json.loads(proj["desired_json"]),
                     "instructions": {}, "bank_writes": None, "read_back": False,
                     "recorded": "the write was refused; reported, not retried"}
-        if observed_tags is None:
-            raise db.Refusal("record what get_transaction showed: observed_tags (and notes)")
+        if observed_tags is None or not observed_first_seen:
+            raise db.Refusal("record what get_transaction showed: observed_tags, observed_notes "
+                             "and the row's first_seen")
+        alias = conn.execute("SELECT first_seen FROM aliases WHERE row_id=?",
+                             (proj["dest_row_id"],)).fetchone()
+        if alias is None or alias["first_seen"] != observed_first_seen:
+            # A different transaction under this row id: the ledger read now is not the one
+            # this pass's import proved (plan §D4, round p4). Stop; the pass writes nothing more.
+            passes.poison(conn, "the bank ledger changed during this pass (row "
+                                f"#{proj['dest_row_id']} is a different transaction); nothing "
+                                "more is written until a pass proves the ledger again")
+            raise db.Refusal("the bank ledger changed during this pass — stop the pass")
         observed = sorted(set(observed_tags))
         class_tags = [t for t in observed if t not in R.OWNED]
         conn.execute("UPDATE projections SET class_tags_json=?, class_observed_at=?,"
@@ -10124,7 +10187,8 @@ def t_list_proj(args):
           "reply when a write did not take. Returns the exact writes to make; apply them, then "
           "read the row again and record it.",
           obj({"pid": I, "pass_token": TOKEN, "observed_tags": A, "observed_notes": A,
-               "not_found": B, "write_error": S}, ("pid", "pass_token")))
+               "observed_first_seen": S, "not_found": B, "write_error": S},
+              ("pid", "pass_token")))
 def t_observe(args):
     _need(args, "pid", "pass_token")
     return sweep.record_observation(conn(), pid=_int(args, "pid"),
@@ -10132,7 +10196,8 @@ def t_observe(args):
                                     observed_tags=args.get("observed_tags"),
                                     observed_notes=args.get("observed_notes"),
                                     not_found=args.get("not_found") is True,
-                                    write_error=args.get("write_error"))
+                                    write_error=args.get("write_error"),
+                                    observed_first_seen=args.get("observed_first_seen"))
 
 
 # --- passes and setup ------------------------------------------------------------
@@ -10563,7 +10628,8 @@ You receive a `pass_token`. Pass it to every plugin write.
 5. **Sweep.** Repeat `list_projections(pass_token)` until `remaining_in_cycle` is 0 or you
    are close to your turn budget. For each item: `get_transaction(row_id)`, then
    `record_observation(pid, pass_token, observed_tags=<every tag>, observed_notes=<every note
-   shown>)`. If `bank_writes` is not allowed, make no bank-feed write and report its reason. Otherwise apply the
+   shown>, observed_first_seen=<the row's first_seen>)`. If it answers that the ledger changed
+   during this pass, stop the pass at once. If `bank_writes` is not allowed, make no bank-feed write and report its reason. Otherwise apply the
    returned `instructions` exactly, in order:
    - `untag_transaction(row_ids=[row_id], tags=untag, workflow=…, expected_generation=…)`
    - `tag_transaction(row_ids=[row_id], tags=tag, workflow=…, expected_generation=…)`
