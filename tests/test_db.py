@@ -24,6 +24,31 @@ class TestSchema(TempEnv):
                          .fetchone()[0], str(db.SCHEMA_VERSION))
         self.assertEqual(c1.execute("PRAGMA journal_mode").fetchone()[0], "wal")
 
+    def test_a_version_1_store_migrates_to_the_delivery_sequence(self):
+        # fix wave D: schema 1 had no renders.delivered_seq. A v1 store with a
+        # delivered rendering opens, gains the column, and the old delivery orders
+        # below every delivery made after the migration.
+        c = db.open_store()
+        c.execute("ALTER TABLE renders DROP COLUMN delivered_seq")
+        c.execute("UPDATE meta SET value='1' WHERE key='schema_version'")
+        c.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, delivered_at,"
+                  " text, membership_json) VALUES ('r-old','status','{}','2030-01-01T00:00:00Z',"
+                  "'2030-01-01T00:00:00Z','','[]')")
+        c.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
+                  " text, membership_json) VALUES ('r-new','status','{}','2026-01-01T00:00:00Z',"
+                  "'','[]')")
+        c.close()
+        c = db.open_store()
+        self.addCleanup(c.close)
+        self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
+                         .fetchone()[0], str(db.SCHEMA_VERSION))
+        self.assertEqual(c.execute("SELECT delivered_seq FROM renders WHERE render_id='r-old'")
+                         .fetchone()[0], 0)
+        self.assertEqual(db.last_delivered(c)["render_id"], "r-old")
+        import views
+        views.mark_rendering_delivered(c, "r-new")
+        self.assertEqual(db.last_delivered(c)["render_id"], "r-new")
+
     def test_a_newer_schema_is_refused(self):
         c = db.open_store()
         self.addCleanup(c.close)

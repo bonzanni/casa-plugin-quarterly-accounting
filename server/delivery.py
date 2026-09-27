@@ -204,8 +204,7 @@ def resend_target(conn) -> int:
     waiting. None waiting, or several, is a refusal in the operator's words —
     several are told apart by the date in their filenames (spec §"What the
     operator never has to learn")."""
-    last = conn.execute("SELECT scope_json FROM renders WHERE delivered_at IS NOT NULL"
-                        " ORDER BY delivered_at DESC, rowid DESC LIMIT 1").fetchone()
+    last = db.last_delivered(conn)
     offered = json.loads(last["scope_json"]).get("offers", []) if last else []
     waiting = []
     for pid in offered:

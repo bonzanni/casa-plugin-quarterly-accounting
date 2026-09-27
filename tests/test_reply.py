@@ -503,6 +503,34 @@ class TestFixRound3(Base):
 
 
 
+class TestFixWaveD(Base):
+    def test_all_good_binds_to_the_sheet_delivered_last_within_one_second(self):
+        # Astra S1: delivered_at has one-second resolution; B then A delivered in the
+        # same second must bind "all good" to A (delivery order), never to B (creation order).
+        a = self.item("Adobe", 5445, "2026-09-14")
+        sheet_a = views.build_review(self.conn, view="status", quarter="2026-Q3")
+        f = self.item("Figma", 1815, "2026-09-15")
+        sheet_b = views.build_review(self.conn, view="status", quarter="2026-Q3")
+        self.assertEqual(sorted(views.render_items(self.conn, sheet_b["render_id"])), [a, f])
+        with mock.patch.object(db, "now", lambda: "2026-09-27T10:00:00Z"):
+            views.mark_rendering_delivered(self.conn, sheet_b["render_id"])
+            views.mark_rendering_delivered(self.conn, sheet_a["render_id"])
+        out = reply.apply_reply(self.conn, "all good")
+        self.assertEqual(self.operator_entries(), 1)
+        self.assertEqual(self.author(a)[0], "operator")
+        self.assertEqual(self.author(f)[0], "auto")
+        self.assertNotIn("Figma", out["receipt"])
+
+    def test_a_rule_binds_to_the_rendering_delivered_last(self):
+        views.build_review(self.conn, view="status", quarter="2026-Q3")
+        first = views.build_review(self.conn, view="status", quarter="2026-Q3")["render_id"]
+        second = views.build_review(self.conn, view="missing", quarter="2026-Q3")["render_id"]
+        with mock.patch.object(db, "now", lambda: "2026-09-27T10:00:00Z"):
+            views.mark_rendering_delivered(self.conn, second)
+            views.mark_rendering_delivered(self.conn, first)
+        self.assertEqual(db.last_delivered(self.conn)["render_id"], first)
+
+
 class TestIntegration(Base):
     def test_a_counted_but_unprinted_payment_is_reshown_not_changed(self):
         # a never-searched payment is counted ("not searched"), not printed: the

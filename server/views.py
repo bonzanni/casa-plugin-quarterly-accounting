@@ -696,7 +696,9 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
         if r["delivered_at"] is not None:
             return {"render_id": render_id, "already": True}
         now = db.now()
-        conn.execute("UPDATE renders SET delivered_at=? WHERE render_id=?", (now, render_id))
+        # the delivery ORDER is the store sequence, not the one-second timestamp (db.last_delivered)
+        conn.execute("UPDATE renders SET delivered_at=?, delivered_seq=? WHERE render_id=?",
+                     (now, db.next_seq(conn), render_id))
         for it in conn.execute("SELECT * FROM render_items WHERE render_id=?", (render_id,)):
             conn.execute("INSERT OR REPLACE INTO shown(pid, render_id, projection_revision,"
                          " match_revisions_json, delivered_at) VALUES (?,?,?,?,?)",

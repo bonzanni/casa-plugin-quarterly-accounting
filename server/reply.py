@@ -339,8 +339,7 @@ def _apply(conn, run, verb, m, items):
     if verb == "all_good":
         # spec §Testing: "`all good` is a sheet reply only while a sheet is the
         # most recent thing sent" — D2 binds to the most recent DELIVERED rendering
-        last = conn.execute("SELECT render_id, kind FROM renders WHERE delivered_at IS NOT NULL"
-                            " ORDER BY delivered_at DESC, rowid DESC LIMIT 1").fetchone()
+        last = db.last_delivered(conn)
         if last is None or last["kind"] not in ("status", "check", "all"):
             run.lines.append("Nothing applied for \"all good\": the last thing I sent you was "
                              "not a sheet to approve. Name the payment, e.g. \"the Zapier one "
@@ -348,7 +347,7 @@ def _apply(conn, run, verb, m, items):
             run.unresolved += 1
             return
         said = len(run.lines)
-        for pid in views.render_items(conn, last[0]):
+        for pid in views.render_items(conn, last["render_id"]):
             d = work.describe(conn, pid)
             cur = d["current"]
             if cur is None or not views._needs_check(d) or d["candidates"]:
@@ -486,9 +485,8 @@ def _broad(conn, run, change, ok_line) -> None:
 
 
 def _last_delivered(conn):
-    r = conn.execute("SELECT render_id FROM renders WHERE delivered_at IS NOT NULL ORDER BY"
-                     " delivered_at DESC, rowid DESC LIMIT 1").fetchone()
-    return r[0] if r else None
+    r = db.last_delivered(conn)
+    return r["render_id"] if r else None
 
 
 def _set_aside_all(conn, d) -> dict:
