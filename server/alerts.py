@@ -34,25 +34,69 @@ def evaluate(conn) -> None:
                                           db.canonical({"detail": p["detail"] or ""}), db.now()))
 
 
-def _delivered_lines(conn, rows) -> list:
-    by_pkg: dict = {}
-    for a in rows:
-        d = json.loads(a["detail"])
-        by_pkg.setdefault(d["package"], []).append(d)
+CHANGE_WORD = {"corrected": "corrected by the bank", "superseded": "replaced by the bank",
+               "vanished": "withdrawn by the bank", "erased": "erased from the ledger",
+               "reclassified": "now categorised differently"}
+MORE_CLOSING = "More changed than fits in one message — the rest comes with the next check."
+
+
+def _units(conn, rows) -> list:
+    """One unit per occurrence, in the order a rendering prints them: the
+    collection alerts, then each package's changes. A unit is (alert_id,
+    package or None, its wrapped lines)."""
     out = []
-    for pkg, changes in sorted(by_pkg.items()):
-        out.append(f"The package {pkg} changed underneath:")
-        for c in changes:
-            pid = conn.execute("SELECT pid FROM aliases WHERE row_id=?", (c["row_id"],)).fetchone()
-            head = views.headline(work.describe(conn, pid[0])) if pid else f"payment #{c['row_id']}"
-            word = {"corrected": "corrected by the bank", "superseded": "replaced by the bank",
-                    "vanished": "withdrawn by the bank", "erased": "erased from the ledger",
-                    "reclassified": "now categorised differently"}.get(c["change"], c["change"])
-            out.append(f"{head} — {word}")
-        q = changes[0]["quarter"].split("-")[1]
-        out.append(f'Your accountant holds the old numbers. Say "rebuild {q}" if they need a '
-                   "fresh one.")
+    for a in rows:
+        if a["kind"] in COLLECTION:
+            detail = json.loads(a["detail"])["detail"]
+            paren = f" ({detail})" if detail else ""
+            out.append((a["alert_id"], None, views._wrap(COLLECTION[a["kind"]].format(paren=paren))))
+    changed = []
+    for a in rows:
+        if a["kind"] == "delivered-changed":
+            changed.append((json.loads(a["detail"])["package"], a["alert_id"], a))
+    for pkg, _, a in sorted(changed, key=lambda x: (x[0], x[1])):
+        c = json.loads(a["detail"])
+        pid = conn.execute("SELECT pid FROM aliases WHERE row_id=?", (c["row_id"],)).fetchone()
+        head = views.headline(work.describe(conn, pid[0])) if pid else f"payment #{c['row_id']}"
+        word = CHANGE_WORD.get(c["change"], c["change"])
+        out.append((a["alert_id"], (pkg, c["quarter"]), views._wrap(f"{head} — {word}")))
     return out
+
+
+def _text(units, more: bool) -> str:
+    lines, pkg = [], None
+
+    def close():
+        q = pkg[1].split("-")[1]
+        lines.extend(views._wrap(f'Your accountant holds the old numbers. Say "rebuild {q}" '
+                                 "if they need a fresh one."))
+    for _, group, wrapped in units:
+        if group != pkg:
+            if pkg is not None:
+                close()
+            pkg = group
+            if group is not None:
+                lines.extend(views._wrap(f"The package {group[0]} changed underneath:"))
+        lines.extend(wrapped)
+    if pkg is not None:
+        close()
+    if more:
+        lines.append(MORE_CLOSING)
+    return "\n".join(lines)
+
+
+def _batch(units) -> tuple:
+    """The first rendering: whole occurrences, in print order, while the text
+    (with its closing line when some are left over) fits TELEGRAM_LIMIT
+    (fix wave D, Astra S2). At least one occurrence, always: no single
+    occurrence comes near the limit."""
+    chosen = units[:1]
+    for u in units[1:]:
+        more = len(chosen) + 1 < len(units)
+        if views.utf16_len(_text(chosen + [u], more)) > views.TELEGRAM_LIMIT:
+            break
+        chosen.append(u)
+    return chosen, _text(chosen, len(chosen) < len(units))
 
 
 def pending_rendering(conn):
@@ -62,39 +106,36 @@ def pending_rendering(conn):
     condition and reach this function while an earlier pass's own call is
     still in flight (fix round 1: two db.tx blocks with composition outside
     either left a window where both could SELECT the same undelivered alert
-    and each INSERT a different render for it). One lock closes that window
-    for the read-compose-insert sequence; by itself it would still let the
-    second, later call mint a fresh duplicate render for an alert the first
-    left undelivered, so an alert already parked in an existing, undelivered
-    render is not composed into a second one — that render is returned again
-    unchanged. That IS the "an undelivered alert is offered again" rule: the
-    same offer, not a fresh one, until it is delivered (mark_rendering_delivered
-    clears it) or a new, disjoint set of alerts supersedes it."""
+    and each INSERT a different render for it). One lock closes that window.
+
+    A rendering never exceeds Telegram's limit (fix wave D): it prints the
+    first batch of undelivered occurrences that fits, closes with a line saying
+    more follows, and binds ONLY the occurrences it prints (scope "alerts"), so
+    once-per-occurrence holds and the rest are offered by the next rendering.
+    "An undelivered alert is offered again" is the SAME offer: when the batch
+    composed now is exactly the occurrences an existing undelivered rendering
+    already holds, that rendering is returned unchanged; a new occurrence that
+    changes the batch supersedes it with a fresh one."""
     with db.tx(conn):
         evaluate(conn)
         rows = conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL"
                              " ORDER BY alert_id").fetchall()
         if not rows:
             return None
-        pending_ids = {a["render_id"] for a in rows if a["render_id"]}
-        if len(pending_ids) == 1 and all(a["render_id"] for a in rows):
-            rid = next(iter(pending_ids))
-            r = conn.execute("SELECT text FROM renders WHERE render_id=? AND"
+        chosen, text = _batch(_units(conn, rows))
+        ids = [u[0] for u in chosen]
+        parked = {a["render_id"] for a in rows if a["alert_id"] in ids}
+        if len(parked) == 1 and None not in parked:
+            rid = next(iter(parked))
+            r = conn.execute("SELECT text, scope_json FROM renders WHERE render_id=? AND"
                              " delivered_at IS NULL", (rid,)).fetchone()
-            if r is not None:
+            if r is not None and sorted(json.loads(r["scope_json"]).get("alerts", [])) \
+                    == sorted(ids):
                 return {"render_id": rid, "text": r["text"]}
-        lines = []
-        for a in rows:
-            if a["kind"] in COLLECTION:
-                detail = json.loads(a["detail"])["detail"]
-                paren = f" ({detail})" if detail else ""
-                lines.append(COLLECTION[a["kind"]].format(paren=paren))
-        lines.extend(_delivered_lines(conn, [a for a in rows if a["kind"] == "delivered-changed"]))
-        text = "\n".join(w for line in lines for w in views._wrap(line))
         rid = f"r{db.next_seq(conn)}"
         conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                      " membership_json) VALUES (?, 'alert', ?, ?, ?, '[]')",
-                     (rid, db.canonical({"alerts": [a["alert_id"] for a in rows]}), db.now(), text))
+                     (rid, db.canonical({"alerts": sorted(ids)}), db.now(), text))
         conn.execute("UPDATE alerts SET render_id=? WHERE alert_id IN (%s)"
-                     % ",".join("?" * len(rows)), [rid] + [a["alert_id"] for a in rows])
+                     % ",".join("?" * len(ids)), [rid] + ids)
     return {"render_id": rid, "text": text}
