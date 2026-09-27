@@ -158,18 +158,31 @@ def bank_write_gate(conn) -> dict:
 
 
 def poison(conn, reason: str) -> None:
-    """Refuse every further bank-feed write in this pass (inside a transaction:
-    the caller's refusal would roll this back, so it commits on its own)."""
+    """Refuse every further bank-feed write in this pass.
+
+    Called from inside the caller's own open write transaction, immediately
+    before the caller raises Refusal — so whatever that transaction already
+    wrote is about to be discarded anyway. poison ROLLS BACK that transaction
+    itself (never COMMITs it: the caller's partial writes must not land),
+    writes and commits the verdict in its OWN short transaction, then re-opens
+    BEGIN IMMEDIATE — through the bounded db._retry_locked, so contention
+    surfaces as Busy rather than hanging — so the caller's enclosing
+    `with db.tx(conn):` still finds a transaction open when it unwinds and its
+    own ROLLBACK does not itself raise (fix round 1 finding: a raw re-BEGIN
+    whose failure left no transaction open made that ROLLBACK error with
+    "cannot rollback - no transaction is active", masking the real one)."""
     cur = current_pass(conn)
     if cur is None:
         return
+    pass_id = cur["pass_id"]
     verdict = db.canonical({"allowed": False, "reason": reason, "expected_generation": None,
                             "expected_ledger": None, "workflow": version.WORKFLOW,
                             "install_backup": None, "older_workflows": []})
-    conn.execute("UPDATE passes SET gate_json=?, snapshot_id=NULL WHERE pass_id=?",
-                 (verdict, cur["pass_id"]))
-    conn.execute("COMMIT")
-    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("ROLLBACK")
+    with db.tx(conn):
+        conn.execute("UPDATE passes SET gate_json=?, snapshot_id=NULL WHERE pass_id=?",
+                     (verdict, pass_id))
+    db._retry_locked(lambda: conn.execute("BEGIN IMMEDIATE"), db.LOCK_BOUND_S)
 
 
 def remember_ledger(conn, pass_id) -> None:

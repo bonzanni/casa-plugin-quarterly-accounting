@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import unittest
 from unittest import mock
 
@@ -152,6 +153,68 @@ class TestBankWriteGate(StoreCase):
         passes.begin_pass(self.conn, "cron")
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
 
+    def test_a_stale_ledger_probe_from_an_earlier_pass_does_not_decide_the_gate(self):
+        # fix round 1, M1: a probe row survives (PK on kind) after its pass ends;
+        # the gate must require it to belong to THIS pass, not merely be ok.
+        t = self.pass_(generation=0, registered={})
+        passes.end_pass(self.conn, t, "complete", {})
+        passes.begin_pass(self.conn, "cron")            # a new pass, no probes recorded yet
+        g = passes.bank_write_gate(self.conn)
+        self.assertFalse(g["allowed"])
+        self.assertIn("list_backups", g["reason"])
+
+    def test_a_different_ledger_instance_after_an_import_is_refused_until_acked(self):
+        # fix round 1, M2+M3: the other-ledger branch and its "not ack" sticky guard.
+        self.pass_(generation=0, registered={})
+        passes.bank_write_gate(self.conn)
+        with db.tx(self.conn):
+            passes.remember_ledger(self.conn, passes.current_pass(self.conn)["pass_id"])
+
+        other = "b" * 32
+        self.pass_(generation=0, registered={}, instance=other)
+        g = passes.bank_write_gate(self.conn)
+        self.assertFalse(g["allowed"])
+        self.assertIn("not the one this store was built on", g["reason"])
+
+        self.pass_(generation=0, registered={}, instance=other)      # still refused, next pass
+        self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
+
+        binding.acknowledge_ledger_reset(self.conn)
+        self.pass_(generation=0, registered={}, instance=other)      # allowed after the ack
+        self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
+
+        self.pass_(generation=0, registered={})                      # back to the bound instance
+        self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
+
+    def test_a_restored_refusal_stays_sticky_even_when_a_later_pass_reports_the_old_generation(self):
+        # fix round 1, M4: the cross-pass meta.gate_refusal cache, not a fresh recompute
+        # (a fresh recompute in the third pass below would NOT itself refuse, because
+        # the reported generation happens to match the remembered one again).
+        self.pass_(generation=0, registered={})
+        passes.bank_write_gate(self.conn)
+        with db.tx(self.conn):
+            passes.remember_ledger(self.conn, passes.current_pass(self.conn)["pass_id"])
+        self._populate()
+        passes.end_pass(self.conn, passes.current_pass(self.conn)["generation"], "complete", {})
+
+        self.pass_(generation=1, registered={})            # a restore: remembered 0 != seen 1
+        g = passes.bank_write_gate(self.conn)
+        self.assertFalse(g["allowed"])
+        self.assertIn("restored", g["reason"].lower())
+        passes.end_pass(self.conn, passes.current_pass(self.conn)["generation"], "complete", {})
+
+        self.pass_(generation=0, registered={})            # generation reverts to match remembered
+        g2 = passes.bank_write_gate(self.conn)
+        self.assertFalse(g2["allowed"])                    # still refused: the sticky, not a recompute
+        self.assertEqual(g2["reason"], g["reason"])
+
+    def test_older_workflows_filters_out_non_acct_prefixed_registrations(self):
+        # fix round 1, M7: the "acct@" prefix filter on older_workflows.
+        self.pass_(generation=0, registered={"acct@0.0.9": "b0", "someother-plugin@1.0": "b1"})
+        g = passes.bank_write_gate(self.conn)
+        self.assertTrue(g["allowed"], g)
+        self.assertEqual(g["older_workflows"], ["acct@0.0.9"])
+
 
 class TestSelfCheck(StoreCase):
     def test_conditions_each_have_their_own_sentence(self):
@@ -217,6 +280,68 @@ class TestReset(StoreCase):
         with self.assertRaises(db.Refusal):
             with db.tx(self.conn):
                 passes.check_token(self.conn, t)
+
+    def test_reset_store_clears_a_restored_gate_refusal_but_keeps_a_dirty_ledger_one(self):
+        # fix round 1, M5: reset_store's DELETE keeps the dirty-ledger row (the ledger's
+        # own condition is not this store's to clear) but drops every other kind.
+        self.bind()
+        self.pass_(generation=0, registered={})
+        passes.bank_write_gate(self.conn)
+        with db.tx(self.conn):
+            passes.remember_ledger(self.conn, passes.current_pass(self.conn)["pass_id"])
+        self._populate_projection()
+        self.pass_(generation=1, registered={})            # a restore: sticks a "restored" row
+        passes.bank_write_gate(self.conn)
+        row = self.conn.execute("SELECT value FROM meta WHERE key='gate_refusal'").fetchone()
+        self.assertEqual(json.loads(row[0])["kind"], "restored")
+
+        binding.reset_store(self.conn)
+        row = self.conn.execute("SELECT value FROM meta WHERE key='gate_refusal'").fetchone()
+        self.assertIsNone(row)                             # the store-only reset clears it
+
+        self.bind()
+        self.pass_(generation=2, registered={version.WORKFLOW: "b-9"})
+        passes.bank_write_gate(self.conn)                  # sticks a "dirty-ledger" row
+        row = self.conn.execute("SELECT value FROM meta WHERE key='gate_refusal'").fetchone()
+        self.assertEqual(json.loads(row[0])["kind"], "dirty-ledger")
+
+        binding.reset_store(self.conn)
+        row = self.conn.execute("SELECT value FROM meta WHERE key='gate_refusal'").fetchone()
+        self.assertIsNotNone(row)                          # the ledger's own condition survives
+        self.assertEqual(json.loads(row[0])["kind"], "dirty-ledger")
+
+    def _populate_projection(self):
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO projections(dest_row_id, admitted_at) VALUES (1, 'x')")
+
+
+class TestPoison(StoreCase):
+    def test_poison_rolls_back_the_callers_partial_write_but_persists_the_verdict(self):
+        # fix round 2: poison must ROLLBACK the caller's in-flight writes (they are
+        # about to be discarded by the Refusal anyway), commit the verdict on its
+        # own, and leave a transaction open so the caller's `with db.tx` unwinds
+        # cleanly instead of masking the real error with a bad ROLLBACK.
+        self.bind()
+        self.pass_()
+        with self.assertRaises(db.Refusal):
+            with db.tx(self.conn):
+                self.conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
+                                  " VALUES ('SHOULD-NOT-SURVIVE', '[]', 'x')")
+                passes.poison(self.conn, "a bank-feed write failed mid-pass")
+                raise db.Refusal("a bank-feed write failed mid-pass")
+        row = self.conn.execute("SELECT 1 FROM counterparties WHERE"
+                                " name='SHOULD-NOT-SURVIVE'").fetchone()
+        self.assertIsNone(row)                     # the partial write did not survive
+        g = passes.bank_write_gate(self.conn)
+        self.assertFalse(g["allowed"])
+        self.assertIn("a bank-feed write failed mid-pass", g["reason"])
+        # the connection is left usable — a later write in the same pass still works
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
+                              " VALUES ('AFTER-POISON', '[]', 'x')")
+        row = self.conn.execute("SELECT 1 FROM counterparties WHERE"
+                                " name='AFTER-POISON'").fetchone()
+        self.assertIsNotNone(row)
 
 
 if __name__ == "__main__":
