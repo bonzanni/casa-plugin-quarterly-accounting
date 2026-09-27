@@ -301,6 +301,39 @@ class TestRace(Base):
         self.assertEqual(self.conn.execute("SELECT cause FROM log WHERE kind='retire' AND"
                                            " match_id=?", (loser,)).fetchone()[0], "occupied")
 
+    def test_two_processes_same_revision_different_documents_one_wins(self):
+        # round C1 (Astra S2): the machine CAS guard (`_machine`'s revision check) is what
+        # stops a second writer that captured a now-stale revision from landing at all. Two
+        # real processes race to pair the SAME lineage, at the SAME captured revision, with
+        # two DIFFERENT documents (no doc-level occupancy collision to catch this instead):
+        # exactly one write should land; the other must be refused as stale before it ever
+        # appends anything.
+        d1, d2 = self.doc(document_number="A"), self.doc(document_number="B")
+        expected = self.rev(self.pid)
+        snap = self.snapshot(self.pid)
+        path = str(self.data / db.DB_NAME)
+        ctx = multiprocessing.get_context("spawn")
+        q = ctx.Queue()
+        procs = [ctx.Process(target=_procs.machine_pair,
+                             args=(path, self.pid, d, self.token, expected, snap, q))
+                 for d in (d1, d2)]
+        for p in procs:
+            p.start()
+        results = [q.get(timeout=60) for _ in procs]
+        for p in procs:
+            p.join(60)
+        oks = [r for r in results if r[0] == "ok"]
+        errs = [r for r in results if r[0] == "error"]
+        self.assertEqual((len(oks), len(errs)), (1, 1), results)
+        self.assertEqual(errs[0][1], "Stale", results)
+        self.assertEqual(oks[0][2], "matched", results)
+        active = self.conn.execute("SELECT COUNT(*) FROM match_state WHERE state='matched'"
+                                   ).fetchone()[0]
+        conflicted = self.conn.execute("SELECT COUNT(*) FROM match_state WHERE state='conflicted'"
+                                       ).fetchone()[0]
+        pairs = self.conn.execute("SELECT COUNT(*) FROM log WHERE kind='pair'").fetchone()[0]
+        self.assertEqual((active, conflicted, pairs), (1, 0, 1))
+
 
 class TestFixRound1(Base):
     def residue(self, reason="exempt-doc"):
