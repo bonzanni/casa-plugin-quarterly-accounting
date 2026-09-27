@@ -4438,10 +4438,12 @@ git commit -m "feat: counterparty KB writes and expectation overrides (counterpa
   - `SOURCES = ("gmail","manual-telegram","manual-email")`
   - `EXTRACTION_AUTHORS = ("resident","specialist")`
 
-- [ ] **Step 1: Add the publish helper to `tests/_base.py`**
+- [ ] **Step 1: Add the publish helper to `tests/_base.py` (in `TempEnv`, not `StoreCase`)**
 
 ```python
-# append inside class TempEnv in tests/_base.py
+# add to class TempEnv in tests/_base.py, directly after its setUp() and BEFORE
+# `class StoreCase` (appending at the end of the file would put it in StoreCase,
+# and Task 21's install smoke test uses it from a plain TempEnv)
     def publish(self, name, data, producer="gmail"):
         import casa_handoff
         return casa_handoff.publish(producer, name, data=data)["path"]
@@ -6990,13 +6992,18 @@ class Base(StoreCase):
 
 class TestSearchBookkeeping(Base):
     def test_effort_ages_out_after_fruitless_passes_and_revives(self):
-        for _ in range(work.AGE_OUT_PASSES):
-            work.record_search(self.conn, pid=self.pid, token=self.token, queries=["from:adobe"])
-            self.token = self.pass_()
+        from unittest import mock
+        with mock.patch.object(db, "now", lambda: "2026-09-20T08:00:00Z"):
+            for _ in range(work.AGE_OUT_PASSES):
+                work.record_search(self.conn, pid=self.pid, token=self.token,
+                                   queries=["from:adobe"])
+                self.token = self.pass_()
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual((p["search_state"], p["status"]), ("aged-out", "open"))
         before = lineage.projection(self.conn, self.pid)["search_json"]
-        work.record_search(self.conn, pid=self.pid, token=None, revive=True)
+        with mock.patch.object(db, "now", lambda: "2026-09-27T08:00:00Z"):   # a later moment:
+            work.record_search(self.conn, pid=self.pid, token=None, revive=True)  # a stamped
+        # search would show here (round p9: same-second times hid the p8 regression)
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual(p["search_state"], "active")
         self.assertEqual(p["search_json"], before)            # no search is claimed
