@@ -19,27 +19,33 @@ The agents drive the whole flow through the skill:
 - Ellen does Gmail work, renders views and applies replies.
 - The finance specialist does bank-feed I/O and matching judgment.
 
-**Tech Stack:** Python 3.11 standard library (`sqlite3`, `zipfile`, `csv`, `json`, `hashlib`, `multiprocessing` in tests). Tests use `unittest` and run as `python3 -m unittest discover -s tests`. A vendored, test-only copy of bank-feed at component tag `v0.14.4` (bank-feed 0.13.4) is the "real bank-feed" every pinned red case runs against.
+**Tech Stack:** Python 3.11 standard library (`sqlite3`, `zipfile`, `csv`, `json`, `hashlib`, `multiprocessing` in tests). Tests use `unittest` and run as `python3 -m unittest discover -s tests`. A vendored, test-only copy of bank-feed at component tag `v0.19.0` (bank-feed 0.18.0) is the "real bank-feed" every pinned red case runs against.
 
 **Spec:** `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.md` (converged at round 43, tree 792a5fa; floor pinned in 99c259b). Executors read the spec section each task names **before** writing code. Where this plan and the spec disagree, the spec wins, except where §"Decisions and errata" below says otherwise and gives the reason.
 
-**Review status:** converged at round p10 (tree b93f71a). Astra (`gpt-6-astra`, medium) and Terra (`gpt-5.6-terra`, medium) both **SHIP**, nothing at S1/S2.
-- Both executed the plan literally in disposable copies against the real bank-feed (component v0.14.4), and the full suite was green: 306 tests.
-- Every mutated guard failed its test: occupancy, both shown-revision bindings, not-found evidence, the restore gate, revive.
-- Rounds p1–p9 are recorded in each fix commit's message (`git log 1cbda9c..b93f71a`).
-- Ledger identity (D4) was generalized after three rounds found the same shape. Reply binding (`_broad`) was generalized after two.
-- **Operator rulings, 2026-09-27:** D1, D8 and D9 accepted. D4 accepted with the reset sentence, and the upstream ledger id filed as [casa-specialist-finance#69](https://github.com/bonzanni/casa-specialist-finance/issues/69). The errata are already applied to the spec (3e2b310), so Task 24 Step 3 is done.
+**Review status:**
+- The plan converged at round p10 (tree b93f71a): Astra (`gpt-6-astra`, medium) and Terra (`gpt-5.6-terra`, medium) both **SHIP**, 306 tests green.
+- Rounds p1–p9 are in each fix commit's message (`git log 1cbda9c..b93f71a`).
+- **Revised 2026-09-27 after upstream releases:**
+  - casa-specialist-finance component 0.16.0 → 0.19.0: the ledger instance id and `expected_ledger` (#69); `delete_all_data` as a clean slate; `delete_data_keep_signins`.
+  - Casa v0.329.0 / v0.331.0: uninstall erasers.
+- **What the revision changes:**
+  - D4 now binds to the instance id, and writes carry `expected_ledger`.
+  - The bank-feed floor is 0.15.0; the vendored test tree is component v0.19.0.
+  - `reset_store` is the argument-free, protected `casa.eraseTool`.
+- The revision is a changed mechanism, so it goes through plan rounds again (p11 onward).
+- **Operator rulings, 2026-09-27:** D1, D8, D9 accepted; D4 accepted with the reset sentence (upstream #69, now shipped); `reset_store` as the eraser. The errata are applied to the spec.
 - Execution is subagent-driven, from a fresh session.
 
 ## Global Constraints
 
 - Python **3.11**, **standard library only** in `server/`. No `requirements.txt`, no vendored third-party code in `server/`. `casa_handoff.py` is vendored **verbatim** from bank-feed (spec §Casa baseline).
-- Required floors: casa **v0.326.0**. bank-feed **0.13.0** (casa-specialist-finance component **0.14.0**, which closed #56). Tests run against component **v0.14.4** (bank-feed 0.13.4). The below-floor demonstration runs against component **v0.13.2** (bank-feed 0.12.2).
+- Required floors: casa **v0.326.0** (the uninstall eraser is offered from v0.329.0; an older Casa ignores the declaration). bank-feed **0.15.0** (casa-specialist-finance component **0.16.0**): the ledger instance id and `expected_ledger` (#69), on top of #56's lineage-closed purge (0.13.0). Tests run against component **v0.19.0** (bank-feed 0.18.0). The below-floor demonstration runs against component **v0.13.2** (bank-feed 0.12.2).
 - Quarter identifier everywhere: **`YYYY-Qn`**, never a bare `Qn`.
 - Owned tag vocabulary, exactly: `acct::matched`, `acct::proposed`, `acct::portal`, `acct::no-document-expected`, `acct::open`. Every one must match bank-feed's grammar `^(?:[a-z][a-z0-9-]{0,15}::)?[a-z0-9][a-z0-9-]{0,31}$`.
-- Workflow string on every bank-feed tag, untag and note write the plugin causes: **`acct@<plugin.json version>`**, always with `expected_generation`.
+- Workflow string on every bank-feed tag, untag and note write the plugin causes: **`acct@<plugin.json version>`**, always with `expected_generation` and `expected_ledger` (the bound ledger instance id).
 - Every tag or note write goes to bank-feed through the specialist. The server never talks to bank-feed.
-- Plugin declares **no required environment variables**, **no `casa.setupTool`**, **no triggers of its own**, **no callbacks**, **no `systemRequirements`**, **no `casa.jobs`** (spec §Setup; §Open items "Background jobs").
+- Plugin declares **no required environment variables**, **no `casa.setupTool`**, **no triggers of its own**, **no callbacks**, **no `systemRequirements`**, **no `casa.jobs`** (spec §Setup; §Open items "Background jobs"). It declares exactly one **`casa.eraseTool`: `reset_store`**, argument-free and the only protected tool (operator ruling 2026-09-27; Casa v0.329.0 offers it at uninstall).
 - Telegram message limit: **4096 UTF-16 code units**. A view that would exceed it caps: largest amounts first, `+N more — say "all of them"`.
 - zip media cap **20 MB**. Handoff file cap **25 MB**. Casa removes handoff files after **7 days**. The outbox reaps orphans at **2 h**.
 - Specialist `max_turns` is **70**. Every pass is resumable, so no single session has to finish the cycle.
@@ -80,20 +86,16 @@ The spec is converged. Turning it into code surfaced the points below. Each is e
   - Revised after round p1 (Astra, two S1s):
     - `build_review` composes the text and records its revisions under one write lock, so they cannot describe different facts.
     - A rendering records a pairing's revision only if its text displays that pairing. A pairing the operator never saw is re-shown, never corrected.
-- **D4: Ledger identity is a property of the whole store, proved by each pass's import.**
-  - bank-feed exposes no instance id. Once the store holds any lineage, in any state (ended and vanished included), every import must find one of:
-    - a held alias present with an unchanged `first_seen`;
-    - a restore point of this plugin's workflow that an **earlier, identity-proven** import recorded.
-  - An alias whose `row_id` reappears with a different `first_seen` is always refused.
-  - Nothing else in a pass touches the ledger (the sweep's reads, observations, ends and repair instructions) until that pass's own import has proved it.
-  - The operator's "the bank ledger was reset" does not excuse a missing proof; it **re-binds** the store. Every held lineage ends `erased`, the old aliases and marks are dropped, and the imported ledger becomes the bound one.
-  - The acknowledgement is consumed by the next successful import, whatever admitted it.
-  - Generalized after rounds p1–p3 found the same shape three times: identity checked only for live lineages, remembered from a rejected ledger, excused by a stale acknowledgement.
-  - **Operator decision:** the spec lets the pass after `delete_all_data` proceed on its own. Here it needs that one sentence, because from the export alone the case is indistinguishable from a different ledger.
-  - Every sweep observation also carries the row's `first_seen`. A mismatch stops the pass, and no further bank-feed write happens in it.
-  - **Residual, stated (round p4, Astra):** an import proves the ledger read at that moment, not the ledger that receives a later write. A ledger switched between an observation and its write can still take that one write. Only bank-feed can fence it atomically, alongside `expected_generation`.
-  - **Ruled 2026-09-27:** filed upstream as casa-specialist-finance#69. When it ships, bind to that id with `expected_ledger` on every write, and retire both the reset sentence and this residual (a follow-up plan change).
-  - `first_seen` is not rewritten by bank-feed's update paths. Task 2 pins that against the vendored `apply_plan`.
+- **D4: Ledger identity is bank-feed's ledger instance id** (casa-specialist-finance#69, shipped in bank-feed 0.15.0 / component 0.16.0).
+  - The store binds to the instance id its first import names. The binding is recorded only inside an import (never at gate time, round p2).
+  - Every pass proves it again:
+    - the ledger probe carries `list_backups`' `Ledger instance:` id;
+    - the import takes the export reply's id, which bank-feed reads in the same snapshot as its rows;
+    - both must equal the bound id.
+  - Every bank-feed write carries `expected_ledger`, checked by bank-feed atomically with `expected_generation`. The earlier "one write after a mid-pass ledger switch" residual is closed. The per-read `first_seen` check stays as a guard on what is *read*.
+  - `restore_backup` and `purge` keep the id; `restore_backup` is still stopped by the generation.
+  - `delete_all_data` and `delete_data_keep_signins` mint a new id, as does a different file. From outside these cannot be told apart. The gate refuses, persistently across passes, until the operator says "the bank ledger was reset". That sentence **re-binds** the store: every held lineage ends `erased`, aliases are dropped, and the new id is bound. The acknowledgement is consumed by the next successful import (operator ruling 2026-09-27).
+  - History: rounds p1–p4 had built identity from indirect evidence (surviving aliases' `first_seen`, restore-point marks). The instance id replaces all of it.
 - **D5: The sweep runs inside the specialist delegation, after the import.**
   - The sweep's per-row reads are what refresh the classification observation, and triage needs a fresh expectation. So one delegation runs, in order: sync, then the classifier, then `export_history` and `import_ledger_export` (admission, resolution, merges, vanished ends, erase candidates), then erase confirmations, then the sweep (observations and tag repair), then triage.
   - This matches spec §Weekly pass step 2 and the round-41 ruling that ends commit at the import. §Weekly pass step 1's "repair sweep, then delegate" wording predates both; Ellen holds no bank-feed tools, so she could not run a sweep herself anyway.
@@ -157,7 +159,7 @@ skills/quarterly-accounting/SKILL.md   the operating procedure for Ellen and the
 server/
   qa_server.py      stdio JSON-RPC dispatcher; TOOLS registry; register()
   version.py        PLUGIN_VERSION (read from plugin.json), WORKFLOW = "acct@<version>"
-  casa_handoff.py   vendored verbatim (bank-feed v0.14.4)
+  casa_handoff.py   vendored verbatim (bank-feed, component v0.19.0)
   dates.py          quarters, effective date, short dates
   amounts.py        money formatting (minor units)
   expectation.py    PURE decision table + classification_state
@@ -187,7 +189,7 @@ scripts/
 tests/
   _base.py          sys.path, temp store/handoff/outbox env, fixtures
   bankfeed.py       harness over the vendored real bank-feed
-  upstream/component-v0.14.4/plugins/bank-feed/...   test-only, MIT, UPSTREAM.txt names the SHA
+  upstream/component-v0.19.0/plugins/bank-feed/...   test-only, MIT, UPSTREAM.txt names the SHA
   upstream/component-v0.13.2/plugins/bank-feed/...   below-floor demonstration only
   test_*.py         one file per module, plus test_e2e_*.py
 .github/workflows/ci.yml
@@ -231,7 +233,7 @@ class TestScaffold(TempEnv):
         self.assertEqual(m["name"], "quarterly-accounting")
         casa = m["casa"]
         for forbidden in ("setupTool", "setupProvides", "callbacks", "triggers",
-                          "jobs", "systemRequirements", "protectedTools"):
+                          "jobs", "systemRequirements", "eraseDataOnlyTool", "dropOffs"):
             self.assertNotIn(forbidden, casa, forbidden)
         mcp = json.loads((ROOT / ".mcp.json").read_text())
         server = mcp["mcpServers"]["quarterly-accounting"]
@@ -277,7 +279,7 @@ class TestScaffold(TempEnv):
         self.assertTrue(b["result"]["content"][0]["text"].startswith("error: KeyError"))
 
     def test_casa_handoff_is_vendored_verbatim(self):
-        up = ROOT / "tests/upstream/component-v0.14.4/plugins/bank-feed/server/casa_handoff.py"
+        up = ROOT / "tests/upstream/component-v0.19.0/plugins/bank-feed/server/casa_handoff.py"
         if not up.exists():
             self.skipTest("upstream tree arrives in Task 2")
         self.assertEqual((ROOT / "server/casa_handoff.py").read_bytes(), up.read_bytes())
@@ -523,6 +525,12 @@ def main() -> int:
     for t, c in casa["resultContract"]["tools"].items():
         if c != {"result": "safe"}:
             problems.append(f"resultContract for {t} must be {{'result': 'safe'}}")
+    for key in ("eraseTool",):
+        if key in casa and casa[key] not in server:
+            problems.append(f"casa.{key} names {casa[key]}, which the server does not register")
+    for t in casa.get("protectedTools", []):
+        if t.get("name") not in server:
+            problems.append(f"protectedTools names {t.get('name')}, which is not registered")
     for p in problems:
         print(p)
     return 1 if problems else 0
@@ -664,7 +672,7 @@ git commit -m "feat: plugin scaffold — stdlib dispatcher, manifest, tool-list 
 **Spec:** §Testing: every red case is pinned "against bank-feed's real `apply_plan` rather than a double", and below the floor the cut-chain case must "show why the floor exists". Also §Casa baseline, bank-feed floor table.
 
 **Files:**
-- Create: `scripts/vendor-bankfeed.sh`, `tests/upstream/component-v0.14.4/` (via the script), `tests/upstream/component-v0.13.2/` (via the script), `tests/bankfeed.py`
+- Create: `scripts/vendor-bankfeed.sh`, `tests/upstream/component-v0.19.0/` (via the script), `tests/upstream/component-v0.13.2/` (via the script), `tests/bankfeed.py`
 - Test: `tests/test_bankfeed_harness.py`
 
 **Interfaces:**
@@ -711,11 +719,11 @@ Run it for both trees:
 ```bash
 chmod +x scripts/vendor-bankfeed.sh
 export FINANCE_REPO=<absolute path of the local casa-specialist-finance clone>
-scripts/vendor-bankfeed.sh v0.14.4
+scripts/vendor-bankfeed.sh v0.19.0
 scripts/vendor-bankfeed.sh v0.13.2
-cp tests/upstream/component-v0.14.4/plugins/bank-feed/server/casa_handoff.py server/casa_handoff.py
+cp tests/upstream/component-v0.19.0/plugins/bank-feed/server/casa_handoff.py server/casa_handoff.py
 ```
-Expected: two `vendored …` lines. `tests/upstream/component-v0.14.4/plugins/bank-feed/.claude-plugin/plugin.json` says `"version": "0.13.4"`.
+Expected: two `vendored …` lines. `tests/upstream/component-v0.19.0/plugins/bank-feed/.claude-plugin/plugin.json` says `"version": "0.18.0"`.
 
 - [ ] **Step 2: Write the failing harness test**
 
@@ -735,10 +743,10 @@ class TestHarness(TempEnv):
         self.bf = bankfeed.Ledger(self.tmp / "bankfeed")
         self.bf.account()
 
-    def test_floor_tree_is_bank_feed_0_13_4(self):
+    def test_floor_tree_is_bank_feed_0_18_0(self):
         import json
         m = json.loads((bankfeed.plugin_root() / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(m["version"], "0.13.4")
+        self.assertEqual(m["version"], "0.18.0")
 
     def test_pending_to_booked_is_a_supersession(self):
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1", status="PDNG")])
@@ -837,7 +845,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-FLOOR = "component-v0.14.4"
+FLOOR = "component-v0.19.0"
 BELOW_FLOOR = "component-v0.13.2"
 CAP_STABLE = {"ref_stable": True, "ref_scope": "account", "observed_n": 200}
 CAP_UNKNOWN = {"ref_stable": False, "ref_scope": "unknown", "observed_n": 0}
@@ -946,11 +954,20 @@ class Ledger:
         return out if isinstance(out, str) else str(out.get("text"))
 
     def export(self) -> str:
+        """export_history's path; its `Ledger instance:` line (read by label, as
+        bank-feed says: the dispatcher may prepend sentences) is kept in
+        self.last_export_instance."""
         out = self.call("export_history", format="csv")
         m = re.search(r"^Path: (.+)$", out, re.M)
-        if not m:
+        li = re.search(r"^Ledger instance: ([0-9a-f]{32})$", out, re.M)
+        if not m or not li:
             raise AssertionError(out)
+        self.last_export_instance = li.group(1)
         return m.group(1).strip()
+
+    def instance(self) -> str:
+        m = re.search(r"^Ledger instance: ([0-9a-f]{32})$", self.listing(), re.M)
+        return m.group(1)
 
     def tags(self, row_id: int) -> list:
         return [r[0] for r in self.conn.execute(
@@ -1008,7 +1025,7 @@ If `test_first_seen_survives_an_in_place_update` fails, stop and report: D4 need
 
 ```bash
 git add scripts/vendor-bankfeed.sh tests/upstream tests/bankfeed.py tests/test_bankfeed_harness.py server/casa_handoff.py
-git commit -m "test: vendored real bank-feed (component v0.14.4 floor, v0.13.2 below-floor) and harness"
+git commit -m "test: vendored real bank-feed (component v0.19.0, v0.13.2 below-floor) and harness"
 ```
 
 ### Task 3: Dates and amounts
@@ -2537,7 +2554,7 @@ CREATE TABLE IF NOT EXISTS binding (
   watermark_announced INTEGER NOT NULL DEFAULT 0,
   row_high_water INTEGER NOT NULL DEFAULT 0,
   ledger_generation INTEGER,
-  ledger_marks_json TEXT NOT NULL DEFAULT '{}',   -- restore-point id -> pass that first saw it
+  ledger_instance TEXT,          -- bank-feed's ledger instance id this store is bound to (#69)
   ledger_reset_ack INTEGER NOT NULL DEFAULT 0);   -- the operator said the ledger was reset
 
 CREATE TABLE IF NOT EXISTS pass_marker (
@@ -2790,7 +2807,8 @@ git commit -m "feat: store schema v1, bounded BEGIN IMMEDIATE, cross-process seq
   - `passes.current_pass(conn) -> sqlite3.Row|None`
   - `passes.end_pass(conn, token, outcome, report: dict) -> dict`
   - `passes.record_probe(conn, token, kind, ok, detail="", data=None) -> dict` (`kind` in `PROBE_KINDS`)
-  - `passes.bank_write_gate(conn) -> dict`: `{"allowed":bool,"reason":str|None,"expected_generation":int|None,"workflow":str,"install_backup":str|None,"older_workflows":[str]}`
+  - `passes.bank_write_gate(conn) -> dict`: `{"allowed":bool,"reason":str|None,"expected_generation":int|None,"expected_ledger":str|None,"workflow":str,"install_backup":str|None,"older_workflows":[str]}`
+  - `passes.LEDGER_RE` (bank-feed's 32-lowercase-hex instance id)
   - `passes.store_populated(conn) -> bool`
   - `binding.get(conn) -> sqlite3.Row|None`
   - `binding.bind_account(conn, account_id, label, token=None) -> dict`
@@ -2798,7 +2816,7 @@ git commit -m "feat: store schema v1, bounded BEGIN IMMEDIATE, cross-process seq
   - `binding.set_package_name(conn, name) -> dict`
   - `binding.acknowledge_ledger_reset(conn) -> dict` (the operator's "the bank ledger was reset")
   - `binding.check_setup(conn) -> dict`
-  - `binding.reset_store(conn, confirm: bool) -> dict`
+  - `binding.reset_store(conn) -> {"erasure": "complete"|"incomplete", "report": str}`: argument-free, the plugin's `casa.eraseTool` (protected: Casa asks one tap)
 - `tests._base.StoreCase(TempEnv)` adds:
   - `self.conn = db.open_store()`
   - `self.bind(account="acc-biz", label="Zakelijk", watermark="2026-07-01")`
@@ -2821,9 +2839,13 @@ class StoreCase(TempEnv):
         with db.tx(self.conn):
             self.conn.execute("UPDATE binding SET watermark=?", (watermark,))
 
-    def pass_(self, trigger="test", generation=0, registered=None, accounts=None):
+    LEDGER = "a" * 32             # the bank-feed ledger instance id the fixtures bind to
+
+    def pass_(self, trigger="test", generation=0, registered=None, accounts=None,
+              instance=None):
         """End any live pass, begin a new one, record the probes a real pass
-        records first. Returns the new pass token."""
+        records first (the ledger probe carries list_backups' instance id).
+        Returns the new pass token."""
         import passes
         cur = passes.current_pass(self.conn)
         if cur is not None:
@@ -2836,7 +2858,8 @@ class StoreCase(TempEnv):
         passes.record_probe(self.conn, token, "bank_sync", True)
         passes.record_probe(self.conn, token, "bank_accounts", True, data={"accounts": accts})
         passes.record_probe(self.conn, token, "ledger", True,
-                            data={"generation": generation, "registered": registered or {}})
+                            data={"generation": generation, "registered": registered or {},
+                                  "instance": instance or self.LEDGER})
         return token
 ```
 
@@ -2925,7 +2948,18 @@ class TestBankWriteGate(StoreCase):
         self.pass_(generation=0, registered={})
         g = passes.bank_write_gate(self.conn)
         self.assertTrue(g["allowed"], g)
-        self.assertEqual((g["expected_generation"], g["workflow"]), (0, version.WORKFLOW))
+        self.assertEqual((g["expected_generation"], g["expected_ledger"], g["workflow"]),
+                         (0, self.LEDGER, version.WORKFLOW))
+
+    def test_a_bank_feed_without_a_ledger_instance_is_below_the_floor(self):
+        import passes as _p
+        t = self.pass_()
+        _p.record_probe(self.conn, t, "ledger", True, data={"generation": 0, "registered": {}})
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE passes SET gate_json=NULL")
+        g = passes.bank_write_gate(self.conn)
+        self.assertFalse(g["allowed"])
+        self.assertIn("0.15.0", g["reason"])
 
     def test_fresh_store_with_our_workflow_registered_is_refused_naming_the_backup(self):
         self.pass_(generation=1, registered={version.WORKFLOW: "b-20260922-01"})
@@ -3022,9 +3056,9 @@ class TestReset(StoreCase):
         t = self.pass_()
         (self.data / "documents" / "ab").mkdir(parents=True)
         (self.data / "documents" / "ab" / "x.pdf").write_bytes(b"%PDF")
-        with self.assertRaises(db.Refusal):
-            binding.reset_store(self.conn, confirm=False)
-        binding.reset_store(self.conn, confirm=True)
+        out = binding.reset_store(self.conn)
+        self.assertEqual(out["erasure"], "complete")
+        self.assertIn("bank-feed", out["report"])
         self.assertIsNone(binding.get(self.conn))
         self.assertFalse((self.data / "documents").exists())
         self.assertFalse(passes.store_populated(self.conn))
@@ -3062,6 +3096,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import re
 
 import db
 import version
@@ -3211,8 +3246,8 @@ def poison(conn, reason: str) -> None:
     if cur is None:
         return
     verdict = db.canonical({"allowed": False, "reason": reason, "expected_generation": None,
-                            "workflow": version.WORKFLOW, "install_backup": None,
-                            "older_workflows": []})
+                            "expected_ledger": None, "workflow": version.WORKFLOW,
+                            "install_backup": None, "older_workflows": []})
     conn.execute("UPDATE passes SET gate_json=?, snapshot_id=NULL WHERE pass_id=?",
                  (verdict, cur["pass_id"]))
     conn.execute("COMMIT")
@@ -3220,26 +3255,25 @@ def poison(conn, reason: str) -> None:
 
 
 def remember_ledger(conn, pass_id) -> None:
-    """Called ONLY by an import that proved ledger identity, inside its
-    transaction (round p2, Astra S1: remembering at gate time let a rejected
-    ledger's restore point vouch for that same ledger one pass later). Records
-    the generation this store now runs against, and each restore point of this
-    plugin's workflows with the pass that first saw it (plan §D4)."""
-    import binding
+    """Called ONLY by an import whose export named the bound ledger instance
+    (or bound a fresh store to it), inside its transaction — never at gate
+    time, where an unproven ledger could make itself remembered (round p2).
+    Records the ledger instance and the restore generation this store now runs
+    against (plan §D4)."""
     probe = conn.execute("SELECT data_json FROM probes WHERE kind='ledger'").fetchone()
     data = json.loads(probe["data_json"] or "{}")
-    marks = json.loads(binding.get(conn)["ledger_marks_json"] or "{}")
-    for wf, backup in (data.get("registered") or {}).items():
-        if wf.startswith("acct@"):
-            marks.setdefault(backup, pass_id)
-    conn.execute("UPDATE binding SET ledger_marks_json=?, ledger_generation=? WHERE id=1",
-                 (db.canonical(marks), int(data.get("generation", -1))))
+    conn.execute("UPDATE binding SET ledger_generation=?, ledger_instance=? WHERE id=1",
+                 (int(data.get("generation", -1)), data.get("instance")))
+
+
+LEDGER_RE = re.compile(r"^[0-9a-f]{32}$")     # bank-feed's LEDGER_RE (#69), parity-tested
 
 
 def _decide_gate(conn) -> dict:
     import binding
     out = {"allowed": False, "reason": None, "expected_generation": None,
-           "workflow": version.WORKFLOW, "install_backup": None, "older_workflows": []}
+           "expected_ledger": None, "workflow": version.WORKFLOW, "install_backup": None,
+           "older_workflows": []}
     b = binding.get(conn)
     if b is None:
         out["reason"] = "no account is bound yet"
@@ -3252,6 +3286,11 @@ def _decide_gate(conn) -> dict:
         return out
     data = json.loads(probe["data_json"] or "{}")
     gen = int(data.get("generation", -1))
+    instance = data.get("instance")
+    if not isinstance(instance, str) or not LEDGER_RE.match(instance):
+        out["reason"] = ("bank-feed reports no ledger instance id: it is below this plugin's "
+                         "floor (bank-feed 0.15.0)")
+        return out
     registered = dict(data.get("registered") or {})
     out["install_backup"] = registered.get(version.WORKFLOW)
     out["older_workflows"] = sorted(w for w in registered
@@ -3260,18 +3299,31 @@ def _decide_gate(conn) -> dict:
     # clears (round p2, Astra S1: filing a document between passes had flipped
     # "fresh" to "populated" and lifted a dirty-ledger refusal without a restore).
     prior = conn.execute("SELECT value FROM meta WHERE key='gate_refusal'").fetchone()
+    ack = bool(b["ledger_reset_ack"])
     if prior is not None:
         pr = json.loads(prior[0])
         if pr["kind"] == "restored" or (
                 pr["kind"] == "dirty-ledger" and gen == pr["generation"]
-                and registered.get(version.WORKFLOW) == pr["backup"]):
+                and registered.get(version.WORKFLOW) == pr["backup"]) or (
+                pr["kind"] == "other-ledger" and instance == pr["instance"] and not ack):
             out["reason"] = pr["reason"]
             return out
         _write(conn, "DELETE FROM meta WHERE key='gate_refusal'")
     populated = store_populated(conn)
     remembered = b["ledger_generation"]
+    bound = b["ledger_instance"]
     refusal = None
-    if populated and remembered is not None and gen != remembered:
+    if bound is not None and instance != bound:
+        # A different ledger instance: another file, or this one erased and
+        # re-minted (delete_all_data, delete_data_keep_signins). The two cannot be
+        # told apart from outside, so only the operator's sentence re-binds (D4).
+        if not ack:
+            refusal = {"kind": "other-ledger", "instance": instance,
+                       "reason": ("the bank ledger is not the one this store was built on "
+                                  f"(instance {instance[:8]}…, bound to {bound[:8]}…). If it "
+                                  "was wiped on purpose, the operator says \"the bank ledger "
+                                  "was reset\"")}
+    elif populated and remembered is not None and gen != remembered:
         refusal = {"kind": "restored",
                    "reason": ("the ledger was restored since this store last ran "
                               f"(restore generation {remembered} → {gen}) — reset the "
@@ -3287,7 +3339,7 @@ def _decide_gate(conn) -> dict:
                (db.canonical(refusal),))
         out["reason"] = refusal["reason"]
         return out
-    out.update(allowed=True, expected_generation=gen)
+    out.update(allowed=True, expected_generation=gen, expected_ledger=instance)
     return out
 ```
 
@@ -3425,15 +3477,22 @@ _TABLES_TO_WIPE = ("binding", "passes", "probes", "documents", "counterparties",
                    "shown", "packages", "deliveries", "delivered_rows", "alerts")
 
 
-def reset_store(conn, confirm: bool) -> dict:
-    """Wipe to the fresh-install state (spec §Setup, "Test install"). No
-    precondition: the server could not check one. In place, under the write
-    lock, so other processes see an empty store at their next transaction
-    rather than writing into an unlinked file; the pass generation is bumped
-    so any running pass is refused at its next write."""
-    if confirm is not True:
-        raise db.Refusal("reset_store wipes the whole accounting store; call it with "
-                         "confirm=true")
+ERASE_REPORT_KEEPS = (
+    "Not erased by this: the acct:: tags and accounting notes in bank-feed's ledger (restore "
+    "its install backup to remove them), Home Assistant backups taken earlier, and copies in "
+    "Casa's handoff folder and plugin outbox, which Casa removes after 7 days and 2 hours.")
+
+
+def reset_store(conn) -> dict:
+    """Wipe to the fresh-install state (spec §Setup, "Test install"), and the
+    plugin's uninstall eraser (casa.eraseTool, Casa v0.329.0+): argument-free,
+    protected (one Casa tap), answering {"erasure", "report"}. No precondition:
+    the server could not check one. In place, under the write lock, so other
+    processes see an empty store at their next transaction rather than writing
+    into an unlinked file; the pass generation is bumped so any running pass is
+    refused at its next write. Then the documents and packages are deleted and
+    the freed pages reclaimed (VACUUM, WAL truncate), so erased rows do not
+    stay readable in free pages. `complete` only when every step finished."""
     with db.tx(conn):
         for t in _TABLES_TO_WIPE:
             conn.execute(f"DELETE FROM {t}")
@@ -3444,14 +3503,31 @@ def reset_store(conn, confirm: bool) -> dict:
         conn.execute("UPDATE pass_marker SET live=0")
         conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=NULL,"
                      " last_cycle_completed_at=NULL")
-        # A "restored" refusal concerned the store just wiped; a dirty-ledger one
-        # concerns the ledger, which a store reset does not clean.
+        # A "restored" or "other-ledger" refusal concerned the store just wiped; a
+        # dirty-ledger one concerns the ledger, which a store reset does not clean.
         conn.execute("DELETE FROM meta WHERE key='gate_refusal' AND"
-                     " json_extract(value, '$.kind')='restored'")
+                     " json_extract(value, '$.kind')<>'dirty-ledger'")
+    problems = []
     for sub in ("documents", "packages"):
-        shutil.rmtree(db.data_dir() / sub, ignore_errors=True)
-    return {"reset": True, "note": "The accounting store is empty. The next pass refuses "
-                                   "every bank-feed write until the ledger is clean."}
+        try:
+            shutil.rmtree(db.data_dir() / sub)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            problems.append(f"{sub}/ could not be removed: {exc}")
+    try:
+        conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception as exc:  # the rows are gone; their free pages may not be
+        problems.append(f"the space reclaim did not finish: {exc}")
+    if problems:
+        return {"erasure": "incomplete",
+                "report": "The accounting store was emptied, but: " + "; ".join(problems)
+                          + ". " + ERASE_REPORT_KEEPS}
+    return {"erasure": "complete",
+            "report": "The accounting store is empty: documents, decisions, views and packages "
+                      "are gone. The next pass refuses every bank-feed write until the ledger "
+                      "is clean. " + ERASE_REPORT_KEEPS}
 ```
 
 The tool wrapper (Task 21) echoes the resulting package name, which is how the operator learns that a name fell back to `books`.
@@ -4829,7 +4905,7 @@ git commit -m "feat: document custody by content hash through the handoff folder
 - Produces:
   - `ledger.REQUIRED_COLUMNS`
   - `ledger.parse(name, data) -> list[dict]`
-  - `ledger.import_ledger_export(conn, *, path, token) -> dict` with keys `snapshot`, `rows`, `admitted` (pids), `merged` (`[[survivor, loser]]`), `ended_vanished` (pids), `erase_candidates` (`[{"pid","row_id","facts"}]`), `broken_floor` (`[{"pid","row_id","missing"}]`), `delivered_changes` (int)
+  - `ledger.import_ledger_export(conn, *, path, token, ledger_instance) -> dict` (`ledger_instance`: the export reply's `Ledger instance:` id) with keys `snapshot`, `rows`, `admitted` (pids), `merged` (`[[survivor, loser]]`), `ended_vanished` (pids), `erase_candidates` (`[{"pid","row_id","facts"}]`), `broken_floor` (`[{"pid","row_id","missing"}]`), `delivered_changes` (int)
   - `ledger.merge(conn, survivor, loser)`
   - `ledger.end_lineage(conn, pid, how)`, used by Task 14 for confirmed erasures (inside `tx`)
   - `ledger.check_delivered_bank_half(conn, by_id)`, which writes `alerts` rows of kind `delivered-changed`, one per occurrence
@@ -4845,7 +4921,7 @@ git commit -m "feat: document custody by content hash through the handoff folder
                    "first_seen", "last_seen", "state", "superseded_by")
 
     def export_csv(self, rows):
-        """A synthetic export with bank-feed 0.13.4's column set (raw_json
+        """A synthetic export with bank-feed 0.18.0's column set (raw_json
         excluded, as its EXPORT_EXCLUDE says). Used only where a test pins
         this plugin's resolution logic; bank-feed behaviour is pinned in
         test_ledger_real.py against the real tree."""
@@ -4886,7 +4962,8 @@ class Base(StoreCase):
         self.token = self.pass_()
 
     def imp(self, rows):
-        return ledger.import_ledger_export(self.conn, path=self.export_csv(rows), token=self.token)
+        return ledger.import_ledger_export(self.conn, path=self.export_csv(rows), token=self.token,
+                                           ledger_instance=getattr(self, "instance", self.LEDGER))
 
     def live(self):
         return {r["pid"]: dict(r) for r in self.conn.execute(
@@ -4916,12 +4993,14 @@ class TestAdmission(Base):
     def test_refused_without_the_account_seen_this_pass(self):
         t = self.pass_(accounts=[])
         with self.assertRaises(db.Refusal):
-            ledger.import_ledger_export(self.conn, path=self.export_csv([{"row_id": 1}]), token=t)
+            ledger.import_ledger_export(self.conn, path=self.export_csv([{"row_id": 1}]), token=t,
+                                        ledger_instance=self.LEDGER)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0], 0)
 
     def test_refused_without_a_pass_token(self):
         with self.assertRaises(db.Refusal):
-            ledger.import_ledger_export(self.conn, path=self.export_csv([{"row_id": 1}]), token=None)
+            ledger.import_ledger_export(self.conn, path=self.export_csv([{"row_id": 1}]), token=None,
+                                        ledger_instance=self.LEDGER)
 
 
 class TestResolution(Base):
@@ -4958,10 +5037,11 @@ class TestResolution(Base):
         import binding
         self.imp([{"row_id": 2}])
         (old,) = self.live()
-        self.token = self.pass_()
         binding.acknowledge_ledger_reset(self.conn)
+        self.token = self.pass_(instance="c" * 32)
+        self.instance = "c" * 32
         self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z"}])       # re-bound
-        self.token = self.pass_()
+        self.token = self.pass_(instance="c" * 32)
         out = self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z"},
                         {"row_id": 2, "first_seen": "2026-09-02T00:00:00Z"}])
         self.assertEqual(out["merged"], [])
@@ -5002,73 +5082,71 @@ class TestResolution(Base):
 
 
 class TestInstance(Base):
-    def test_an_unproven_ledger_ends_nothing(self):
-        # round p1 (Astra S1): a different ledger with the same account and none of our rows
+    """Ledger identity is bank-feed's instance id (#69; plan §D4)."""
+    OTHER = "b" * 32
+
+    def test_a_fresh_store_binds_to_the_exports_instance(self):
+        import binding
         self.imp([{"row_id": 1}])
-        self.token = self.pass_()
+        self.assertEqual(binding.get(self.conn)["ledger_instance"], self.LEDGER)
+
+    def test_another_instance_imports_and_ends_nothing(self):
+        # rounds p1-p4: a different ledger carrying the same account and none of our rows
+        self.imp([{"row_id": 1}])
+        self.token = self.pass_(instance=self.OTHER)
+        self.instance = self.OTHER
         with self.assertRaises(db.Refusal):
             self.imp([{"row_id": 7, "first_seen": "2026-08-01T00:00:00Z"}])
         self.assertIsNone(list(self.live().values())[0]["ended"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 1)
 
-    def test_a_restore_point_seen_in_an_earlier_pass_is_evidence(self):
+    def test_an_export_from_another_instance_than_the_probe_is_refused(self):
+        self.imp([{"row_id": 1}])
+        self.token = self.pass_()
+        self.instance = self.OTHER          # list_backups said LEDGER; the export says OTHER
+        with self.assertRaises(db.Refusal):
+            self.imp([])
+        self.assertIsNone(list(self.live().values())[0]["ended"])
+
+    def test_everything_purged_on_the_same_instance_is_candidates(self):
         self.imp([{"row_id": 40}])
-        self.token = self.pass_(registered={"acct@0.1.0": "b-1"})
-        self.imp([{"row_id": 40}])
-        self.token = self.pass_(registered={"acct@0.1.0": "b-1"})   # everything purged since
         out = self.imp([])
         self.assertEqual([c["row_id"] for c in out["erase_candidates"]], [40])
 
-    def test_a_restore_point_first_seen_this_pass_is_not_evidence(self):
-        self.imp([{"row_id": 40}])
-        self.token = self.pass_(registered={"acct@0.1.0": "b-9"})
-        with self.assertRaises(db.Refusal):
-            self.imp([])
-
-    def test_a_rejected_ledger_never_vouches_for_itself_later(self):
-        # round p2 (Astra S1): ledger B, empty, with its own restore point, two passes running
-        self.imp([{"row_id": 40}])
+    def test_the_refusal_persists_while_the_other_instance_does(self):
+        import passes
+        self.imp([{"row_id": 1}])
         for _ in range(2):
-            self.token = self.pass_(registered={"acct@0.1.0": "b-other-ledger"})
-            with self.assertRaises(db.Refusal):
-                self.imp([])
-        self.assertIsNone(list(self.live().values())[0]["ended"])
+            self.pass_(instance=self.OTHER)
+            self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
+        self.pass_()
+        self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
 
     def test_the_operators_word_rebinds_the_store(self):
         import binding
         self.imp([{"row_id": 1}])
         (old,) = self.live()
-        self.token = self.pass_()
         binding.acknowledge_ledger_reset(self.conn)
+        self.token = self.pass_(instance=self.OTHER)
+        self.instance = self.OTHER
         out = self.imp([{"row_id": 50, "first_seen": "2026-09-01T00:00:00Z"}])
         self.assertEqual(self.live()[old]["ended"], "erased")
         self.assertEqual(len(out["admitted"]), 1)
-        self.assertEqual(binding.get(self.conn)["ledger_reset_ack"], 0)
+        b = binding.get(self.conn)
+        self.assertEqual((b["ledger_reset_ack"], b["ledger_instance"]), (0, self.OTHER))
         self.assertEqual({r[0] for r in self.conn.execute("SELECT row_id FROM aliases")}, {50})
 
     def test_the_acknowledgement_is_consumed_by_any_successful_import(self):
-        # round p3 (Astra S1): an acknowledgement that met other evidence stayed armed
+        # round p3 (Astra S1): an acknowledgement that met the same ledger stayed armed
         import binding
+        import passes
         self.imp([{"row_id": 1}])
-        self.token = self.pass_()
         binding.acknowledge_ledger_reset(self.conn)
-        self.imp([{"row_id": 1}])                         # the same ledger, proven by row 1
+        self.token = self.pass_()
+        self.imp([{"row_id": 1}])                         # the same instance
         self.assertEqual(binding.get(self.conn)["ledger_reset_ack"], 0)
-        self.token = self.pass_()
-        with self.assertRaises(db.Refusal):               # a different ledger later: refused
-            self.imp([{"row_id": 9, "first_seen": "2026-09-01T00:00:00Z"}])
-
-    def test_ended_lineages_still_bind_the_store_to_its_ledger(self):
-        # round p3 (Astra S1): every lineage ended, then a different ledger arrives
-        self.imp([{"row_id": 1}])
-        self.imp([{"row_id": 1, "state": "vanished"}])
-        self.assertEqual(list(self.live().values())[0]["ended"], "vanished")
-        self.token = self.pass_()
-        with self.assertRaises(db.Refusal):               # same id, different payment
-            self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z"}])
-        self.token = self.pass_()
-        with self.assertRaises(db.Refusal):               # none of its rows at all
-            self.imp([{"row_id": 9, "first_seen": "2026-09-01T00:00:00Z"}])
+        self.pass_(instance=self.OTHER)
+        self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
 
     def test_nothing_is_imported_while_the_gate_refuses(self):
         self.token = self.pass_(generation=1, registered={"acct@0.1.0": "b-1"})
@@ -5110,16 +5188,12 @@ class Base(StoreCase):
         self.bind(account=bankfeed.Ledger.ACCOUNT)
 
     def imp(self):
-        t = self.pass_(generation=self.bf.generation(), registered=self.bf.registered())
-        return ledger.import_ledger_export(self.conn, path=self.bf.export(), token=t)
+        t = self.pass_(generation=self.bf.generation(), registered=self.bf.registered(),
+                       instance=self.bf.instance())
+        path = self.bf.export()
+        return ledger.import_ledger_export(self.conn, path=path, token=t,
+                                           ledger_instance=self.bf.last_export_instance)
 
-    def mint(self):
-        """This plugin's first write mints its restore point in the ledger; the
-        pass after it records that point as ledger-identity evidence (§D4)."""
-        rid = self.bf.rows(state="active")[0]["row_id"]
-        self.bf.call("tag_transaction", row_ids=[rid], tags=["acct::open"],
-                     workflow="acct@0.1.0", expected_generation=self.bf.generation())
-        self.imp()
 
     def live(self):
         return {r["pid"]: dict(r) for r in self.conn.execute(
@@ -5168,7 +5242,6 @@ class TestReal(Base):
         self.imp()
         (pid,) = self.live()
         old_id = self.live()[pid]["dest_row_id"]
-        self.mint()
         self.bf.purge_before("2026-08-01")
         out = self.imp()
         self.assertEqual([c["pid"] for c in out["erase_candidates"]], [pid])
@@ -5347,59 +5420,54 @@ def check_delivered_bank_half(conn, by_id: dict) -> int:
     return new
 
 
-def _require_same_ledger(conn, b, cur_pass, anchored: bool) -> None:
-    """Ledger identity is a property of the WHOLE store (plan §D4, generalized
-    after three rounds found the same shape): every lineage it has ever held,
-    in any state — ended and vanished ones included — ties it to one ledger.
-    Once a store holds any lineage, every import must prove it is reading that
-    ledger: a held alias present with an unchanged first_seen, or a restore
-    point of this plugin's workflow that an earlier proven import recorded.
-
-    The operator's "the bank ledger was reset" does not excuse a missing proof;
-    it RE-BINDS the store: every lineage it held is closed (erased, cause
-    ledger-reset), their aliases and the old ledger's marks are dropped, and
-    the ledger being imported becomes the bound one. The acknowledgement is
-    consumed by the next successful import whatever evidence admitted it, so
-    it can never outlive the moment it was given (round p3, Astra S1)."""
+def _require_same_ledger(conn, b, ledger_instance: str) -> None:
+    """Ledger identity is bank-feed's ledger instance id (#69; plan §D4). The
+    export names the instance its rows were read from, in the same snapshot;
+    the store is bound to one instance. A fresh store binds at its first import
+    (remember_ledger). A different instance — another file, or this one erased
+    and re-minted by delete_all_data or delete_data_keep_signins, which cannot
+    be told apart — imports nothing and ends nothing, unless the operator said
+    "the bank ledger was reset": then the store RE-BINDS (every held lineage
+    closed, the old aliases dropped). The acknowledgement is consumed by the
+    next successful import whatever it met (round p3), and rolls back with a
+    refused one."""
     ack = b["ledger_reset_ack"]
     conn.execute("UPDATE binding SET ledger_reset_ack=0 WHERE id=1")   # rolls back with a refusal
-    held = conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0]
-    if not held or anchored:
-        return
-    marks = json.loads(b["ledger_marks_json"] or "{}")
-    probe = conn.execute("SELECT data_json FROM probes WHERE kind='ledger'").fetchone()
-    registered = json.loads(probe["data_json"] or "{}").get("registered") or {}
-    if any(marks.get(bid) not in (None, cur_pass["pass_id"]) for bid in registered.values()):
+    bound = b["ledger_instance"]
+    if bound is None or bound == ledger_instance:
         return
     if ack:
         _rebind(conn)
         return
-    raise db.Refusal("I can't confirm this is the bank ledger this store was built on: none of "
-                     "its payments and none of its restore points are in it. Nothing was "
-                     "imported or ended. If the ledger was wiped on purpose, the operator says "
-                     "\"the bank ledger was reset\".")
+    raise db.Refusal(f"this export comes from ledger instance {ledger_instance[:8]}…, not the "
+                     f"{bound[:8]}… this store was built on. Nothing was imported or ended. If "
+                     "the bank ledger was wiped on purpose, the operator says \"the bank "
+                     "ledger was reset\".")
 
 
 def _rebind(conn) -> None:
     """Close everything tied to the old ledger, inside the import's transaction.
     Every held lineage ends `erased` (a vanished one too: its row id belongs to
-    the old ledger and must never be read or written again); aliases and marks
-    go, so nothing of the old ledger can address a row of the new one."""
+    the old ledger and must never be read or written again); aliases
+    go, so nothing of the old ledger can address a row of the new one; the
+    import's remember_ledger then binds the new instance."""
     for pid in [r[0] for r in conn.execute("SELECT pid FROM projections WHERE merged_into IS NULL")]:
         conn.execute("UPDATE projections SET ended='erased', ended_at=coalesce(ended_at, ?)"
                      " WHERE pid=?", (db.now(), pid))
         lineage.add_residue(conn, pid, "ended", "ledger reset")
         lineage.settle(conn, pid)
     conn.execute("DELETE FROM aliases")
-    conn.execute("UPDATE binding SET ledger_marks_json='{}', ledger_generation=NULL,"
+    conn.execute("UPDATE binding SET ledger_instance=NULL, ledger_generation=NULL,"
                  " row_high_water=0 WHERE id=1")
 
 
-def import_ledger_export(conn, *, path: str, token) -> dict:
+def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dict:
     import binding
     import passes
     if token is None:
         raise db.Refusal("an import belongs to a pass: pass the pass_token from begin_pass")
+    if not isinstance(ledger_instance, str) or not passes.LEDGER_RE.match(ledger_instance):
+        raise db.Refusal("pass the export's `Ledger instance:` id as ledger_instance")
     try:
         name, data = casa_handoff.capture(path)
     except casa_handoff.HandoffError as exc:
@@ -5420,14 +5488,17 @@ def import_ledger_export(conn, *, path: str, token) -> dict:
         mine = [r for r in rows if r["account_id"] == b["account_id"]]
         by_id = {r["row_id"]: r for r in mine}
         max_id = max((r["row_id"] for r in rows), default=0)
-        anchored = False
+        probe = conn.execute("SELECT data_json FROM probes WHERE kind='ledger'").fetchone()
+        probed = json.loads(probe["data_json"] or "{}").get("instance")
+        if ledger_instance != probed:
+            raise db.Refusal("the export's ledger instance is not the one list_backups showed "
+                             "this pass — nothing was imported (re-run the pass)")
+        _require_same_ledger(conn, b, ledger_instance)          # may re-bind (drops aliases)
         for a in conn.execute("SELECT row_id, first_seen FROM aliases"):   # every lineage, any state
             r = by_id.get(a["row_id"])
             if r is not None and a["first_seen"] and r["first_seen"] != a["first_seen"]:
                 raise db.Refusal(f"row #{a['row_id']} now names a different transaction than "
                                  "the one this store holds — nothing was imported")
-            anchored = anchored or r is not None
-        _require_same_ledger(conn, b, cur_pass, anchored)
         old_facts = {r["row_id"]: dict(r) for r in conn.execute("SELECT * FROM bank_rows")}
         sync = conn.execute("SELECT ok, pass_id FROM probes WHERE kind='bank_sync'").fetchone()
         prev = conn.execute("SELECT bank_through FROM snapshots ORDER BY snapshot_id DESC"
@@ -6286,8 +6357,8 @@ procedure SKILL.md prescribes; the skill must say exactly this, in words:
   list_projections -> for each item:
     get_transaction(row_id); "no transaction #N" -> record_observation(not_found)
     else record_observation(observed_tags, observed_notes)
-    make the ONE returned write (untag, tag or add_note) with workflow +
-      expected_generation exactly as returned
+    make the ONE returned write (untag, tag or add_note) with workflow,
+      expected_generation and expected_ledger exactly as returned
     a write that did not take -> record_observation(write_error=<reply>)
     read the row again and record_observation again; repeat until nothing is
       returned (plan §D14; round p5: never two writes without a read between)
@@ -6323,7 +6394,8 @@ def observe_and_repair(conn, bf, token, item) -> dict:
         ins = r.get("instructions") or {}
         if not ins:
             return r
-        kw = {"workflow": ins["workflow"], "expected_generation": ins["expected_generation"]}
+        kw = {"workflow": ins["workflow"], "expected_generation": ins["expected_generation"],
+              "expected_ledger": ins["expected_ledger"]}
         if "untag" in ins:
             out = bf.call("untag_transaction", row_ids=[row_id], tags=ins["untag"], **kw)
             if set(ins["untag"]) & set(bf.tags(row_id)):
@@ -6383,9 +6455,12 @@ class Base(StoreCase):
     def new_pass(self):
         """A pass up to the sweep, in the skill's order: probes, gate, import, then
         the erase candidates confirmed with get_transaction BEFORE anything else."""
-        self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered())
+        self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered(),
+                                instance=self.bf.instance())
         self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
-        out = ledger.import_ledger_export(self.conn, path=self.bf.export(), token=self.token)
+        path = self.bf.export()
+        out = ledger.import_ledger_export(self.conn, path=path, token=self.token,
+                                          ledger_instance=self.bf.last_export_instance)
         for c in out["erase_candidates"]:
             if self.bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
                 sweep.record_observation(self.conn, pid=c["pid"], token=self.token,
@@ -6548,7 +6623,7 @@ class TestEndsAndErasure(Base):
         rid = self.show(old_pid)
         matches.record_match(self.conn, pid=old_pid, doc_id=d, author="operator",
                              expected_revision=self.rev(old_pid), render_id=rid)
-        self.new_pass()                  # a pass that sees this plugin's restore point (§D4)
+        self.new_pass()
         self.bf.purge_before("2026-08-01")                         # before the pass
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])      # this pass's own sync
         self.bf.call("tag_transaction", row_ids=[self.rid()], tags=["software"])  # classifier
@@ -6571,7 +6646,8 @@ class TestEndsAndErasure(Base):
         self.new_pass()
         pid = self.pid_of(self.rid())
         passes.end_pass(self.conn, self.token, "complete", {})
-        self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered())
+        self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered(),
+                                instance=self.bf.instance())
         with self.assertRaises(db.Refusal):
             sweep.record_observation(self.conn, pid=pid, token=self.token, not_found=True)
         self.assertIsNone(lineage.projection(self.conn, pid)["ended"])
@@ -6590,10 +6666,14 @@ class TestEndsAndErasure(Base):
                              row_snapshot=self.snapshot(pid))
         self.new_pass()
         self.bf.purge_before("2026-08-01")
-        self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered())
-        ledger.import_ledger_export(self.conn, path=self.bf.export(), token=self.token)
+        self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered(),
+                                instance=self.bf.instance())
+        path = self.bf.export()
+        ledger.import_ledger_export(self.conn, path=path, token=self.token,
+                                    ledger_instance=self.bf.last_export_instance)
         passes.end_pass(self.conn, self.token, "interrupted", {})    # confirmation never ran
-        self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered())
+        self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered(),
+                                instance=self.bf.instance())
         with self.assertRaises(db.Refusal):
             sweep.record_observation(self.conn, pid=pid, token=self.token, not_found=True)
         with self.assertRaises(db.Refusal):
@@ -6928,7 +7008,8 @@ def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=N
                     else {"add_note": note} if note_needed else None)
             if step is not None:
                 instructions = {**step, "workflow": gate["workflow"],
-                                "expected_generation": gate["expected_generation"]}
+                                "expected_generation": gate["expected_generation"],
+                                "expected_ledger": gate["expected_ledger"]}
         _advance(conn, pid)
         return {"pid": pid, "status": red.status, "desired": sorted(red.desired),
                 "instructions": instructions,
@@ -6939,7 +7020,7 @@ def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=N
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tests.test_sweep_real -v` → PASS.
-If `purge(... user_work="erase")` needs more arguments at the vendored tag, read `tools_destructive.purge`'s schema in `tests/upstream/component-v0.14.4` and call it exactly. The test's point is that it deletes zero rows and strips every tag and note.
+If `purge(... user_work="erase")` needs more arguments at the vendored tag, read `tools_destructive.purge`'s schema in `tests/upstream/component-v0.19.0` and call it exactly. The test's point is that it deletes zero rows and strips every tag and note.
 
 - [ ] **Step 7: Commit**
 
@@ -7047,7 +7128,8 @@ class TestWatermark(Base):
         with self.assertRaises(db.Refusal):
             work.set_watermark(self.conn, "2026-Q4")
         work.set_watermark(self.conn, "2026-Q2")
-        out = ledger.import_ledger_export(self.conn, token=self.token, path=self.export_csv([
+        out = ledger.import_ledger_export(self.conn, token=self.token, ledger_instance=self.LEDGER,
+                                          path=self.export_csv([
             {"row_id": 1, "first_seen": "2026-07-01T00:00:00Z"},
             {"row_id": 5, "booking_date": "2026-05-10", "value_date": "2026-05-10",
                             "first_seen": "2026-05-10T08:00:00Z"}]))
@@ -10187,6 +10269,18 @@ class TestSurface(TempEnv):
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
         self.assertEqual(len(m["casa"]["provides_tools"]), 33)
+        # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
+        self.assertEqual(m["casa"]["eraseTool"], "reset_store")
+        self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
+        import tools  # noqa: F401
+        self.assertEqual(qa_server.TOOLS["reset_store"]["schema"].get("required", []), [])
+
+    def test_the_eraser_answers_erasure_and_report_as_one_json_object(self):
+        import tools  # noqa: F401
+        out = qa_server.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                                "params": {"name": "reset_store", "arguments": {}}})
+        body = json.loads(out["result"]["content"][0]["text"])
+        self.assertEqual(set(body), {"erasure", "report"})
 
     def test_schemas_are_objects_and_required_args_are_declared(self):
         import tools  # noqa: F401
@@ -10486,10 +10580,13 @@ def t_exempt(args):
           "Import this pass's bank snapshot: the path export_history returned. Admits new "
           "payments, follows supersessions, merges lineages, ends tombstoned ones, and returns "
           "erase candidates to confirm with get_transaction before triage.",
-          obj({"path": S, "pass_token": TOKEN}, ("path", "pass_token")))
+          obj({"path": S, "pass_token": TOKEN, "ledger_instance": S},
+              ("path", "pass_token", "ledger_instance")))
 def t_import(args):
     _need(args, "path", "pass_token")
-    return ledger.import_ledger_export(conn(), path=args["path"], token=_int(args, "pass_token"))
+    _need(args, "ledger_instance")
+    return ledger.import_ledger_export(conn(), path=args["path"], token=_int(args, "pass_token"),
+                                       ledger_instance=args["ledger_instance"])
 
 
 @register("list_projections",
@@ -10545,8 +10642,9 @@ def t_end(args):
 
 @register("record_probe",
           "Record what you actually observed this pass: bank_tools, bank_accounts (data.accounts "
-          "from list_accounts: account_id, category, label), bank_sync, ledger (data.generation "
-          "and data.registered from list_backups), gmail.",
+          "from list_accounts: account_id, category, label), bank_sync, ledger (data.generation, "
+          "data.registered and data.instance — the `Ledger instance:` id — from list_backups), "
+          "gmail.",
           obj({"pass_token": TOKEN, "kind": S, "ok": B, "detail": S, "data": O},
               ("pass_token", "kind", "ok")))
 def t_probe(args):
@@ -10594,11 +10692,13 @@ def t_pkg_name(args):
 
 
 @register("reset_store",
-          "Wipe the accounting store to the fresh-install state (confirm=true). Only in the reset "
-          "loop, after the ledger's install backup was restored.",
-          obj({"confirm": B}, ("confirm",)))
+          "PROTECTED (Casa asks the operator for one tap). Erase the whole accounting store: "
+          "documents, decisions, views, packages. Used in the test-install reset loop after the "
+          "ledger's install backup was restored, and by Casa as this plugin's uninstall eraser. "
+          "Answers {erasure: complete|incomplete, report}.",
+          obj({}))
 def t_reset(args):
-    return binding.reset_store(conn(), args.get("confirm") is True)
+    return binding.reset_store(conn())
 
 
 # --- work ------------------------------------------------------------------------
@@ -10712,6 +10812,10 @@ m = json.loads(p.read_text())
 names = sorted(qa_server.TOOLS)
 m["casa"]["provides_tools"] = ["mcp__plugin_quarterly-accounting_quarterly-accounting__" + n for n in names]
 m["casa"]["resultContract"] = {"version": 1, "tools": {n: {"result": "safe"} for n in names}}
+m["casa"]["eraseTool"] = "reset_store"
+m["casa"]["protectedTools"] = [{"name": "reset_store", "summary":
+    "Erases the whole quarterly-accounting store: documents, decisions, views, packages. "
+    "bank-feed's acct:: tags and notes stay."}]
 p.write_text(json.dumps(m, indent=2) + "\n")
 PY
 ```
@@ -10800,6 +10904,7 @@ class TestSkill(TempEnv):
             if re.search(r"`(tag_transaction|untag_transaction|add_note)[`(]", line):
                 self.assertIn("workflow", line, line)
                 self.assertIn("expected_generation", line, line)
+                self.assertIn("expected_ledger", line, line)
 
     def test_no_invention_rules(self):
         for phrase in ("I can't read the accounting right now", "VERBATIM",
@@ -10939,11 +11044,13 @@ You receive a `pass_token`. Pass it to every plugin write.
    ok=true, data={"accounts": [{account_id, category, label}, …]})`. Call `sync`, then
    `record_probe(kind="bank_sync", ok=…, detail=…)`. Call `list_backups`, then
    `record_probe(kind="ledger", ok=true, data={"generation": <Restore generation>,
-   "registered": {<workflow>: <backup id>, …}})`. Then `check_setup()`. If `can_run` is false,
+   "registered": {<workflow>: <backup id>, …}, "instance": <the "Ledger instance:" id>})`
+   (read each value by its label: bank-feed may prepend sentences). Then `check_setup()`. If `can_run` is false,
    stop and return its `conditions`.
 2. **Classification.** tx-classifier drains its queue on `sync`'s trailer, in this same
    session. Let it finish. This plugin never classifies.
-3. **Snapshot.** `export_history(format="csv")`, then `import_ledger_export(path, pass_token)`.
+3. **Snapshot.** `export_history(format="csv")`, then `import_ledger_export(path, pass_token,
+   ledger_instance=<the reply's "Ledger instance:" id>)`. Read both values by their labels.
 4. **Ends.** For each `erase_candidates` row: `get_transaction(row_id)`. If it answers
    `no transaction #N`, call `record_observation(pid, pass_token, not_found=true)`. Do this
    before any matching, so freed documents are free for this pass.
@@ -10952,11 +11059,13 @@ You receive a `pass_token`. Pass it to every plugin write.
    `record_observation(pid, pass_token, observed_tags=<every tag>, observed_notes=<every note
    shown>, observed_first_seen=<the row's first_seen>)`. If it answers that the ledger changed
    during this pass, stop the pass at once. If `bank_writes` is not allowed, make no bank-feed write and report its reason. Otherwise make the ONE write the returned `instructions` name, exactly:
-   - `untag_transaction(row_ids=[row_id], tags=untag, workflow=…, expected_generation=…)`, or
-   - `tag_transaction(row_ids=[row_id], tags=tag, workflow=…, expected_generation=…)`, or
-   - `add_note(row_ids=[row_id], note=add_note, author="agent", workflow=…, expected_generation=…)`
+   - `untag_transaction(row_ids=[row_id], tags=untag, workflow=…, expected_generation=…, expected_ledger=…)`, or
+   - `tag_transaction(row_ids=[row_id], tags=tag, workflow=…, expected_generation=…, expected_ledger=…)`, or
+   - `add_note(row_ids=[row_id], note=add_note, author="agent", workflow=…, expected_generation=…, expected_ledger=…)`
 
-   Pass `workflow` and `expected_generation` exactly as returned, on every write. If the write
+   Pass `workflow`, `expected_generation` and `expected_ledger` exactly as returned, on every
+   write. If bank-feed refuses a write because the ledger instance differs, stop the pass at
+   once. If the write
    does not take, `record_observation(pid, pass_token, write_error=<bank-feed's reply>)`.
    Otherwise read the row again with `get_transaction` and record it again; repeat until
    nothing is returned. Never make two writes without a read between them. If bank-feed
@@ -11041,7 +11150,7 @@ No other trigger: packages are built only when asked.
 Quiesce first: no pass running, `/new` on both agents. Then:
 1. Ask the finance specialist to restore the install backup `check_setup` names
    (`restore_backup`; Casa asks the operator for one tap).
-2. `reset_store(confirm=true)`.
+2. `reset_store()` (Casa asks the operator for one tap).
 3. Upgrade the plugin if the fix needs it, or just run the pass. Its first write mints the
    new install backup.
 
@@ -11092,7 +11201,8 @@ def probe(conn, bf, token):
     passes.record_probe(conn, token, "bank_accounts", True, data={"accounts": accounts})
     passes.record_probe(conn, token, "bank_sync", True)
     passes.record_probe(conn, token, "ledger", True,
-                        data={"generation": bf.generation(), "registered": bf.registered()})
+                        data={"generation": bf.generation(), "registered": bf.registered(),
+                              "instance": bf.instance()})
 
 
 def _fits(item, doc):
@@ -11167,7 +11277,9 @@ def run_pass(conn, bf, trigger="cron", sync=None) -> dict:
     if not gate["allowed"]:
         end = passes.end_pass(conn, token, "stopped", {})
         return {"token": token, "import": None, "gate": gate, "triage": None, "end": end}
-    imp = ledger.import_ledger_export(conn, path=bf.export(), token=token)
+    path = bf.export()
+    imp = ledger.import_ledger_export(conn, path=path, token=token,
+                                      ledger_instance=bf.last_export_instance)
     for c in imp["erase_candidates"]:
         if bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
             sweep.record_observation(conn, pid=c["pid"], token=token, not_found=True)
@@ -11321,7 +11433,7 @@ class TestEndsE2E(Base):
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="R1", status="PDNG", amount=1000)])
         self.first_pass()
-        sim.run_pass(self.conn, bf)          # sees this plugin's restore point (§D4 evidence)
+        sim.run_pass(self.conn, bf)
         (old_pid,) = lineage.live_pids(self.conn)
         stored = bf.rows(account=bankfeed.Ledger.ACCOUNT)
         plan = ingest.reconcile(stored, [bf.row("2026-07-06", ref="R1", amount=1000)],
@@ -11334,6 +11446,30 @@ class TestEndsE2E(Base):
         self.assertEqual(lineage.projection(self.conn, old_pid)["ended"], "erased")
         self.assertEqual(len([p for p in lineage.live_pids(self.conn)
                               if not lineage.projection(self.conn, p)["ended"]]), 1)
+
+    def test_a_data_only_erasure_waits_for_the_operator_then_rebinds(self):
+        # bank-feed 0.18.0 (component 0.19.0): delete_data_keep_signins erases the data,
+        # keeps the account bindings and mints a NEW ledger instance id. From outside that
+        # is another ledger, so the store waits for "the bank ledger was reset" (plan §D4).
+        # Drive the tool as upstream tests/test_data_only_erasure.py does if it needs more.
+        bf = self.bf
+        bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000)])
+        self.first_pass()
+        (old_pid,) = lineage.live_pids(self.conn)
+        before = bf.instance()
+        bf.call("delete_data_keep_signins")
+        self.assertNotEqual(bf.instance(), before)
+        bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000)])            # re-synced
+        out = sim.run_pass(self.conn, bf)
+        self.assertFalse(out["gate"]["allowed"])
+        self.assertIsNone(lineage.projection(self.conn, old_pid)["ended"])
+        self.assertEqual([t for r in self.active() for t in bf.tags(r["row_id"])
+                          if t.startswith("acct::")], [])                     # nothing written
+        binding.acknowledge_ledger_reset(self.conn)
+        out = sim.run_pass(self.conn, bf)
+        self.assertTrue(out["gate"]["allowed"])
+        self.assertEqual(lineage.projection(self.conn, old_pid)["ended"], "erased")
+        self.assertEqual(self.owned(self.active()[0]["row_id"]), ["acct::open"])
 
     def test_forget_relink_resync_ends_old_lineages_and_keeps_writing(self):
         bf = self.bf
@@ -11368,7 +11504,7 @@ class TestRestoreAndReset(Base):
         out = sim.run_pass(self.conn, bf)
         self.assertFalse(out["gate"]["allowed"])
         self.assertIn("reset", out["gate"]["reason"].lower())
-        binding.reset_store(self.conn, confirm=True)
+        binding.reset_store(self.conn)
         self.assertEqual([t for t in bf.tags(rid) if t.startswith("acct::")], [])
         self.assertFalse([n for n in bf.notes(rid) if n.startswith("Accounting revision")])
         out = sim.run_pass(self.conn, bf)
@@ -11385,7 +11521,7 @@ class TestRestoreAndReset(Base):
         bf.call("backup", reason="weekly")
         weekly = [b for b in self._backups() if b != install][-1]
         bf.call("restore_backup", backup_id=weekly)
-        binding.reset_store(self.conn, confirm=True)
+        binding.reset_store(self.conn)
         tags_before = {r["row_id"]: bf.tags(r["row_id"]) for r in self.active()}
         out = sim.run_pass(self.conn, bf)
         self.assertFalse(out["gate"]["allowed"])
@@ -11421,7 +11557,7 @@ Run: `python3 -m unittest tests.test_e2e -v`
 Expected before Step 1: ERROR (`sim` has no `run_pass`). After Step 1: PASS.
 
 A failure here is information about how the pieces meet. Fix the module at fault, never the assertion, unless the assertion contradicts the spec. In that case, quote the spec passage in the task report. Known tree-dependent details:
-- `restore_backup`'s argument name, and the listing's line format for backup ids. Read `tools_backup.py` in `tests/upstream/component-v0.14.4` and adapt `_backups()` to it.
+- `restore_backup`'s argument name, and the listing's line format for backup ids. Read `tools_backup.py` in `tests/upstream/component-v0.19.0` and adapt `_backups()` to it.
 - `forget_local_account` may need the account's session. `Ledger.account()` inserts one, and upstream's own test `_relink` shows the relink shape.
 
 - [ ] **Step 4: Commit**
@@ -11452,7 +11588,7 @@ request. Design: `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.
 
 ## Requirements
 - Casa **0.326.0** or newer.
-- bank-feed **0.13.0** or newer (casa-specialist-finance component 0.14.0), installed on the
+- bank-feed **0.15.0** or newer (casa-specialist-finance component 0.16.0), installed on the
   finance specialist with the business account linked, labelled `company`, and synced.
 - The gmail plugin (0.9.0 or newer) on Ellen; the finance specialist is Ellen's delegate.
 
@@ -11467,7 +11603,7 @@ The package name and the start quarter are defaulted and changeable by asking.
 
 ## Development
 - `python3 -m unittest discover -s tests -t .` — the whole suite, standard library only.
-- `tests/upstream/` holds test-only copies of bank-feed (component v0.14.4, and v0.13.2 for the
+- `tests/upstream/` holds test-only copies of bank-feed (component v0.19.0, and v0.13.2 for the
   below-floor case) and gmail's sent log. Refresh with `scripts/vendor-bankfeed.sh <tag>`.
 - `git config core.hooksPath .githooks` — tool-list agreement and the identifier scan.
 

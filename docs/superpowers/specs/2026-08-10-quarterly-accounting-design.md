@@ -44,7 +44,7 @@ states it (792a5fa). **Converged at round 43: Astra SHIP, Terra SHIP, at 792a5fa
 nothing at S1/S2. The #56 floor stays mandatory: the newest bank-feed is below it.
 Revised 2026-09-22 — re-verified against casa **v0.328.0** and bank-feed **0.10.1**
 after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31 landed.
-Required floors: casa **0.326.0**, bank-feed **0.13.0** (casa-specialist-finance component 0.14.0, which closed #56; §Casa baseline).
+Required floors: casa **0.326.0**, bank-feed **0.15.0** (casa-specialist-finance component 0.16.0: the ledger instance id and `expected_ledger`, #69, on top of #56's lineage-closed purge in 0.13.0; §Casa baseline). Revised 2026-09-27.
 Re-verified 2026-09-27 against casa **v0.328.6** and component **0.14.4**: nothing in between
 changes a contract this document relies on.
 Implementation plan: `docs/superpowers/plans/2026-09-27-quarterly-accounting.md`, converged at
@@ -205,8 +205,10 @@ correctness properties protect nothing. Three rungs:
 either undoable in one word or cheap to redo, so a gate would only buy ceremony. Two
 things would put something on the gated rung and are deliberately out of scope: sending
 the package anywhere the operator cannot retract it from (mailing the accountant
-directly, filing with the tax authority), and deleting retained documents — which v1
-never does.
+directly, filing with the tax authority), and deleting retained documents. v1 deletes
+documents only through `reset_store`, which is protected: Casa asks for one tap. That covers
+both the test-install reset loop and Casa's uninstall "Erase everything" (operator ruling
+2026-09-27; §Setup, "The uninstall eraser").
 
 Two consequences worth stating, because they overturn v1's instincts:
 
@@ -308,7 +310,11 @@ attaches handoff files. bank-feed's `export_history` publishes its ledger export
 Casa's `share_inbound_file` copies a file the operator sent in Telegram there. This
 plugin vendors `casa_handoff.py` verbatim.
 
-**bank-feed floor: 0.13.0** (casa-specialist-finance component 0.14.0, 2026-09-25), the
+**bank-feed floor: 0.15.0** (casa-specialist-finance component 0.16.0, 2026-09-27; revised
+from 0.13.0). It adds [#69](https://github.com/bonzanni/casa-specialist-finance/issues/69):
+a ledger instance id reported by `list_backups` and `export_history`, and `expected_ledger`
+on `tag_transaction`, `untag_transaction` and `add_note`, checked atomically with
+`expected_generation`. The earlier floor, 0.13.0 (component 0.14.0, 2026-09-25), was the
 release that closed [#56](https://github.com/bonzanni/casa-specialist-finance/issues/56):
 "no surviving row's superseded_by names an erased row". This plugin is not released
 against anything lower. Five fixes sit at or below the floor, each
@@ -320,6 +326,7 @@ load-bearing (re-verified 2026-09-24 against component 0.13.2):
 | 0.9.0 | [#31](https://github.com/bonzanni/casa-specialist-finance/issues/31) — `owner::name` tags are another workflow's | The whole `acct::` vocabulary below depends on it. |
 | **0.10.0** | `export_history` publishes into Casa's handoff folder | `import_ledger_export` takes the export only through `casa_handoff.capture` and refuses any other path. On 0.9.x the export lands in bank-feed's private data directory, so **packaging fails closed**. |
 | **0.13.0** | [#56](https://github.com/bonzanni/casa-specialist-finance/issues/56) — `purge` deletes a supersession chain whole or not at all | Ending a lineage on an erased row (§Match records, "A lineage can end") is only sound when an erasure cannot cut a chain. Below it, a date `purge` can delete a superseded predecessor and keep its successor, and the plugin would retire decisions about a payment that still exists (round 41). |
+| **0.15.0** | [#69](https://github.com/bonzanni/casa-specialist-finance/issues/69) — the ledger instance id; `expected_ledger` on the annotation writes | The store binds to the instance id, the import checks the export's id, and every accounting write carries `expected_ledger`: a write can never land on a ledger the store was not built on (implementation plan D4). |
 | **0.11.0** | [#39](https://github.com/bonzanni/casa-specialist-finance/issues/39) — backups, a protected restore, and the restore point minted on a workflow's first write; `workflow` and `expected_generation` on `tag_transaction`, `untag_transaction` and `add_note` | Every accounting write carries both (§Setup, "Test install"). Below it the `workflow` argument is refused, and the pass says the ledger is below the floor rather than writing unfenced. |
 
 An earlier revision named 0.9.0 as the floor — correct for the namespace, one version
@@ -994,8 +1001,10 @@ Expectation: `set_expectation(scope, kind, tier)` — `scope` is a counterparty 
 classification chain; the operator's "no invoices ever for X" and "payslips don't matter"
 land here, with the render binding when the operator is the author (§"Document
 expectation"). The per-payment case stays `set_exemption`.
-Reset: `reset_store(confirm)` — wipes `$CLAUDE_PLUGIN_DATA` to the fresh-install state.
-It has no precondition, because the server could not check one; the guard is that the
+Reset: `reset_store()` — wipes `$CLAUDE_PLUGIN_DATA` to the fresh-install state. It is
+argument-free and protected (one Casa tap), and it is the plugin's `casa.eraseTool`,
+answering `{"erasure": "complete" | "incomplete", "report"}` (revised 2026-09-27, operator
+ruling). It has no precondition, because the server could not check one; the guard is that the
 next pass refuses every bank-feed write while bank-feed still reports `acct@<version>`
 registered (§Setup, "Test install"). Every bank-feed write the skill prescribes carries the
 workflow string `acct@<version>`; the restore point is minted by bank-feed on the first
@@ -1515,6 +1524,18 @@ re-arming, #1014 lost retirement notes), none of which can touch a plugin that d
 no setup tool and no credentials. The first-run binding above covers the same ground in
 the surface the operator is already reading.
 
+**The uninstall eraser (added 2026-09-27, operator ruling).** From Casa v0.329.0 a plugin
+may declare `casa.eraseTool`. Uninstalling it then asks Keep data / Erase everything /
+Cancel, and "Erase everything" runs the eraser and removes the plugin only on `complete`.
+This plugin declares `reset_store` as its eraser; it declares no data-only eraser, because
+it holds no sign-ins.
+- **What it erases:** the whole store, the documents and the packages, then the freed pages
+  (VACUUM, WAL truncate).
+- **What its report names as not erased:** the `acct::` tags and accounting notes in
+  bank-feed's ledger (restoring bank-feed's install backup removes them), Home Assistant
+  backups, and the handoff and outbox copies, which Casa removes on its own schedule.
+- An older Casa ignores the declaration, so the casa floor does not move.
+
 **No trigger or callback consent round.** The plugin declares no triggers of its own —
 the one above lives on Ellen's `triggers.yaml` — and no callbacks, so there is no consent
 verdict for its setup to wait on.
@@ -1702,7 +1723,7 @@ clean.
 uninstalled plugin's tools are gone (round-31 finding), and Casa keeps its store anyway.
 (1) Quiesce: no pass running, `/new` on both agents. (2) Ask the finance specialist to
 restore the install backup; the tap confirms which; bank-feed reports the restore and the
-unregistered workflow. (3) `reset_store` wipes `$CLAUDE_PLUGIN_DATA` to the fresh-install
+unregistered workflow. (3) `reset_store` (one Casa tap) wipes `$CLAUDE_PLUGIN_DATA` to the fresh-install
 state; it has no precondition it could not check, and it is safe to call at the wrong time
 only because the next pass will refuse to write until the ledger is clean. (4) Upgrade the
 plugin if the fix needs it (`plugin_update`), otherwise just run the pass: the first write
@@ -1746,12 +1767,18 @@ the store holds either names the same payment or names nothing. The per-lineage 
 make any `purge` of old unmanaged history cost the whole accounting store. Three
 consequences, stated:
 
-- **Revised 2026-09-27 (operator ruling, plan D4):** from the export alone a wiped ledger is
-  indistinguishable from a different one, so the pass after `delete_all_data` waits for the
-  operator's "the bank ledger was reset", which re-binds the store. Filed upstream as
-  [casa-specialist-finance#69](https://github.com/bonzanni/casa-specialist-finance/issues/69)
-  (a ledger instance id, and `expected_ledger` on annotation writes). Once #69 ships, the
-  sentence is no longer needed and the paragraph below holds as written.
+- **Revised 2026-09-27 (operator ruling, plan D4; #69 shipped in bank-feed 0.15.0):** the store
+  binds to bank-feed's ledger instance id.
+  - `restore_backup` and `purge` keep the id.
+  - `delete_all_data` and `delete_data_keep_signins` (bank-feed 0.18.0) mint a new one, exactly
+    as a different ledger file has a different one. From this side the two cannot be told apart,
+    so the pass after either erasure refuses every write and import. It waits for the
+    operator's "the bank ledger was reset", which **re-binds** the store: every held lineage
+    ends `erased`, and the new id is bound.
+  - #69 does not remove that sentence, because the erasers mint a new id by design. What it
+    closes is the write fence: every accounting write carries `expected_ledger`, so no write
+    can land on a ledger other than the bound one.
+  - The paragraph below describes what follows the re-bind.
 - **After `delete_all_data`, `check_setup` finds `acct@<version>` unregistered under a
   populated store.** That is not the fresh-install state and is not treated as one: the
   generation is unchanged, so it can only be an erasure. The self-check stops the pass
