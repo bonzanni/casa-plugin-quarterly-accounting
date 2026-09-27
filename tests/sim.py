@@ -3,8 +3,8 @@
 bank-feed (tests/bankfeed.py). This is the executable reference for the
 procedure SKILL.md prescribes; the skill must say exactly this, in words:
 
-  list_projections -> for each item (until remaining_in_cycle is 0; nothing is
-  judged until it is — sweep_within, run_pass(sweep_budget=...)):
+  list_projections -> for each item (until remaining_in_cycle is 0 or the room runs
+  out; triage then judges only fresh items — sweep_within, run_pass(sweep_budget=...)):
     get_transaction(row_id); "no transaction #N" -> record_observation(not_found)
     else record_observation(observed_tags, observed_notes)
     make the ONE returned write (untag, tag or add_note) with workflow,
@@ -95,7 +95,7 @@ def sweep_within(conn, bf, token, budget) -> int:
 # The specialist's delegation in the order plan §D5 fixes: the probes (with
 # sync), tx-classifier's own drain (waited for, never done here),
 # export_history + import_ledger_export, erase confirmations, the sweep
-# (observations and tag repair), triage. Only triage's judgment is
+# (observations and tag repair), triage of the fresh items. Only triage's judgment is
 # replaced: `triage` applies the auto-match bar of SKILL.md step 6 to filed
 # metadata (the real specialist reads the PDFs). Every bank-feed interaction
 # is the real one.
@@ -191,9 +191,12 @@ def _identical_pairing(conn, item, doc):
 def triage(conn, bf, token) -> dict:
     """The auto-match bar of SKILL.md step 6, on filed metadata (the real
     specialist reads the PDFs). Deterministic, so a test can predict it."""
-    done = {"matched": [], "proposed": []}
+    done = {"matched": [], "proposed": [], "not_fresh": []}
     for item in work.triage(conn):
         if item["pending"]:
+            continue
+        if not item["fresh"]:             # not read since this import: a later pass judges it
+            done["not_fresh"].append(item["pid"])
             continue
         docs = [d for d in documents.list_unmatched(conn, limit=500)["documents"] if _fits(item, d)]
         if not docs:
@@ -223,7 +226,7 @@ def run_pass(conn, bf, trigger="cron", sync=None, sweep_budget=None) -> dict:
     """One specialist delegation, in plan §D5's order. `sync` stands in for
     bank-feed's sync (run between list_accounts and list_backups). With a
     `sweep_budget` the sweep may stop short; then, as SKILL.md step 6 says,
-    there is no triage and the pass ends `interrupted` (fix E2)."""
+    triage judges only the fresh items and the pass ends `interrupted` (fix E2)."""
     token = passes.begin_pass(conn, trigger)["pass_token"]
     probe(conn, bf, token, sync)
     setup = binding.check_setup(conn)
@@ -254,11 +257,11 @@ def run_pass(conn, bf, trigger="cron", sync=None, sweep_budget=None) -> dict:
             remaining = sweep_within(conn, bf, token, sweep_budget)
     except db.Refusal as exc:
         return _stopped(conn, token, gate, imp, None, exc)
+    tri = triage(conn, bf, token)
     if remaining:
         end = passes.end_pass(conn, token, "interrupted", {})
-        return {"token": token, "import": imp, "gate": gate, "triage": None, "end": end,
+        return {"token": token, "import": imp, "gate": gate, "triage": tri, "end": end,
                 "remaining": remaining}
-    tri = triage(conn, bf, token)
     try:
         sweep_cycle(conn, bf, token)      # the annotations for what triage just decided
     except db.Refusal as exc:

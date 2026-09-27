@@ -168,23 +168,40 @@ class TestTerraPartialSweepThenTriage(ToolPass):
 
 
 class TestPassWithAnUnfinishedSweep(ToolPass):
-    """SKILL.md step 6 (fix E2): triage runs only when the sweep reported 0; a sweep
-    cut short ends the pass `interrupted` with nothing judged."""
-    def test_no_triage_after_a_sweep_cut_short(self):
+    """SKILL.md step 6 (fix E2, controller ruling): a sweep cut short leaves triage
+    judging the fresh items only; the pass ends `interrupted`; the next pass's sweep
+    resumes at the cursor and its triage handles the rest."""
+    def outcome(self, out):
+        return self.conn.execute("SELECT outcome FROM passes WHERE pass_id=?",
+                                 (out["end"]["ended"],)).fetchone()[0]
+
+    def test_triage_matches_the_fresh_item_and_leaves_the_rest_for_the_next_pass(self):
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="Z1", amount=2000, counterparty="Zapier"),
                   bf.row("2026-07-06", ref="A1", amount=1000, counterparty="Adobe")])
-        for r in self.active():
-            self.classify(r["row_id"], "software")
+        ids = {r["provider_ref"]: r["row_id"] for r in self.active()}
+        for rid in ids.values():
+            self.classify(rid, "software")
         self.first_pass()
+        z, a = self.pid_of(ids["Z1"]), self.pid_of(ids["A1"])
+        self.assertLess(z, a)
+        self.file(counterparty="Zapier", issuer="Zapier", amount_minor=2000,
+                  document_date="2026-07-05")
         self.file(amount_minor=1000, document_date="2026-07-06")
-        out = sim.run_pass(self.conn, bf, sweep_budget=1)
-        self.assertEqual((out["triage"], out["remaining"]), (None, 1))
-        self.assertEqual(self.conn.execute("SELECT outcome FROM passes WHERE pass_id=?",
-                                           (out["end"]["ended"],)).fetchone()[0], "interrupted")
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM match_state").fetchone()[0], 0)
-        out = sim.run_pass(self.conn, bf, sweep_budget=2)            # room for both: judged
-        self.assertEqual(len(out["triage"]["matched"]), 1)
+        out = sim.run_pass(self.conn, bf, sweep_budget=1)            # Zapier read, Adobe not
+        self.assertEqual(out["remaining"], 1)
+        self.assertEqual((out["triage"]["matched"], out["triage"]["not_fresh"]), ([z], [a]))
+        self.assertEqual(self.outcome(out), "interrupted")
+        status = {p: lineage.projection(self.conn, p)["status"] for p in (z, a)}
+        self.assertEqual(status, {z: "matched", a: "open"})
+        out = sim.run_pass(self.conn, bf, sweep_budget=1)            # resumes at Adobe
+        self.assertEqual(out["triage"]["matched"], [a])
+        self.assertEqual(self.outcome(out), "interrupted")          # Zapier not re-read yet
+        out = sim.run_pass(self.conn, bf, sweep_budget=2)            # room for both
+        self.assertNotIn("remaining", out)
+        self.assertEqual(self.outcome(out), "complete")
+        self.assertEqual({p: lineage.projection(self.conn, p)["status"] for p in (z, a)},
+                         {z: "matched", a: "matched"})
 
 
 def _raw(name, **args):

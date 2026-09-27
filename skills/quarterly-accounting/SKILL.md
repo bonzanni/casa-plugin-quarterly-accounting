@@ -118,12 +118,12 @@ pass, whichever comes first:
      one `list_backups` answer, the ledger probe, `check_setup`) — stop if `can_run` is false;
    - the snapshot of step 3, the ends of step 4 and the sweep of step 5 (its reads refresh
      each payment's classification, which decides the document kind it wants);
-   - judge ONLY that document, by the auto-match bar of step 6 — only once the sweep has
-     reported `remaining_in_cycle` 0 (every payment read since this import). If you run out
-     of room first, judge nothing: the next pass's triage judges it; end the pass
-     `interrupted` and return that to Ellen;
+   - judge ONLY that document, by the auto-match bar of step 6, and only against payments
+     whose item says `fresh: true` (read since this import). A payment it may fit that is not
+     fresh waits: the next pass's triage judges it. If the sweep did not reach
+     `remaining_in_cycle` 0, end the pass `interrupted`;
    - if nothing fits, suspect the data before the document: `sync` again, record its probe,
-     export and import again (step 3), sweep again to 0 (step 5), and judge once more;
+     export and import again (step 3), sweep again (step 5), and judge once more;
    - `end_pass(pass_token, outcome="complete")` (`stopped` if it stopped), and return to
      Ellen which case it is, plus any `speak` for Ellen to send.
 3. Tell the operator which case it is, in one line, from what was recorded — never claim a
@@ -242,8 +242,10 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    first seen, as above); repeat until nothing is returned (at most an untag, a tag and a
    note). Never make two writes without a read between them. A refusal that this pass is no
    longer the current one stops the pass.
-6. **Triage.** Only when the sweep reported `remaining_in_cycle` 0. If it did not, do no
-   triage: return the work order with the sweep's remaining count, and the pass ends
+6. **Triage.** Only the items that say `fresh: true` — read by the sweep since this pass's
+   import. An item with `fresh: false` was not read yet: leave it (the server refuses to match
+   it) and mark it not searched; a later pass handles it. If the sweep did not reach
+   `remaining_in_cycle` 0, say so in the work order with the remaining count: the pass ends
    `interrupted` (the next pass's sweep resumes where this one stopped).
    `list_quarter_state(triage=true)` lists, required first, the payments that
    need a document and have none of the right kind. For each, compare against
