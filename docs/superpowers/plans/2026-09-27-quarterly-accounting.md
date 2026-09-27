@@ -72,14 +72,15 @@ The spec is converged. Turning it into code surfaced the points below. Each is e
   - Revised after round p1 (Astra, two S1s):
     - `build_review` composes the text and records its revisions under one write lock, so they cannot describe different facts.
     - A rendering records a pairing's revision only if its text displays that pairing. A pairing the operator never saw is re-shown, never corrected.
-- **D4: Ledger identity needs positive evidence.**
-  - bank-feed exposes no instance id. When the store has live lineages, an import must find at least one of:
-    - a live alias row whose `first_seen` is unchanged;
-    - a restore point of this plugin's workflow that an **earlier, identity-proven** import recorded;
-    - the operator's one-shot "the bank ledger was reset".
-  - Without any of them, nothing is imported and nothing ends.
+- **D4: Ledger identity is a property of the whole store, proved by each pass's import.**
+  - bank-feed exposes no instance id. Once the store holds any lineage, in any state (ended and vanished included), every import must find one of:
+    - a held alias present with an unchanged `first_seen`;
+    - a restore point of this plugin's workflow that an **earlier, identity-proven** import recorded.
   - An alias whose `row_id` reappears with a different `first_seen` is always refused.
-  - Revised after round p1: continuity of surviving aliases alone let an empty ledger with the same account end every lineage (Astra S1).
+  - Nothing else in a pass touches the ledger (the sweep's reads, observations, ends and repair instructions) until that pass's own import has proved it.
+  - The operator's "the bank ledger was reset" does not excuse a missing proof; it **re-binds** the store. Every held lineage ends `erased`, the old aliases and marks are dropped, and the imported ledger becomes the bound one.
+  - The acknowledgement is consumed by the next successful import, whatever admitted it.
+  - Generalized after rounds p1–p3 found the same shape three times: identity checked only for live lineages, remembered from a rejected ledger, excused by a stale acknowledgement.
   - **Operator decision:** the spec lets the pass after `delete_all_data` proceed on its own. Here it needs that one sentence, because from the export alone the case is indistinguishable from a different ledger.
   - The clean fix is an instance id exposed by bank-feed, to be filed upstream if the operator agrees.
   - `first_seen` is not rewritten by bank-feed's update paths. Task 2 pins that against the vendored `apply_plan`.
@@ -3316,15 +3317,18 @@ def bind_account(conn, account_id: str, label: str = "", token=None) -> dict:
 
 def acknowledge_ledger_reset(conn) -> dict:
     """The operator's word that the bank ledger was wiped on purpose
-    (delete_all_data, or everything purged before this plugin ever wrote):
-    the next import may end every lineage it cannot find (plan §D4)."""
+    (delete_all_data, or everything purged before this plugin ever wrote). If
+    the next import cannot prove it is the ledger the store was built on, it
+    RE-BINDS the store to the ledger it reads (ledger._rebind); either way the
+    word is consumed by that import (plan §D4)."""
     with db.tx(conn):
         if get(conn) is None:
             raise db.Refusal("no account is bound yet")
         conn.execute("UPDATE binding SET ledger_reset_ack=1 WHERE id=1")
     return {"acknowledged": True,
-            "note": "At the next check, payments no longer in the bank ledger are closed and "
-                    "their documents freed."}
+            "note": "At the next check, if the bank ledger is not the one I knew, every "
+                    "payment I tracked is closed, its document freed, and I start again from "
+                    "the ledger as it is now."}
 
 
 def set_package_name(conn, name: str) -> dict:
@@ -4932,14 +4936,41 @@ class TestInstance(Base):
                 self.imp([])
         self.assertIsNone(list(self.live().values())[0]["ended"])
 
-    def test_the_operators_word_is_evidence_once(self):
+    def test_the_operators_word_rebinds_the_store(self):
+        import binding
+        self.imp([{"row_id": 1}])
+        (old,) = self.live()
+        self.token = self.pass_()
+        binding.acknowledge_ledger_reset(self.conn)
+        out = self.imp([{"row_id": 50, "first_seen": "2026-09-01T00:00:00Z"}])
+        self.assertEqual(self.live()[old]["ended"], "erased")
+        self.assertEqual(len(out["admitted"]), 1)
+        self.assertEqual(binding.get(self.conn)["ledger_reset_ack"], 0)
+        self.assertEqual({r[0] for r in self.conn.execute("SELECT row_id FROM aliases")}, {50})
+
+    def test_the_acknowledgement_is_consumed_by_any_successful_import(self):
+        # round p3 (Astra S1): an acknowledgement that met other evidence stayed armed
         import binding
         self.imp([{"row_id": 1}])
         self.token = self.pass_()
         binding.acknowledge_ledger_reset(self.conn)
-        out = self.imp([])
-        self.assertEqual(len(out["erase_candidates"]), 1)
+        self.imp([{"row_id": 1}])                         # the same ledger, proven by row 1
         self.assertEqual(binding.get(self.conn)["ledger_reset_ack"], 0)
+        self.token = self.pass_()
+        with self.assertRaises(db.Refusal):               # a different ledger later: refused
+            self.imp([{"row_id": 9, "first_seen": "2026-09-01T00:00:00Z"}])
+
+    def test_ended_lineages_still_bind_the_store_to_its_ledger(self):
+        # round p3 (Astra S1): every lineage ended, then a different ledger arrives
+        self.imp([{"row_id": 1}])
+        self.imp([{"row_id": 1, "state": "vanished"}])
+        self.assertEqual(list(self.live().values())[0]["ended"], "vanished")
+        self.token = self.pass_()
+        with self.assertRaises(db.Refusal):               # same id, different payment
+            self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z"}])
+        self.token = self.pass_()
+        with self.assertRaises(db.Refusal):               # none of its rows at all
+            self.imp([{"row_id": 9, "first_seen": "2026-09-01T00:00:00Z"}])
 
     def test_nothing_is_imported_while_the_gate_refuses(self):
         self.token = self.pass_(generation=1, registered={"acct@0.1.0": "b-1"})
@@ -5219,29 +5250,51 @@ def check_delivered_bank_half(conn, by_id: dict) -> int:
 
 
 def _require_same_ledger(conn, b, cur_pass, anchored: bool) -> None:
-    """Positive evidence that this is the ledger instance the store was built
-    on (spec §Setup: "the bound account in the bound ledger instance"; plan
-    §D4). A store with live lineages needs one of: a surviving alias row with
-    the same first_seen; a restore point of this plugin's workflow that an
-    EARLIER pass saw in this ledger; or the operator's word that the ledger
-    was reset (consumed here). Without any, nothing is imported and nothing
-    ends — absence from an unproven ledger is not erasure (round p1)."""
-    live = conn.execute("SELECT COUNT(*) FROM projections WHERE merged_into IS NULL AND"
-                        " ended IS NULL").fetchone()[0]
-    if not live or anchored:
+    """Ledger identity is a property of the WHOLE store (plan §D4, generalized
+    after three rounds found the same shape): every lineage it has ever held,
+    in any state — ended and vanished ones included — ties it to one ledger.
+    Once a store holds any lineage, every import must prove it is reading that
+    ledger: a held alias present with an unchanged first_seen, or a restore
+    point of this plugin's workflow that an earlier proven import recorded.
+
+    The operator's "the bank ledger was reset" does not excuse a missing proof;
+    it RE-BINDS the store: every lineage it held is closed (erased, cause
+    ledger-reset), their aliases and the old ledger's marks are dropped, and
+    the ledger being imported becomes the bound one. The acknowledgement is
+    consumed by the next successful import whatever evidence admitted it, so
+    it can never outlive the moment it was given (round p3, Astra S1)."""
+    ack = b["ledger_reset_ack"]
+    conn.execute("UPDATE binding SET ledger_reset_ack=0 WHERE id=1")   # rolls back with a refusal
+    held = conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0]
+    if not held or anchored:
         return
     marks = json.loads(b["ledger_marks_json"] or "{}")
     probe = conn.execute("SELECT data_json FROM probes WHERE kind='ledger'").fetchone()
     registered = json.loads(probe["data_json"] or "{}").get("registered") or {}
     if any(marks.get(bid) not in (None, cur_pass["pass_id"]) for bid in registered.values()):
         return
-    if b["ledger_reset_ack"]:
-        conn.execute("UPDATE binding SET ledger_reset_ack=0 WHERE id=1")
+    if ack:
+        _rebind(conn)
         return
     raise db.Refusal("I can't confirm this is the bank ledger this store was built on: none of "
                      "its payments and none of its restore points are in it. Nothing was "
                      "imported or ended. If the ledger was wiped on purpose, the operator says "
                      "\"the bank ledger was reset\".")
+
+
+def _rebind(conn) -> None:
+    """Close everything tied to the old ledger, inside the import's transaction.
+    Every held lineage ends `erased` (a vanished one too: its row id belongs to
+    the old ledger and must never be read or written again); aliases and marks
+    go, so nothing of the old ledger can address a row of the new one."""
+    for pid in [r[0] for r in conn.execute("SELECT pid FROM projections WHERE merged_into IS NULL")]:
+        conn.execute("UPDATE projections SET ended='erased', ended_at=coalesce(ended_at, ?)"
+                     " WHERE pid=?", (db.now(), pid))
+        lineage.add_residue(conn, pid, "ended", "ledger reset")
+        lineage.settle(conn, pid)
+    conn.execute("DELETE FROM aliases")
+    conn.execute("UPDATE binding SET ledger_marks_json='{}', ledger_generation=NULL,"
+                 " row_high_water=0 WHERE id=1")
 
 
 def import_ledger_export(conn, *, path: str, token) -> dict:
@@ -5270,8 +5323,7 @@ def import_ledger_export(conn, *, path: str, token) -> dict:
         by_id = {r["row_id"]: r for r in mine}
         max_id = max((r["row_id"] for r in rows), default=0)
         anchored = False
-        for a in conn.execute("SELECT a.row_id, a.first_seen FROM aliases a JOIN projections p"
-                              " ON p.pid=a.pid WHERE p.merged_into IS NULL AND p.ended IS NULL"):
+        for a in conn.execute("SELECT row_id, first_seen FROM aliases"):   # every lineage, any state
             r = by_id.get(a["row_id"])
             if r is not None and a["first_seen"] and r["first_seen"] != a["first_seen"]:
                 raise db.Refusal(f"row #{a['row_id']} now names a different transaction than "
@@ -6414,6 +6466,32 @@ class TestEndsAndErasure(Base):
             sweep.record_observation(self.conn, pid=pid, token=self.token, not_found=True)
         self.assertIsNone(lineage.projection(self.conn, pid)["ended"])
 
+    def test_an_earlier_import_that_omitted_the_row_is_not_evidence_now(self):
+        # round p3 (Astra S2): the omission was seen by a previous pass whose
+        # confirmation never happened; a later pass without its own import ends nothing
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.bf.call("tag_transaction", row_ids=[self.rid()], tags=["software"])
+        self.new_pass()
+        self.cycle()
+        pid = self.pid_of(self.rid())
+        d = self.ingest()
+        matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
+                             expected_revision=self.rev(pid), token=self.token,
+                             row_snapshot=self.snapshot(pid))
+        self.new_pass()
+        self.bf.purge_before("2026-08-01")
+        self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered())
+        ledger.import_ledger_export(self.conn, path=self.bf.export(), token=self.token)
+        passes.end_pass(self.conn, self.token, "interrupted", {})    # confirmation never ran
+        self.token = self.pass_(generation=self.bf.generation(), registered=self.bf.registered())
+        with self.assertRaises(db.Refusal):
+            sweep.record_observation(self.conn, pid=pid, token=self.token, not_found=True)
+        with self.assertRaises(db.Refusal):
+            sweep.list_projections(self.conn, token=self.token)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM match_state WHERE state IN"
+                                           " ('matched','proposed')").fetchone()[0], 1)
+        self.assertEqual(documents.status(self.conn, d), "matched")
+
     def test_not_found_for_a_row_still_in_the_snapshot_is_refused(self):
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
         self.new_pass()
@@ -6561,6 +6639,7 @@ def list_projections(conn, *, token, limit: int = PAGE) -> dict:
         raise db.Refusal("the sweep belongs to a pass: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
+        _require_proven_import(conn)
         cur = _cursor(conn)
         pids = _enumerable(conn)
         after = [p for p in pids if p > cur["last_pid"]]
@@ -6583,6 +6662,16 @@ def list_projections(conn, *, token, limit: int = PAGE) -> dict:
                           "unprojectable": p["unprojectable"]})
         return {"workflow": version.WORKFLOW, "bank_writes": gate, "projections": items,
                 "remaining_in_cycle": len(after) - len(page), "notice": NOTICE}
+
+
+def _require_proven_import(conn) -> None:
+    """Nothing in a pass touches the ledger before that pass's own import has
+    proved which ledger it is (plan §D4): the sweep's reads, observations and
+    repair instructions all follow it."""
+    cur = passes.current_pass(conn)
+    if cur is None or cur["snapshot_id"] is None or not cur["account_seen"]:
+        raise db.Refusal("this pass has not imported its bank snapshot yet (or could not prove "
+                         "it is the bound ledger): nothing to sweep, nothing written")
 
 
 def _advance(conn, pid: int) -> None:
@@ -6617,6 +6706,7 @@ def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=N
         proj = lineage.projection(conn, pid)
         if not_found:
             return _confirm_erased(conn, pid)
+        _require_proven_import(conn)
         if write_error:
             conn.execute("UPDATE projections SET last_error=?, unprojectable=? WHERE pid=?",
                          (str(write_error)[:500],
