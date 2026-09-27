@@ -118,6 +118,11 @@ def check_setup(conn) -> dict:
     if can_run and ledger_read and not gate["allowed"]:
         conditions.append("Stopped before writing anything: " + gate["reason"] + ".")
         can_run, header = False, "Stopped."
+    if gate.get("older_workflows"):
+        # spec §Testing: a version upgrade without a restore "reports the older
+        # version's writes still present" — a report, not a stop
+        conditions.append("The older version's writes are still present in bank-feed's ledger ("
+                          + ", ".join(gate["older_workflows"]) + ").")
     return {"bound": dict(b) if b else None, "probes": probes, "conditions": conditions,
             "can_run": can_run, "header": header, "searching": searching, "bank_writes": gate}
 
