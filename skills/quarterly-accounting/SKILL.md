@@ -116,10 +116,11 @@ pass, whichever comes first:
      its triage (or the next pass) judges the document; return that to Ellen;
    - the probes of its pass, step 1 (bank-feed tools, accounts, `sync`, the sync's probe,
      one `list_backups` answer, the ledger probe, `check_setup`) — stop if `can_run` is false;
-   - the snapshot of step 3 and the ends of step 4;
+   - the snapshot of step 3, the ends of step 4 and the sweep of step 5 (its reads refresh
+     each payment's classification, which decides the document kind it wants);
    - judge ONLY that document, by the auto-match bar of step 6;
    - if nothing fits, suspect the data before the document: `sync` again, record its probe,
-     export and import again (step 3), and judge once more;
+     export and import again (step 3), sweep again (step 5), and judge once more;
    - `end_pass(pass_token, outcome="complete")` (`stopped` if it stopped), and return to
      Ellen which case it is, plus any `speak` for Ellen to send.
 3. Tell the operator which case it is, in one line, from what was recorded — never claim a
@@ -293,8 +294,12 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
 
 1. Delegate "quarterly-accounting package snapshot" to the specialist: `begin_pass(trigger=
    "package")`, the probes of its pass, step 1 (stop if `can_run` is false), the snapshot of
-   step 3, the ends of step 4, then `end_pass` (`stopped` if it stopped); it returns any
-   `speak` to Ellen. If it stopped, tell the operator why and build nothing.
+   step 3, the ends of step 4, then the sweep of step 5 — every row read and recorded, exactly
+   as in the pass (the export carries no classification tags: only the sweep's reads tell the
+   store what each payment is now, so a package built without it can ship a document the
+   payment no longer wants) — then `end_pass` (`stopped` if it stopped); it returns any
+   `speak` to Ellen. If it stopped, tell the operator why and build nothing. Build only after
+   the sweep.
 2. `build_quarterly_package(quarter)`. For Telegram: `stage_for_delivery(channel="telegram",
    package_id=…)`, then `send_media(path, kind="zip")` with the caption
    `build_quarterly_package` returned, then `record_delivery(delivery_id, outcome)`. A timeout

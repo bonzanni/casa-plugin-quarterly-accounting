@@ -179,6 +179,17 @@ class TestSkill(TempEnv):
         self.assertIn("never pick a\n   backup otherwise", section)
         self.assertNotIn("under\n   `bank_writes`", section)
 
+    def test_packaging_sweeps_between_import_and_build(self):
+        # round E1 (Astra S1): only the sweep's reads refresh the classification
+        pack = " ".join(self.section("## Packaging", "## Install").split())
+        order = ["the snapshot of step 3", "the ends of step 4", "the sweep of step 5",
+                 "`end_pass`", "`build_quarterly_package(quarter)`"]
+        positions = [pack.index(k) for k in order]
+        self.assertEqual(positions, sorted(positions))
+        doc = " ".join(self.section("## Ellen: a document the operator hands over",
+                                    "## Ellen: the pass").split())
+        self.assertLess(doc.index("the sweep of step 5"), doc.index("judge ONLY that document"))
+
 
 if __name__ == "__main__":
     unittest.main()
