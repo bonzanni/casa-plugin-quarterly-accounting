@@ -1,0 +1,147 @@
+"""The reducer — spec §Match records, "The reducer, as one total function".
+PURE. Given a lineage's folded state, its live row facts and its derived
+expectation, return the ONE desired owned-tag set, a machinery status and
+the residue reasons. The desired-set table in §"The projection" is derived
+from this order; where they could differ, this order wins."""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+
+import expectation as ex
+import fold as F
+
+OWNED = ("acct::matched", "acct::proposed", "acct::portal",
+         "acct::no-document-expected", "acct::open")
+
+# Material facts of a row (spec §Match records: account, direction, currency,
+# amount_minor, status, booking date, counterparty, remittance, and
+# bank-feed's review flags).
+FACT_KEYS = ("account_id", "direction", "currency", "amount_minor", "status",
+             "booking_date", "counterparty", "remittance", "needs_review", "review_reason")
+
+
+def facts_of(row: dict) -> dict:
+    out = {k: row.get(k) for k in FACT_KEYS}
+    out["amount_minor"] = int(out["amount_minor"]) if out["amount_minor"] is not None else None
+    out["needs_review"] = int(out["needs_review"] or 0)
+    for k in ("review_reason", "counterparty", "remittance", "booking_date", "status"):
+        out[k] = out[k] if out[k] not in ("",) else None
+    return out
+
+
+def fingerprint(facts: dict, kind: str | None) -> str:
+    return json.dumps({"facts": facts, "kind": kind}, sort_keys=True, separators=(",", ":"))
+
+
+@dataclass(frozen=True)
+class Inputs:
+    ended: str | None
+    eligible: bool
+    fold: F.FoldState
+    facts: dict | None
+    expectation: ex.Expectation
+    last_known_kind: str | None
+    doc_kinds: dict
+    portal: bool
+
+
+@dataclass(frozen=True)
+class Reduction:
+    desired: frozenset
+    status: str
+    current: int | None
+    reasons: tuple
+
+
+def _fp(cand: F.Cand) -> dict:
+    return json.loads(cand.fp) if cand.fp else {"facts": None, "kind": None}
+
+
+def effective_kind(inp: Inputs) -> str | None:
+    """While the expectation is unknown, the last known kind stands in:
+    a pairing keeps the kind verdict it had (round-42 finding)."""
+    return inp.expectation.kind if not inp.expectation.unknown else inp.last_known_kind
+
+
+def kind_verdict(cand: F.Cand, inp: Inputs) -> str:
+    kind = effective_kind(inp)
+    if inp.doc_kinds.get(cand.doc_id) != kind:
+        return "mismatch"            # no confirmation cures it
+    if _fp(cand)["kind"] != kind:
+        return "stale"               # confirming against the new expectation cures it
+    return "ok"
+
+
+def _row_ok(cand: F.Cand, inp: Inputs) -> bool:
+    return _fp(cand)["facts"] == inp.facts
+
+
+def _with_portal(tags: set, inp: Inputs) -> frozenset:
+    if inp.portal and inp.eligible:
+        tags = tags | {"acct::portal"}
+    return frozenset(tags)
+
+
+def reduce(inp: Inputs) -> Reduction:
+    exp = inp.expectation
+    reasons: list[str] = []
+    if exp.unknown:
+        reasons.append("classification-conflict" if exp.conflict else "unclassified")
+    if inp.fold.conflicted_ids():
+        reasons.append("conflicted")
+    # step 0 — ended
+    if inp.ended:
+        return Reduction(frozenset(), "ended", None, tuple(reasons))
+    # step 1 — eligibility
+    if not inp.eligible:
+        return Reduction(frozenset(), "ineligible", None, tuple(reasons))
+    # step 2 — operator precedence over the folded state
+    if inp.fold.exemption is not None:
+        return Reduction(_with_portal({"acct::no-document-expected"}, inp), "exempt", None,
+                         tuple(reasons))
+    op = inp.fold.operator_current()
+    if op is not None:
+        # step 3 — validity of the current operator pairing
+        verdict = kind_verdict(op, inp)
+        row_ok = _row_ok(op, inp)
+        if not row_ok:
+            reasons.append("facts-changed")
+        if verdict == "mismatch":
+            reasons.append("kind-mismatch")
+        elif verdict == "stale":
+            reasons.append("kind-changed")
+        ok = row_ok and verdict == "ok"
+        tag = "acct::matched" if ok else "acct::proposed"
+        return Reduction(_with_portal({tag}, inp), "matched" if ok else "proposed",
+                         op.match_id, tuple(reasons))
+    # step 4 — machine candidates, judged as a set; conflicted is sticky
+    ms = inp.fold.machine_set()
+    if len(ms) == 1 and ms[0].state in F.ACTIVE:
+        m = ms[0]
+        # step 5 — validity of the current machine pairing
+        verdict = kind_verdict(m, inp)
+        row_ok = _row_ok(m, inp)
+        if not row_ok:
+            reasons.append("facts-changed")
+        if verdict == "stale":
+            reasons.append("kind-changed")
+        elif verdict == "mismatch":
+            reasons.append("kind-mismatch")
+        ok = m.state == "matched" and row_ok and verdict == "ok"
+        tag = "acct::matched" if ok else "acct::proposed"
+        return Reduction(_with_portal({tag}, inp), "matched" if ok else "proposed",
+                         m.match_id, tuple(reasons))
+    # step 6 — expectation, for a lineage with no current pairing
+    if exp.kind == "none":
+        return Reduction(_with_portal({"acct::no-document-expected"}, inp), "no-document",
+                         None, tuple(reasons))
+    if exp.tier == "optional":
+        return Reduction(_with_portal(set(), inp), "optional", None, tuple(reasons))
+    # step 7 — otherwise open (required or unknown)
+    return Reduction(_with_portal({"acct::open"}, inp), "open", None, tuple(reasons))
+
+
+def apply_fixed_point(actual: set, desired: frozenset) -> set:
+    """actual := (actual − owned_tags) ∪ desired (spec §The sweep step 4)."""
+    return (set(actual) - set(OWNED)) | set(desired)
