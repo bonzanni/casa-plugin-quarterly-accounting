@@ -173,12 +173,12 @@ pass, whichever comes first:
 
 You receive a `pass_token`. Pass it to every plugin write you make — `record_probe`,
 `record_observation`, `record_match`, `propose_match`, `relabel_match`, `record_search`,
-`update_document_metadata`, `mark_irrelevant`, `upsert_counterparty` — a machine write
-without it is refused. You never speak to the operator: everything you would say goes back
-to Ellen. Binding the account, expectations, packaging, the start date, the package name
-and "stop chasing" are Ellen's, on the operator's word: never call `bind_account`,
-`set_expectation`, `build_quarterly_package`, `set_watermark`, `set_package_name` or
-`stop_chasing` yourself.
+`update_document_metadata`, `mark_irrelevant`, `upsert_counterparty`, `set_expectation` — a
+machine write without it is refused. You never speak to the operator: everything you would
+say goes back to Ellen. Binding the account, packaging, the start date, the package name,
+"stop chasing" and every expectation the operator states are Ellen's, on the operator's
+word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
+`set_package_name` or `stop_chasing` yourself. Your one expectation write is in step 6.
 
 1. **Probes.** If bank-feed's tools are not visible to you, `record_probe(pass_token,
    kind="bank_tools", ok=false)` and stop; otherwise record it `ok=true`. Call
@@ -266,8 +266,16 @@ and "stop chasing" are Ellen's, on the operator's word: never call `bind_account
    cannot be told apart from an already-paired payment and its document (same vendor, same
    amount, same dates) and that pairing was made by the machine (never one the operator
    confirmed), propose both: `propose_match` for the new payment, and `propose_match`
-   again on the paired payment with its own document, which turns that pairing back into a
-   proposal the operator is shown.
+   again on the paired payment with its own document (its `row_snapshot` and `revision` from
+   `list_quarter_state(quarter=…)` of that payment's quarter), which turns that pairing back
+   into a proposal the operator is shown.
+
+   A vendor whose documents turn out to be a kind the mapping did not predict (its payments
+   want invoices, but it only ever issues receipts, say) stays missing until the expectation
+   matches it: `set_expectation(scope_type="counterparty", scope=<the vendor>, kind=<the kind
+   its documents are>, tier=…, author="specialist", pass_token=…)`, then judge again. Only
+   the counterparty, only for that reason; a class-level expectation and anything the
+   operator says ("no invoices ever for X") are Ellen's, through `apply_reply`.
 7. **Identity and portals.** A payee you cannot identify: `record_search(pid, pass_token,
    identity_unknown=true)`. A vendor whose invoices live behind a login: research the deepest
    link to their invoice list once with WebSearch, then `upsert_counterparty(name,

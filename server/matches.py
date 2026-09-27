@@ -124,8 +124,9 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
             raise db.Refusal("a pending payment is not matched automatically")
         if row_snapshot is None or R.facts_of(row_snapshot) != R.facts_of(row) \
                 or (row_snapshot.get("state") or "active") != "active":
-            raise db.Refusal("the row changed since this pass's snapshot (or was not re-read "
-                             "with get_transaction): re-import before matching")
+            raise db.Refusal("the row changed since this pass's snapshot (or row_snapshot is not the item's value "
+                             "from list_quarter_state): pass the item's row_snapshot from list_quarter_state, "
+                             "verbatim, or re-import before matching")
         if kind == "pair" and documents.collisions(conn, doc_id):
             raise db.Refusal("another document carries the same issuer and number: propose it "
                              "instead, or resolve the duplicate first")

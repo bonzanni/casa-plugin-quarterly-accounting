@@ -526,9 +526,6 @@ class TestCursor(Base):
         self.assertIsNotNone(c)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestNoteAsRendered(Base):
     """Task 22 review, item 1: the specialist transcribes get_transaction's TEXT,
@@ -583,3 +580,7 @@ class TestNoteAsRendered(Base):
                                      observed_tags=tags, observed_notes=stale,
                                      observed_first_seen=first_seen)
         self.assertIn("add_note", r["instructions"])
+
+
+if __name__ == "__main__":
+    unittest.main()

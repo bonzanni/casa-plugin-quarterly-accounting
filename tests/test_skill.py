@@ -159,10 +159,14 @@ class TestSkill(TempEnv):
         self.assertIn("`row_snapshot` from `list_quarter_state` verbatim", triage)
         self.assertNotIn("pass its facts as `row_snapshot`", SKILL)
 
-    def test_the_specialist_never_binds_or_sets_expectations(self):
+    def test_the_specialist_never_binds_and_sets_only_a_vendor_kind(self):
         spec = " ".join(self.section("## The specialist's pass", "1. **Probes.**").split())
-        self.assertIn("never call `bind_account`, `set_expectation`", spec)
+        self.assertIn("never call `bind_account`,", spec)
         self.assertIn("never by the specialist", SKILL)
+        triage = " ".join(self.section("**Triage.**", "7. **Identity").split())
+        self.assertIn('set_expectation(scope_type="counterparty"', triage)
+        self.assertIn('author="specialist", pass_token=…)', triage)
+        self.assertIn("a kind the mapping did not predict", triage)
 
     def test_the_handover_suspects_the_data_first(self):
         doc = self.section("## Ellen: a document the operator hands over", "## Ellen: the pass")
