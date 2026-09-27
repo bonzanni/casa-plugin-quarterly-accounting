@@ -328,7 +328,14 @@ def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dic
         lineage.settle_all(conn)
         passes.remember_ledger(conn, cur_pass["pass_id"])   # identity proved above
         out["delivered_changes"] = check_delivered_bank_half(conn, by_id)
-        return out
+        # 5. an unsent first send staged under an earlier snapshot is revoked in this
+        # same commit (round E5, Terra S1): the plugin cannot hold a lock across the
+        # external send, so the import takes the send away instead
+        import delivery
+        revoked = delivery.revoke_superseded_first_sends(conn, sid)
+        out["revoked_deliveries"] = [r["delivery_id"] for r in revoked]
+    delivery.remove_revoked_files(conn, revoked)
+    return out
 
 
 def check_delivered_kind_half(conn, pid: int) -> int:

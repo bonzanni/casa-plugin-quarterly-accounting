@@ -206,7 +206,8 @@ CREATE TABLE IF NOT EXISTS deliveries (
   channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
   staged_path TEXT NOT NULL, request_id TEXT,
   status TEXT NOT NULL CHECK (status IN ('staged', 'delivered', 'uncertain', 'failed')),
-  message_id TEXT, created_at TEXT NOT NULL, settled_at TEXT);
+  message_id TEXT, created_at TEXT NOT NULL, settled_at TEXT,
+  revoked_at TEXT);              -- an unsent first send an import superseded (fix E5)
 CREATE TABLE IF NOT EXISTS delivered_rows (
   package_id INTEGER NOT NULL, row_id INTEGER NOT NULL, pid INTEGER,
   facts_fp TEXT NOT NULL, kind TEXT, PRIMARY KEY (package_id, row_id));
@@ -224,7 +225,8 @@ MIGRATIONS: dict[int, list[str]] = {
     1: ["ALTER TABLE projections ADD COLUMN class_observed_snapshot INTEGER",
         "ALTER TABLE projections ADD COLUMN observed_revision INTEGER",
         # a package built before it names no import: its first send is refused (rebuild)
-        "ALTER TABLE packages ADD COLUMN snapshot_id INTEGER"],
+        "ALTER TABLE packages ADD COLUMN snapshot_id INTEGER",
+        "ALTER TABLE deliveries ADD COLUMN revoked_at TEXT"],
 }
 
 

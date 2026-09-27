@@ -212,6 +212,11 @@ class TestSkill(TempEnv):
         self.assertIn("the first `stage_for_delivery` of a package, is refused because the bank "
                       "was re-read", pack)
         self.assertIn("A resend (\"send it again\") is the exact file already sent", pack)
+        # round E5: an import takes back an unsent first send
+        self.assertIn("fails because the file is gone, or `record_delivery` answers that the "
+                      "bank was re-read before it was sent", pack)
+        self.assertIn("A send already under way at the moment of the check cannot be stopped",
+                      pack)
 
 
 if __name__ == "__main__":

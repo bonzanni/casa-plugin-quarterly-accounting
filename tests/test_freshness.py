@@ -426,6 +426,61 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
                          pathlib.Path(pkg["path"]).read_bytes())
 
 
+class TestImportRevokesAnUnsentFirstSend(ToolPass):
+    """Round E5 (Terra S1): a first send staged under snapshot N stayed sendable after
+    import N+1. The import revokes it in its own commit: the staged bytes go, and
+    record_delivery refuses it. A resend of a file already sent is never revoked."""
+    def built(self):
+        self.two_rows_matched()
+        token = self.begin("package")
+        self.assertEqual(self.sweep(token), 0)
+        call("end_pass", pass_token=token, outcome="complete")
+        pkg, files, _, _ = self.zip_of()
+        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])
+        return pkg
+
+    def handoff_entries(self):
+        d = self.handoff / "quarterly-accounting"
+        return sorted(os.listdir(d)) if d.exists() else []
+
+    def test_a_first_send_staged_before_an_import_is_revoked(self):
+        pkg = self.built()
+        tg = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"])
+        em = call("stage_for_delivery", channel="email", package_id=pkg["package_id"])
+        self.assertEqual(os.listdir(self.outbox), [tg["filename"]])
+        self.assertEqual(len(self.handoff_entries()), 1)
+        token = self.begin("cron")                                  # import N+1
+        call("end_pass", pass_token=token, outcome="interrupted")
+        self.assertEqual(os.listdir(self.outbox), [])                # nothing left to send
+        self.assertEqual(self.handoff_entries(), [])
+        for d in (tg, em):
+            out = _raw("record_delivery", delivery_id=d["delivery_id"], outcome="delivered",
+                       message_id="m-1")
+            self.assertEqual(out, "refused: the bank was re-read before this was sent — "
+                                  "build it again")
+        rows = self.conn.execute("SELECT status, revoked_at IS NOT NULL FROM deliveries"
+                                 " ORDER BY delivery_id").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [("failed", 1), ("failed", 1)])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM delivered_rows").fetchone()[0],
+                         0)
+
+    def test_a_resend_of_a_file_already_sent_is_not_revoked(self):
+        pkg = self.built()
+        d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"])
+        call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain")
+        for f in os.listdir(self.outbox):                  # Casa consumed the outbox copy
+            os.unlink(self.outbox / f)
+        r = call("build_review", view="status", quarter="2026-Q3")
+        call("mark_rendering_delivered", render_id=r["render_id"])
+        self.assertIn("resend", call("apply_reply", text="send it again")["instructions"])
+        again = call("stage_for_delivery", channel="telegram", resend=True)
+        token = self.begin("cron")                                  # import N+1
+        call("end_pass", pass_token=token, outcome="interrupted")
+        self.assertEqual(os.listdir(self.outbox), [again["filename"]])
+        self.assertEqual(call("record_delivery", delivery_id=again["delivery_id"],
+                              outcome="delivered")["status"], "delivered")
+
+
 def _raw(name, **args):
     import qa_server
     out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",

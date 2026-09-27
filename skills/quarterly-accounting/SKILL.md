@@ -327,6 +327,13 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    was re-read (while building, or since it was built), nothing was kept or staged: run
    step 1 again (the re-read made every payment unread), then build again, once. A resend
    ("send it again") is the exact file already sent and is never refused for this.
+   A bank check that lands after a package's first send was staged but before it went out
+   takes that send back: the staged file is removed, so `send_media` or `send_email` fails
+   because the file is gone, or `record_delivery` answers that the bank was re-read before it
+   was sent. Either way nothing was delivered: tell the operator the package needs building
+   again ("The bank was re-read before I could send it — ask for it again and I'll rebuild
+   it."). A send already under way at the moment of the check cannot be stopped; if it
+   arrives, the "a delivered quarter changed" alert covers it.
 3. "Email me the Q3 package": `stage_for_delivery(channel="email", package_id=…)`, then
    gmail's `send_email` to the operator's own address with the returned path attached and the
    returned `request_id`. Casa asks the operator for one tap showing the recipient. Then

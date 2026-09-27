@@ -159,6 +159,52 @@ def _require_current_snapshot(conn, package_id) -> None:
         raise db.Refusal("the bank was re-read since this package was built — build it again")
 
 
+def revoke_superseded_first_sends(conn, snapshot_id) -> list:
+    """Inside an import's transaction, after its snapshot is recorded (round E5,
+    Terra S1): every delivery still `staged` that is a package's FIRST send
+    (no delivered or uncertain send of it) and was built under another snapshot
+    is revoked — marked failed with revoked_at, so record_delivery refuses it.
+    Returns the revoked rows; their staged bytes are removed after the commit
+    (remove_revoked_files). A resend of a file already sent is never revoked."""
+    assert conn.in_transaction
+    rows = conn.execute(
+        "SELECT d.delivery_id, d.channel, d.staged_path FROM deliveries d JOIN packages p"
+        " ON p.package_id=d.package_id WHERE d.status='staged' AND d.revoked_at IS NULL"
+        " AND (p.snapshot_id IS NULL OR p.snapshot_id<>?)"
+        " AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.package_id=d.package_id"
+        "  AND e.status IN ('delivered', 'uncertain'))", (snapshot_id,)).fetchall()
+    now = db.now()
+    for r in rows:
+        conn.execute("UPDATE deliveries SET status='failed', settled_at=?, revoked_at=?"
+                     " WHERE delivery_id=?", (now, now, r["delivery_id"]))
+    return [dict(r) for r in rows]
+
+
+def remove_revoked_files(conn, revoked) -> None:
+    """After the revoking commit: the Telegram outbox copy is deleted, and the
+    email handoff copy — this plugin's own published entry, one directory per
+    publish (casa_handoff offers no retract call) — is removed. Under the custody
+    lock, and only a path no live staged delivery still names (a later staging of
+    the same bytes reuses the outbox file)."""
+    if not revoked:
+        return
+    with db.custody_lock():
+        for r in revoked:
+            live = conn.execute("SELECT 1 FROM deliveries WHERE staged_path=? AND"
+                                " status='staged' AND revoked_at IS NULL",
+                                (r["staged_path"],)).fetchone()
+            if live is not None:
+                continue
+            path = pathlib.Path(r["staged_path"])
+            if r["channel"] == "email":
+                shutil.rmtree(path.parent, ignore_errors=True)
+            else:
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+
+
 def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=None) -> dict:
     if outcome not in ("delivered", "uncertain", "failed"):
         raise db.Refusal("outcome is 'delivered', 'uncertain' or 'failed'")
@@ -167,6 +213,8 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
         d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?", (delivery_id,)).fetchone()
         if d is None:
             raise db.Refusal(f"there is no delivery #{delivery_id}")
+        if d["revoked_at"] is not None:
+            raise db.Refusal("the bank was re-read before this was sent — build it again")
         if d["status"] == "delivered":
             return {"delivery_id": delivery_id, "status": "delivered", "already": True}
         if outcome == "delivered" and d["channel"] == "email" and not message_id:
