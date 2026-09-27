@@ -78,6 +78,132 @@ class TestAlerts(StoreCase):
         del pk
 
 
+class TestAlertBatching(StoreCase):
+    """fix wave D (Astra S2): a changed-package alert over Telegram's 4096
+    UTF-16 units was undeliverable forever. Renderings are batched within the
+    limit; each rendering binds only the occurrences it prints."""
+    N = 80
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO packages(quarter, filename, path, built_at,"
+                              " partial, digest, size, caption, manifest_json) VALUES"
+                              " ('2026-Q3','books-2026-Q3-2026-10-14.zip','/x','x',0,'d',1,"
+                              " 'c','{}')")
+        for i in range(1, self.N + 1):
+            self.row(i, counterparty="Supplier %02d Consulting Services" % i,
+                     amount_minor=100000 + i, booking_date="2026-07-14")
+            self.settle(self.lineage_for(i))
+            with db.tx(self.conn):
+                self.conn.execute(
+                    "INSERT INTO alerts(kind, occurrence_key, detail, raised_at) VALUES"
+                    " ('delivered-changed', ?, ?, 'x')",
+                    ("k%d" % i, db.canonical({"package": "books-2026-Q3-2026-10-14.zip",
+                                              "quarter": "2026-Q3", "row_id": i,
+                                              "change": "corrected"})))
+
+    def finish(self):
+        return passes.end_pass(self.conn, self.pass_(), "complete", {})["speak"]
+
+    def test_every_rendering_fits_and_every_occurrence_is_said_once(self):
+        said, renders = {}, 0
+        while True:
+            speak = self.finish()
+            if speak is None:
+                break
+            renders += 1
+            self.assertLessEqual(views.utf16_len(speak["text"]), views.TELEGRAM_LIMIT)
+            self.assertIn("books-2026-Q3-2026-10-14.zip", speak["text"])
+            self.assertIn('Say "rebuild Q3"', speak["text"])
+            again = self.finish()                         # not delivered yet: the same offer
+            self.assertEqual(again, speak)
+            views.mark_rendering_delivered(self.conn, speak["render_id"])
+            for i in range(1, self.N + 1):
+                if "Supplier %02d Consulting" % i in speak["text"]:
+                    said[i] = said.get(i, 0) + 1
+            self.assertLess(renders, 10)
+        self.assertGreater(renders, 1)
+        self.assertEqual(said, {i: 1 for i in range(1, self.N + 1)})
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM alerts WHERE sent_at IS NULL")
+                         .fetchone()[0], 0)
+        # each occurrence is bound to the rendering that printed it
+        for a in self.conn.execute("SELECT render_id, detail FROM alerts"):
+            import json
+            i = json.loads(a["detail"])["row_id"]
+            text = self.conn.execute("SELECT text FROM renders WHERE render_id=?",
+                                     (a["render_id"],)).fetchone()[0]
+            self.assertIn("Supplier %02d Consulting" % i, text)
+
+    def test_a_new_occurrence_joins_the_next_rendering_when_it_fits(self):
+        first = self.finish()
+        views.mark_rendering_delivered(self.conn, first["render_id"])
+        rest = self.finish()
+        t = self.pass_()
+        passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
+        joined = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        self.assertNotEqual(joined["render_id"], rest["render_id"])
+        self.assertIn("Gmail", joined["text"])
+        self.assertLessEqual(views.utf16_len(joined["text"]), views.TELEGRAM_LIMIT)
+
+
+class TestUnboundedDetail(StoreCase):
+    """fix wave D round 2 (Astra + Terra S2): a probe's diagnostic has no bound;
+    the first occurrence of a batch was taken unchecked and rendered 4363/5097
+    units, offered again unchanged forever."""
+    def setUp(self):
+        super().setUp()
+        self.bind()
+
+    def check(self, detail):
+        t = self.pass_()
+        passes.record_probe(self.conn, t, "gmail", False, detail)
+        speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        self.assertLessEqual(views.utf16_len(speak["text"]), views.TELEGRAM_LIMIT)
+        flat = speak["text"].replace("\n", " ")
+        self.assertTrue(flat.startswith("Gmail stopped letting me in ("), flat[:80])
+        self.assertTrue(flat.endswith("Re-authorise Gmail when you can."), flat[-80:])
+        self.assertIn(views.CLIP_MARK, speak["text"])
+        views.mark_rendering_delivered(self.conn, speak["render_id"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM alerts WHERE sent_at IS NULL")
+                         .fetchone()[0], 0)                      # the occurrence was said
+
+    def test_a_repeated_long_diagnostic(self):
+        self.check("Upstream error: " + "gateway timeout; " * 250)
+
+    def test_a_five_thousand_character_diagnostic(self):
+        self.check("E" * 5000)
+
+    def test_a_non_bmp_diagnostic_is_cut_between_characters(self):
+        self.check("\U0001f6a8" * 3000)
+
+
+class TestOversizedParkedRendering(StoreCase):
+    """fix wave D round 3 (Astra S2): an undelivered alert rendering saved
+    oversized by earlier code is never reused; it is re-composed through the fit."""
+    def setUp(self):
+        super().setUp()
+        self.bind()
+
+    def test_an_oversized_parked_rendering_is_recomposed(self):
+        t = self.pass_()
+        passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
+        first = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        with db.tx(self.conn):                  # what pre-fix code could have saved
+            self.conn.execute("UPDATE renders SET text=? WHERE render_id=?",
+                              ("x" * 5000, first["render_id"]))
+        t = self.pass_()
+        passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
+        again = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        self.assertNotEqual(again["render_id"], first["render_id"])
+        self.assertLessEqual(views.utf16_len(again["text"]), views.TELEGRAM_LIMIT)
+        self.assertIn("Gmail", again["text"])
+        views.mark_rendering_delivered(self.conn, again["render_id"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM alerts WHERE sent_at IS NULL")
+                         .fetchone()[0], 0)
+
+
 class TestAlertRace(StoreCase):
     """end_pass commits pass_marker.live=0 before calling pending_rendering, so
     a second pass can begin, re-observe the same still-failing occurrence and

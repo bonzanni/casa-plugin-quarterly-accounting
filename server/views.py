@@ -13,7 +13,10 @@ mark_rendering_delivered, called after the send succeeded, promotes it and
 advances the shown-revision pointers that corrections bind to."""
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
+import re
 import textwrap
 
 import amounts
@@ -38,6 +41,145 @@ FORBIDDEN = ("proposed", "conflicted", "revision", "projection", "CAS", "no-ref"
 
 def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
+
+
+# Only unbounded free-text FIELDS are clipped, each to its own bound (fix wave D
+# round 3): a payee / bank counterparty text, a document number or recipient, a
+# runner-up description, a residue detail — FIELD_MAX; a link — LINK_MAX. What
+# identifies an item or a candidate (amount, currency, date, kind, the "Could
+# be:" enumeration itself) is never clipped, so a bound item always prints
+# everything that identifies it (D3). A whole line is never clipped: that cut
+# the amount and date, or a second candidate, off lines that stayed bound.
+FIELD_MAX = 60
+LINK_MAX = 200
+
+
+MARK = "\u00b7"             # reserved: only generated text prints it (round 6)
+LITERAL_MARK = "\u2022"     # what a literal "·" in free text prints as
+
+
+class _Names:
+    """Per-rendering disambiguation (rounds 5-6): displayed identities are made
+    unique BY CONSTRUCTION within one rendering, before anything is composed,
+    so the bind-time backstop (_bindable) never decides liveness.
+
+    Generated disambiguators live in a namespace literal text cannot occupy:
+    they follow the reserved MARK, and every literal free-text field prints a
+    MARK as LITERAL_MARK (field()).
+    - digest: hex length of a clipped field's digest ("…·<hex>");
+    - docs: doc_id -> level; a document at level k >= 1 prints
+      " ·<issuer>" (k = 1), then " ·<issuer>·<sha256 prefix of 4(k-1)>" — the
+      stored content hash, so distinct documents always end up distinct;
+    - pids: pid -> the generated ref hex a payment's headline adds ("ref <hex>").
+    Levels grow to a fixed point over the FINAL identity strings of ALL the
+    rendering's entities, not per original collision group."""
+    def __init__(self):
+        self.digest, self.docs, self.doc_level, self.pids = 4, {}, {}, {}
+
+
+_NAMES = None
+
+
+def field(text, units: int = FIELD_MAX) -> str:
+    """A literal free-text field: MARK neutralized, clipped to `units` with a
+    digest of its FULL value ("…·3f9a"), as long as this rendering needs for
+    all its clipped values to print distinct."""
+    return _field(text, units, _NAMES.digest if _NAMES is not None else 4)
+
+
+def _field(text, units, n) -> str:
+    if not text:
+        return text
+    shown = text.replace(MARK, LITERAL_MARK)
+    if utf16_len(shown) <= units:
+        return shown
+    tag = MARK + hashlib.sha256(text.encode("utf-8")).hexdigest()[:n]
+    return clip(shown, units - utf16_len(tag)) + tag
+
+
+def _hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def lineage_ref(pid: int) -> str:
+    """The stable hex a payment's generated "ref …" is a prefix of."""
+    return _hex(f"lineage:{pid}")
+
+
+def _fixpoint(ents, render, raise_level, cap=17) -> None:
+    """Raise the level of every entity whose FINAL printed identity (render(e),
+    normalized as the bind check sees it) is shared with any other entity of
+    the rendering, until all are distinct (or `cap`)."""
+    for _ in range(cap):
+        seen: dict = {}
+        for e in ents:
+            seen.setdefault(_norm(render(e)), []).append(e)
+        dups = [e for es in seen.values() if len(es) > 1 for e in es]
+        if not dups:
+            return
+        for e in dups:
+            raise_level(e)
+
+
+@contextlib.contextmanager
+def named(items, view_quarter=None):
+    """Compose under the disambiguation for `items` (what build_review does)."""
+    global _NAMES
+    saved = _NAMES
+    _NAMES = names_for(items, view_quarter)
+    try:
+        yield _NAMES
+    finally:
+        _NAMES = saved
+
+
+def _doc_extra(doc, level) -> str:
+    if level <= 0:
+        return ""
+    issuer = field(doc.get("issuer")) or ""
+    sha = doc.get("sha256") or _hex(f"doc:{doc.get('doc_id')}")
+    parts = ([issuer] if issuer else []) + ([sha[:4 * (level - 1)]] if level > 1 else [])
+    if not parts:
+        parts = [sha[:4 * level]]
+    return " " + MARK + MARK.join(parts)
+
+
+def names_for(items, view_quarter=None) -> _Names:
+    """The disambiguation for a rendering over `items` (every payment it may
+    print: a superset of what it prints, so what it prints is distinct too)."""
+    global _NAMES
+    names, saved = _Names(), _NAMES
+    try:
+        values = set()
+        docs = {}
+        for d in items:
+            values.add(d["counterparty"] or "")
+            for c in ([d["current"]] if d["current"] else []) + d["candidates"]:
+                doc = c["document"]
+                docs[doc["doc_id"]] = doc
+                values.update(x for x in (doc.get("number"), doc.get("issuer")) if x)
+        values = {v for v in values if utf16_len(v) > FIELD_MAX}
+        for n in range(4, 65, 4):
+            if len({_field(v, FIELD_MAX, n) for v in values}) == len(values):
+                names.digest = n
+                break
+        _NAMES = names
+
+        def raise_doc(i):
+            names.doc_level[i] = names.doc_level.get(i, 0) + 1
+            names.docs[i] = _doc_extra(docs[i], names.doc_level[i])
+        _fixpoint(list(docs), lambda i: ident(docs[i]), raise_doc)
+
+        by_pid = {d["pid"]: d for d in items}
+        level: dict = {}
+
+        def raise_pid(p):
+            level[p] = level.get(p, 0) + 1
+            names.pids[p] = lineage_ref(p)[:4 * level[p]]
+        _fixpoint(list(by_pid), lambda p: headline(by_pid[p], view_quarter), raise_pid)
+    finally:
+        _NAMES = saved
+    return names
 
 
 def _wrap(line: str) -> list:
@@ -68,12 +210,14 @@ def _money(d) -> str:
 
 
 def headline(d: dict, view_quarter=None) -> str:
-    parts = [d["counterparty"], _money(d), _day(d["date"])]
+    parts = [field(d["counterparty"]), _money(d), _day(d["date"])]
     kind = d["expectation"]["kind"]
     if kind and kind not in ("invoice", "none"):
         parts.append(KIND_WORD[kind])
     if d.get("pending"):
         parts.append("pending")
+    if _NAMES is not None and _NAMES.pids.get(d["pid"]):
+        parts.append("ref " + _NAMES.pids[d["pid"]])
     if view_quarter and d.get("quarter") and d["quarter"] != view_quarter:
         parts.append(dates.quarter_label(d["quarter"]))
     return " · ".join(parts)
@@ -85,10 +229,40 @@ def _a(word: str) -> str:
 
 def _docname(doc: dict) -> str:
     w = KIND_WORD.get(doc["kind"], "document")
-    return f"{w} {doc['number']}" if doc.get("number") else w
+    return f"{w} {field(doc['number'])}" if doc.get("number") else w
 
 
-def evidence(d: dict) -> list:
+# Evidence enumerations are bounded (round 4). Runner-ups are context and never
+# bind: at most RUNNERS_MAX, then "and N others". Candidates DO bind: a view
+# prints at most CANDIDATES_MAX and binds only those; the rest are one phrase
+# away — an item view that pages every candidate, each page binding what it prints.
+RUNNERS_MAX = 3
+CANDIDATES_MAX = 3
+
+
+def ident(doc: dict) -> str:
+    """How a pairing is named in the text: document and date. The binding
+    check (_bindable) requires this exact string to be visible, and unique
+    within its payment."""
+    extra = _NAMES.docs.get(doc.get("doc_id"), "") if _NAMES is not None else ""
+    return f"{_docname(doc)}{extra} ({_day(doc['date'])})"
+
+
+def _cands(d, cands):
+    return d["candidates"][:CANDIDATES_MAX] if cands is None else cands
+
+
+def _amount_word(d) -> str:
+    return f"{abs(d['amount_minor'] or 0) / 100:.2f}"
+
+
+def candidates_phrase(d) -> str:
+    return f"candidates for {_amount_word(d)} {_day(d['date'])}"
+
+
+def evidence(d: dict, cands=None) -> list:
+    """`cands` are the candidates to print (default: the first
+    CANDIDATES_MAX, with the phrase that shows the rest)."""
     out = []
     cur = d["current"]
     if cur is not None:
@@ -106,24 +280,38 @@ def evidence(d: dict) -> list:
         if "guessed" not in labels:
             # a line that asks for a verdict names what it is asking about (round p7:
             # a no-ref line never named its invoice, yet "all good" confirmed it)
-            out.insert(0, f"Paired with {name} ({_day(doc['date'])}).")
+            out.insert(0, f"Paired with {ident(doc)}.")
         if "guessed" in labels:
-            others = "; ".join(cur["runners_up"])
-            out.append(f"Picked {name} ({_day(doc['date'])}); {others} also fits." if others
-                       else f"Picked {name} among several that fit.")
+            rs = cur["runners_up"]
+            others = "; ".join(field(x) for x in rs[:RUNNERS_MAX])
+            if len(rs) > RUNNERS_MAX:
+                others += f"; and {len(rs) - RUNNERS_MAX} others"
+            out.append(f"Picked {ident(doc)}; {others} also fits." if others
+                       else f"Picked {ident(doc)} among several that fit.")
         if "no-ref" in labels:
             out.append("Repeating equal charges, and no invoice number on both sides.")
         if "partial-search" in labels:
             out.append("The search was cut short, so this may not be the only fit.")
         if "recipient?" in labels:
             out.append(f"{name[0].upper() + name[1:]} names "
-                       f"{doc.get('recipient') or 'someone else'}, not the business.")
+                       f"{field(doc.get('recipient')) or 'someone else'}, not the business.")
         if d["status"] == "proposed" and len(out) == 1:
             out.append("Not sure — say if it's wrong.")
-    if d["candidates"]:
-        out.append("Could be: " + ", ".join(f"{_docname(c['document'])} "
-                                            f"({_day(c['document']['date'])})"
-                                            for c in d["candidates"]) + ".")
+    shown = _cands(d, cands)
+    if shown:
+        out.append("Could be: " + ", ".join(ident(c["document"]) for c in shown) + ".")
+    if cands is None and len(d["candidates"]) > len(shown):
+        out.append(f"{len(d['candidates']) - len(shown)} more could fit — say "
+                   f"\"{candidates_phrase(d)}\".")
+    return out
+
+
+def pairings(d: dict, cands=None) -> dict:
+    """The pairings a block that shows evidence(d, cands) displays, by match id,
+    with the identity string it prints for each."""
+    out = {c["match_id"]: ident(c["document"]) for c in _cands(d, cands)}
+    if d["current"] is not None:
+        out[d["current"]["match_id"]] = ident(d["current"]["document"])
     return out
 
 
@@ -184,7 +372,7 @@ def _missing_detail(d) -> list:
     elif d["search"].get("incomplete"):
         out.append("Search incomplete — resumes next pass.")
     if d["link"]:
-        out.append(d["link"])
+        out.append(field(d["link"], LINK_MAX))
     if d["search_state"] == "accepted-missing":
         out.append("No longer chased.")
     return out
@@ -274,11 +462,14 @@ def _degraded_block(gmail_down, interrupted, missing, unsearched) -> list:
 class _Block:
     """One printed item: its lines, and what printing it binds on delivery."""
     __slots__ = ("lines", "pid", "pairings", "residue", "amount", "order", "name", "guessed",
-                 "offer")
+                 "offer", "ident")
 
-    def __init__(self, lines, *, pid=None, pairings=(), residue=None, amount=0, order=("", 0),
-                 name=None, guessed=False, offer=None):
-        self.lines, self.pid, self.pairings, self.residue = list(lines), pid, set(pairings), residue
+    def __init__(self, lines, *, pid=None, pairings=None, residue=None, amount=0, order=("", 0),
+                 name=None, guessed=False, offer=None, ident=None):
+        # `pairings`: match id -> the identity string printed for it; `ident`: the
+        # payment's printed identity (its headline). Both are checked at bind time.
+        self.lines, self.pid, self.residue = list(lines), pid, residue
+        self.pairings, self.ident = dict(pairings or {}), ident
         self.offer = offer              # a package offered for "send it again"
         self.amount, self.order, self.name, self.guessed = amount or 0, order, name, guessed
 
@@ -304,7 +495,7 @@ def _residue_blocks(conn) -> tuple:
             freed = conn.execute("SELECT COUNT(*) FROM log WHERE pid=? AND kind='retire' AND"
                                  " cause='row-ended'", (r["pid"],)).fetchone()[0]
             tail = "its document is free again" if freed else "nothing was paired to it"
-            line = f"{head} left the bank ledger ({r['detail']}) — {tail}"
+            line = f"{head} left the bank ledger ({field(r['detail'])}) — {tail}"
         elif r["reason"] == "occupied":
             line = f"{head} — that document is already on another payment"
         elif r["reason"] == "kind-mismatch":
@@ -321,19 +512,12 @@ def _residue_blocks(conn) -> tuple:
     return blocks, silent
 
 
-def _shown_pairings(d) -> set:
-    ids = {c["match_id"] for c in d["candidates"]}
-    if d["current"] is not None:
-        ids.add(d["current"]["match_id"])
-    return ids
-
-
 def _item_blocks(ds, detail, q, shows_pairings=False, guessed=False) -> list:
     """`pairings` are the match ids whose proposition the text displays. Only
     those are bound for a later correction (round p1, Astra S1: a missing view
     that bound candidates it never showed let "Adobe is wrong" reject them)."""
-    return [_Block([headline(d, q), *detail(d)], pid=d["pid"],
-                   pairings=_shown_pairings(d) if shows_pairings else (),
+    return [_Block([headline(d, q), *detail(d)], pid=d["pid"], ident=headline(d, q),
+                   pairings=pairings(d) if shows_pairings else {},
                    amount=abs(d["amount_minor"] or 0), order=(d["date"] or "", d["pid"]),
                    name=d["counterparty"], guessed=guessed)
             for d in ds]
@@ -363,14 +547,8 @@ def _compose(conn, view, q, items, members, lead):
     parts = {"view": view, "head": [], "announce": [], "sections": [], "silent": [],
              "tail": None}
     if view == "item":
-        d = items[0]
-        lines = [headline(d), _item_sentence(d), *evidence(d)]
-        if _open_required(d):
-            lines += _missing_detail(d)
-        parts["sections"].append(_Section(None, [_Block(lines, pid=d["pid"],
-                                                        pairings=_shown_pairings(d))]))
         parts["tail"] = lambda printed_guessed: []
-        return parts
+        return parts                    # composed page by page in _item_page
 
     titles = {"status": f"Accounting · {dates.quarter_label(q)}",
               "all": f"Accounting · {dates.quarter_label(q)}",
@@ -462,7 +640,8 @@ def _compose(conn, view, q, items, members, lead):
                            else "Everything matched cleanly.")
             if printed_guessed:
                 # the example names an item this very text shows
-                out.append(f'Tell me if one is wrong — "the {printed_guessed[0]} one is wrong".')
+                out.append(f'Tell me if one is wrong — "the {field(printed_guessed[0])} one is '
+                           'wrong".')
         if view in ("status", "all", "missing") and missing:
             out.append("Download the PDFs and email them to yourself, then")
             out.append('say "check emailed invoices" to file them now.')
@@ -563,21 +742,67 @@ def _page(parts, after, first):
 
 
 FIT_CLOSING = "The rest did not fit in one message."
+CLIP_MARK = "\u2026"
 
 
-def _fit(lines, closing=FIT_CLOSING) -> str:
-    """The last resort: whole lines up to the limit, and a closing line (which
-    carries the continuation phrase when there is one). Never returns text over
-    TELEGRAM_LIMIT."""
-    text = _text(lines)
-    if utf16_len(text) <= TELEGRAM_LIMIT:
+def clip(text: str, units: int) -> str:
+    """`text` cut to at most `units` UTF-16 units, ending in CLIP_MARK when it
+    was cut — for displayed detail with no natural bound (a probe's diagnostic,
+    a bank counterparty text). Cuts between code points, so a non-BMP
+    character is never split into half a surrogate pair."""
+    if utf16_len(text) <= units:
         return text
-    kept = []
-    for w in text.split("\n"):
-        if utf16_len("\n".join(kept + [w, closing])) > TELEGRAM_LIMIT:
+    out, used = [], 0
+    budget = units - utf16_len(CLIP_MARK)
+    for ch in text:
+        n = utf16_len(ch)
+        if used + n > budget:
             break
-        kept.append(w)
-    return "\n".join(kept + [closing])
+        out.append(ch)
+        used += n
+    return "".join(out) + CLIP_MARK
+
+
+def fit_lines(lines, closing=None, always_close=False) -> tuple:
+    """THE fit (fix wave D round 2, generalized after the same shape recurred in
+    views, alerts and receipts): every operator-facing message is produced
+    through here, and what it returns joins with "\n" to at most
+    TELEGRAM_LIMIT UTF-16 units — every separator and the closing line
+    included, whatever the inputs.
+
+    Returns (out_lines, whole): `whole` is how many leading input lines are
+    printed IN FULL — the only ones a caller may bind (D3). When everything fits,
+    out_lines is the input (plus `closing` if always_close). Otherwise whole
+    lines while they fit beside the closing line; when not even the first line
+    fits, it is clipped with CLIP_MARK so the message still says something (and
+    `whole` is 0). The closing line is never cut away (it is clipped only if it
+    alone exceeds the limit)."""
+    lines = list(lines)
+    tail = [clip(closing, TELEGRAM_LIMIT)] if closing else []
+    if utf16_len("\n".join(lines + (tail if always_close else []))) <= TELEGRAM_LIMIT:
+        return lines + (tail if always_close else []), len(lines)
+    budget = TELEGRAM_LIMIT - (utf16_len(tail[0]) + 1 if tail else 0)
+    kept, used = [], 0
+    for ln in lines:
+        need = utf16_len(ln) + (1 if kept else 0)
+        if used + need > budget:
+            break
+        kept.append(ln)
+        used += need
+    whole = len(kept)
+    if whole == 0 and lines and budget > utf16_len(CLIP_MARK):
+        kept = [clip(lines[0], budget)]
+    if not kept and tail:
+        return tail, 0
+    return kept + tail, whole
+
+
+def fit_message(lines, closing=None, always_close=False) -> str:
+    """fit_lines, joined: a text that is always deliverable. `lines` may be
+    a str (split at newlines)."""
+    if isinstance(lines, str):
+        lines = lines.split("\n")
+    return "\n".join(fit_lines(lines, closing, always_close)[0])
 
 
 def _item_sentence(d) -> str:
@@ -601,7 +826,40 @@ def _item_sentence(d) -> str:
     return f"No {word} yet." + (f" Searched {n} ways." if n else "")
 
 
+def _item_block(d, cands, more) -> _Block:
+    lines = [headline(d), _item_sentence(d), *evidence(d, cands=cands)]
+    if _open_required(d):
+        lines += _missing_detail(d)
+    if more:
+        lines += ["", MORE_LINE]
+    return _Block(lines, pid=d["pid"], ident=headline(d), pairings=pairings(d, cands))
+
+
+def _item_page(d, after):
+    """The item view pages EVERY candidate (round 4): as many as fit one
+    message after the cursor (the last match id printed), each page binding
+    the candidates it prints. Returns (block, cursor or None)."""
+    rest = [c for c in d["candidates"] if after is None or c["match_id"] > after[0]]
+    n = 1 if rest else 0
+    while n < len(rest) and utf16_len(_text(_item_block(d, rest[:n + 1],
+                                                         n + 1 < len(rest)).lines)) \
+            <= TELEGRAM_LIMIT:
+        n += 1
+    more = n < len(rest)
+    return _item_block(d, rest[:n], more), ([rest[n - 1]["match_id"]] if more else None)
+
+
 def build_review(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
+    """See _build_review. The per-rendering disambiguation (_NAMES) lives only
+    for the duration of one call."""
+    global _NAMES
+    try:
+        return _build_review(conn, view, quarter, pid, page, after)
+    finally:
+        _NAMES = None
+
+
+def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
     """`page` (1, 2, ...) renders the view uncapped, one message per page, and
     `after` is the cursor the previous page's `next` returned; the `all` view
     is the status view paged. The answer's `next` is the call that the phrase
@@ -624,17 +882,26 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
     # between composing and recording bound the operator to an unseen document).
     with db.tx(conn):
         members, chosen, scope, nxt = [], [], {"quarter": q, "pid": pid}, None
+        items = []
         if lead[0] is not None:
-            text = _fit(lead[0])
+            text = fit_message(_text(lead[0]), FIT_CLOSING)
             scope["stop"] = True
         else:
             members = membership(conn, view, q, pid)
             items = [work.describe(conn, p) for p in members]
+            # every identity this rendering prints is made distinct before composing
+            global _NAMES
+            _NAMES = names_for(items, None if view == "item" else q)
             parts = _compose(conn, view, q, items, members, lead)
             if view == "item":
-                page = None
-                lines, chosen = _emit(parts, {0: parts["sections"][0].blocks}, announce=False)
+                blk, cursor = _item_page(items[0], after)
+                lines, chosen = blk.lines, [blk]
                 text = _text(lines)
+                if cursor is not None:
+                    nxt = {"view": "item", "pid": pid, "page": (page or 1) + 1, "after": cursor}
+                scope["page"], scope["after"] = page, after
+                # a later page adds to what the earlier pages of this item bound
+                scope["continues"] = bool(page and page > 1)
             elif page is not None:
                 lines, chosen, cursor = _page(parts, after, page == 1)
                 text = _text(lines)
@@ -650,15 +917,18 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
                 if any(len(s.blocks) > sum(1 for c in chosen if c in s.blocks)
                        for s in parts["sections"]):
                     nxt = {"view": "all" if view == "status" else view, "quarter": q, "page": 1}
-            cut = utf16_len(text) > TELEGRAM_LIMIT
+            # The final text goes through the one fit. If it cut anything, nothing it
+            # prints is bound: the text may not show every block chosen. The closing
+            # line carries the phrase `next` answers, so it is never cut.
+            closing = FIT_CLOSING
+            if nxt is not None:
+                closing = (MORE_LINE if "after" in nxt
+                           else 'The rest did not fit — say "all of them".')
+            body = text.split("\n")
+            out, whole = fit_lines(body, closing)
+            text, cut = "\n".join(out), whole < len(body)
             if cut:
-                # nothing it prints is bound: the text may not show every block chosen.
-                # The closing line carries the phrase `next` answers, so it is never cut.
-                closing = FIT_CLOSING
-                if nxt is not None:
-                    closing = (MORE_LINE if "after" in nxt
-                               else 'The rest did not fit — say "all of them".')
-                text, chosen = _fit(lines, closing), []
+                chosen = []
             if page in (None, 1) and parts["announce"] and not cut \
                     and parts["announce"][0] in lines:
                 scope["announce_watermark"] = True
@@ -667,14 +937,28 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
                 scope["offers"] = [c.offer for c in chosen if c.offer is not None]
                 if page in (None, 1):
                     scope["residue_silent"] = parts["silent"]
+        printed = _bindable(chosen, text)
+        if _NAMES is not None:
+            # the generated refs this rendering printed on payments it binds: a reply's
+            # "ref <hex>" is honoured only against these (round 6)
+            # hex -> EVERY payment printed with that ref (round 9: refs are distinct only
+            # within a payee-collision group, so two groups can print the same hex)
+            refs: dict = {}
+            for p in sorted(printed):
+                if _NAMES.pids.get(p):
+                    refs.setdefault(_NAMES.pids[p], []).append(p)
+            if refs:
+                scope["refs"] = refs
+            # the payee name each bound payment was SHOWN as: a reply resolves names
+            # against what the operator saw, as well as the stored names (round 7)
+            by_pid = {d["pid"]: d for d in items}
+            seen = {str(p): field(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
+            if seen:
+                scope["names"] = seen
         rid = f"r{db.next_seq(conn)}"
         conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                      " membership_json) VALUES (?,?,?,?,?,?)",
                      (rid, view, db.canonical(scope), db.now(), text, json.dumps(members)))
-        printed = {}
-        for c in chosen:
-            if c.pid is not None:
-                printed.setdefault(c.pid, set()).update(c.pairings)
         for p, shown_ids in printed.items():
             prev = conn.execute("SELECT revision FROM projections WHERE pid=?", (p,)).fetchone()[0]
             mrevs = {str(r[0]): r[1] for r in conn.execute(
@@ -684,6 +968,39 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
                          " match_revisions_json) VALUES (?,?,?,?)",
                          (rid, p, prev, db.canonical(mrevs)))
     return {"render_id": rid, "text": text, "printed": len(printed), "next": nxt}
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[\s\u00b7]+", "", s)
+
+
+def _bindable(chosen, text) -> dict:
+    """THE bind-time check (round 4): a payment is bound only if its printed
+    identity (headline) is visible in the text and no other bound payment in
+    this rendering prints the same identity; a pairing only if its identity
+    string is visible and unique within its payment. Whatever the formatting,
+    every entity a rendering binds is uniquely identified by text visibly in it.
+    Returns pid -> the match ids bound."""
+    flat = _norm(text)
+    by_pid: dict = {}
+    for c in chosen:
+        if c.pid is None:
+            continue
+        e = by_pid.setdefault(c.pid, {"ident": c.ident, "pairings": {}})
+        e["pairings"].update(c.pairings)
+    seen: dict = {}
+    for e in by_pid.values():
+        k = _norm(e["ident"] or "")
+        seen[k] = seen.get(k, 0) + 1
+    out = {}
+    for p, e in by_pid.items():
+        k = _norm(e["ident"] or "")
+        if not k or seen[k] > 1 or k not in flat:
+            continue
+        names = [_norm(v) for v in e["pairings"].values()]
+        out[p] = {m for m, v in e["pairings"].items()
+                  if names.count(_norm(v)) == 1 and _norm(v) in flat}
+    return out
 
 
 def render_items(conn, render_id) -> list:
@@ -699,13 +1016,27 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
         if r["delivered_at"] is not None:
             return {"render_id": render_id, "already": True}
         now = db.now()
-        conn.execute("UPDATE renders SET delivered_at=? WHERE render_id=?", (now, render_id))
-        for it in conn.execute("SELECT * FROM render_items WHERE render_id=?", (render_id,)):
+        # the delivery ORDER is the store sequence, not the one-second timestamp (db.last_delivered)
+        conn.execute("UPDATE renders SET delivered_at=?, delivered_seq=? WHERE render_id=?",
+                     (now, db.next_seq(conn), render_id))
+        scope = json.loads(r["scope_json"])
+        for it in conn.execute("SELECT * FROM render_items WHERE render_id=?",
+                               (render_id,)).fetchall():
+            mrevs = it["match_revisions_json"]
+            if scope.get("continues"):
+                # a later page of one item view: the operator has now been shown the
+                # earlier pages' candidates too, at the same revision of the payment
+                prev = conn.execute("SELECT s.*, r.kind FROM shown s JOIN renders r ON"
+                                    " r.render_id=s.render_id WHERE s.pid=?",
+                                    (it["pid"],)).fetchone()
+                if prev is not None and prev["kind"] == "item" \
+                        and prev["projection_revision"] == it["projection_revision"]:
+                    merged = json.loads(prev["match_revisions_json"])
+                    merged.update(json.loads(mrevs))
+                    mrevs = db.canonical(merged)
             conn.execute("INSERT OR REPLACE INTO shown(pid, render_id, projection_revision,"
                          " match_revisions_json, delivered_at) VALUES (?,?,?,?,?)",
-                         (it["pid"], render_id, it["projection_revision"],
-                          it["match_revisions_json"], now))
-        scope = json.loads(r["scope_json"])
+                         (it["pid"], render_id, it["projection_revision"], mrevs, now))
         for rid_ in scope.get("residue", []) + scope.get("residue_silent", []):
             conn.execute("UPDATE residue SET shown_render=? WHERE id=?", (render_id, rid_))
         if scope.get("announce_watermark"):

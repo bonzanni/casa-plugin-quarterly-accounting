@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -185,7 +185,8 @@ CREATE TABLE IF NOT EXISTS residue (
 CREATE TABLE IF NOT EXISTS renders (
   render_id TEXT PRIMARY KEY, kind TEXT NOT NULL, scope_json TEXT NOT NULL,
   created_at TEXT NOT NULL, delivered_at TEXT, text TEXT NOT NULL,
-  membership_json TEXT NOT NULL);
+  membership_json TEXT NOT NULL,
+  delivered_seq INTEGER);        -- store sequence at delivery: what "most recent delivered" orders by
 CREATE TABLE IF NOT EXISTS render_items (
   render_id TEXT NOT NULL, pid INTEGER NOT NULL, projection_revision INTEGER NOT NULL,
   match_revisions_json TEXT NOT NULL, PRIMARY KEY (render_id, pid));
@@ -215,7 +216,15 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 # Migrations from version N to N+1, appended when the schema changes. Each is
 # a list of statements applied inside the migrating transaction.
-MIGRATIONS: dict[int, list[str]] = {}
+MIGRATIONS: dict[int, list[str]] = {
+    # 1 -> 2 (fix wave D, Astra S1): delivered_at has one-second resolution, so two
+    # deliveries in one second tied and "the most recent delivered rendering" fell
+    # back to creation order. A rendering delivered before this migration gets 0:
+    # every later delivery (a fresh next_seq, >= 1) orders after it; among the old
+    # ones the previous delivered_at order is kept as the tie-break.
+    1: ["ALTER TABLE renders ADD COLUMN delivered_seq INTEGER",
+        "UPDATE renders SET delivered_seq = 0 WHERE delivered_at IS NOT NULL"],
+}
 
 
 def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:
@@ -306,6 +315,15 @@ def next_seq(conn: sqlite3.Connection) -> int:
     assert conn.in_transaction, "the sequence is allocated inside the write transaction"
     conn.execute("UPDATE counters SET value = value + 1 WHERE name='seq'")
     return conn.execute("SELECT value FROM counters WHERE name='seq'").fetchone()[0]
+
+
+def last_delivered(conn: sqlite3.Connection):
+    """THE most recent DELIVERED rendering (D2/D3: an operator's words bind to
+    what they were shown last) — the one place it is resolved. Ordered by the
+    store sequence mark_rendering_delivered allocates inside its transaction,
+    so a later delivery always wins, even within one second (fix wave D)."""
+    return conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL ORDER BY"
+                        " delivered_seq DESC, delivered_at DESC, rowid DESC LIMIT 1").fetchone()
 
 
 @contextlib.contextmanager

@@ -122,6 +122,41 @@ class TestSurface(TempEnv):
         self.assertNotIn("isError", res)
 
 
+class TestDeliverableBoundary(TempEnv):
+    """fix wave D round 2: an operator-facing text over Telegram's limit never
+    leaves a tool as a result — it is an error (isError), loud."""
+    def setUp(self):
+        super().setUp()
+        _fresh_conn(self)
+
+    def test_every_operator_text_key_is_checked(self):
+        from unittest import mock
+        import passes
+        import reply
+        import views
+        big = "x" * 4097
+        cases = [("build_review", views, "build_review", {"render_id": "r1", "text": big},
+                  {}),
+                 ("end_pass", passes, "end_pass", {"speak": {"render_id": "r1", "text": big}},
+                  {"pass_token": 1, "outcome": "complete"}),
+                 ("apply_reply", reply, "apply_reply",
+                  {"receipt": "ok", "receipt_pages": ["ok", big]}, {"text": "all good"}),
+                 ("apply_reply", reply, "apply_reply",
+                  {"receipt": big, "receipt_pages": [big]}, {"text": "all good"})]
+        for tool, mod, fn, out, args in cases:
+            with mock.patch.object(mod, fn, lambda *a, _o=out, **k: _o):
+                res = _tool(tool, **args)
+            self.assertTrue(res.get("isError"), (tool, res))
+            self.assertIn("4097 UTF-16 units", res["content"][0]["text"])
+        fits = {"render_id": "r1", "text": "\U0001d518" * 2048}          # 4096 units exactly
+        with mock.patch.object(views, "build_review", lambda *a, **k: fits):
+            res = _tool("build_review")
+        self.assertNotIn("isError", res)
+        with mock.patch.object(views, "build_review",
+                               lambda *a, **k: {"render_id": "r1", "text": "\U0001d518" * 2049}):
+            self.assertTrue(_tool("build_review").get("isError"))
+
+
 class ToolCase(StoreCase):
     """The tools reach this test's store connection (tools.conn())."""
     def setUp(self):

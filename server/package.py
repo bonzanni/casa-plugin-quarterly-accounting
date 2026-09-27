@@ -118,7 +118,14 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         r, d = ln["row"], ln["d"]
         status = "UNTRACKED" if d is None else STATUS.get(d["status"], "UNTRACKED")
         exp = d["expectation"] if d else {"kind": None, "tier": None}
-        if d is not None and d["status"] == "open" and exp["kind"] is None:
+        # Classification is reported from the expectation alone (fix wave D, Astra S1):
+        # an unknown expectation is UNCLASSIFIED whether or not a pairing is retained
+        # (round-42 ruling keeps the pairing and its last known kind verdict; spec
+        # ~2742-2744: `UNCLASSIFIED` for a row whose expectation is not yet known). The
+        # retained document still ships in its folder and is named in `document`.
+        unknown = d is not None and exp["kind"] is None \
+            and d["status"] in ("open", "matched", "proposed")
+        if unknown:
             status = "UNCLASSIFIED"
         docname, confidence, link, notes = "", "", "", []
         if d is not None and d["status"] == "matched" and d["current"]:
@@ -131,6 +138,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
             if d["current"]["author"] == "operator":
                 notes.append("confirmed by the operator")
         elif d is not None and ln["docs"]:
+            if unknown and d["status"] == "proposed":
+                notes.append("pairing not yet confirmed")
             for mid, doc in sorted(ln["docs"].items()):
                 name = _place("unresolved", doc, used, named, dates.effective_date(r))
                 files[name] = documents_bytes(doc)
@@ -140,7 +149,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
             if status == "MISSING":
                 missing.append((d, link))
             elif status == "UNCLASSIFIED":
-                unclassified.append(d)
+                unclassified.append((d, docname))
             elif status == "OPTIONAL-MISSING":
                 nice.append(d)
             if d["broken_floor"]:
@@ -167,7 +176,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     if not missing:
         notes.append("- none")
     notes += ["", "## Not yet classified", ""]
-    notes += [f"- {_head(d)}" for d in unclassified] or ["- none"]
+    notes += [f"- {_head(d)}" + (f" — holds {name}" if name else "")
+              for d, name in unclassified] or ["- none"]
     notes += ["", "## Nice to have, not found", ""]
     notes += [f"- {_head(d)} — {d['expectation']['kind']}" for d in nice] or ["- none"]
     notes += ["", "## Unresolved candidates", ""]

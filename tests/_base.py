@@ -169,8 +169,10 @@ class StoreCase(TempEnv):
         rid = "r-test-%d" % (self.conn.execute("SELECT COUNT(*) FROM renders").fetchone()[0] + 1)
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
-                              " delivered_at, text, membership_json) VALUES (?,?,?,?,?,?,?)",
-                              (rid, "status", "{}", db.now(), db.now(), "", json.dumps(list(pids))))
+                              " delivered_at, text, membership_json, delivered_seq)"
+                              " VALUES (?,?,?,?,?,?,?,?)",
+                              (rid, "status", "{}", db.now(), db.now(), "",
+                               json.dumps(list(pids)), db.next_seq(self.conn)))
             for pid in pids:
                 prev = self.conn.execute("SELECT revision FROM projections WHERE pid=?",
                                          (pid,)).fetchone()[0]

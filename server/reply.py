@@ -31,6 +31,8 @@ _AMOUNT = re.compile(r"(?:eur\s*|€\s*)?(\d{1,3}(?:,\d{3})*\.\d{2}|\d+[.,]\d{2}
 _DATE = re.compile(r"\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b")
 _T = r"(?:the\s+)?(?P<t>.+?)(?:\s+one)?"
 PATTERNS = [
+    # round 4: the phrase a view offers when a payment has more candidates than it prints
+    ("candidates", re.compile(r"(?:show\s+(?:me\s+)?)?(?:the\s+)?candidates for\s+(?P<t>.+)")),
     ("bulk_except", re.compile(r"all (?:good|fine|correct|right) (?:except|but) (?P<t>.+)")),
     ("all_good", re.compile(r"all (?:good|fine|correct|right)")),
     ("unpair", re.compile(_T + r"\s+(?:is|are)\s+(?:wrong|not right|incorrect)")),
@@ -138,6 +140,9 @@ def _open_items(conn) -> list:
     return out
 
 
+_REF = re.compile(r"\bref\s+([0-9a-f]{4,64})\b")
+
+
 def _parse_target(phrase: str) -> dict:
     p = phrase.strip()
     amount = None
@@ -155,8 +160,38 @@ def _parse_target(phrase: str) -> dict:
     return {"vendor": kb.norm(p) or None, "amount": amount, "day": day}
 
 
-def _matches(d, t) -> bool:
-    if t["vendor"] and t["vendor"] not in (kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"])):
+def _names(d, seen=None) -> set:
+    """Every name a payment answers to: its stored names, and the name the
+    latest delivered rendering showed it as (round 7: "A·B" is shown "A•B",
+    so "the A•B one" may mean either payment)."""
+    out = {kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"])}
+    if seen and str(d["pid"]) in seen:
+        out.add(kb.norm(seen[str(d["pid"])]))
+    return out
+
+
+def _shown_scopes(conn) -> list:
+    """(pid, scope) of the rendering each payment was last SHOWN in — its own
+    `shown.render_id`, the rendering D3 binds its shown revision to (round 8:
+    the globally latest delivery may be an unrelated item view or an alert)."""
+    import json
+    return [(r[0], json.loads(r[1])) for r in conn.execute(
+        "SELECT s.pid, r.scope_json FROM shown s JOIN renders r ON r.render_id=s.render_id"
+        " WHERE r.delivered_at IS NOT NULL")]
+
+
+def _seen_names(conn) -> dict:
+    """pid (str) -> the payee name the rendering that last showed it printed."""
+    out = {}
+    for pid, scope in _shown_scopes(conn):
+        name = scope.get("names", {}).get(str(pid))
+        if name is not None:
+            out[str(pid)] = name
+    return out
+
+
+def _matches(d, t, seen=None) -> bool:
+    if t["vendor"] and t["vendor"] not in _names(d, seen):
         return False
     if t["amount"] is not None and d["amount_minor"] != t["amount"]:
         return False
@@ -169,20 +204,68 @@ def _matches(d, t) -> bool:
     return bool(t["vendor"] or t["amount"] is not None)
 
 
+def _delivered_refs(conn) -> dict:
+    """hex -> the pids whose last-shown rendering printed that generated ref."""
+    out: dict = {}
+    for pid, scope in _shown_scopes(conn):
+        for k, v in scope.get("refs", {}).items():
+            if pid in (v if isinstance(v, list) else [v]):
+                out.setdefault(k, set()).add(pid)
+    return out
+
+
 def _resolve(conn, phrase, items):
+    """A description resolves to exactly one open item. The literal reading
+    (the whole phrase as payee, amount, date) and a ref reading are both
+    tried; a "ref <hex>" counts only as a generated ref the latest DELIVERED
+    rendering printed, exactly (round 6: a payee literally named "Adobe ref
+    e40c" is not a ref). Several readings, or several payments: ask."""
     t = _parse_target(phrase)
-    hits = [d for d in items if _matches(d, t)]
+    seen_names = _seen_names(conn)
+    hits = [d for d in items if _matches(d, t, seen_names)]
+    refs = _delivered_refs(conn)
+    m = _REF.search(phrase)
+    if m and m.group(1) in refs:
+        rest = (phrase[:m.start()] + phrase[m.end():]).strip(" ,")
+        rt = _parse_target(rest)
+        rt_ok = rt["vendor"] or rt["amount"] is not None or rt["day"] is not None
+        hits += [d for d in items if d["pid"] in refs[m.group(1)]
+                 and (not rt_ok or _matches(d, rt, seen_names) or (rt["vendor"] is None
+                                                       and _matches_loose(d, rt)))]
+    seen, uniq = set(), []
+    for d in hits:
+        if d["pid"] not in seen:
+            seen.add(d["pid"])
+            uniq.append(d)
+    hits = uniq
     if len(hits) == 1:
         return hits[0], None
     if not hits:
-        same = [d for d in items if t["vendor"] and t["vendor"] in
-                (kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"]))]
+        same = [d for d in items if t["vendor"] and t["vendor"] in _names(d, seen_names)]
         msg = f"Nothing open matches “{phrase}”."
         if same:
             msg += " Open for that name: " + "; ".join(views.headline(d) for d in same) + "."
         return None, msg
-    return None, (f"Which one? " + "; ".join(views.headline(d) for d in hits)
-                  + " — say it with the amount or the date.")
+    by_pid = {p: k for k, ps in refs.items() for p in ps}
+    heads = [views.headline(d) + (f" · ref {by_pid[d['pid']]}" if d["pid"] in by_pid else "")
+             for d in hits]
+    ask = "say it with the amount or the date"
+    if len(set(heads)) < len(heads) or len(set(views.headline(d) for d in hits)) < len(hits):
+        ask += ", or the ref"
+    return None, "Which one? " + "; ".join(heads) + f" — {ask}."
+
+
+def _matches_loose(d, t) -> bool:
+    """A ref plus only an amount or a date: those must agree too."""
+    if t["amount"] is not None and d["amount_minor"] != t["amount"]:
+        return False
+    if t["day"] is not None:
+        if not d["date"]:
+            return False
+        dd = dates.parse_day(d["date"])
+        if (dd.day, dd.month) != t["day"]:
+            return False
+    return True
 
 
 def _shown(conn, pid):
@@ -198,6 +281,50 @@ def _delivered_package_for(conn, quarter):
     return conn.execute("SELECT p.filename, d.settled_at FROM packages p JOIN deliveries d ON"
                         " d.package_id=p.package_id WHERE p.quarter=? AND d.status='delivered'"
                         " ORDER BY d.settled_at DESC LIMIT 1", (quarter,)).fetchone()
+
+
+def _split(line: str) -> list:
+    """A line over the limit (a "Which one?" listing a hundred charges) as
+    pieces that each fit a message: broken between words, a word longer than a
+    message between code points. Nothing is added and nothing lost (fix wave D
+    round 2: the previous splitter appended a ";" to a full piece)."""
+    if views.utf16_len(line) <= views.TELEGRAM_LIMIT:
+        return [line]
+    out, cur = [], ""
+    for word in line.split(" "):
+        cand = word if not cur else cur + " " + word
+        if views.utf16_len(cand) <= views.TELEGRAM_LIMIT:
+            cur = cand
+            continue
+        if cur:
+            out.append(cur)
+        cur = ""
+        for ch in word:
+            if views.utf16_len(cur + ch) > views.TELEGRAM_LIMIT:
+                out.append(cur)
+                cur = ""
+            cur += ch
+    return out + [cur] if cur else out
+
+
+def _pages(lines: list) -> list:
+    """The receipt as Telegram-sized messages (fix wave D, Astra S2): EVERY
+    line, in order. Paged, never summarised: spec §Flows asks for "one receipt,
+    generated from what actually committed, naming vendor and effect", with
+    "the exceptions [riding] in the same receipt" — a summary would drop the
+    names that make a misread reply visible. Each page is what views.fit_lines
+    keeps whole of the lines still to send, so every page is within
+    TELEGRAM_LIMIT by the one shared fit. `receipt` is the first page; the
+    caller sends `receipt_pages` in order."""
+    rest = [p for line in lines for p in _split(line)]
+    pages = []
+    while rest:
+        out, whole = views.fit_lines(rest)
+        if whole == 0:              # unreachable: every piece fits on its own
+            raise RuntimeError("a receipt line does not fit one message")
+        pages.append("\n".join(out))
+        rest = rest[whole:]
+    return pages
 
 
 class _Run:
@@ -225,7 +352,9 @@ class _Run:
             if pk is not None:
                 self.lines.append(f"The package sent on {dates.short_day(pk['settled_at'])} no "
                                   "longer matches — say \"rebuild it\" for a fresh one.")
-        return {"receipt": "\n".join(self.lines), "applied": self.applied, "asks": self.asks,
+        pages = _pages(self.lines)
+        return {"receipt": pages[0] if pages else "", "receipt_pages": pages,
+                "applied": self.applied, "asks": self.asks,
                 "reshow": self.reshow, "instructions": self.instructions,
                 "not_a_reply": not_a_reply}
 
@@ -339,8 +468,7 @@ def _apply(conn, run, verb, m, items):
     if verb == "all_good":
         # spec §Testing: "`all good` is a sheet reply only while a sheet is the
         # most recent thing sent" — D2 binds to the most recent DELIVERED rendering
-        last = conn.execute("SELECT render_id, kind FROM renders WHERE delivered_at IS NOT NULL"
-                            " ORDER BY delivered_at DESC, rowid DESC LIMIT 1").fetchone()
+        last = db.last_delivered(conn)
         if last is None or last["kind"] not in ("status", "check", "all"):
             run.lines.append("Nothing applied for \"all good\": the last thing I sent you was "
                              "not a sheet to approve. Name the payment, e.g. \"the Zapier one "
@@ -348,7 +476,7 @@ def _apply(conn, run, verb, m, items):
             run.unresolved += 1
             return
         said = len(run.lines)
-        for pid in views.render_items(conn, last[0]):
+        for pid in views.render_items(conn, last["render_id"]):
             d = work.describe(conn, pid)
             cur = d["current"]
             if cur is None or not views._needs_check(d) or d["candidates"]:
@@ -373,9 +501,16 @@ def _apply(conn, run, verb, m, items):
         return
     if verb == "never":
         said = kb.norm(m.group("t"))
-        name = next((d["counterparty"] for d in items
-                     if said in (kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"]))),
-                    None)
+        seen_names = _seen_names(conn)
+        fits = sorted({d["counterparty"] for d in items if said in _names(d, seen_names)})
+        if len(fits) > 1:           # the name the operator saw fits several payees: ask
+            ask = (f"Which one? “{m.group('t').strip()}” could be " + " or ".join(
+                views.field(n) for n in fits) + " — nothing applied.")
+            run.asks.append(ask)
+            run.lines.append(ask)
+            run.unresolved += 1
+            return
+        name = fits[0] if fits else None
         if name is None:
             known = kb.counterparty_for(conn, said)
             if known is None:
@@ -429,6 +564,14 @@ def _apply(conn, run, verb, m, items):
         return
     if verb == "show":
         run.instructions.append(m.group("s"))
+        return
+    if verb == "candidates":
+        d, problem = _resolve(conn, m.group("t"), items)
+        if d is None:
+            run.asks.append(problem)
+            run.lines.append(problem)
+            return
+        run.instructions.append(f"show item {d['pid']}")
         return
 
 
@@ -486,9 +629,8 @@ def _broad(conn, run, change, ok_line) -> None:
 
 
 def _last_delivered(conn):
-    r = conn.execute("SELECT render_id FROM renders WHERE delivered_at IS NOT NULL ORDER BY"
-                     " delivered_at DESC, rowid DESC LIMIT 1").fetchone()
-    return r[0] if r else None
+    r = db.last_delivered(conn)
+    return r["render_id"] if r else None
 
 
 def _set_aside_all(conn, d) -> dict:
