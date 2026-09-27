@@ -15,9 +15,9 @@ import views
 import work
 
 COLLECTION = {
-    "gmail": "Gmail stopped letting me in ({detail}) — invoices aren't being searched. "
+    "gmail": "Gmail stopped letting me in{paren} — invoices aren't being searched. "
              "Re-authorise Gmail when you can.",
-    "bank_sync": "The bank connection stopped ({detail}) — new payments aren't coming in. "
+    "bank_sync": "The bank connection stopped{paren} — new payments aren't coming in. "
                  "Re-authorise it in bank-feed.",
     "bound_account": "The bound account is gone from bank-feed — nothing is being checked "
                      "until it is linked again.",
@@ -56,20 +56,45 @@ def _delivered_lines(conn, rows) -> list:
 
 
 def pending_rendering(conn):
+    """evaluate(), the read of undelivered alerts, composition and the renders
+    INSERT all run under ONE db.tx: end_pass frees the pass marker before
+    calling here, so a fresh pass can begin, re-observe the same still-failing
+    condition and reach this function while an earlier pass's own call is
+    still in flight (fix round 1: two db.tx blocks with composition outside
+    either left a window where both could SELECT the same undelivered alert
+    and each INSERT a different render for it). One lock closes that window
+    for the read-compose-insert sequence; by itself it would still let the
+    second, later call mint a fresh duplicate render for an alert the first
+    left undelivered, so an alert already parked in an existing, undelivered
+    render is not composed into a second one — that render is returned again
+    unchanged. That IS the "an undelivered alert is offered again" rule: the
+    same offer, not a fresh one, until it is delivered (mark_rendering_delivered
+    clears it) or a new, disjoint set of alerts supersedes it."""
     with db.tx(conn):
         evaluate(conn)
-    rows = conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL ORDER BY alert_id").fetchall()
-    if not rows:
-        return None
-    lines = []
-    for a in rows:
-        if a["kind"] in COLLECTION:
-            lines.append(COLLECTION[a["kind"]].format(detail=json.loads(a["detail"])["detail"]))
-    lines.extend(_delivered_lines(conn, [a for a in rows if a["kind"] == "delivered-changed"]))
-    text = "\n".join(w for line in lines for w in views._wrap(line))
-    with db.tx(conn):
+        rows = conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL"
+                             " ORDER BY alert_id").fetchall()
+        if not rows:
+            return None
+        pending_ids = {a["render_id"] for a in rows if a["render_id"]}
+        if len(pending_ids) == 1 and all(a["render_id"] for a in rows):
+            rid = next(iter(pending_ids))
+            r = conn.execute("SELECT text FROM renders WHERE render_id=? AND"
+                             " delivered_at IS NULL", (rid,)).fetchone()
+            if r is not None:
+                return {"render_id": rid, "text": r["text"]}
+        lines = []
+        for a in rows:
+            if a["kind"] in COLLECTION:
+                detail = json.loads(a["detail"])["detail"]
+                paren = f" ({detail})" if detail else ""
+                lines.append(COLLECTION[a["kind"]].format(paren=paren))
+        lines.extend(_delivered_lines(conn, [a for a in rows if a["kind"] == "delivered-changed"]))
+        text = "\n".join(w for line in lines for w in views._wrap(line))
         rid = f"r{db.next_seq(conn)}"
         conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                      " membership_json) VALUES (?, 'alert', ?, ?, ?, '[]')",
                      (rid, db.canonical({"alerts": [a["alert_id"] for a in rows]}), db.now(), text))
+        conn.execute("UPDATE alerts SET render_id=? WHERE alert_id IN (%s)"
+                     % ",".join("?" * len(rows)), [rid] + [a["alert_id"] for a in rows])
     return {"render_id": rid, "text": text}

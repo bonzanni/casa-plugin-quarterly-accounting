@@ -43,6 +43,21 @@ def open_fresh(path, barrier):
     conn.close()
 
 
+def pending_rendering(path, barrier, out):
+    """Both siblings call this on the SAME already-seeded store, released by
+    the barrier as near as the OS gets to the same instant, modeling end_pass
+    freeing the pass marker and a second pass reaching alerts.pending_rendering
+    while the first pass's own call is still in flight."""
+    import db
+    import alerts
+    conn = db.open_store(path)
+    try:
+        barrier.wait(30)
+        out.put(alerts.pending_rendering(conn))
+    finally:
+        conn.close()
+
+
 def machine_pair(path, pid, doc_id, token, expected_revision, snapshot, out):
     import db
     import matches
