@@ -11,6 +11,7 @@ class TestHarness(TempEnv):
     def setUp(self):
         super().setUp()
         self.bf = bankfeed.Ledger(self.tmp / "bankfeed")
+        self.addCleanup(self.bf.close)
         self.bf.account()
 
     def test_floor_tree_is_bank_feed_0_18_0(self):
