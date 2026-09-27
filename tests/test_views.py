@@ -358,6 +358,70 @@ class TestSheet(Base):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM residue WHERE shown_render"
                                            " IS NULL").fetchone()[0], 0)
 
+    def test_an_item_no_longer_chased_stays_missing_even_if_never_searched(self):
+        self.add(counterparty="Found")
+        self.add(counterparty="Dropped", searched=False)
+        work.stop_chasing(self.conn, "2026-Q3")
+        text = self.render()["text"]
+        self.assertIn("Dropped · EUR 100.00 · 14 Sep\nNo longer chased.", text)
+        self.assertIn("2 transactions, 2 missing a document.", flat(text))
+        self.assertNotIn("the next pass looks", text)
+        self.assertNotIn("Not searched yet", text)
+
+    def test_a_merge_carrying_accepted_missing_keeps_the_survivor_listed(self):
+        import ledger
+        import lineage
+        survivor = self.add(counterparty="Kept", searched=False)
+        loser = self.add(counterparty="Kept", searched=False)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET search_state='accepted-missing'"
+                              " WHERE pid=?", (loser,))
+            ledger.merge(self.conn, survivor, loser)
+            self.conn.execute("UPDATE projections SET merged_into=? WHERE pid=?",
+                              (survivor, loser))
+            lineage.settle(self.conn, survivor)
+        text = self.render()["text"]
+        self.assertIn("MISSING\nKept · ", text)
+        self.assertNotIn("the next pass looks", text)
+
+    def test_an_interrupted_pass_says_not_checked_once(self):
+        self.add(counterparty="Seen")
+        self.add(counterparty="Unreached", searched=False)
+        passes.end_pass(self.conn, self.token, "interrupted", {"checked": 1, "total": 2})
+        text = self.render()["text"]
+        self.assertIn("Review interrupted.\n1 of 2 new payments checked.\n1 not checked yet. Saved.",
+                      text)
+        self.assertEqual(text.count("not checked yet"), 1)
+
+    def test_degraded_counts_agree_with_coverage_and_skip_the_item_view(self):
+        old = self.add(counterparty="OldCo", booking_date="2026-05-04")
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE binding SET watermark='2026-04-01'")
+        self.settle(old)
+        pid = self.add(counterparty="NowCo")
+        passes.record_probe(self.conn, self.token, "gmail", False, "auth failed")
+        text = self.render()["text"]
+        self.assertIn("1 invoice already missing.", text)
+        self.assertIn("1 transaction, 1 missing a document.", flat(text))
+        self.assertIn("+1 older still missing (Q2)", text)
+        item = self.render("item", pid=pid)["text"]
+        self.assertTrue(item.startswith("NowCo · "), item)
+
+    def test_a_cut_page_keeps_its_continuation_phrase(self):
+        kb.upsert_counterparty(self.conn, "Big", source="portal",
+                               document_link="https://big.example/" + "x" * 5000)
+        self.add(counterparty="Big", amount_minor=100, booking_date="2026-07-01")
+        for i in range(10):
+            self.add(counterparty=f"Small{i}", amount_minor=200 + i)
+        r = views.build_review(self.conn, view="missing", quarter="2026-Q3", page=1)
+        self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+        self.assertIsNotNone(r["next"])
+        self.assertTrue(r["text"].endswith('say "more".'), r["text"][-80:])
+        r2 = views.build_review(self.conn, view="missing", quarter="2026-Q3", **{
+            k: r["next"][k] for k in ("page", "after")})
+        self.assertIn("Small9", r2["text"])
+        self.assertIsNone(r2["next"])
+
 
 class TestRenderLog(Base):
     def test_rendering_is_not_showing(self):

@@ -137,7 +137,12 @@ def _open_required(d):
 
 
 def _searched(d):
-    return bool(d["search"].get("last_searched_at")) or d["identity_question"]
+    """Looked for, or no longer to be looked for: an item the operator stopped
+    chasing (or a merge carried `accepted-missing` onto) is never searched
+    again, and stays "still open, still listed" as missing (spec §"What a pass
+    works on"), never "the next pass looks"."""
+    return (bool(d["search"].get("last_searched_at")) or d["identity_question"]
+            or d["search_state"] != "active")
 
 
 def _is_missing(d):
@@ -173,7 +178,8 @@ def _missing_detail(d) -> list:
         return ["Who was this payment to?"]
     out = []
     if not d["search"].get("last_searched_at"):
-        out.append("Not searched yet.")
+        if d["search_state"] == "active":
+            out.append("Not searched yet.")
     elif d["search"].get("incomplete"):
         out.append("Search incomplete — resumes next pass.")
     if d["link"]:
@@ -350,8 +356,6 @@ def _compose(conn, view, q, items, members, lead):
     b = binding.get(conn)
     parts = {"view": view, "head": [], "announce": [], "sections": [], "silent": [],
              "tail": None}
-    parts["head"] = _degraded_block(gmail_down, interrupted, missing + older_missing, unsearched)
-
     if view == "item":
         d = items[0]
         lines = [headline(d), _item_sentence(d), *evidence(d)]
@@ -369,6 +373,8 @@ def _compose(conn, view, q, items, members, lead):
               "rest": f"Nice to have · {dates.quarter_label(q)}",
               "older": "Older, still missing",
               "quarter": f"Accounting · {dates.quarter_label(q)}"}
+    # the same quarter figure the coverage line prints; older ones have their own line
+    parts["head"] = _degraded_block(gmail_down, interrupted, missing, unsearched)
     if parts["head"]:
         parts["head"].append("")
     parts["head"].append(titles[view])
@@ -419,7 +425,9 @@ def _compose(conn, view, q, items, members, lead):
             counts = []
             if uncl:
                 counts.append(f"{len(uncl)} not yet classified — the categories aren't in yet.")
-            if unsearched and not gmail_down:
+            # one line, one source: an interrupted pass's lead already says how
+            # many it did not reach, from the run record
+            if unsearched and not gmail_down and interrupted is None:
                 counts.append(f"{_plural(len(unsearched), 'new payment')} not checked yet"
                               " — the next pass looks.")
             if counts:
@@ -538,10 +546,13 @@ def _page(parts, after, first):
     return lines, chosen, _key(*page[-1])
 
 
-def _fit(lines) -> str:
-    """The last resort: whole lines up to the limit, and a closing line. Never
-    returns text over TELEGRAM_LIMIT."""
-    closing = "The rest did not fit in one message."
+FIT_CLOSING = "The rest did not fit in one message."
+
+
+def _fit(lines, closing=FIT_CLOSING) -> str:
+    """The last resort: whole lines up to the limit, and a closing line (which
+    carries the continuation phrase when there is one). Never returns text over
+    TELEGRAM_LIMIT."""
     text = _text(lines)
     if utf16_len(text) <= TELEGRAM_LIMIT:
         return text
@@ -625,8 +636,13 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
                     nxt = {"view": "all" if view == "status" else view, "quarter": q, "page": 1}
             cut = utf16_len(text) > TELEGRAM_LIMIT
             if cut:
-                # nothing it prints is bound: the text may not show every block chosen
-                text, chosen = _fit(lines), []
+                # nothing it prints is bound: the text may not show every block chosen.
+                # The closing line carries the phrase `next` answers, so it is never cut.
+                closing = FIT_CLOSING
+                if nxt is not None:
+                    closing = (MORE_LINE if "after" in nxt
+                               else 'The rest did not fit — say "all of them".')
+                text, chosen = _fit(lines, closing), []
             if page in (None, 1) and parts["announce"] and not cut \
                     and parts["announce"][0] in lines:
                 scope["announce_watermark"] = True
