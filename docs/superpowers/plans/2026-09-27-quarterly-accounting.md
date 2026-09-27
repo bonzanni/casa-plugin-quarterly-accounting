@@ -5170,9 +5170,11 @@ class TestInstance(Base):
                         {"row_id": 50, "first_seen": "2026-09-01T00:00:00Z"}])
         self.assertEqual(self.live()[old]["ended"], "erased")
         self.assertEqual(len(out["admitted"]), 2)
-        import work
-        gone = work.describe(self.conn, old)                  # the NEW ledger's row 1 is not it
-        self.assertEqual((gone["counterparty"], gone["amount_minor"]), ("Adobe", 10000))
+        # the NEW ledger's row 1 is not it: an erased lineage reads no row, keeps its facts
+        proj = lineage.projection(self.conn, old)
+        self.assertIsNone(lineage.live_row(self.conn, proj))
+        saved = json.loads(proj["last_facts_json"])
+        self.assertEqual((saved["counterparty"], saved["amount_minor"]), ("Adobe", 10000))
         b = binding.get(self.conn)
         self.assertEqual((b["ledger_reset_ack"], b["ledger_instance"]), (0, self.OTHER))
         self.assertEqual({r[0] for r in self.conn.execute("SELECT row_id FROM aliases")}, {1, 50})
@@ -6777,20 +6779,20 @@ class TestEndsAndErasure(Base):
         self.assertEqual([n for n in self.bf.notes(rid)
                           if n.startswith("Accounting revision ")][-1], current)
 
-    def test_every_repair_write_carries_the_ledger_fence(self):
-        # round p11 (Astra S2): the ledger is re-minted between the observation and the
-        # write; with expected_ledger on the write, nothing lands, for each of the three tools
+    def _remint_before_the_write(self, rid, expected_tool, prepare):
+        """The ledger is re-minted between the observation and the ONE write the
+        server asks for; with expected_ledger on that write nothing lands."""
         import store as bf_store
-        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        prepare(rid)
         self.new_pass()
-        item = sweep.list_projections(self.conn, token=self.token)["projections"][0]
-        rid = item["row_id"]
-        self.bf.call("tag_transaction", row_ids=[rid], tags=["acct::matched"],
-                     workflow="acct@0.1.0", expected_generation=self.bf.generation())
+        item = next(i for i in sweep.list_projections(self.conn, token=self.token)["projections"]
+                    if i["row_id"] == rid)
         real_call = self.bf.call
+        calls = []
 
         def reminting_call(tool, **args):
             if tool in ("tag_transaction", "untag_transaction", "add_note"):
+                calls.append(tool)
                 self.bf.conn.execute("UPDATE meta SET value=? WHERE key=?",
                                      ("f" * 32, bf_store.LEDGER_INSTANCE_KEY))
                 self.bf.conn.commit()
@@ -6801,7 +6803,41 @@ class TestEndsAndErasure(Base):
             sim.observe_and_repair(self.conn, self.bf, self.token, item)
         except db.Refusal:
             pass
+        finally:
+            self.bf.call = real_call
+        self.assertEqual(calls[:1], [expected_tool])
         self.assertEqual((sorted(self.bf.tags(rid)), list(self.bf.notes(rid))), before)
+
+    def test_every_repair_write_carries_the_ledger_fence(self):
+        # rounds p11/p12 (Astra S2): each of the three annotation tools, as the FIRST
+        # write the server requests, is refused on a re-minted ledger
+        self.bf.fetch([self.bf.row("2026-07-%02d" % d, ref="R%d" % d, amount=100 + d)
+                       for d in (5, 6, 7)])
+        self.new_pass()
+        ids = [r["row_id"] for r in self.bf.rows(state="active")]
+        wf = {"workflow": "acct@0.1.0"}
+
+        def stale_matched(rid):              # first request: untag acct::matched
+            self.bf.call("tag_transaction", row_ids=[rid], tags=["acct::matched"],
+                         expected_generation=self.bf.generation(), **wf)
+
+        def nothing(rid):                    # first request: tag acct::open
+            pass
+
+        def tagged_no_note(rid):             # first request: add the accounting note
+            self.bf.call("tag_transaction", row_ids=[rid], tags=["acct::open"],
+                         expected_generation=self.bf.generation(), **wf)
+        cases = (("untag_transaction", stale_matched), ("tag_transaction", nothing),
+                 ("add_note", tagged_no_note))
+        import store as bf_store
+        original = self.bf.instance()
+        for rid, (tool, prepare) in zip(ids, cases):
+            with self.subTest(tool=tool):
+                # back to the bound ledger before each case (the previous one re-minted it)
+                self.bf.conn.execute("UPDATE meta SET value=? WHERE key=?",
+                                     (original, bf_store.LEDGER_INSTANCE_KEY))
+                self.bf.conn.commit()
+                self._remint_before_the_write(rid, tool, prepare)
 
     def test_not_found_for_a_row_still_in_the_snapshot_is_refused(self):
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
