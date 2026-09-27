@@ -119,7 +119,8 @@ pass, whichever comes first:
 2. For an operator-triggered pass that will be long (first run, a catch-up), say one line first.
 3. Delegate to the finance specialist, sync mode, the task "quarterly-accounting pass" with
    context `pass_token=<token>` and this skill's section "The specialist's pass". Wait for its
-   work order. If it reports the pass stopped, go to step 6 with outcome `failed`.
+   work order. If it reports the pass stopped (a setup condition, a refused import, a
+   stop-the-pass refusal), go to step 6 with outcome `stopped`.
 4. **Gmail round** (skip it when `check_setup` says searching is off). Your first Gmail call
    is the Gmail probe: `record_probe(pass_token, kind="gmail", ok=…, detail=…)` with what it
    showed. For each item in the work order's `search` list, run its ladder of narrow queries
@@ -134,7 +135,7 @@ pass, whichever comes first:
    self-addressed mail with attachments, and sweep your Telegram inbox as above.
 5. If anything was filed, delegate "judge the newly filed documents" with the same
    `pass_token`.
-6. `end_pass(pass_token, outcome, report)` — outcome `complete`, `interrupted` or `failed`;
+6. `end_pass(pass_token, outcome, report)` — outcome `complete`, `interrupted`, `stopped` or `failed`;
    report `{checked, total, not_searched}`. If it returns `speak`, send its text verbatim, call
    `mark_rendering_delivered` with its `render_id`, then output `<silent/>`. If not: on the
    cron, output `<silent/>` and nothing else; for the operator, render and send
@@ -153,17 +154,22 @@ chasing" are Ellen's, on the operator's request: never call `build_quarterly_pac
 1. **Probes.** If bank-feed's tools are not visible to you, `record_probe(pass_token,
    kind="bank_tools", ok=false)` and stop; otherwise record it `ok=true`. Call
    `list_accounts` and `record_probe(pass_token, kind="bank_accounts", ok=true,
-   data={"accounts": [{account_id, category, label}, …]})` — this one first: it is what
+   data={"accounts": [{account_id, category, label}, …]})` — before the sync and the ledger probe: it is what
    binds the account. Call `sync`, then `record_probe(pass_token, kind="bank_sync", ok=…,
-   detail=…)`. Call `list_backups`, then `record_probe(pass_token, kind="ledger", ok=true,
+   detail=…)` from that sync's actual outcome (ok=false with its error if it failed). Call
+   `list_backups` once and read the generation, the registered backups and the instance
+   from that ONE answer, then `record_probe(pass_token, kind="ledger", ok=true,
    data={"generation": <Restore generation>, "registered": {<workflow>: <backup id>, …},
    "instance": <the "Ledger instance:" id>})` (read each value by its label: bank-feed may
    prepend sentences). Then `check_setup()`. If `can_run` is false, stop and return its
    `conditions`.
 2. **Classification.** tx-classifier drains its queue on `sync`'s trailer, in this same
-   session. Let it finish. This plugin never classifies.
+   session. Wait for it to finish. This plugin never classifies and never applies rules
+   itself.
 3. **Snapshot.** `export_history(format="csv")`, then `import_ledger_export(path, pass_token,
    ledger_instance=<the reply's "Ledger instance:" id>)`. Read both values by their labels.
+   If the import is refused, stop: return the refusal, and the pass ends `stopped` —
+   nothing after this step runs.
 4. **Ends.** For each `erase_candidates` row: `get_transaction(row_id)`. If it answers
    `no transaction #N`, call `record_observation(pid, pass_token, not_found=true)`. Do this
    before any matching, so freed documents are free for this pass.
