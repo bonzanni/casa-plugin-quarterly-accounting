@@ -34,3 +34,41 @@ class TempEnv(unittest.TestCase):
         os.environ["CLAUDE_PLUGIN_DATA"] = str(self.data)
         os.environ["CASA_HANDOFF_DIR"] = str(self.handoff)
         os.environ["CASA_PLUGIN_OUTBOX_DIR"] = str(self.outbox)
+
+
+class StoreCase(TempEnv):
+    def setUp(self):
+        super().setUp()
+        import db
+        self.conn = db.open_store()
+        self.addCleanup(self.conn.close)
+
+    def bind(self, account="acc-biz", label="Zakelijk", watermark="2026-07-01"):
+        import binding
+        import db
+        binding.bind_account(self.conn, account, label)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE binding SET watermark=?", (watermark,))
+
+    LEDGER = "a" * 32             # the bank-feed ledger instance id the fixtures bind to
+
+    def pass_(self, trigger="test", generation=0, registered=None, accounts=None,
+              instance=None):
+        """End any live pass, begin a new one, record the probes a real pass
+        records first (the ledger probe carries list_backups' instance id).
+        Returns the new pass token."""
+        import passes
+        cur = passes.current_pass(self.conn)
+        if cur is not None:
+            passes.end_pass(self.conn, cur["generation"], "complete", {})
+        token = passes.begin_pass(self.conn, trigger)["pass_token"]
+        b = self.conn.execute("SELECT account_id FROM binding").fetchone()
+        accts = accounts if accounts is not None else (
+            [{"account_id": b[0], "category": "company", "label": "Zakelijk"}] if b else [])
+        passes.record_probe(self.conn, token, "bank_tools", True)
+        passes.record_probe(self.conn, token, "bank_sync", True)
+        passes.record_probe(self.conn, token, "bank_accounts", True, data={"accounts": accts})
+        passes.record_probe(self.conn, token, "ledger", True,
+                            data={"generation": generation, "registered": registered or {},
+                                  "instance": instance or self.LEDGER})
+        return token
