@@ -228,6 +228,32 @@ class TestPassStops(Base):
         self.assertEqual(passes.begin_pass(self.conn, "cron")["status"], "started")
 
 
+    def test_a_sweep_refusal_ends_the_pass_stopped(self):
+        # the row changes under the pass AFTER the import proved the ledger: the
+        # sweep's record_observation refuses (first_seen mismatch, poisoned); the
+        # pass must END (stopped) so no live marker answers "Already checking".
+        bf = self.bf
+        bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000)])
+        self.first_pass()
+        rid = self.active()[0]["row_id"]
+        tags_before = bf.tags(rid)
+        export = bf.export
+
+        def export_then_change():
+            path = export()
+            bf.conn.execute("UPDATE transactions SET first_seen='2026-09-21T08:00:00Z'"
+                            " WHERE row_id=?", (rid,))
+            bf.conn.commit()
+            return path
+        bf.export = export_then_change
+        out = sim.run_pass(self.conn, bf)
+        self.assertIsNotNone(out["import"])                   # the import itself succeeded
+        self.assertIn("stop the pass", out["refused"])
+        self.assertEqual(out["end"]["outcome"], "stopped")
+        self.assertIsNone(passes.current_pass(self.conn))
+        self.assertEqual(bf.tags(rid), tags_before)
+        self.assertEqual(passes.begin_pass(self.conn, "cron")["status"], "started")
+
     def test_a_failed_sync_is_probed_as_failed_and_does_not_advance_bank_through(self):
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000)])

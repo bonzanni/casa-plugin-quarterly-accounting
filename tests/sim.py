@@ -225,14 +225,27 @@ def run_pass(conn, bf, trigger="cron", sync=None) -> dict:
     except db.Refusal as exc:
         # the ledger switched or changed under the pass: nothing was imported,
         # the pass stops (its bank writes were poisoned by the import)
-        end = passes.end_pass(conn, token, "stopped", {"refused": str(exc)})
-        return {"token": token, "import": None, "gate": gate, "triage": None, "end": end,
-                "refused": str(exc)}
-    for c in imp["erase_candidates"]:
-        if bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
-            sweep.record_observation(conn, pid=c["pid"], token=token, not_found=True)
-    sweep_cycle(conn, bf, token)
+        return _stopped(conn, token, gate, None, None, exc)
+    try:
+        for c in imp["erase_candidates"]:
+            if bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
+                sweep.record_observation(conn, pid=c["pid"], token=token, not_found=True)
+        sweep_cycle(conn, bf, token)
+    except db.Refusal as exc:
+        return _stopped(conn, token, gate, imp, None, exc)
     tri = triage(conn, bf, token)
-    sweep_cycle(conn, bf, token)          # the annotations for what triage just decided
+    try:
+        sweep_cycle(conn, bf, token)      # the annotations for what triage just decided
+    except db.Refusal as exc:
+        return _stopped(conn, token, gate, imp, tri, exc)
     end = passes.end_pass(conn, token, "complete", {})
     return {"token": token, "import": imp, "gate": gate, "triage": tri, "end": end}
+
+
+def _stopped(conn, token, gate, imp, tri, exc) -> dict:
+    """A refusal is the server saying stop (the ledger switched or changed under
+    the pass, and its bank writes are poisoned): END the pass, stopped, so its
+    marker does not answer "Already checking" to the operator for hours."""
+    end = passes.end_pass(conn, token, "stopped", {"refused": str(exc)})
+    return {"token": token, "import": imp, "gate": gate, "triage": tri, "end": end,
+            "refused": str(exc)}
