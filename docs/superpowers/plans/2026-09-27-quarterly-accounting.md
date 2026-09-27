@@ -1626,6 +1626,12 @@ class TestTransitions(unittest.TestCase):
         c = st.cands[10]
         self.assertEqual((c.state, c.author, c.activation), ("matched", "operator", 1))
 
+    def test_an_operator_activation_is_checked_against_occupancy_too(self):
+        st = F.fold([pair(5, 10, doc=99)], occupied=lambda d, m: d == 99)
+        self.assertEqual(states(st), {10: "conflicted"})
+        self.assertEqual([(r.match_id, r.to, r.cause) for r in st.produced],
+                         [(10, "conflicted", "occupied")])
+
     def test_occupancy_retires_the_activation_conflicted(self):
         st = F.fold([auto_pair(5, 10, doc=99)], occupied=lambda d, m: d == 99)
         self.assertEqual(states(st), {10: "conflicted"})
@@ -3051,6 +3057,24 @@ class TestSelfCheck(StoreCase):
 
 
 class TestReset(StoreCase):
+    def test_a_reader_holding_the_log_makes_the_erasure_incomplete(self):
+        import sqlite3
+        self.bind()
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
+                              " VALUES ('SENTINEL-NAME', '[]', 'x')")
+        reader = sqlite3.connect(str(self.data / db.DB_NAME), isolation_level=None)
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM counterparties").fetchone()   # holds a snapshot
+        out = binding.reset_store(self.conn)
+        self.assertEqual(out["erasure"], "incomplete")
+        reader.execute("COMMIT")
+        reader.close()
+        out = binding.reset_store(self.conn)
+        self.assertEqual(out["erasure"], "complete")
+        for f in self.data.glob(db.DB_NAME + "*"):
+            self.assertNotIn(b"SENTINEL-NAME", f.read_bytes(), f.name)
+
     def test_reset_wipes_to_fresh_and_fences_a_stale_pass(self):
         self.bind()
         t = self.pass_()
@@ -3517,7 +3541,12 @@ def reset_store(conn) -> dict:
             problems.append(f"{sub}/ could not be removed: {exc}")
     try:
         conn.execute("VACUUM")
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        busy, log_frames, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if busy or log_frames:
+            # Another session still reads an older snapshot: erased rows stay in the
+            # WAL until it lets go (round p11, Astra S2). Never report that as complete.
+            problems.append("another session is still reading the store, so erased rows "
+                            "remain in its write-ahead log until it closes; try again")
     except Exception as exc:  # the rows are gone; their free pages may not be
         problems.append(f"the space reclaim did not finish: {exc}")
     if problems:
@@ -3990,6 +4019,12 @@ def add_residue(conn, pid, reason: str, detail: str = "") -> None:
 
 
 def live_row(conn, proj):
+    """The destination row in the latest snapshot. An ERASED lineage has none,
+    ever: its id belongs to a ledger (or a row) that is gone, and after a
+    re-bind the same number can name another ledger's payment (round p11,
+    Astra S2). Its last known facts stay in last_facts_json."""
+    if proj["ended"] == "erased":
+        return None
     r = conn.execute("SELECT * FROM bank_rows WHERE row_id=?", (proj["dest_row_id"],)).fetchone()
     return dict(r) if r is not None else None
 
@@ -5129,12 +5164,18 @@ class TestInstance(Base):
         binding.acknowledge_ledger_reset(self.conn)
         self.token = self.pass_(instance=self.OTHER)
         self.instance = self.OTHER
-        out = self.imp([{"row_id": 50, "first_seen": "2026-09-01T00:00:00Z"}])
+        out = self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z",
+                         "counterparty": "Zapier", "amount_minor": 9900,
+                         "booking_date": "2026-09-02", "value_date": "2026-09-02"},
+                        {"row_id": 50, "first_seen": "2026-09-01T00:00:00Z"}])
         self.assertEqual(self.live()[old]["ended"], "erased")
-        self.assertEqual(len(out["admitted"]), 1)
+        self.assertEqual(len(out["admitted"]), 2)
+        import work
+        gone = work.describe(self.conn, old)                  # the NEW ledger's row 1 is not it
+        self.assertEqual((gone["counterparty"], gone["amount_minor"]), ("Adobe", 10000))
         b = binding.get(self.conn)
         self.assertEqual((b["ledger_reset_ack"], b["ledger_instance"]), (0, self.OTHER))
-        self.assertEqual({r[0] for r in self.conn.execute("SELECT row_id FROM aliases")}, {50})
+        self.assertEqual({r[0] for r in self.conn.execute("SELECT row_id FROM aliases")}, {1, 50})
 
     def test_the_acknowledgement_is_consumed_by_any_successful_import(self):
         # round p3 (Astra S1): an acknowledgement that met the same ledger stayed armed
@@ -6735,6 +6776,32 @@ class TestEndsAndErasure(Base):
         self.cycle()
         self.assertEqual([n for n in self.bf.notes(rid)
                           if n.startswith("Accounting revision ")][-1], current)
+
+    def test_every_repair_write_carries_the_ledger_fence(self):
+        # round p11 (Astra S2): the ledger is re-minted between the observation and the
+        # write; with expected_ledger on the write, nothing lands, for each of the three tools
+        import store as bf_store
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.new_pass()
+        item = sweep.list_projections(self.conn, token=self.token)["projections"][0]
+        rid = item["row_id"]
+        self.bf.call("tag_transaction", row_ids=[rid], tags=["acct::matched"],
+                     workflow="acct@0.1.0", expected_generation=self.bf.generation())
+        real_call = self.bf.call
+
+        def reminting_call(tool, **args):
+            if tool in ("tag_transaction", "untag_transaction", "add_note"):
+                self.bf.conn.execute("UPDATE meta SET value=? WHERE key=?",
+                                     ("f" * 32, bf_store.LEDGER_INSTANCE_KEY))
+                self.bf.conn.commit()
+            return real_call(tool, **args)
+        self.bf.call = reminting_call
+        before = (sorted(self.bf.tags(rid)), list(self.bf.notes(rid)))
+        try:
+            sim.observe_and_repair(self.conn, self.bf, self.token, item)
+        except db.Refusal:
+            pass
+        self.assertEqual((sorted(self.bf.tags(rid)), list(self.bf.notes(rid))), before)
 
     def test_not_found_for_a_row_still_in_the_snapshot_is_refused(self):
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
@@ -10894,7 +10961,8 @@ class TestSkill(TempEnv):
                                         "write_error", "observed_tags", "observed_notes",
                                         "instructions", "speak", "reshow", "true", "false",
                                         "bank_writes", "request_id", "labels", "runners_up",
-                                        "can_run", "remaining_in_cycle", "erase_candidates"}:
+                                        "can_run", "remaining_in_cycle", "erase_candidates",
+                                        "expected_ledger"}:
                 continue
             if "_" in n:
                 self.assertIn(n, ours | EXTERNAL, n)
