@@ -50,6 +50,31 @@ class TestKB(StoreCase):
             kb.upsert_counterparty(self.conn, "Zapier", patterns=["bck*zapier"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 1)
 
+    def test_an_update_adding_another_entrys_name_as_a_pattern_is_refused(self):
+        kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
+        kb.upsert_counterparty(self.conn, "Stripe")
+        with self.assertRaises(db.Refusal) as cm:
+            kb.upsert_counterparty(self.conn, "Stripe", patterns=["zapier"])
+        self.assertIn("Zapier", str(cm.exception))
+        with self.assertRaises(db.Refusal):
+            kb.upsert_counterparty(self.conn, "Stripe", patterns=["bck*zapier "])
+        self.assertEqual(kb.get_counterparty(self.conn, "Stripe")["patterns"], [])
+
+    def test_every_upsert_validates_the_entrys_own_name_and_held_patterns(self):
+        # round B2 (Terra S1, controller ruling): ALL of an upsert's names and
+        # patterns are checked against every other entry, on create AND update.
+        # No API path reaches a collided store any more (a 3000-sequence fuzz of
+        # upsert/set_expectation found none), so the state is built directly: an
+        # update touching an entry that collides must refuse, never pass silently.
+        kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
+                              " VALUES ('bck*zapier', '[]', 'x')")
+        with self.assertRaises(db.Refusal):
+            kb.upsert_counterparty(self.conn, "BCK*ZAPIER", notes="monthly")
+        with self.assertRaises(db.Refusal):
+            kb.upsert_counterparty(self.conn, "Zapier", notes="monthly")
+
     def test_an_entry_may_list_its_own_name_as_a_pattern(self):
         kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
         kb.upsert_counterparty(self.conn, "Zapier", patterns=["ZAPIER"], notes="monthly")

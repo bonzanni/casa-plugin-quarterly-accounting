@@ -48,7 +48,12 @@ class TestCustody(StoreCase):
 
     def test_a_crash_before_indexing_leaves_only_a_reapable_file(self):
         path = self.publish("a.pdf", PDF)
-        with mock.patch.object(db, "tx", side_effect=RuntimeError("crash")):
+        real = documents._install
+
+        def install_then_crash(*a, **kw):     # bytes installed, index row not committed
+            real(*a, **kw)
+            raise RuntimeError("crash")
+        with mock.patch.object(documents, "_install", install_then_crash):
             with self.assertRaises(RuntimeError):
                 ingest(self.conn, path)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 0)
@@ -176,3 +181,25 @@ class TestCustodyUnderConcurrency(StoreCase):
         self.assertEqual(reaped, 0)
         self.assertEqual(self._rows_without_bytes(), [])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)
+
+    def test_a_stale_pass_ingest_waiting_behind_a_reset_installs_nothing(self):
+        # round B2 (Astra S2): the ingest captured its bytes, waited behind reset's
+        # custody lock, then installed them BEFORE its token (fenced by the reset)
+        # was refused — reset said "complete" and the bytes were back on disk
+        import passes
+        token = passes.begin_pass(self.conn, "cron")["pass_token"]
+        path = self.publish("a.pdf", PDF)
+
+        def stale_ingest(c):
+            try:
+                ingest(c, path, token=token)
+            except db.Refusal as exc:
+                return f"refused: {exc}"
+            return "written"
+        reset, res = self._race(_procs.reset_paused, (), "the row wipe", stale_ingest)
+        self.assertEqual(reset["erasure"], "complete", reset)
+        self.assertTrue(res.startswith("refused"), res)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 0)
+        root = self.data / "documents"
+        self.assertEqual([f for f in root.rglob("*") if f.is_file()] if root.exists() else [],
+                         [])

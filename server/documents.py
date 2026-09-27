@@ -107,13 +107,16 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
     if ext not in ALLOWED_EXT:
         raise db.Refusal(f"{name}: only PDFs, images and XML invoices are filed")
     sha = hashlib.sha256(data).hexdigest()
-    # Bytes installed before the row (a crash leaves an orphan to reap, never a
-    # row over missing bytes); the custody lock spans both, so a concurrent
-    # reset_store or reap_orphans cannot remove the bytes in between.
+    # Under the custody lock, so a concurrent reset_store or reap_orphans cannot
+    # remove the bytes between install and index. Every refusal fires BEFORE the
+    # install (round B2, Astra S2: a pass fenced by a reset while this ingest
+    # waited for the lock must not put bytes back after the reset reported
+    # complete). Bytes are still installed before the row commits: a crash
+    # leaves an orphan to reap, never a row over missing bytes.
     with db.custody_lock():
-        _install(data, sha, ext)
         with db.tx(conn):
             passes.check_token(conn, token)
+            _install(data, sha, ext)
             existing = conn.execute("SELECT doc_id FROM documents WHERE sha256=?",
                                     (sha,)).fetchone()
             if existing is not None:
