@@ -125,3 +125,33 @@ class StoreCase(TempEnv):
         import lineage
         with db.tx(self.conn):
             return lineage.settle(self.conn, pid)
+
+    EXPORT_COLS = ("row_id", "account_id", "provider_ref", "provider_ref_kind", "match_method",
+                   "match_confidence", "needs_review", "review_reason", "state_reason",
+                   "identity_key", "occurrence", "booking_date", "value_date", "amount_minor",
+                   "currency", "direction", "status", "counterparty", "remittance",
+                   "first_seen", "last_seen", "state", "superseded_by")
+
+    def export_csv(self, rows):
+        """A synthetic export with bank-feed 0.18.0's column set (raw_json
+        excluded, as its EXPORT_EXCLUDE says). Used only where a test pins
+        this plugin's resolution logic; bank-feed behaviour is pinned in
+        test_ledger_real.py against the real tree. Published straight through
+        casa_handoff, as bank-feed's export_history does."""
+        import casa_handoff
+        import csv
+        import io
+        buf = io.StringIO(newline="")
+        w = csv.DictWriter(buf, fieldnames=self.EXPORT_COLS)
+        w.writeheader()
+        for r in rows:
+            full = {"account_id": "acc-biz", "needs_review": 0, "identity_key": "ik%d" % r["row_id"],
+                    "occurrence": 0, "booking_date": "2026-07-03", "value_date": "2026-07-03",
+                    "amount_minor": 10000, "currency": "EUR", "direction": "DBIT",
+                    "status": "BOOK", "counterparty": "Adobe", "remittance": "",
+                    "first_seen": "2026-07-03T08:00:00Z", "last_seen": "2026-07-03T08:00:00Z",
+                    "state": "active", "superseded_by": ""}
+            full.update(r)
+            w.writerow({k: ("" if full.get(k) is None else full.get(k, "")) for k in self.EXPORT_COLS})
+        return casa_handoff.publish("bank-feed", "ledger-export-test.csv",
+                                    data=buf.getvalue().encode())["path"]
