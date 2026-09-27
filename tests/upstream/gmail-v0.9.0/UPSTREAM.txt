@@ -1,0 +1,5 @@
+repo: bonzanni/casa-plugin-gmail
+tag: v0.9.0
+commit: fce8ed4
+path: server/sent_log.py
+purpose: test-only; pins why an uncertain email is never retried automatically
