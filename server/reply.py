@@ -140,8 +140,16 @@ def _open_items(conn) -> list:
     return out
 
 
+_REF = re.compile(r"\bref\s+([0-9a-f]{4,64})\b")
+
+
 def _parse_target(phrase: str) -> dict:
     p = phrase.strip()
+    ref = None
+    m = _REF.search(p)
+    if m:                   # the "ref …" a view prints on payments that would print alike
+        ref = m.group(1)
+        p = (p[:m.start()] + p[m.end():]).strip(" ,")
     amount = None
     m = _AMOUNT.search(p)
     if m:
@@ -154,13 +162,15 @@ def _parse_target(phrase: str) -> dict:
         day = (int(m.group(1)), _MONTHS[m.group(2)[:3]])
         p = (p[:m.start()] + p[m.end():]).strip()
     p = re.sub(r"^(?:the|from|on)\s+|\s+(?:one|from|on)$", "", p).strip()
-    return {"vendor": kb.norm(p) or None, "amount": amount, "day": day}
+    return {"vendor": kb.norm(p) or None, "amount": amount, "day": day, "ref": ref}
 
 
 def _matches(d, t) -> bool:
     if t["vendor"] and t["vendor"] not in (kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"])):
         return False
     if t["amount"] is not None and d["amount_minor"] != t["amount"]:
+        return False
+    if t.get("ref") and not views.lineage_ref(d["pid"]).startswith(t["ref"]):
         return False
     if t["day"] is not None:
         if not d["date"]:
@@ -183,8 +193,12 @@ def _resolve(conn, phrase, items):
         if same:
             msg += " Open for that name: " + "; ".join(views.headline(d) for d in same) + "."
         return None, msg
-    return None, (f"Which one? " + "; ".join(views.headline(d) for d in hits)
-                  + " — say it with the amount or the date.")
+    with views.named(hits):          # payments that print alike are told apart by their ref
+        heads = [views.headline(d) for d in hits]
+    ask = "say it with the amount or the date"
+    if len(set(views.headline(d) for d in hits)) < len(hits):
+        ask += ", or the ref"
+    return None, f"Which one? " + "; ".join(heads) + f" — {ask}."
 
 
 def _shown(conn, pid):

@@ -13,6 +13,7 @@ mark_rendering_delivered, called after the send succeeded, promotes it and
 advances the shown-revision pointers that corrections bind to."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -53,14 +54,116 @@ FIELD_MAX = 60
 LINK_MAX = 200
 
 
+class _Names:
+    """Per-rendering disambiguation (round 5): displayed identities are made
+    unique BY CONSTRUCTION within one rendering, before anything is composed,
+    so the bind-time backstop (_bindable) never decides liveness.
+    - digest: the hex length of a clipped field's digest — the least (>= 4)
+      that keeps every clipped value of the rendering distinct;
+    - docs: doc_id -> what a document's identity adds when two documents of
+      the rendering would print alike (" from <issuer>", then "·<sha256 prefix>"
+      of the stored content hash, lengthened until distinct);
+    - pids: pid -> what a payment's headline adds when two headlines would
+      print alike ("ref <hash prefix>" of the lineage, lengthened until distinct)."""
+    def __init__(self):
+        self.digest, self.docs, self.pids = 4, {}, {}
+
+
+_NAMES = None
+
+
 def field(text, units: int = FIELD_MAX) -> str:
-    """A free-text field, clipped to `units`. A clipped value carries a short
-    digest of its FULL value ("…·3f9a", round 4), so two different values that
-    share their first `units` characters never render identically."""
+    """A free-text field, clipped to `units`. A clipped value carries a digest
+    of its FULL value ("…·3f9a", round 4), as long as this rendering needs for
+    all its clipped values to print distinct (round 5)."""
+    return _field(text, units, _NAMES.digest if _NAMES is not None else 4)
+
+
+def _field(text, units, n) -> str:
     if not text or utf16_len(text) <= units:
         return text
-    tag = "\u00b7" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:4]
+    tag = "\u00b7" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:n]
     return clip(text, units - utf16_len(tag)) + tag
+
+
+def _hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def lineage_ref(pid: int) -> str:
+    """The stable hex a payment's "ref …" disambiguator is a prefix of."""
+    return _hex(f"lineage:{pid}")
+
+
+def _distinct(keys: dict, grow) -> dict:
+    """keys: entity -> base printed identity. Returns entity -> suffix such that
+    base + suffix is distinct across entities: colliding groups take grow(e, n)
+    with n = 4, 8, ... until the group is distinct."""
+    out = {e: "" for e in keys}
+    groups: dict = {}
+    for e, k in keys.items():
+        groups.setdefault(k, []).append(e)
+    for es in groups.values():
+        if len(es) < 2:
+            continue
+        for n in range(4, 65, 4):
+            tags = {e: grow(e, n) for e in es}
+            if len(set(tags.values())) == len(es):
+                out.update(tags)
+                break
+    return out
+
+
+@contextlib.contextmanager
+def named(items, view_quarter=None):
+    """Compose under the disambiguation for `items` (what build_review does)."""
+    global _NAMES
+    saved = _NAMES
+    _NAMES = names_for(items, view_quarter)
+    try:
+        yield _NAMES
+    finally:
+        _NAMES = saved
+
+
+def names_for(items, view_quarter=None) -> _Names:
+    """The disambiguation for a rendering over `items` (every payment it may
+    print: a superset of what it prints, so what it prints is distinct too)."""
+    global _NAMES
+    names, saved = _Names(), _NAMES
+    try:
+        values = set()
+        docs = {}
+        for d in items:
+            values.add(d["counterparty"] or "")
+            for c in ([d["current"]] if d["current"] else []) + d["candidates"]:
+                doc = c["document"]
+                docs[doc["doc_id"]] = doc
+                values.update(x for x in (doc.get("number"), doc.get("issuer")) if x)
+        values = {v for v in values if utf16_len(v) > FIELD_MAX}
+        for n in range(4, 65, 4):
+            if len({_field(v, FIELD_MAX, n) for v in values}) == len(values):
+                names.digest = n
+                break
+        _NAMES = names
+        base = {i: _norm(ident(doc)) for i, doc in docs.items()}
+        count: dict = {}
+        for k in base.values():
+            count[k] = count.get(k, 0) + 1
+        # first the issuer, which a person can read; then the content hash
+        issuer = {i: (f" from {field(docs[i].get('issuer'))}"
+                      if count[base[i]] > 1 and docs[i].get("issuer") else "") for i in docs}
+        names.docs = dict(issuer)
+        again = {i: _norm(ident(doc)) for i, doc in docs.items()}
+        sha = _distinct(again, lambda i, n: " \u00b7" + (docs[i].get("sha256") or
+                                                              _hex(str(i)))[:n])
+        names.docs = {i: issuer[i] + sha[i] for i in docs}
+        heads = {d["pid"]: _norm(headline(d, view_quarter)) for d in items}
+        names.pids = {p: (f"ref {t}" if t else "") for p, t in
+                      _distinct(heads, lambda p, n: lineage_ref(p)[:n]).items()}
+    finally:
+        _NAMES = saved
+    return names
 
 
 def _wrap(line: str) -> list:
@@ -97,6 +200,8 @@ def headline(d: dict, view_quarter=None) -> str:
         parts.append(KIND_WORD[kind])
     if d.get("pending"):
         parts.append("pending")
+    if _NAMES is not None and _NAMES.pids.get(d["pid"]):
+        parts.append(_NAMES.pids[d["pid"]])
     if view_quarter and d.get("quarter") and d["quarter"] != view_quarter:
         parts.append(dates.quarter_label(d["quarter"]))
     return " · ".join(parts)
@@ -123,7 +228,8 @@ def ident(doc: dict) -> str:
     """How a pairing is named in the text: document and date. The binding
     check (_bindable) requires this exact string to be visible, and unique
     within its payment."""
-    return f"{_docname(doc)} ({_day(doc['date'])})"
+    extra = _NAMES.docs.get(doc.get("doc_id"), "") if _NAMES is not None else ""
+    return f"{_docname(doc)}{extra} ({_day(doc['date'])})"
 
 
 def _cands(d, cands):
@@ -725,6 +831,16 @@ def _item_page(d, after):
 
 
 def build_review(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
+    """See _build_review. The per-rendering disambiguation (_NAMES) lives only
+    for the duration of one call."""
+    global _NAMES
+    try:
+        return _build_review(conn, view, quarter, pid, page, after)
+    finally:
+        _NAMES = None
+
+
+def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
     """`page` (1, 2, ...) renders the view uncapped, one message per page, and
     `after` is the cursor the previous page's `next` returned; the `all` view
     is the status view paged. The answer's `next` is the call that the phrase
@@ -753,6 +869,9 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
         else:
             members = membership(conn, view, q, pid)
             items = [work.describe(conn, p) for p in members]
+            # every identity this rendering prints is made distinct before composing
+            global _NAMES
+            _NAMES = names_for(items, None if view == "item" else q)
             parts = _compose(conn, view, q, items, members, lead)
             if view == "item":
                 blk, cursor = _item_page(items[0], after)

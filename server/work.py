@@ -126,7 +126,7 @@ def _match_summary(conn, match_id) -> dict:
                          "issuer": d["issuer"] or d["counterparty"],
                          "number": d["document_number"], "date": d["document_date"],
                          "amount_minor": d["amount_minor"], "currency": d["currency"],
-                         "recipient": d["recipient"]}}
+                         "recipient": d["recipient"], "sha256": d["sha256"]}}
 
 
 def describe(conn, pid: int) -> dict:

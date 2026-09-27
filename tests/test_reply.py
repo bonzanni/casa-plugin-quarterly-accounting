@@ -687,30 +687,83 @@ class TestIdentity(Base):
         self.assertEqual(len(self.bound(r["render_id"], pid)), 2)
         del m
 
-    def test_identical_candidates_are_bound_by_neither(self):
+    def test_same_number_across_issuers_binds_both_and_applies(self):
+        # round 5 (Astra S2): number SAME, date 2 Sep, two issuers — the backstop bound
+        # neither and "Adobe is wrong" re-showed forever. Distinct by construction now.
         pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
-        for issuer in ("Adobe", "Adobe Ireland"):     # different documents, same printed name
-            d = self.doc(document_number="SAME-NUMBER", issuer=issuer, document_date="2026-09-02")
+        for issuer in ("Adobe", "Adobe Ireland"):
+            d = self.doc(document_number="SAME", issuer=issuer, document_date="2026-09-02")
             matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
                                  expected_revision=self.rev(pid), token=self.token,
                                  row_snapshot=self.snapshot(pid))
         r = self.deliver(view="check")
-        self.assertEqual(self.bound(r["render_id"], pid), set())
+        flat = " ".join(r["text"].split())
+        self.assertIn("invoice SAME from Adobe (2 Sep)", flat)
+        self.assertIn("invoice SAME from Adobe Ireland (2 Sep)", flat)
+        self.assertEqual(len(self.bound(r["render_id"], pid)), 2)
         out = reply.apply_reply(self.conn, "the Adobe one is wrong")
-        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
-        self.assertNotIn("rejected", [r_[0] for r_ in self.conn.execute(
-            "SELECT state FROM match_state")])
+        self.assertIn("Set aside both candidates", out["receipt"])
+        self.assertEqual(out["reshow"], [])
 
-    def test_identical_payments_are_bound_only_where_they_stand_alone(self):
+    def test_same_number_same_issuer_is_told_apart_by_the_content_hash(self):
+        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        docs = []
+        for body in ("one", "two"):
+            docs.append(self.doc(document_number="SAME", issuer="Adobe",
+                                 document_date="2026-09-02", source_ref=body))
+        with db.tx(self.conn):          # the store holds such a pair (a duplicate not yet resolved)
+            for doc in docs:
+                mid = self.conn.execute(
+                    "INSERT INTO matches(pid_created, doc_id, label, runners_up_json,"
+                    " created_seq) VALUES (?,?,'clean','[]',?)",
+                    (pid, doc, db.next_seq(self.conn))).lastrowid
+                self.conn.execute("INSERT INTO match_state(match_id, pid, doc_id, state, author,"
+                                  " activation) VALUES (?,?,?,'conflicted','auto',0)",
+                                  (mid, pid, doc))
+        r = self.deliver(view="check")
+        shas = [self.conn.execute("SELECT sha256 FROM documents WHERE doc_id=?", (d,))
+                .fetchone()[0] for d in docs]
+        flat = " ".join(r["text"].split())
+        self.assertEqual(flat.count("invoice SAME from Adobe \u00b7"), 2, flat)
+        self.assertEqual(len(self.bound(r["render_id"], pid)), 2)
+        del shas
+
+    def test_identical_payments_print_apart_and_both_bind(self):
         a = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
         b = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
         r = self.deliver()
-        self.assertEqual(views.render_items(self.conn, r["render_id"]), [])
+        self.assertEqual(sorted(views.render_items(self.conn, r["render_id"])), sorted([a, b]))
+        self.assertEqual(" ".join(r["text"].split()).count("Adobe · EUR 54.45 · 14 Sep · ref "), 2)
         reply.apply_reply(self.conn, "all good")
-        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
-        for p in (a, b):
-            it = views.build_review(self.conn, view="item", pid=p)
-            self.assertEqual(views.render_items(self.conn, it["render_id"]), [p])
+        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("operator", "operator"))
+
+    def test_identical_payments_are_named_by_their_ref(self):
+        a = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
+        b = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
+        r = self.deliver()
+        out = reply.apply_reply(self.conn, "the Adobe one is wrong")
+        self.assertEqual(out["applied"], [])
+        self.assertIn("or the ref", out["receipt"])
+        ref = views.lineage_ref(b)[:4]
+        self.assertIn("ref " + ref, " ".join(r["text"].split()))
+        self.assertIn("ref " + ref, out["receipt"])
+        out = reply.apply_reply(self.conn, f"the Adobe ref {ref} one is wrong")
+        self.assertIsNone(self.author(b))
+        self.assertEqual(self.author(a)[0], "auto")
+
+    def test_a_four_hex_digest_collision_is_lengthened(self):
+        # round 5 (Astra S1): "A"*65+"149" and +"257" share the digest 0844
+        n1, n2 = "A" * 65 + "149", "A" * 65 + "257"
+        self.assertEqual(views.field(n1), views.field(n2))       # the collision, outside a view
+        x = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        y = self.item("Adobe", 6000, "2026-09-15", paired=False)
+        self.pair(x, n1, labels=("guessed",))
+        self.pair(y, n2, labels=("guessed",))
+        r = self.deliver()
+        flat = " ".join(r["text"].split())
+        self.assertIn("\u00b70844d4d4", flat)
+        self.assertIn("\u00b708449d0c", flat)
+        self.assertEqual(sorted(views.render_items(self.conn, r["render_id"])), sorted([x, y]))
 
     def test_a_hundred_runners_up_leave_the_item_bindable_everywhere(self):
         # Astra + Terra: 80-120 runners-up made the item unbindable in every view

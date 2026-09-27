@@ -7,6 +7,7 @@ its closing phrase, and what is bound must be what was printed."""
 import json
 import random
 import unittest
+from unittest import mock
 
 from tests._base import StoreCase
 import db  # noqa: E402
@@ -242,13 +243,31 @@ def _norm(s):
     return "".join(ch for ch in s if not ch.isspace() and ch != "·")
 
 
+def _digest_collisions(prefix, k=6):
+    """Suffixes whose "A"*65-style values share a 4-hex digest (birthday search):
+    forced collisions of the clipped-field digest."""
+    import hashlib
+    seen, out = {}, []
+    i = 0
+    while len(out) < k:
+        v = prefix + str(i)
+        h = hashlib.sha256(v.encode()).hexdigest()[:4]
+        if h in seen:
+            out += [seen.pop(h), v]
+        else:
+            seen[h] = v
+        i += 1
+    return out
+
+
 class TestIdentityProperty(Base):
     """fix wave D round 4, the property stated once: every entity a rendering
     binds is uniquely identified by text visibly in it, and every item (and
     every candidate) is bindable in at least one reachable view."""
 
-    def candidates(self, pid, numbers):
-        docs = [self.doc(document_number=n, issuer="Issuer %d" % i,
+    def candidates(self, pid, numbers, issuers=None):
+        docs = [self.doc(document_number=n,
+                         issuer=(issuers[i] if issuers else "Issuer %d" % i),
                          document_date="2026-09-%02d" % (1 + i % 3))
                 for i, n in enumerate(numbers)]
         with db.tx(self.conn):
@@ -261,7 +280,13 @@ class TestIdentityProperty(Base):
                                   " activation) VALUES (?,?,?,'conflicted','auto',0)",
                                   (mid, pid, doc))
 
-    def check(self, r, bound_where):
+    def check(self, r, bound_where, view, pid=None):
+        members = views.membership(self.conn, view, "2026-Q3", pid)
+        with views.named([work.describe(self.conn, p) for p in members],
+                         None if view == "item" else "2026-Q3"):
+            self._check(r, bound_where)
+
+    def _check(self, r, bound_where):
         text = r["text"]
         self.assertLessEqual(views.utf16_len(text), LIMIT)
         flat = _norm(text)
@@ -285,13 +310,14 @@ class TestIdentityProperty(Base):
 
     def test_identity_is_visible_unique_and_every_entity_reachable(self):
         rng = random.Random(4)
+        forced = _digest_collisions("A" * 65)                     # 4-hex digest collisions
         pids = []
         for i in range(rng.randint(12, 20)):
             payee = rng.choice(("Adobe", "Adobe", "Figma", "Z" * 70 + rng.choice("AB")))
             amount = rng.choice((5445, 5445, 1000))
             pid = self.item(payee, amount, False)
             pids.append(pid)
-            shape = rng.choice(("guessed", "candidates", "plain"))
+            shape = rng.choice(("guessed", "candidates", "plain", "same", "forced"))
             prefix = "A" * rng.choice((10, 65))
             if shape == "guessed":
                 d = self.doc(counterparty=payee, issuer="I%d" % i,
@@ -302,17 +328,42 @@ class TestIdentityProperty(Base):
                     row_snapshot=self.snapshot(pid), token=self.token, labels=("guessed",),
                     runners_up=tuple(_word(rng, rng.choice((5, 90))) for _ in
                                      range(rng.randint(0, 120))))
+            elif shape == "same":                 # equal numbers across (and within) issuers
+                n = rng.randint(2, 6)
+                self.candidates(pid, ["SAME"] * n,
+                                [rng.choice(("Adobe", "Adobe Ireland")) for _ in range(n)])
+            elif shape == "forced":
+                d = self.doc(counterparty=payee, issuer="Adobe", document_number=forced[i % 6],
+                             document_date="2026-09-02")
+                matches.record_match(
+                    self.conn, pid=pid, doc_id=d, author="auto", expected_revision=self.rev(pid),
+                    row_snapshot=self.snapshot(pid), token=self.token, labels=("guessed",))
             elif shape == "candidates":
                 n = rng.randint(2, 45)
                 self.candidates(pid, [prefix + rng.choice(("CORRECT", "WRONG", "X%d" % k))
                                       for k in range(n)])
+        # the backstop never refuses two DISTINCT entities: identities are distinct by
+        # construction, so on an uncut rendering it binds every block and pairing
+        real = views._bindable
+        refused = []
+
+        def watching(chosen, text):
+            out = real(chosen, text)
+            for c in chosen:
+                if c.pid is not None and (c.pid not in out
+                                          or set(c.pairings) - out[c.pid]):
+                    refused.append((c.pid, c.ident))
+            return out
+        patch = mock.patch.object(views, "_bindable", watching)
+        patch.start()
+        self.addCleanup(patch.stop)
         bound = {}
         for view in ("status", "check", "all"):
             page, after = (1 if view == "all" else None), None
             for _ in range(40):
                 kw = {k: v for k, v in (("page", page), ("after", after)) if v is not None}
                 r = views.build_review(self.conn, view=view, quarter="2026-Q3", **kw)
-                self.check(r, bound)
+                self.check(r, bound, view)
                 nxt = r["next"]
                 if nxt is None or "after" not in nxt:
                     break
@@ -323,7 +374,7 @@ class TestIdentityProperty(Base):
                 kw = {k: v for k, v in (("page", page), ("after", after)) if v is not None}
                 r = views.build_review(self.conn, view="item", pid=pid, **kw)
                 r["_view"] = "item"
-                self.check(r, bound)
+                self.check(r, bound, "item", pid)
                 if r["next"] is None:
                     break
                 self.assertIn('say "more"', r["text"])
@@ -331,10 +382,11 @@ class TestIdentityProperty(Base):
         for pid in pids:
             self.assertIn(pid, bound)                                # every item bindable
             d = work.describe(self.conn, pid)
-            names = [views.ident(c["document"]) for c in d["candidates"]]
-            reachable = {c["match_id"] for c in d["candidates"]
-                         if names.count(views.ident(c["document"])) == 1}
-            self.assertLessEqual(reachable, bound[pid])              # every distinct candidate
+            every = {c["match_id"] for c in d["candidates"]}
+            if d["current"]:
+                every.add(d["current"]["match_id"])
+            self.assertLessEqual(every, bound[pid])                  # every candidate
+        self.assertEqual(refused, [])
 
 
 class TestBindable(unittest.TestCase):
