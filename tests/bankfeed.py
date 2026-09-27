@@ -55,6 +55,12 @@ class Ledger:
         self._saved_conn = tools_read.CONN
         tools_read.CONN = self.conn
 
+    def close(self) -> None:
+        """Close the database connection and restore the previous one."""
+        import tools_read
+        self.conn.close()
+        tools_read.CONN = self._saved_conn
+
     # --- rows -----------------------------------------------------------
     def account(self, category="company", label="Zakelijk", aid=None):
         aid = aid or self.ACCOUNT
