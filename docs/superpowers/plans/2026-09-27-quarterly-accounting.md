@@ -28,10 +28,8 @@ The agents drive the whole flow through the skill:
 - Every mutated guard failed its test: occupancy, both shown-revision bindings, not-found evidence, the restore gate, revive.
 - Rounds p1–p9 are recorded in each fix commit's message (`git log 1cbda9c..b93f71a`).
 - Ledger identity (D4) was generalized after three rounds found the same shape. Reply binding (`_broad`) was generalized after two.
-- **Owed before execution — operator decisions:**
-  - D1: 33 tools (spec erratum).
-  - D4: the "the bank ledger was reset" sentence; the upstream bank-feed ledger id and `expected_ledger` write precondition, to be filed if accepted.
-  - D8 and D9: spec errata.
+- **Operator rulings, 2026-09-27:** D1, D8 and D9 accepted. D4 accepted with the reset sentence, and the upstream ledger id filed as [casa-specialist-finance#69](https://github.com/bonzanni/casa-specialist-finance/issues/69). The errata are already applied to the spec (3e2b310), so Task 24 Step 3 is done.
+- Execution is subagent-driven, from a fresh session.
 
 ## Global Constraints
 
@@ -94,7 +92,7 @@ The spec is converged. Turning it into code surfaced the points below. Each is e
   - **Operator decision:** the spec lets the pass after `delete_all_data` proceed on its own. Here it needs that one sentence, because from the export alone the case is indistinguishable from a different ledger.
   - Every sweep observation also carries the row's `first_seen`. A mismatch stops the pass, and no further bank-feed write happens in it.
   - **Residual, stated (round p4, Astra):** an import proves the ledger read at that moment, not the ledger that receives a later write. A ledger switched between an observation and its write can still take that one write. Only bank-feed can fence it atomically, alongside `expected_generation`.
-  - **Operator decision:** file upstream a bank-feed ledger instance id, reported by `list_backups` and checked on every annotation write as `expected_ledger`. It closes this residual and makes the `delete_all_data` sentence unnecessary.
+  - **Ruled 2026-09-27:** filed upstream as casa-specialist-finance#69. When it ships, bind to that id with `expected_ledger` on every write, and retire both the reset sentence and this residual (a follow-up plan change).
   - `first_seen` is not rewritten by bank-feed's update paths. Task 2 pins that against the vendored `apply_plan`.
 - **D5: The sweep runs inside the specialist delegation, after the import.**
   - The sweep's per-row reads are what refresh the classification observation, and triage needs a fresh expectation. So one delegation runs, in order: sync, then the classifier, then `export_history` and `import_ledger_export` (admission, resolution, merges, vanished ends, erase candidates), then erase confirmations, then the sweep (observations and tag repair), then triage.
@@ -11485,7 +11483,7 @@ python3 scripts/check_tool_agreement.py && python3 scripts/scan_identifiers.py .
 ```
 Expected: `OK` from the suite and exit 0 from both scripts.
 
-- [ ] **Step 3: Record the accepted errata in the spec**
+- [x] **Step 3: Record the accepted errata in the spec** (done at plan time: 3e2b310, operator rulings 2026-09-27)
 
 For each of D1, D8 and D9 that the plan review and the operator accepted, edit the spec passage it names:
 - D1: the heading "Tool surface (server, 22 tools)" becomes "(server, 33 tools)", with the list.
