@@ -8,6 +8,7 @@ import db  # noqa: E402
 import matches  # noqa: E402
 import reply  # noqa: E402
 import views  # noqa: E402
+import work  # noqa: E402
 
 
 class Base(StoreCase):
@@ -40,6 +41,12 @@ class Base(StoreCase):
         pid = self.lineage_for(self.n)
         self.classify(pid, set(tags))
         self.settle(pid)
+        if not paired:
+            # Integration fix: a required payment nobody has searched for is "not
+            # searched", not "missing", and a status/missing sheet counts it
+            # without printing it (Task 16, spec §Weekly pass "four states stay
+            # distinct"). These fixtures mean a MISSING line the operator saw.
+            work.record_search(self.conn, pid=pid, token=self.token, queries=[cp])
         if paired:
             d = self.doc(counterparty=cp, issuer=cp, amount_minor=amount, document_date=day)
             matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
@@ -493,6 +500,23 @@ class TestFixRound3(Base):
                          ["send invoice.pdf again", "adobe is wrong"])
         self.assertEqual(reply._clauses("Zapier is fine.Adobe is wrong"),
                          ["zapier is fine", "adobe is wrong"])
+
+
+
+class TestIntegration(Base):
+    def test_a_counted_but_unprinted_payment_is_reshown_not_changed(self):
+        # a never-searched payment is counted ("not searched"), not printed: the
+        # operator never saw its line, so a correction naming it applies nothing
+        self.n += 1
+        self.row(self.n, counterparty="BCK*XYZ", amount_minor=18000,
+                 booking_date="2026-09-16", value_date="2026-09-16")
+        pid = self.lineage_for(self.n)
+        self.classify(pid, {"software"})
+        self.settle(pid)
+        self.deliver()
+        out = reply.apply_reply(self.conn, "the BCK*XYZ one is my accountant")
+        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
 
 
 if __name__ == "__main__":
