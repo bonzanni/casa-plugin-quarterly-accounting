@@ -30,3 +30,14 @@ def allocate(path, n, out):
     finally:
         conn.close()
     out.put(got)
+
+
+def open_fresh(path, barrier):
+    """Every spawned sibling calls this on the SAME not-yet-existing path,
+    released by the barrier at (as near as the OS gets to) the same instant,
+    so the very first WAL-mode conversion is contended. A non-zero process
+    exit (an uncaught exception) is the failure signal the test reads."""
+    import db
+    barrier.wait(30)
+    conn = db.open_store(path)
+    conn.close()

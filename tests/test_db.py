@@ -53,6 +53,23 @@ class TestSchema(TempEnv):
 
 
 class TestConcurrency(TempEnv):
+    def test_concurrent_first_open_of_a_fresh_store_all_succeed(self):
+        # A fresh path's very first WAL-mode conversion writes the file header,
+        # so it can contend exactly like BEGIN IMMEDIATE does. Every sibling is
+        # released by the barrier at once, on a path that does not exist yet
+        # (never opened by this process, or any other, before this call).
+        path = str(self.data / db.DB_NAME)
+        ctx = multiprocessing.get_context("spawn")
+        n = 8
+        barrier = ctx.Barrier(n)
+        procs = [ctx.Process(target=_procs.open_fresh, args=(path, barrier)) for _ in range(n)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(30)
+        for p in procs:
+            self.assertEqual(p.exitcode, 0, f"pid {p.pid} exited {p.exitcode}")
+
     def test_sequence_is_unique_across_processes(self):
         path = str(self.data / db.DB_NAME)
         seed = db.open_store(path)

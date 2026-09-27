@@ -216,8 +216,8 @@ CREATE TABLE IF NOT EXISTS alerts (
 MIGRATIONS: dict[int, list[str]] = {}
 
 
-def migrate(conn: sqlite3.Connection) -> None:
-    with tx(conn):
+def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:
+    with tx(conn, bound_s=bound_s):
         conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         current = int(row[0]) if row else 0
@@ -248,15 +248,39 @@ def _statements(script: str) -> list[str]:
     return out
 
 
-def open_store(path=None) -> sqlite3.Connection:
+def _retry_locked(stmt, bound_s: float):
+    """Run a no-arg statement that may raise 'database is locked'/'busy' while
+    another process holds the file (a WAL-mode conversion, or BEGIN IMMEDIATE),
+    retrying with backoff until bound_s elapses. Past the bound: Busy, not a
+    raw sqlite3.OperationalError — every open-time or write-time statement that
+    can contend for the file's lock shares this one bounded retry (spec
+    §Match records: "contention past the bound surfaces as an error")."""
+    deadline = time.monotonic() + bound_s
+    while True:
+        try:
+            stmt()
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                raise
+            if time.monotonic() >= deadline:
+                raise Busy("the accounting store stayed locked by another session past "
+                           f"{bound_s:g} s; this change was NOT applied — ask again") from exc
+            time.sleep(0.05)
+
+
+def open_store(path=None, bound_s: float = LOCK_BOUND_S) -> sqlite3.Connection:
     p = pathlib.Path(path) if path else data_dir() / DB_NAME
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p), isolation_level=None, timeout=BUSY_TIMEOUT_MS / 1000)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA journal_mode=WAL")
-        migrate(conn)
+        # A fresh file's journal-mode conversion writes the file header, so it
+        # contends with another process's simultaneous first open exactly like
+        # BEGIN IMMEDIATE does; give it the same bounded retry.
+        _retry_locked(lambda: conn.execute("PRAGMA journal_mode=WAL"), bound_s)
+        migrate(conn, bound_s=bound_s)
     except BaseException:
         conn.close()
         raise
@@ -267,18 +291,7 @@ def open_store(path=None) -> sqlite3.Connection:
 def tx(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S):
     if conn.in_transaction:
         raise RuntimeError("tx() does not nest; the caller already holds the write lock")
-    deadline = time.monotonic() + bound_s
-    while True:
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            break
-        except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc) and "busy" not in str(exc):
-                raise
-            if time.monotonic() >= deadline:
-                raise Busy("the accounting store stayed locked by another session past "
-                           f"{bound_s:g} s; this change was NOT applied — ask again") from exc
-            time.sleep(0.05)
+    _retry_locked(lambda: conn.execute("BEGIN IMMEDIATE"), bound_s)
     try:
         yield conn
     except BaseException:
