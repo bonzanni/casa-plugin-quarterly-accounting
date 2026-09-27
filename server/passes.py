@@ -75,13 +75,16 @@ def check_token(conn, token) -> None:
 
 
 def end_pass(conn, token, outcome: str, report: dict) -> dict:
+    import alerts
+    import documents
     with db.tx(conn):
         check_token(conn, token)
         m = _marker(conn)
         conn.execute("UPDATE passes SET ended_at=?, outcome=?, report_json=? WHERE pass_id=?",
                      (db.now(), outcome, db.canonical(report or {}), m["pass_id"]))
         conn.execute("UPDATE pass_marker SET live=0 WHERE id=1")
-        return {"ended": m["pass_id"], "outcome": outcome}
+    documents.reap_orphans(conn)
+    return {"ended": m["pass_id"], "outcome": outcome, "speak": alerts.pending_rendering(conn)}
 
 
 def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None) -> dict:
@@ -116,6 +119,17 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None) 
             if b is not None and pass_id and any(a.get("account_id") == b["account_id"]
                                                  for a in accounts):
                 conn.execute("UPDATE passes SET account_seen=1 WHERE pass_id=?", (pass_id,))
+            if b is not None:
+                present = any(a.get("account_id") == b["account_id"] for a in accounts)
+                prev_b = conn.execute("SELECT * FROM probes WHERE kind='bound_account'").fetchone()
+                since = None
+                if not present:
+                    since = (prev_b["failing_since"] if prev_b is not None and not prev_b["ok"]
+                             and prev_b["failing_since"] else f"{now}#{db.next_seq(conn)}")
+                conn.execute("INSERT OR REPLACE INTO probes(kind, ok, detail, data_json,"
+                             " observed_at, pass_id, failing_since) VALUES"
+                             " ('bound_account', ?, '', NULL, ?, ?, ?)",
+                             (1 if present else 0, now, pass_id, since))
         return {"recorded": kind, "ok": bool(ok), "observed_at": now}
 
 
