@@ -321,9 +321,10 @@ def _build(conn, quarter: str) -> dict:
                 raise db.Refusal("the bank was re-read while building — build again")
             pkg_id = conn.execute(
                 "INSERT INTO packages(quarter, filename, path, built_at, partial, digest, size,"
-                " oversize, caption, manifest_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " oversize, caption, manifest_json, snapshot_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (quarter, path.name, str(path), stamp, int(partial), digest, len(data),
-                 int(oversize), caption, db.canonical(manifest))).lastrowid
+                 int(oversize), caption, db.canonical(manifest),
+                 frozen["snapshot_id"])).lastrowid
     except BaseException:
         path.unlink(missing_ok=True)       # an unregistered zip is never left to hand out
         raise

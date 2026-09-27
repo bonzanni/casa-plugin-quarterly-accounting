@@ -36,7 +36,10 @@ class TestSchema(TempEnv):
         v1 = db.DDL
         for line in ("  class_observed_snapshot INTEGER,", "  observed_revision INTEGER,"):
             v1 = "\n".join(x for x in v1.splitlines() if not x.startswith(line))
+        cut = v1.index("manifest_json TEXT NOT NULL,") + len("manifest_json TEXT NOT NULL")
+        v1 = v1[:cut] + ");" + v1[v1.index("\n", v1.index("snapshot_id INTEGER);", cut)):]
         self.assertNotIn("observed_revision", v1)
+        self.assertNotIn("snapshot_id INTEGER);", v1)
         path = db.data_dir() / db.DB_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
         old = sqlite3.connect(str(path), isolation_level=None)
@@ -57,6 +60,8 @@ class TestSchema(TempEnv):
         p = lineage.projection(c, 1)
         self.assertEqual((p["class_observed_snapshot"], p["observed_revision"]), (None, None))
         self.assertFalse(lineage.is_fresh(c, p))           # re-read before anything is decided
+        cols = {r[1] for r in c.execute("PRAGMA table_info(packages)")}
+        self.assertIn("snapshot_id", cols)                 # a package's first send checks it
         c.close()
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)

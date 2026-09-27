@@ -209,7 +209,9 @@ class TestSkill(TempEnv):
         self.assertIn("passes the `snapshot_id` that `list_projections` returned", section)
         self.assertIn("read the payment again with its new `snapshot_id`", section)
         pack = " ".join(self.section("## Packaging", "## Install").split())
-        self.assertIn("refused because the bank was re-read while building", pack)
+        self.assertIn("the first `stage_for_delivery` of a package, is refused because the bank "
+                      "was re-read", pack)
+        self.assertIn("A resend (\"send it again\") is the exact file already sent", pack)
 
 
 if __name__ == "__main__":

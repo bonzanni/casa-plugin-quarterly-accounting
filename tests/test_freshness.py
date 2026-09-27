@@ -9,6 +9,8 @@ exercised."""
 import csv
 import io
 import multiprocessing
+import os
+import pathlib
 import random
 import unittest
 import zipfile
@@ -360,6 +362,68 @@ class TestVanishedAndPurgedConverges(test_sweep_real.Base):
             sweep.record_observation(self.conn, pid=pid, token=self.token,
                                      snapshot_id=self.snap_id, not_found=True)
         self.assertIn(pid, sweep._due(self.conn))
+
+
+class TestFirstSendChecksTheBuildSnapshot(ToolPass):
+    """Round E4 (Terra, Astra): a package built under snapshot N, then a real
+    reclassification, import N+1 and a completed sweep — staging the still-unsent
+    package carried the superseded invoice to the outbox. Its FIRST send is refused
+    at the delivery-log write; a resend of a file already sent is that exact file."""
+    def built_then_superseded(self, before_import=None):
+        ids = self.two_rows_matched()
+        bf, a = self.bf, ids["A1"]
+        token = self.begin("package")
+        self.assertEqual(self.sweep(token), 0)
+        call("end_pass", pass_token=token, outcome="complete")
+        pkg, files, rows, _ = self.zip_of()
+        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])     # MATCHED/invoice
+        if before_import:
+            before_import(pkg)
+        bf.call("untag_transaction", row_ids=[a], tags=["software"])
+        self.classify(a, "refund")
+        token = self.begin("cron")                                     # import N+1
+        self.assertEqual(self.sweep(token), 0)
+        call("end_pass", pass_token=token, outcome="complete")
+        return pkg
+
+    def outbox_files(self):
+        return sorted(os.listdir(self.outbox))
+
+    def handoff_files(self):
+        return sorted(str(p.relative_to(self.handoff)) for p in self.handoff.rglob("*")
+                      if p.is_file() and "quarterly-accounting" in p.parts)
+
+    def test_the_first_send_of_a_superseded_package_is_refused(self):
+        pkg = self.built_then_superseded()
+        handoff_before = self.handoff_files()
+        for channel in ("telegram", "email"):
+            out = _raw("stage_for_delivery", channel=channel, package_id=pkg["package_id"])
+            self.assertEqual(out, "refused: the bank was re-read since this package was built "
+                                  "— build it again")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0], 0)
+        self.assertEqual(self.outbox_files(), [])
+        self.assertEqual(self.handoff_files(), handoff_before)
+        # built again after the sweep, it ships the truth and stages
+        pkg2, files, rows, _ = self.zip_of()
+        self.assertEqual(files, [])
+        staged = call("stage_for_delivery", channel="telegram", package_id=pkg2["package_id"])
+        self.assertEqual(self.outbox_files(), [staged["filename"]])
+
+    def test_a_resend_of_a_package_already_sent_still_works_after_a_newer_import(self):
+        def send_uncertain(pkg):
+            d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"])
+            call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain")
+            for f in os.listdir(self.outbox):              # Casa consumed the outbox copy
+                os.unlink(self.outbox / f)
+        pkg = self.built_then_superseded(before_import=send_uncertain)
+        r = call("build_review", view="status", quarter="2026-Q3")
+        self.assertIn(pkg["filename"], r["text"])                     # offered again
+        call("mark_rendering_delivered", render_id=r["render_id"])
+        self.assertIn("resend", call("apply_reply", text="send it again")["instructions"])
+        staged = call("stage_for_delivery", channel="telegram", resend=True)
+        self.assertEqual(staged["filename"], pkg["filename"])
+        self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),
+                         pathlib.Path(pkg["path"]).read_bytes())
 
 
 def _raw(name, **args):

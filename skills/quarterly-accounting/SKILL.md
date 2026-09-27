@@ -323,8 +323,10 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    package_id=…)`, then `send_media(path, kind="zip")` with the caption
    `build_quarterly_package` returned, then `record_delivery(delivery_id, outcome)`. A timeout
    is `uncertain`: do not send again unless the operator asks ("send it again", above).
-   If it is refused because the bank was re-read while building, nothing was kept: run
-   step 1 again (the re-read made every payment unread), then build again, once.
+   If the build, or the first `stage_for_delivery` of a package, is refused because the bank
+   was re-read (while building, or since it was built), nothing was kept or staged: run
+   step 1 again (the re-read made every payment unread), then build again, once. A resend
+   ("send it again") is the exact file already sent and is never refused for this.
 3. "Email me the Q3 package": `stage_for_delivery(channel="email", package_id=…)`, then
    gmail's `send_email` to the operator's own address with the returned path attached and the
    returned `request_id`. Casa asks the operator for one tap showing the recipient. Then

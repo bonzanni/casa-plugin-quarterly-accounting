@@ -199,7 +199,8 @@ CREATE TABLE IF NOT EXISTS packages (
   package_id INTEGER PRIMARY KEY AUTOINCREMENT, quarter TEXT NOT NULL,
   filename TEXT NOT NULL UNIQUE, path TEXT NOT NULL, built_at TEXT NOT NULL,
   partial INTEGER NOT NULL, digest TEXT NOT NULL, size INTEGER NOT NULL,
-  oversize INTEGER NOT NULL DEFAULT 0, caption TEXT NOT NULL, manifest_json TEXT NOT NULL);
+  oversize INTEGER NOT NULL DEFAULT 0, caption TEXT NOT NULL, manifest_json TEXT NOT NULL,
+  snapshot_id INTEGER);          -- the import the build froze (fix E4: its first send checks it)
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id INTEGER PRIMARY KEY AUTOINCREMENT, package_id INTEGER, doc_id INTEGER,
   channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
@@ -221,7 +222,9 @@ MIGRATIONS: dict[int, list[str]] = {
     # 1 -> 2 (fix E2): classification freshness. A migrated lineage has no stamp,
     # so it is non-fresh until the next sweep reads it: the conservative start.
     1: ["ALTER TABLE projections ADD COLUMN class_observed_snapshot INTEGER",
-        "ALTER TABLE projections ADD COLUMN observed_revision INTEGER"],
+        "ALTER TABLE projections ADD COLUMN observed_revision INTEGER",
+        # a package built before it names no import: its first send is refused (rebuild)
+        "ALTER TABLE packages ADD COLUMN snapshot_id INTEGER"],
 }
 
 
