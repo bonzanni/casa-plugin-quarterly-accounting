@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+# plugins/bank-feed/server/bank_feed_server.py
+"""casa bank-feed MCP server. Stdlib-only stdio JSON-RPC.
+
+bank_feed_server.py only dispatches; every behaviour lives in a focused module
+(money.py, jwtsign.py, httpx.py, eb_ais.py, eb_admin.py, store.py,
+provenance.py, ingest.py, callbacks.py, apply.py, flows.py, tools_read.py,
+tools_auth.py, tools_refresh.py, tools_destructive.py) that is testable
+without a running MCP session.
+"""
+from __future__ import annotations
+import fcntl, importlib.util, json, os, sys, time
+
+import backups
+import ebmode
+import opvault
+import store
+
+TOOLS: dict = {}          # name -> {"description": str, "schema": {...}, "fn": callable}
+PROTOCOL_VERSION = "2024-11-05"
+
+#: Static literal on purpose: the banner interpolates nothing, so there is
+#: nothing to neutralise.
+SANDBOX_BANNER = ("[SANDBOX] Disposable test world — sandbox application, "
+                  "sandbox vault items, sandbox ledger. No real money.")
+
+
+#: THE LIFECYCLE LOCK (issue #72). `delete_all_data` removes the ledger file,
+#: its copies, the exports and the vault items bank-feed created. A call in
+#: another process running at the same time would publish an export after
+#: the sweep, create a vault item after the vault was listed, or write into
+#: a ledger file already removed, and the erasure would still answer
+#: `complete`. So every tool call holds a shared flock on the data directory
+#: itself (no lock file exists to outlive the erasure) and `delete_all_data`
+#: holds it exclusively for its whole call. Seconds a call waits before
+#: refusing as busy; read at call time so tests can lower it.
+LOCK_WAIT_S = 30.0
+EXCLUSIVE_TOOLS = frozenset({"delete_all_data", "delete_data_keep_signins"})
+BUSY = ("Refused, nothing was done: another bank-feed call is running%s. "
+        "Try again when it has finished.")
+
+
+#: The calls the uninstall fence (`store.UNINSTALL_FENCE_KEY`, issue #73)
+#: still admits: both erasers, so an unfinished one can be run again; setup
+#: and its sign-in step, since setup is what lifts the fence; and the two
+#: calls that look at and withdraw a bank consent, which write no data. Every
+#: other call refuses, a read too: none of them is needed before the
+#: uninstall finishes, and a short list can be checked by eye.
+FENCE_EXEMPT = frozenset({"delete_data_keep_signins", "delete_all_data",
+                          "setup_bank_feed", "bank_feed_signin",
+                          "consent_status", "unlink_bank"})
+FENCED = ("Refused, nothing was done: bank-feed's data was erased at %s for "
+          "an uninstall that keeps the bank sign-ins, and nothing is fetched "
+          "or written until setup_bank_feed runs. Casa runs it when "
+          "bank-feed is installed again; if you are keeping bank-feed, run "
+          "setup_bank_feed now to carry on.")
+
+
+LOCK_UNAVAILABLE = ("Refused, nothing was done: the plugin data directory "
+                    "could not be locked (%s).")
+
+
+def _lifecycle_lock(name):
+    """-> `(fd or None, refusal or None)`. The path is the RAW variable,
+    exactly as `tools_read.conn()` and `opvault.record_path()` read it: a
+    normalised spelling could name a different directory, and a lock on
+    that one excludes nothing. An unset variable means no lock (every tool
+    that touches data refuses on it anyway). A directory that does not
+    exist yet is created first, so even the call that creates the ledger
+    runs under the lock; any failure refuses rather than running unlocked."""
+    data = os.environ.get("CLAUDE_PLUGIN_DATA") or ""
+    if not data:
+        return None, None
+    try:
+        os.makedirs(data, mode=0o700, exist_ok=True)
+        fd = os.open(data, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        return None, LOCK_UNAVAILABLE % (type(exc).__name__,)
+    exclusive = name in EXCLUSIVE_TOOLS
+    op = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+    deadline = time.monotonic() + LOCK_WAIT_S
+    while True:
+        try:
+            fcntl.flock(fd, op)
+            return fd, None
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None, BUSY % ("" if exclusive else
+                                     ", an erasure of all data")
+            time.sleep(0.05)
+        except OSError as exc:
+            os.close(fd)
+            return None, LOCK_UNAVAILABLE % (type(exc).__name__,)
+
+
+def _fenced(name):
+    """The uninstall fence's timestamp when it refuses `name`, else None.
+    Read under the call's lifecycle lock, which the eraser holds exclusively
+    while it commits the fence, so no call starts between the erasure and
+    the fence. Never creates a ledger: with none on disk there is nothing
+    to fence, and nothing is settled or migrated before the tool's own
+    argument check (`store.uninstall_fence_at`)."""
+    if name in FENCE_EXEMPT:
+        return None
+    import tools_read              # imports this module; resolved at call time
+    if tools_read.CONN is not None:
+        # The ledger this process's tools already use: the fence's own row.
+        return store.uninstall_fence(tools_read.CONN)
+    data = os.environ.get("CLAUDE_PLUGIN_DATA") or ""
+    return store.uninstall_fence_at(data) if data else None
+
+
+def _result(id_, payload):
+    return {"jsonrpc": "2.0", "id": id_, "result": payload}
+
+
+def _error(id_, code, message):
+    return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
+
+
+def handle(req: dict) -> dict | None:
+    method, id_ = req.get("method"), req.get("id")
+    if method == "initialize":
+        return _result(id_, {"protocolVersion": PROTOCOL_VERSION,
+                             "capabilities": {"tools": {}},
+                             "serverInfo": {"name": "bank-feed", "version": "0.1.0"}})
+    if method == "notifications/initialized":
+        return None
+    if method == "tools/list":
+        return _result(id_, {"tools": [
+            {"name": n, "description": t["description"], "inputSchema": t["schema"]}
+            for n, t in sorted(TOOLS.items())]})
+    if method == "tools/call":
+        params = req.get("params") or {}
+        tool = TOOLS.get(params.get("name"))
+        if tool is None:
+            return _error(id_, -32601, f"unknown tool {params.get('name')!r}")
+        # In this exact order. (1) The mode: an unrecognised
+        # BANKFEED_EB_ENVIRONMENT refuses EVERY tool uniformly — never a silent
+        # fall-back to the real-money world — and the refusal is unbannered
+        # because with an unparseable mode there is no truthful banner to
+        # print. (2) The install marker, BEFORE the tool body: the flip refusal
+        # must fire before setup_bank_feed can touch vault state, and its
+        # StoreError rides the existing error rendering below. (3) The tool.
+        # (4) The banner, over success AND error alike — a wrapper inside
+        # register() would never see the rendered exception, which is why the
+        # banner lives here at the dispatcher.
+        #
+        # A `capability` tool (casa's result contract, see `register`) has one
+        # success shape: a dict, sent as ONE JSON object, because casa parses
+        # the whole result text as JSON and checks the reference in it. Its
+        # banner therefore goes INSIDE the object, into its `text` field, and
+        # never in front of it. Anything else such a tool produces (a refusal
+        # it returns as prose, or an exception) is an MCP tool error: casa
+        # passes an error's text to the model unchanged, whereas a non-error
+        # result without the reference would be withheld as a broken plugin.
+        try:
+            sandbox = ebmode.is_sandbox()
+        except ebmode.ModeError as exc:
+            payload = {"content": [{"type": "text", "text": str(exc)}]}
+            if tool.get("capability"):
+                payload["isError"] = True
+            return _result(id_, payload)
+        # (5) What settlement wrote during this call, in ONE sentence after
+        # the banner (issues #48, #53). Settlement records each write into
+        # a log that lives exactly as long as this call — including the
+        # open-time pass inside the first `tools_read.conn()`, which has no
+        # reply of its own — and this is the only place that log is
+        # rendered: on success, refusal and exception alike.
+        token = backups.open_log()
+        lock_fd, busy = _lifecycle_lock(params.get("name"))
+        try:
+            try:
+                if busy:
+                    out = busy
+                else:
+                    # Every `op` child holds the call's lock too (`opvault`).
+                    opvault.INHERIT_FDS = (lock_fd,) if lock_fd is not None \
+                        else ()
+                    store.check_mode_marker(
+                        os.environ.get("CLAUDE_PLUGIN_DATA"))
+                    fenced = _fenced(params.get("name"))
+                    out = (FENCED % fenced if fenced else
+                           tool["fn"](params.get("arguments") or {}))
+            except Exception as exc:                   # surfaced, never swallowed
+                # A capability tool's link exists as bytes on its own path,
+                # and a stdlib parser quotes the bytes it chokes on (a status
+                # line, a redirect host). So its exception text is rendered
+                # only for the types it declares as speaking in its own words
+                # (`register`).
+                if tool.get("capability") and not isinstance(
+                        exc, tool.get("error_text_types") or ()):
+                    out = f"error: {type(exc).__name__}"
+                else:
+                    out = f"error: {type(exc).__name__}: {exc}"
+        finally:
+            opvault.INHERIT_FDS = ()
+            if lock_fd is not None:
+                os.close(lock_fd)
+            settled = backups.close_log(token)
+        head = "\n".join(p for p in (SANDBOX_BANNER if sandbox else "",
+                                     settled) if p)
+        if isinstance(out, dict):
+            # An erasure result (`delete_all_data`, bank-feed's casa.eraseTool)
+            # carries its prose in `report`; the dispatcher's sentences belong
+            # to that account as they belong to a capability result's `text`.
+            key = "report" if "report" in out and "text" not in out else "text"
+            if head:
+                out = dict(out, **{key: head + "\n" + str(out.get(key) or "")})
+            payload = {"content": [{"type": "text", "text": json.dumps(out)}]}
+        else:
+            text = head + "\n" + out if head else out
+            payload = {"content": [{"type": "text", "text": text}]}
+            if tool.get("capability"):
+                payload["isError"] = True
+        return _result(id_, payload)
+    return _error(id_, -32601, f"unknown method {method!r}")
+
+
+def main() -> None:
+    # When this file is launched as a script (the real deployment), Python
+    # loads it as module "__main__" -- NOT as "bank_feed_server". tools_read.py,
+    # tools_auth.py, tools_refresh.py and tools_destructive.py all
+    # do `import bank_feed_server` to reach the shared TOOLS dict; without the
+    # alias below that import would execute THIS SAME FILE a second time
+    # under the distinct module name "bank_feed_server", handing them an empty
+    # TOOLS dict of their own while handle() above keeps reading the
+    # __main__ one. The live process would then answer tools/list with an
+    # empty registry regardless of what those four modules registered.
+    # Aliasing sys.modules first makes both names resolve to the one module
+    # object that is actually running, so registration lands in the dict
+    # handle() reads.
+    sys.modules.setdefault("bank_feed_server", sys.modules[__name__])
+    # Fail closed on a broken module, fail open only on a MISSING one
+    # -- find_spec() only locates a module on sys.path, and never executes
+    # it, so a module that genuinely does not exist yet returns None here and is
+    # the ONE case this loop may skip. Once a module IS findable, __import__
+    # runs with no except around it: any exception raised while running
+    # it -- including a real ImportError the module itself trips over --
+    # propagates out of main() and kills the process. A live MCP server
+    # that answers tools/list with fewer tools than the manifest declares,
+    # silently and with nothing to point at, is strictly worse than a dead
+    # process with a traceback: the crash is loud, the partial registry
+    # was not.
+    for _mod in ("tools_read", "tools_auth", "tools_refresh",
+                 "tools_destructive", "tools_annotate", "tools_aggregate",
+                 "tools_rules", "tools_backup"):
+        if importlib.util.find_spec(_mod) is None:
+            continue                                     # not shipped yet -- acceptable
+        __import__(_mod)                                 # populates TOOLS; any failure here is fatal
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        resp = handle(req)
+        if resp is not None:
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()
