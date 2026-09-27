@@ -13,7 +13,9 @@ mark_rendering_delivered, called after the send succeeded, promotes it and
 advances the shown-revision pointers that corrections bind to."""
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import textwrap
 
 import amounts
@@ -52,7 +54,13 @@ LINK_MAX = 200
 
 
 def field(text, units: int = FIELD_MAX) -> str:
-    return clip(text, units) if text else text
+    """A free-text field, clipped to `units`. A clipped value carries a short
+    digest of its FULL value ("…·3f9a", round 4), so two different values that
+    share their first `units` characters never render identically."""
+    if not text or utf16_len(text) <= units:
+        return text
+    tag = "\u00b7" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:4]
+    return clip(text, units - utf16_len(tag)) + tag
 
 
 def _wrap(line: str) -> list:
@@ -103,7 +111,36 @@ def _docname(doc: dict) -> str:
     return f"{w} {field(doc['number'])}" if doc.get("number") else w
 
 
-def evidence(d: dict) -> list:
+# Evidence enumerations are bounded (round 4). Runner-ups are context and never
+# bind: at most RUNNERS_MAX, then "and N others". Candidates DO bind: a view
+# prints at most CANDIDATES_MAX and binds only those; the rest are one phrase
+# away — an item view that pages every candidate, each page binding what it prints.
+RUNNERS_MAX = 3
+CANDIDATES_MAX = 3
+
+
+def ident(doc: dict) -> str:
+    """How a pairing is named in the text: document and date. The binding
+    check (_bindable) requires this exact string to be visible, and unique
+    within its payment."""
+    return f"{_docname(doc)} ({_day(doc['date'])})"
+
+
+def _cands(d, cands):
+    return d["candidates"][:CANDIDATES_MAX] if cands is None else cands
+
+
+def _amount_word(d) -> str:
+    return f"{abs(d['amount_minor'] or 0) / 100:.2f}"
+
+
+def candidates_phrase(d) -> str:
+    return f"candidates for {_amount_word(d)} {_day(d['date'])}"
+
+
+def evidence(d: dict, cands=None) -> list:
+    """`cands` are the candidates to print (default: the first
+    CANDIDATES_MAX, with the phrase that shows the rest)."""
     out = []
     cur = d["current"]
     if cur is not None:
@@ -121,11 +158,14 @@ def evidence(d: dict) -> list:
         if "guessed" not in labels:
             # a line that asks for a verdict names what it is asking about (round p7:
             # a no-ref line never named its invoice, yet "all good" confirmed it)
-            out.insert(0, f"Paired with {name} ({_day(doc['date'])}).")
+            out.insert(0, f"Paired with {ident(doc)}.")
         if "guessed" in labels:
-            others = "; ".join(field(x) for x in cur["runners_up"])
-            out.append(f"Picked {name} ({_day(doc['date'])}); {others} also fits." if others
-                       else f"Picked {name} among several that fit.")
+            rs = cur["runners_up"]
+            others = "; ".join(field(x) for x in rs[:RUNNERS_MAX])
+            if len(rs) > RUNNERS_MAX:
+                others += f"; and {len(rs) - RUNNERS_MAX} others"
+            out.append(f"Picked {ident(doc)}; {others} also fits." if others
+                       else f"Picked {ident(doc)} among several that fit.")
         if "no-ref" in labels:
             out.append("Repeating equal charges, and no invoice number on both sides.")
         if "partial-search" in labels:
@@ -135,10 +175,21 @@ def evidence(d: dict) -> list:
                        f"{field(doc.get('recipient')) or 'someone else'}, not the business.")
         if d["status"] == "proposed" and len(out) == 1:
             out.append("Not sure — say if it's wrong.")
-    if d["candidates"]:
-        out.append("Could be: " + ", ".join(f"{_docname(c['document'])} "
-                                            f"({_day(c['document']['date'])})"
-                                            for c in d["candidates"]) + ".")
+    shown = _cands(d, cands)
+    if shown:
+        out.append("Could be: " + ", ".join(ident(c["document"]) for c in shown) + ".")
+    if cands is None and len(d["candidates"]) > len(shown):
+        out.append(f"{len(d['candidates']) - len(shown)} more could fit — say "
+                   f"\"{candidates_phrase(d)}\".")
+    return out
+
+
+def pairings(d: dict, cands=None) -> dict:
+    """The pairings a block that shows evidence(d, cands) displays, by match id,
+    with the identity string it prints for each."""
+    out = {c["match_id"]: ident(c["document"]) for c in _cands(d, cands)}
+    if d["current"] is not None:
+        out[d["current"]["match_id"]] = ident(d["current"]["document"])
     return out
 
 
@@ -286,11 +337,14 @@ def _degraded_block(gmail_down, interrupted, missing, unsearched) -> list:
 class _Block:
     """One printed item: its lines, and what printing it binds on delivery."""
     __slots__ = ("lines", "pid", "pairings", "residue", "amount", "order", "name", "guessed",
-                 "offer")
+                 "offer", "ident")
 
-    def __init__(self, lines, *, pid=None, pairings=(), residue=None, amount=0, order=("", 0),
-                 name=None, guessed=False, offer=None):
-        self.lines, self.pid, self.pairings, self.residue = list(lines), pid, set(pairings), residue
+    def __init__(self, lines, *, pid=None, pairings=None, residue=None, amount=0, order=("", 0),
+                 name=None, guessed=False, offer=None, ident=None):
+        # `pairings`: match id -> the identity string printed for it; `ident`: the
+        # payment's printed identity (its headline). Both are checked at bind time.
+        self.lines, self.pid, self.residue = list(lines), pid, residue
+        self.pairings, self.ident = dict(pairings or {}), ident
         self.offer = offer              # a package offered for "send it again"
         self.amount, self.order, self.name, self.guessed = amount or 0, order, name, guessed
 
@@ -333,19 +387,12 @@ def _residue_blocks(conn) -> tuple:
     return blocks, silent
 
 
-def _shown_pairings(d) -> set:
-    ids = {c["match_id"] for c in d["candidates"]}
-    if d["current"] is not None:
-        ids.add(d["current"]["match_id"])
-    return ids
-
-
 def _item_blocks(ds, detail, q, shows_pairings=False, guessed=False) -> list:
     """`pairings` are the match ids whose proposition the text displays. Only
     those are bound for a later correction (round p1, Astra S1: a missing view
     that bound candidates it never showed let "Adobe is wrong" reject them)."""
-    return [_Block([headline(d, q), *detail(d)], pid=d["pid"],
-                   pairings=_shown_pairings(d) if shows_pairings else (),
+    return [_Block([headline(d, q), *detail(d)], pid=d["pid"], ident=headline(d, q),
+                   pairings=pairings(d) if shows_pairings else {},
                    amount=abs(d["amount_minor"] or 0), order=(d["date"] or "", d["pid"]),
                    name=d["counterparty"], guessed=guessed)
             for d in ds]
@@ -375,14 +422,8 @@ def _compose(conn, view, q, items, members, lead):
     parts = {"view": view, "head": [], "announce": [], "sections": [], "silent": [],
              "tail": None}
     if view == "item":
-        d = items[0]
-        lines = [headline(d), _item_sentence(d), *evidence(d)]
-        if _open_required(d):
-            lines += _missing_detail(d)
-        parts["sections"].append(_Section(None, [_Block(lines, pid=d["pid"],
-                                                        pairings=_shown_pairings(d))]))
         parts["tail"] = lambda printed_guessed: []
-        return parts
+        return parts                    # composed page by page in _item_page
 
     titles = {"status": f"Accounting · {dates.quarter_label(q)}",
               "all": f"Accounting · {dates.quarter_label(q)}",
@@ -660,6 +701,29 @@ def _item_sentence(d) -> str:
     return f"No {word} yet." + (f" Searched {n} ways." if n else "")
 
 
+def _item_block(d, cands, more) -> _Block:
+    lines = [headline(d), _item_sentence(d), *evidence(d, cands=cands)]
+    if _open_required(d):
+        lines += _missing_detail(d)
+    if more:
+        lines += ["", MORE_LINE]
+    return _Block(lines, pid=d["pid"], ident=headline(d), pairings=pairings(d, cands))
+
+
+def _item_page(d, after):
+    """The item view pages EVERY candidate (round 4): as many as fit one
+    message after the cursor (the last match id printed), each page binding
+    the candidates it prints. Returns (block, cursor or None)."""
+    rest = [c for c in d["candidates"] if after is None or c["match_id"] > after[0]]
+    n = 1 if rest else 0
+    while n < len(rest) and utf16_len(_text(_item_block(d, rest[:n + 1],
+                                                         n + 1 < len(rest)).lines)) \
+            <= TELEGRAM_LIMIT:
+        n += 1
+    more = n < len(rest)
+    return _item_block(d, rest[:n], more), ([rest[n - 1]["match_id"]] if more else None)
+
+
 def build_review(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
     """`page` (1, 2, ...) renders the view uncapped, one message per page, and
     `after` is the cursor the previous page's `next` returned; the `all` view
@@ -691,9 +755,14 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
             items = [work.describe(conn, p) for p in members]
             parts = _compose(conn, view, q, items, members, lead)
             if view == "item":
-                page = None
-                lines, chosen = _emit(parts, {0: parts["sections"][0].blocks}, announce=False)
+                blk, cursor = _item_page(items[0], after)
+                lines, chosen = blk.lines, [blk]
                 text = _text(lines)
+                if cursor is not None:
+                    nxt = {"view": "item", "pid": pid, "page": (page or 1) + 1, "after": cursor}
+                scope["page"], scope["after"] = page, after
+                # a later page adds to what the earlier pages of this item bound
+                scope["continues"] = bool(page and page > 1)
             elif page is not None:
                 lines, chosen, cursor = _page(parts, after, page == 1)
                 text = _text(lines)
@@ -733,10 +802,7 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
         conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                      " membership_json) VALUES (?,?,?,?,?,?)",
                      (rid, view, db.canonical(scope), db.now(), text, json.dumps(members)))
-        printed = {}
-        for c in chosen:
-            if c.pid is not None:
-                printed.setdefault(c.pid, set()).update(c.pairings)
+        printed = _bindable(chosen, text)
         for p, shown_ids in printed.items():
             prev = conn.execute("SELECT revision FROM projections WHERE pid=?", (p,)).fetchone()[0]
             mrevs = {str(r[0]): r[1] for r in conn.execute(
@@ -746,6 +812,39 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
                          " match_revisions_json) VALUES (?,?,?,?)",
                          (rid, p, prev, db.canonical(mrevs)))
     return {"render_id": rid, "text": text, "printed": len(printed), "next": nxt}
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[\s\u00b7]+", "", s)
+
+
+def _bindable(chosen, text) -> dict:
+    """THE bind-time check (round 4): a payment is bound only if its printed
+    identity (headline) is visible in the text and no other bound payment in
+    this rendering prints the same identity; a pairing only if its identity
+    string is visible and unique within its payment. Whatever the formatting,
+    every entity a rendering binds is uniquely identified by text visibly in it.
+    Returns pid -> the match ids bound."""
+    flat = _norm(text)
+    by_pid: dict = {}
+    for c in chosen:
+        if c.pid is None:
+            continue
+        e = by_pid.setdefault(c.pid, {"ident": c.ident, "pairings": {}})
+        e["pairings"].update(c.pairings)
+    seen: dict = {}
+    for e in by_pid.values():
+        k = _norm(e["ident"] or "")
+        seen[k] = seen.get(k, 0) + 1
+    out = {}
+    for p, e in by_pid.items():
+        k = _norm(e["ident"] or "")
+        if not k or seen[k] > 1 or k not in flat:
+            continue
+        names = [_norm(v) for v in e["pairings"].values()]
+        out[p] = {m for m, v in e["pairings"].items()
+                  if names.count(_norm(v)) == 1 and _norm(v) in flat}
+    return out
 
 
 def render_items(conn, render_id) -> list:
@@ -764,12 +863,24 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
         # the delivery ORDER is the store sequence, not the one-second timestamp (db.last_delivered)
         conn.execute("UPDATE renders SET delivered_at=?, delivered_seq=? WHERE render_id=?",
                      (now, db.next_seq(conn), render_id))
-        for it in conn.execute("SELECT * FROM render_items WHERE render_id=?", (render_id,)):
+        scope = json.loads(r["scope_json"])
+        for it in conn.execute("SELECT * FROM render_items WHERE render_id=?",
+                               (render_id,)).fetchall():
+            mrevs = it["match_revisions_json"]
+            if scope.get("continues"):
+                # a later page of one item view: the operator has now been shown the
+                # earlier pages' candidates too, at the same revision of the payment
+                prev = conn.execute("SELECT s.*, r.kind FROM shown s JOIN renders r ON"
+                                    " r.render_id=s.render_id WHERE s.pid=?",
+                                    (it["pid"],)).fetchone()
+                if prev is not None and prev["kind"] == "item" \
+                        and prev["projection_revision"] == it["projection_revision"]:
+                    merged = json.loads(prev["match_revisions_json"])
+                    merged.update(json.loads(mrevs))
+                    mrevs = db.canonical(merged)
             conn.execute("INSERT OR REPLACE INTO shown(pid, render_id, projection_revision,"
                          " match_revisions_json, delivered_at) VALUES (?,?,?,?,?)",
-                         (it["pid"], render_id, it["projection_revision"],
-                          it["match_revisions_json"], now))
-        scope = json.loads(r["scope_json"])
+                         (it["pid"], render_id, it["projection_revision"], mrevs, now))
         for rid_ in scope.get("residue", []) + scope.get("residue_silent", []):
             conn.execute("UPDATE residue SET shown_render=? WHERE id=?", (render_id, rid_))
         if scope.get("announce_watermark"):

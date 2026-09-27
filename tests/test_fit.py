@@ -236,3 +236,130 @@ class TestReplyProperty(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _norm(s):
+    return "".join(ch for ch in s if not ch.isspace() and ch != "·")
+
+
+class TestIdentityProperty(Base):
+    """fix wave D round 4, the property stated once: every entity a rendering
+    binds is uniquely identified by text visibly in it, and every item (and
+    every candidate) is bindable in at least one reachable view."""
+
+    def candidates(self, pid, numbers):
+        docs = [self.doc(document_number=n, issuer="Issuer %d" % i,
+                         document_date="2026-09-%02d" % (1 + i % 3))
+                for i, n in enumerate(numbers)]
+        with db.tx(self.conn):
+            for doc in docs:
+                mid = self.conn.execute(
+                    "INSERT INTO matches(pid_created, doc_id, label, runners_up_json,"
+                    " created_seq) VALUES (?,?,'clean','[]',?)",
+                    (pid, doc, db.next_seq(self.conn))).lastrowid
+                self.conn.execute("INSERT INTO match_state(match_id, pid, doc_id, state, author,"
+                                  " activation) VALUES (?,?,?,'conflicted','auto',0)",
+                                  (mid, pid, doc))
+
+    def check(self, r, bound_where):
+        text = r["text"]
+        self.assertLessEqual(views.utf16_len(text), LIMIT)
+        flat = _norm(text)
+        idents = {}
+        for row in self.conn.execute("SELECT pid, match_revisions_json FROM render_items WHERE"
+                                     " render_id=?", (r["render_id"],)).fetchall():
+            d = work.describe(self.conn, row[0])
+            head = _norm(views.headline(d, "2026-Q3") if r.get("_view") != "item"
+                         else views.headline(d))
+            self.assertIn(head, flat)
+            idents.setdefault(head, []).append(row[0])
+            docs = {c["match_id"]: c["document"] for c in
+                    ([d["current"]] if d["current"] else []) + d["candidates"]}
+            names = [_norm(views.ident(docs[int(m)])) for m in json.loads(row[1])]
+            for n in names:
+                self.assertIn(n, flat)
+            self.assertEqual(len(names), len(set(names)))           # unique within the payment
+            bound_where.setdefault(row[0], set()).update(int(m) for m in json.loads(row[1]))
+        for head, pids in idents.items():
+            self.assertEqual(len(pids), 1, head)                     # unique among payments
+
+    def test_identity_is_visible_unique_and_every_entity_reachable(self):
+        rng = random.Random(4)
+        pids = []
+        for i in range(rng.randint(12, 20)):
+            payee = rng.choice(("Adobe", "Adobe", "Figma", "Z" * 70 + rng.choice("AB")))
+            amount = rng.choice((5445, 5445, 1000))
+            pid = self.item(payee, amount, False)
+            pids.append(pid)
+            shape = rng.choice(("guessed", "candidates", "plain"))
+            prefix = "A" * rng.choice((10, 65))
+            if shape == "guessed":
+                d = self.doc(counterparty=payee, issuer="I%d" % i,
+                             document_number=prefix + "G%d" % i,
+                             document_date="2026-09-02")
+                matches.record_match(
+                    self.conn, pid=pid, doc_id=d, author="auto", expected_revision=self.rev(pid),
+                    row_snapshot=self.snapshot(pid), token=self.token, labels=("guessed",),
+                    runners_up=tuple(_word(rng, rng.choice((5, 90))) for _ in
+                                     range(rng.randint(0, 120))))
+            elif shape == "candidates":
+                n = rng.randint(2, 45)
+                self.candidates(pid, [prefix + rng.choice(("CORRECT", "WRONG", "X%d" % k))
+                                      for k in range(n)])
+        bound = {}
+        for view in ("status", "check", "all"):
+            page, after = (1 if view == "all" else None), None
+            for _ in range(40):
+                kw = {k: v for k, v in (("page", page), ("after", after)) if v is not None}
+                r = views.build_review(self.conn, view=view, quarter="2026-Q3", **kw)
+                self.check(r, bound)
+                nxt = r["next"]
+                if nxt is None or "after" not in nxt:
+                    break
+                page, after = nxt["page"], nxt["after"]
+        for pid in pids:                  # the item view: reached by a re-show or the phrase
+            page, after = None, None
+            for _ in range(40):
+                kw = {k: v for k, v in (("page", page), ("after", after)) if v is not None}
+                r = views.build_review(self.conn, view="item", pid=pid, **kw)
+                r["_view"] = "item"
+                self.check(r, bound)
+                if r["next"] is None:
+                    break
+                self.assertIn('say "more"', r["text"])
+                page, after = r["next"]["page"], r["next"]["after"]
+        for pid in pids:
+            self.assertIn(pid, bound)                                # every item bindable
+            d = work.describe(self.conn, pid)
+            names = [views.ident(c["document"]) for c in d["candidates"]]
+            reachable = {c["match_id"] for c in d["candidates"]
+                         if names.count(views.ident(c["document"])) == 1}
+            self.assertLessEqual(reachable, bound[pid])              # every distinct candidate
+
+
+class TestBindable(unittest.TestCase):
+    """The bind-time backstop on its own: visible AND unique, or not bound."""
+    def blk(self, pid, ident, pairings):
+        return views._Block([ident], pid=pid, ident=ident, pairings=pairings)
+
+    def test_only_visible_unique_identities_bind(self):
+        text = "Adobe · EUR 1.00 · 1 Sep\ninvoice A (2 Sep), invoice B (2 Sep)\nFigma · EUR 2.00 · 2 Sep"
+        chosen = [self.blk(1, "Adobe · EUR 1.00 · 1 Sep",
+                           {10: "invoice A (2 Sep)", 11: "invoice B (2 Sep)",
+                            12: "invoice C (2 Sep)"}),                 # C is not in the text
+                  self.blk(2, "Figma · EUR 2.00 · 2 Sep", {}),
+                  self.blk(3, "Zapier · EUR 3.00 · 3 Sep", {})]      # not in the text
+        self.assertEqual(views._bindable(chosen, text), {1: {10, 11}, 2: set()})
+
+    def test_shared_identities_bind_neither(self):
+        text = "Adobe · EUR 1.00 · 1 Sep\ninvoice (2 Sep), invoice (2 Sep)"
+        chosen = [self.blk(1, "Adobe · EUR 1.00 · 1 Sep", {10: "invoice (2 Sep)",
+                                                          11: "invoice (2 Sep)"}),
+                  self.blk(2, "Adobe · EUR 1.00 · 1 Sep", {})]
+        self.assertEqual(views._bindable(chosen, text), {})
+        self.assertEqual(views._bindable(chosen[:1], text), {1: set()})
+
+    def test_a_wrapped_identity_is_still_visible(self):
+        text = "Adobe\nEUR 1.00 · 1\nSep"
+        self.assertEqual(views._bindable([self.blk(1, "Adobe · EUR 1.00 · 1 Sep", {})], text),
+                         {1: set()})

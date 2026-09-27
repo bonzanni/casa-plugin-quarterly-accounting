@@ -488,7 +488,8 @@ def t_delivered(args):
           "or instruction about the accounting. Applies only what resolves, bound to what they "
           "were shown. Send EVERY entry of receipt_pages, in order, each as its own message "
           "(receipt is the first page). Also returns items to show again (build_review item) "
-          "and instructions for you (rebuild, resend, show views).",
+          "and instructions for you (rebuild, resend, show views; \"show item N\" is "
+          "build_review(view=\"item\", pid=N)).",
           obj({"text": S}, ("text",)))
 def t_reply(args):
     _need(args, "text")

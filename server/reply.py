@@ -31,6 +31,8 @@ _AMOUNT = re.compile(r"(?:eur\s*|€\s*)?(\d{1,3}(?:,\d{3})*\.\d{2}|\d+[.,]\d{2}
 _DATE = re.compile(r"\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b")
 _T = r"(?:the\s+)?(?P<t>.+?)(?:\s+one)?"
 PATTERNS = [
+    # round 4: the phrase a view offers when a payment has more candidates than it prints
+    ("candidates", re.compile(r"(?:show\s+(?:me\s+)?)?(?:the\s+)?candidates for\s+(?P<t>.+)")),
     ("bulk_except", re.compile(r"all (?:good|fine|correct|right) (?:except|but) (?P<t>.+)")),
     ("all_good", re.compile(r"all (?:good|fine|correct|right)")),
     ("unpair", re.compile(_T + r"\s+(?:is|are)\s+(?:wrong|not right|incorrect)")),
@@ -474,6 +476,14 @@ def _apply(conn, run, verb, m, items):
         return
     if verb == "show":
         run.instructions.append(m.group("s"))
+        return
+    if verb == "candidates":
+        d, problem = _resolve(conn, m.group("t"), items)
+        if d is None:
+            run.asks.append(problem)
+            run.lines.append(problem)
+            return
+        run.instructions.append(f"show item {d['pid']}")
         return
 
 

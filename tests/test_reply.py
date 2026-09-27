@@ -629,6 +629,133 @@ class TestFieldClip(Base):
         self.assertIn("Set aside both candidates", out["receipt"])
 
 
+class TestIdentity(Base):
+    """fix wave D round 4: every entity a rendering binds is uniquely identified
+    by text visibly in it, and every item is bindable in a reachable view."""
+    def pair(self, pid, number, date="2026-09-02", **kw):
+        d = self.doc(document_number=number, document_date=date)
+        matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
+                             expected_revision=self.rev(pid), token=self.token,
+                             row_snapshot=self.snapshot(pid), **kw)
+        return d
+
+    def more_candidates(self, pid, numbers, dates_):
+        """Candidates beyond the two record_match makes, written as the store
+        holds them (match + conflicted match_state), for a large candidate set."""
+        tmpl = self.conn.execute("SELECT * FROM match_state WHERE pid=? AND state='conflicted'"
+                                 " ORDER BY match_id LIMIT 1", (pid,)).fetchone()
+        docs = [self.doc(document_number=n, document_date=d) for n, d in zip(numbers, dates_)]
+        with db.tx(self.conn):
+            for doc in docs:
+                mid = self.conn.execute(
+                    "INSERT INTO matches(pid_created, doc_id, label, runners_up_json,"
+                    " created_seq) VALUES (?,?,'clean','[]',?)",
+                    (pid, doc, db.next_seq(self.conn))).lastrowid
+                self.conn.execute("INSERT INTO match_state(match_id, pid, doc_id, state, author,"
+                                  " activation, fp, revision, digest) VALUES"
+                                  " (?,?,?,'conflicted','auto',?,?,0,?)",
+                                  (mid, pid, doc, tmpl["activation"], tmpl["fp"], tmpl["digest"]))
+
+    def bound(self, rid, pid):
+        import json
+        row = self.conn.execute("SELECT match_revisions_json FROM render_items WHERE"
+                                " render_id=? AND pid=?", (rid, pid)).fetchone()
+        return None if row is None else {int(k) for k in json.loads(row[0])}
+
+    def test_numbers_alike_in_their_first_sixty_characters_render_apart(self):
+        # Astra S1 (a): 65 x "A" + CORRECT / WRONG rendered identically
+        x = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        y = self.item("Adobe", 6000, "2026-09-15", paired=False)
+        self.pair(x, "A" * 65 + "CORRECT", labels=("guessed",))
+        self.pair(y, "A" * 65 + "WRONG", labels=("guessed",))
+        r = self.deliver()
+        a, b = views.field("A" * 65 + "CORRECT"), views.field("A" * 65 + "WRONG")
+        self.assertNotEqual(a, b)
+        self.assertIn(a, " ".join(r["text"].split()))
+        self.assertIn(b, " ".join(r["text"].split()))
+
+    def test_two_candidates_alike_in_their_first_sixty_characters_render_apart(self):
+        # Astra S1 (b): both rendered identically, and "Adobe is wrong" rejected both
+        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        m = [self.pair(pid, "A" * 65 + tail) for tail in ("CORRECT", "WRONG")]
+        r = self.deliver(view="check")
+        idents = [views.ident(views.work.describe(self.conn, pid)["candidates"][i]["document"])
+                  for i in range(2)]
+        self.assertNotEqual(idents[0], idents[1])
+        for i in idents:
+            self.assertIn(i, " ".join(r["text"].split()))
+        self.assertEqual(len(self.bound(r["render_id"], pid)), 2)
+        del m
+
+    def test_identical_candidates_are_bound_by_neither(self):
+        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        for issuer in ("Adobe", "Adobe Ireland"):     # different documents, same printed name
+            d = self.doc(document_number="SAME-NUMBER", issuer=issuer, document_date="2026-09-02")
+            matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
+                                 expected_revision=self.rev(pid), token=self.token,
+                                 row_snapshot=self.snapshot(pid))
+        r = self.deliver(view="check")
+        self.assertEqual(self.bound(r["render_id"], pid), set())
+        out = reply.apply_reply(self.conn, "the Adobe one is wrong")
+        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        self.assertNotIn("rejected", [r_[0] for r_ in self.conn.execute(
+            "SELECT state FROM match_state")])
+
+    def test_identical_payments_are_bound_only_where_they_stand_alone(self):
+        a = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
+        b = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
+        r = self.deliver()
+        self.assertEqual(views.render_items(self.conn, r["render_id"]), [])
+        reply.apply_reply(self.conn, "all good")
+        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
+        for p in (a, b):
+            it = views.build_review(self.conn, view="item", pid=p)
+            self.assertEqual(views.render_items(self.conn, it["render_id"]), [p])
+
+    def test_a_hundred_runners_up_leave_the_item_bindable_everywhere(self):
+        # Astra + Terra: 80-120 runners-up made the item unbindable in every view
+        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        mid = self.pair(pid, "INV-1", labels=("guessed",),
+                        runners_up=tuple("runner-up invoice %03d from Adobe" % i
+                                         for i in range(100)))
+        del mid
+        for view, kw in (("status", {}), ("check", {}), ("all", {}), ("item", {"pid": pid})):
+            r = views.build_review(self.conn, view=view, quarter="2026-Q3", **kw)
+            self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+            self.assertIn("and 97 others", r["text"], view)
+            self.assertEqual(views.render_items(self.conn, r["render_id"]), [pid], view)
+            self.assertEqual(len(self.bound(r["render_id"], pid)), 1, view)
+
+    def test_many_candidates_page_through_the_item_view_then_apply(self):
+        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
+        for i in range(2):
+            self.pair(pid, "CANDIDATE-%02d-" % i + "X" * 40, date="2026-09-%02d" % (1 + i))
+        self.more_candidates(pid, ["CANDIDATE-%02d-" % i + "X" * 40 for i in range(2, 60)],
+                             ["2026-09-%02d" % (1 + i % 28) for i in range(2, 60)])
+        r = self.deliver(view="check")
+        self.assertEqual(len(self.bound(r["render_id"], pid)), views.CANDIDATES_MAX)
+        self.assertIn('57 more could fit — say "candidates for 54.45 14 Sep".', r["text"])
+        out = reply.apply_reply(self.conn, "the Adobe one is wrong")      # not all shown
+        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        out = reply.apply_reply(self.conn, "candidates for 54.45 14 Sep")
+        self.assertEqual(out["instructions"], ["show item %d" % pid])
+        seen, page, after = set(), None, None
+        for _ in range(20):
+            kw = {"page": page, "after": after} if page else {}
+            it = views.build_review(self.conn, view="item", pid=pid, **kw)
+            self.assertLessEqual(views.utf16_len(it["text"]), views.TELEGRAM_LIMIT)
+            seen |= self.bound(it["render_id"], pid)
+            views.mark_rendering_delivered(self.conn, it["render_id"])
+            if it["next"] is None:
+                break
+            self.assertTrue(it["text"].endswith('say "more".'))
+            page, after = it["next"]["page"], it["next"]["after"]
+        self.assertGreater(page or 1, 1)
+        self.assertEqual(len(seen), 60)
+        out = reply.apply_reply(self.conn, "the Adobe one is wrong")
+        self.assertIn("Set aside 60 candidates", out["receipt"])
+
+
 class TestIntegration(Base):
     def test_a_counted_but_unprinted_payment_is_reshown_not_changed(self):
         # a never-searched payment is counted ("not searched"), not printed: the
