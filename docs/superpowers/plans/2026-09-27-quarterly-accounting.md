@@ -3711,6 +3711,16 @@ class TestSettle(Base):
             "SELECT cause FROM log WHERE kind='retire'")])
         del d2
 
+    def test_an_ended_lineage_retires_its_conflicted_candidates(self):
+        a, b = self.machine_pair(self.pid, self.doc()), self.machine_pair(self.pid, self.doc())
+        self.assertEqual((self.state(a), self.state(b)), ("conflicted", "conflicted"))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET ended='vanished' WHERE pid=?", (self.pid,))
+        self.settle(self.pid)
+        self.assertEqual((self.state(a), self.state(b)), ("rejected", "rejected"))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE kind='retire' AND"
+                                           " cause='row-ended'").fetchone()[0], 2)
+
     def test_revisions_move_only_with_the_proposition(self):
         d = self.doc()
         mid = self.machine_pair(self.pid, d)
@@ -3724,6 +3734,13 @@ class TestSettle(Base):
         self.assertEqual(self.proj()["revision"], r0 + 1)
         self.assertEqual(self.conn.execute("SELECT revision FROM match_state WHERE match_id=?",
                                            (mid,)).fetchone()[0], m0 + 1)
+
+    def test_renaming_the_payee_moves_the_revision(self):
+        self.settle(self.pid)
+        r0 = self.proj()["revision"]
+        import kb
+        kb.upsert_counterparty(self.conn, "Acme Law", patterns=["Adobe"])
+        self.assertEqual(self.proj()["revision"], r0 + 1)
 
     def test_note_revision_comes_from_the_store_sequence_and_moves_with_status(self):
         self.settle(self.pid)
@@ -4079,7 +4096,12 @@ def settle(conn, pid: int) -> R.Reduction:
         "reasons": list(red.reasons), "exempt": st.exemption is not None,
         "cands": match_digests, "facts": inp.facts,
         "exp": [exp.kind, exp.tier, exp.row, exp.conflict], "ended": proj["ended"],
-        "search_state": proj["search_state"], "identity": proj["identity_question"]})
+        "search_state": proj["search_state"], "identity": proj["identity_question"],
+        # what the KB makes visible on the line (round p6, Astra S2: a renamed payee
+        # kept the shown revision and a correction landed on an unseen identity)
+        "payee": kb.display_name(conn, row["counterparty"]) if row else None,
+        "link": cp["document_link"] if cp is not None else None,
+        "portal": kb.is_portal(cp)})
     body = _note_body(conn, red)
     note_seq = proj["note_seq"]
     if body != proj["note_body"]:
@@ -4303,7 +4325,6 @@ def _require_delivered_render(conn, render_id) -> None:
 
 def set_expectation(conn, *, scope_type, scope, kind, tier=None, author, render_id=None,
                     token=None) -> dict:
-    import lineage
     import passes
     if scope_type not in ("counterparty", "chain"):
         raise db.Refusal("scope_type is 'counterparty' or 'chain'")
@@ -4318,40 +4339,51 @@ def set_expectation(conn, *, scope_type, scope, kind, tier=None, author, render_
             raise db.Refusal("a document kind needs a tier: 'required' or 'optional'")
     with db.tx(conn):
         passes.check_token(conn, token)
-        if author == "operator":
-            _require_delivered_render(conn, render_id)
-        if scope_type == "chain":
-            if author != "operator":
-                raise db.Refusal("a class-level expectation is the operator's to set")
-            tags = parse_scope(scope)
-            if not tags or not all(_TAG.match(t) for t in tags):
-                raise db.Refusal("a chain is comma-separated classification tags")
-            norm = ex.normalize_scope(tags)
-            if norm is None:
-                raise db.Refusal("those tags select different rows of the mapping; name one chain")
-            rows, okey = norm
-            key = ", ".join(sorted(tags))
-            if kind == "default":
-                conn.execute("DELETE FROM chain_overrides WHERE scope=?", (key,))
-            else:
-                conn.execute("INSERT OR REPLACE INTO chain_overrides(scope, kind, tier, rows_json,"
-                             " key_json, author, set_at) VALUES (?,?,?,?,?,?,?)",
-                             (key, kind, tier, json.dumps(sorted(rows)), json.dumps(sorted(okey)),
-                              author, db.now()))
+        return set_expectation_in_tx(conn, scope_type=scope_type, scope=scope, kind=kind,
+                                     tier=tier, author=author, render_id=render_id)
+
+
+def set_expectation_in_tx(conn, *, scope_type, scope, kind, tier=None, author,
+                          render_id=None) -> dict:
+    """The override inside the caller's transaction, so apply_reply can check,
+    in that same transaction, that every payment it changes was shown."""
+    import lineage
+    if kind == "none":
+        tier = None
+    if author == "operator":
+        _require_delivered_render(conn, render_id)
+    if scope_type == "chain":
+        if author != "operator":
+            raise db.Refusal("a class-level expectation is the operator's to set")
+        tags = parse_scope(scope)
+        if not tags or not all(_TAG.match(t) for t in tags):
+            raise db.Refusal("a chain is comma-separated classification tags")
+        norm = ex.normalize_scope(tags)
+        if norm is None:
+            raise db.Refusal("those tags select different rows of the mapping; name one chain")
+        rows, okey = norm
+        key = ", ".join(sorted(tags))
+        if kind == "default":
+            conn.execute("DELETE FROM chain_overrides WHERE scope=?", (key,))
         else:
-            e = _entry(conn, scope) or counterparty_for(conn, scope)
-            if e is None:
-                conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
-                             " VALUES (?, '[]', ?)", (scope.strip(), db.now()))
-                e = _entry(conn, scope)
-            if kind == "default":
-                conn.execute("UPDATE counterparties SET exp_kind=NULL, exp_tier=NULL,"
-                             " exp_author=NULL, updated_at=? WHERE cp_id=?", (db.now(), e["cp_id"]))
-            else:
-                conn.execute("UPDATE counterparties SET exp_kind=?, exp_tier=?, exp_author=?,"
-                             " updated_at=? WHERE cp_id=?", (kind, tier, author, db.now(),
-                                                             e["cp_id"]))
-        lineage.settle_all(conn)
+            conn.execute("INSERT OR REPLACE INTO chain_overrides(scope, kind, tier, rows_json,"
+                         " key_json, author, set_at) VALUES (?,?,?,?,?,?,?)",
+                         (key, kind, tier, json.dumps(sorted(rows)), json.dumps(sorted(okey)),
+                          author, db.now()))
+    else:
+        e = _entry(conn, scope) or counterparty_for(conn, scope)
+        if e is None:
+            conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
+                         " VALUES (?, '[]', ?)", (scope.strip(), db.now()))
+            e = _entry(conn, scope)
+        if kind == "default":
+            conn.execute("UPDATE counterparties SET exp_kind=NULL, exp_tier=NULL,"
+                         " exp_author=NULL, updated_at=? WHERE cp_id=?", (db.now(), e["cp_id"]))
+        else:
+            conn.execute("UPDATE counterparties SET exp_kind=?, exp_tier=?, exp_author=?,"
+                         " updated_at=? WHERE cp_id=?", (kind, tier, author, db.now(),
+                                                         e["cp_id"]))
+    lineage.settle_all(conn)
     return {"scope_type": scope_type, "scope": scope, "kind": kind, "tier": tier}
 ```
 
@@ -6567,8 +6599,11 @@ class TestEndsAndErasure(Base):
         item = sweep.list_projections(self.conn, token=self.token)["projections"][0]
         rid = item["row_id"]
         real_call = self.bf.call
+        writes = []
 
         def swapping_call(tool, **args):
+            if tool in ("tag_transaction", "untag_transaction", "add_note"):
+                writes.append(tool)
             out = real_call(tool, **args)
             if tool in ("tag_transaction", "untag_transaction"):
                 self.bf.conn.execute("UPDATE transactions SET first_seen='2030-01-01T00:00:00Z'"
@@ -6578,9 +6613,24 @@ class TestEndsAndErasure(Base):
         self.bf.call = swapping_call
         with self.assertRaises(db.Refusal):
             sim.observe_and_repair(self.conn, self.bf, self.token, item)
-        self.assertEqual(self.owned(rid), ["acct::open"])               # the one write
+        self.assertEqual(writes, ["tag_transaction"])                  # exactly one write
+        self.assertEqual(self.owned(rid), ["acct::open"])
         self.assertFalse([n for n in self.bf.notes(rid) if n.startswith("Accounting revision")])
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
+
+    def test_a_late_stale_note_is_restated(self):
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.new_pass()
+        self.cycle()
+        rid = self.rid()
+        current = [n for n in self.bf.notes(rid) if n.startswith("Accounting revision ")][-1]
+        self.bf.call("add_note", row_ids=[rid], note="Accounting revision 1: stale.",
+                     author="agent", workflow="acct@0.1.0",
+                     expected_generation=self.bf.generation())
+        self.new_pass()
+        self.cycle()
+        self.assertEqual([n for n in self.bf.notes(rid)
+                          if n.startswith("Accounting revision ")][-1], current)
 
     def test_not_found_for_a_row_still_in_the_snapshot_is_refused(self):
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
@@ -6839,7 +6889,11 @@ def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=N
             else:
                 conn.execute("UPDATE projections SET unprojectable=NULL WHERE pid=?", (pid,))
         note = lineage.note_text(conn, pid)
-        note_needed = note is not None and note not in (observed_notes or [])
+        # The newest accounting assertion visible is what a reader believes; a lower
+        # revision appended late is historical and the current one is restated
+        # (spec §"Notes are versioned assertions"; round p6, Astra S2).
+        visible = [n for n in (observed_notes or []) if n.startswith("Accounting revision ")]
+        note_needed = note is not None and (not visible or visible[-1] != note)
         gate = passes.bank_write_gate(conn)
         # ONE write per observation (round p5, Terra S1): the specialist makes it,
         # re-reads the row and records it before the next, so a ledger that changes
@@ -8213,6 +8267,27 @@ class TestGrammar(Base):
         self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
 
+    def test_a_vendor_wide_rule_waits_for_every_payment_it_changes_to_be_seen(self):
+        # round p6 (Terra S1)
+        self.deliver()
+        pid = self.item("Adobe", 5445, "2026-09-14")                     # paired, unseen
+        out = reply.apply_reply(self.conn, "no invoices ever for Adobe")
+        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties WHERE"
+                                           " exp_kind IS NOT NULL").fetchone()[0], 0)
+        self.assertEqual(self.author(pid)[0], "auto")                   # the pairing survives
+        self.deliver()
+        out = reply.apply_reply(self.conn, "no invoices ever for Adobe")
+        self.assertEqual(len(out["applied"]), 1)
+
+    def test_rebuild_is_decided_after_the_whole_reply(self):
+        self.deliver()
+        self.item("Zapier", 9900, "2026-09-17")                            # unseen
+        for text in ("rebuild it; Zapier is wrong", "all good except the Zapier; rebuild it"):
+            out = reply.apply_reply(self.conn, text)
+            self.assertEqual(out["instructions"], [], text)
+            self.assertIn("Not rebuilding yet", out["receipt"], text)
+
     def test_an_unresolved_correction_blocks_its_rebuild(self):
         self.deliver()
         self.item("Zapier", 9900, "2026-09-17")                            # unseen
@@ -8406,8 +8481,20 @@ class _Run:
         self.lines, self.applied, self.asks, self.reshow, self.instructions = [], [], [], [], []
         self.touched_quarters = set()
         self.unresolved = 0               # corrections in this reply that did not apply
+        self.rebuilds = []                # rebuild requests, released only if nothing is unresolved
 
     def result(self, not_a_reply=False) -> dict:
+        if self.rebuilds:
+            if self.unresolved:
+                # spec: "An unresolved correction blocks its dependent rebuild and says so."
+                # Decided after every clause, whatever their order (round p6).
+                self.lines.append("Not rebuilding yet: a correction in this message did not "
+                                  "apply. Say \"rebuild it\" again once it has.")
+            else:
+                for q in self.rebuilds:
+                    qs = [_quarter(q)] if q else (sorted(self.touched_quarters)
+                                                  or [_quarter(None)])
+                    self.instructions.extend(f"rebuild {x}" for x in qs)
         for q in sorted(self.touched_quarters):
             pk = _delivered_package_for(self.conn, q)
             if pk is not None:
@@ -8469,6 +8556,7 @@ def apply_reply(conn, text: str) -> dict:
         if re.fullmatch(r"\d{1,2}(?:\s+\w+)?", clause):
             run.lines.append(f"“{clause}”: there are no numbered lines — name the payee, "
                              "e.g. \"the Zapier one is wrong\".")
+            run.unresolved += 1
             continue
         verb, m = None, None
         for name, rx in PATTERNS:
@@ -8484,6 +8572,7 @@ def apply_reply(conn, text: str) -> dict:
                                  f"Say \"{pretty} are wrong\".")
             else:
                 run.lines.append(f"I didn't understand “{clause}” — nothing applied for it.")
+            run.unresolved += 1
             continue
         _apply(conn, run, verb, m, items)
     return run.result()
@@ -8493,6 +8582,7 @@ def _apply(conn, run, verb, m, items):
     if verb == "bulk_except":
         run.lines.append("Nothing applied for that: say \"all good\" and \"the Zapier one is "
                          "wrong\" as two sentences, or only the one that is wrong.")
+        run.unresolved += 1
         return
     if verb == "all_good":
         last = conn.execute("SELECT render_id FROM renders WHERE delivered_at IS NOT NULL AND kind"
@@ -8527,21 +8617,17 @@ def _apply(conn, run, verb, m, items):
         name = next((d["counterparty"] for d in items
                      if said in (kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"]))),
                     m.group("t").strip())
-        try:
-            kb.set_expectation(conn, scope_type="counterparty", scope=name, kind="none",
-                               author="operator", render_id=_last_delivered(conn))
-        except db.Refusal as exc:
-            run.lines.append(f"{name}: not applied — {exc}")
-            return
-        run.applied.append({"never": name})
-        run.lines.append(f"{name}: never needs a document.")
+        _broad(conn, run, lambda: kb.set_expectation_in_tx(
+                   conn, scope_type="counterparty", scope=name, kind="none",
+                   author="operator", render_id=_last_delivered(conn)),
+               f"{name}: never needs a document.")
         return
     if verb == "class_none":
-        for scope in CLASS_SCOPES[m.group("k")]:
-            kb.set_expectation(conn, scope_type="chain", scope=scope, kind="none",
-                               author="operator", render_id=_last_delivered(conn))
-        run.lines.append(f"{m.group('k').capitalize()} are no longer needed.")
-        run.applied.append({"class": m.group("k")})
+        k = m.group("k")
+        _broad(conn, run, lambda: [kb.set_expectation_in_tx(
+                   conn, scope_type="chain", scope=scope, kind="none", author="operator",
+                   render_id=_last_delivered(conn)) for scope in CLASS_SCOPES[k]],
+               f"{k.capitalize()} are no longer needed.")
         return
     if verb == "stop":
         q = _quarter(m.group("q"))
@@ -8568,15 +8654,7 @@ def _apply(conn, run, verb, m, items):
         run.lines.append(res["note"])
         return
     if verb == "rebuild":
-        if run.unresolved:
-            # spec: "An unresolved correction blocks its dependent rebuild and says so."
-            run.lines.append("Not rebuilding yet: a correction above did not apply. Say "
-                             "\"rebuild it\" again once it has.")
-            return
-        # "rebuild it" means the quarter this reply just touched, else the current one
-        qs = [_quarter(m.group("q"))] if m.group("q") else (
-            sorted(run.touched_quarters) or [_quarter(None)])
-        run.instructions.extend(f"rebuild {q}" for q in qs)
+        run.rebuilds.append(m.group("q"))        # decided after the WHOLE reply (result())
         return
     if verb == "resend":
         run.instructions.append("resend")
@@ -8584,6 +8662,53 @@ def _apply(conn, run, verb, m, items):
     if verb == "show":
         run.instructions.append(m.group("s"))
         return
+
+
+class _Unseen(Exception):
+    def __init__(self, pids):
+        super().__init__("unseen")
+        self.pids = pids
+
+
+def _broad(conn, run, change, ok_line) -> None:
+    """A vendor- or class-wide operator change binds EVERY payment whose
+    proposition it changes (round p6, Terra S1: "no invoices ever for Adobe"
+    retired a pairing on an Adobe payment the operator had never seen). The
+    change is made inside one transaction; every payment whose digest it moved
+    must have been shown at the revision it had before the change, or the whole
+    change rolls back and those payments are shown first."""
+    try:
+        with db.tx(conn):
+            before = {r[0]: (r[1], r[2]) for r in conn.execute(
+                "SELECT pid, revision, digest FROM projections WHERE merged_into IS NULL"
+                " AND ended IS NULL")}
+            res = change()
+            unseen = []
+            for pid, (rev, digest) in sorted(before.items()):
+                now = conn.execute("SELECT digest FROM projections WHERE pid=?",
+                                   (pid,)).fetchone()[0]
+                if now == digest:
+                    continue
+                s_ = _shown(conn, pid)
+                if s_ is None or s_["projection_revision"] != rev:
+                    unseen.append(pid)
+            if unseen:
+                raise _Unseen(unseen)
+    except _Unseen as exc:
+        for pid in exc.pids:
+            if pid not in run.reshow:
+                run.reshow.append(pid)
+        run.lines.append(f"Not applied: it would change {len(exc.pids)} payment"
+                         f"{'s' if len(exc.pids) != 1 else ''} you haven't seen as they are "
+                         "now — here they are first.")
+        run.unresolved += 1
+        return
+    except db.Refusal as exc:
+        run.lines.append(f"Not applied — {exc}")
+        run.unresolved += 1
+        return
+    run.applied.append({"broad": res if isinstance(res, dict) else {"changes": len(res)}})
+    run.lines.append(ok_line)
 
 
 def _last_delivered(conn):
@@ -9116,6 +9241,19 @@ class TestNamingAndDeterminism(Base):
             more, _ = self.build()
         self.assertIn("1 document added since the package from 14 Oct.", more["caption"])
 
+    def test_a_change_only_in_notes_is_not_identical(self):
+        with mock.patch.object(db, "now", lambda: "2026-10-14T09:00:00Z"):
+            first, _ = self.build()
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO deliveries(package_id, channel, staged_path, status,"
+                              " created_at, settled_at) VALUES (?, 'telegram', '/x', 'delivered',"
+                              " 'x', '2026-10-14T09:01:00Z')", (first["package_id"],))
+        with mock.patch.object(db, "now", lambda: "2026-07-20T09:00:00Z"):
+            self.file_doc(document_number="LOOSE-1")        # filed in Q3, matches nothing
+        with mock.patch.object(db, "now", lambda: "2026-10-15T09:00:00Z"):
+            again, _ = self.build()
+        self.assertNotIn("Identical", again["caption"])
+
     def test_first_package_names_itself_once(self):
         out, _ = self.build()
         self.assertIn('say "call the zips <name>" to change that', out["caption"])
@@ -9441,7 +9579,12 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                   for h in frozen["history"]]
     if oversize_note:
         notes += ["", "## Too large to send", ""] + [f"- {x}" for x in oversize_note]
-    digest = hashlib.sha256(b"".join(n.encode() + b"\0" + files[n] for n in sorted(files))).hexdigest()
+    # The digest covers every file INCLUDING notes.md (round p6, Astra S2: a change
+    # visible only in notes.md was captioned "identical"); only the closing line,
+    # which carries the build date and the digest itself, is left out.
+    body = ("\n".join(notes) + "\n").encode("utf-8")
+    digest = hashlib.sha256(b"".join(n.encode() + b"\0" + files[n] for n in sorted(files))
+                            + b"notes.md\0" + body).hexdigest()
     period = "{} to {}".format(*dates.quarter_bounds(quarter))
     notes += ["", f"built {today}, covers {period}, bank data through "
                   f"{frozen['bank_through'] or 'not checked'}, digest {digest[:16]}"]
