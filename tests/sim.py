@@ -74,3 +74,125 @@ def sweep_cycle(conn, bf, token, limit=25) -> int:
             n += 1
         if page["remaining_in_cycle"] == 0:
             return n
+
+
+# --- a whole pass, mechanically (Task 23) -----------------------------------
+# The specialist's delegation in the order plan §D5 fixes: sync, the
+# classifier, export_history + import_ledger_export, erase confirmations, the
+# sweep (observations and tag repair), triage. Only triage's judgment is
+# replaced: `triage` applies the auto-match bar of SKILL.md step 6 to filed
+# metadata (the real specialist reads the PDFs). Every bank-feed interaction
+# is the real one.
+import binding  # noqa: E402
+import documents  # noqa: E402
+import ledger  # noqa: E402
+import matches  # noqa: E402
+import passes  # noqa: E402
+import work  # noqa: E402
+
+
+def probe(conn, bf, token):
+    """What the specialist records first: bank-feed's tools, its accounts (with
+    the category label_account wrote), a sync, and list_backups' ledger state."""
+    accounts = [{"account_id": r["account_id"], "category": r["category"], "label": r["name"]}
+                for r in bf.conn.execute("SELECT account_id, category, name FROM accounts")]
+    passes.record_probe(conn, token, "bank_tools", True)
+    passes.record_probe(conn, token, "bank_accounts", True, data={"accounts": accounts})
+    passes.record_probe(conn, token, "bank_sync", True)
+    passes.record_probe(conn, token, "ledger", True,
+                        data={"generation": bf.generation(), "registered": bf.registered(),
+                              "instance": bf.instance()})
+
+
+def _fits(item, doc):
+    if doc["kind"] != item["expectation"]["kind"] or doc["amount_minor"] != item["amount_minor"]:
+        return False
+    if doc.get("currency") and doc["currency"] != item["currency"]:
+        return False
+    from datetime import date
+    a, b = date.fromisoformat(item["date"]), date.fromisoformat(doc["document_date"])
+    return abs((a - b).days) <= 10
+
+
+def lineage_row(conn, pid):
+    return conn.execute("SELECT dest_row_id FROM projections WHERE pid=?", (pid,)).fetchone()[0]
+
+
+def _bank_row(bf, row_id):
+    """The row as get_transaction reads it now (the pass's re-read before a match)."""
+    return dict(bf.conn.execute("SELECT * FROM transactions WHERE row_id=?",
+                                (row_id,)).fetchone())
+
+
+def _identical_pairing(conn, item, doc):
+    """A machine pairing of an identical payment with an identical document: the
+    new pair is ambiguous, so neither is picked (spec §Weekly pass, the
+    ambiguous pair across two passes)."""
+    for pid in [r[0] for r in conn.execute("SELECT pid FROM projections WHERE status='matched'"
+                                           " AND merged_into IS NULL AND pid<>?", (item["pid"],))]:
+        other = work.describe(conn, pid)
+        if other["current"]["author"] != "auto":
+            continue                  # an operator's pairing is never demoted by the machine
+        od = other["current"]["document"]
+        if (other["counterparty"], other["amount_minor"], other["date"]) == (
+                item["counterparty"], item["amount_minor"], item["date"]) and (
+                od["issuer"], od["amount_minor"], od["date"]) == (
+                doc["issuer"], doc["amount_minor"], doc["document_date"]):
+            return pid
+    return None
+
+
+def triage(conn, bf, token) -> dict:
+    """The auto-match bar of SKILL.md step 6, on filed metadata (the real
+    specialist reads the PDFs). Deterministic, so a test can predict it."""
+    done = {"matched": [], "proposed": []}
+    for item in work.triage(conn):
+        if item["pending"]:
+            continue
+        docs = [d for d in documents.list_unmatched(conn, limit=500)["documents"] if _fits(item, d)]
+        if not docs:
+            continue
+        doc = docs[0]
+        snap = _bank_row(bf, lineage_row(conn, item["pid"]))
+        twin = _identical_pairing(conn, item, doc)
+        kw = dict(pid=item["pid"], doc_id=doc["doc_id"], expected_revision=item["revision"],
+                  row_snapshot=snap, token=token,
+                  runners_up=[f"{d['document_number']} ({d['document_date']})" for d in docs[1:]],
+                  labels=("guessed",) if len(docs) > 1 else ("clean",))
+        if twin is not None:
+            matches.propose_match(conn, **kw)
+            other = work.describe(conn, twin)
+            matches.propose_match(conn, pid=twin, doc_id=other["current"]["document"]["doc_id"],
+                                  expected_revision=other["revision"],
+                                  row_snapshot=_bank_row(bf, lineage_row(conn, twin)),
+                                  token=token)
+            done["proposed"] += [item["pid"], twin]
+        else:
+            matches.record_match(conn, author="auto", **kw)
+            done["matched"].append(item["pid"])
+    return done
+
+
+def run_pass(conn, bf, trigger="cron", sync=None) -> dict:
+    """One specialist delegation, in plan §D5's order. `sync` stands in for
+    bank-feed's sync (a callable run between the probes and the export)."""
+    token = passes.begin_pass(conn, trigger)["pass_token"]
+    probe(conn, bf, token)
+    if sync is not None:
+        sync()
+    bf.call("apply_rules")                # the classifier (a no-op without rules)
+    gate = binding.check_setup(conn)["bank_writes"]
+    if not gate["allowed"]:
+        end = passes.end_pass(conn, token, "stopped", {})
+        return {"token": token, "import": None, "gate": gate, "triage": None, "end": end}
+    path = bf.export()
+    imp = ledger.import_ledger_export(conn, path=path, token=token,
+                                      ledger_instance=bf.last_export_instance)
+    for c in imp["erase_candidates"]:
+        if bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
+            sweep.record_observation(conn, pid=c["pid"], token=token, not_found=True)
+    sweep_cycle(conn, bf, token)
+    tri = triage(conn, bf, token)
+    sweep_cycle(conn, bf, token)          # the annotations for what triage just decided
+    end = passes.end_pass(conn, token, "complete", {})
+    return {"token": token, "import": imp, "gate": gate, "triage": tri, "end": end}
