@@ -344,8 +344,12 @@ def _build(path, data_dir, q):
     os.environ["CLAUDE_PLUGIN_DATA"] = data_dir
     import db as _db
     import package as _p
-    with mock.patch.object(_db, "now", lambda: "2026-10-14T14:12:10Z"):
-        q.put(_p.build_quarterly_package(_db.open_store(path), "2026-Q3"))
+    conn = _db.open_store(path)
+    try:
+        with mock.patch.object(_db, "now", lambda: "2026-10-14T14:12:10Z"):
+            q.put(_p.build_quarterly_package(conn, "2026-Q3"))
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
