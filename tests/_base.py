@@ -121,8 +121,11 @@ class StoreCase(TempEnv):
         import db
         import json
         with db.tx(self.conn):
-            self.conn.execute("UPDATE projections SET class_tags_json=?, class_observed_at=?"
-                              " WHERE pid=?", (json.dumps(sorted(tags)), db.now(), pid))
+            # an observation made now: after the latest import, so fresh (fix E2)
+            self.conn.execute("UPDATE projections SET class_tags_json=?, class_observed_at=?,"
+                              " class_observed_snapshot=(SELECT coalesce(max(snapshot_id), 0)"
+                              " FROM snapshots) WHERE pid=?",
+                              (json.dumps(sorted(tags)), db.now(), pid))
 
     def settle(self, pid):
         import db

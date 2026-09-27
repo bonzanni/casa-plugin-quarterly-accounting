@@ -372,5 +372,130 @@ class TestRestoreAndReset(Base):
         self.assertNotIn("acct::matched", bf.tags(rid))
 
 
+class TestPackagingSeesTheClassification(Base):
+    """Round E1 (Astra S1): the CSV import carries no classification tags; only the
+    sweep's per-row read refreshes the classification the expectation and the kind
+    guard use. Packaging, driven through the tool layer against the real bank-feed
+    and its RENDERED get_transaction text, must sweep between import and build."""
+    def setUp(self):
+        super().setUp()
+        from tests.test_tools import _fresh_conn
+        _fresh_conn(self)._CONN = self.conn
+
+    @staticmethod
+    def call(name, **args):
+        import json
+        import qa_server
+        out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": name, "arguments": args}})
+        text = out["result"]["content"][0]["text"]
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            raise AssertionError(f"{name} answered {text!r}") from None
+
+    @staticmethod
+    def read(text):
+        """What the skill's sweep step transcribes from get_transaction's text."""
+        tags, notes, in_notes = [], [], False
+        for line in text.splitlines():
+            if line.startswith("Tags: ") and line != "Tags: none":
+                tags += line[len("Tags: "):].split(", ")
+            elif line.startswith("Other workflows' tags (not classifications): "):
+                tags += line.split(": ", 1)[1].split(", ")
+            elif line.startswith("Notes"):
+                in_notes = line != "Notes: none"
+            elif in_notes and line.startswith("  ["):
+                notes.append(line[2:])
+        first_seen = re.search(r"first seen (\S+), last seen", text).group(1)
+        return tags, notes, first_seen
+
+    def sweep(self, token):
+        """SKILL.md's sweep (the specialist's pass, step 5), through the tools."""
+        bf = self.bf
+        while True:
+            page = self.call("list_projections", pass_token=token)
+            for item in page["projections"]:
+                row_id = item["row_id"]
+                for _ in range(4):
+                    text = bf.call("get_transaction", row_id=row_id)
+                    if text.startswith("no transaction #"):
+                        self.call("record_observation", pid=item["pid"], pass_token=token,
+                                  snapshot_id=page["snapshot_id"],
+                                  not_found=True)
+                        break
+                    tags, notes, first_seen = self.read(text)
+                    r = self.call("record_observation", pid=item["pid"], pass_token=token,
+                                  snapshot_id=page["snapshot_id"],
+                                  observed_tags=tags, observed_notes=notes,
+                                  observed_first_seen=first_seen)
+                    ins = r["instructions"]
+                    if not ins:
+                        break
+                    kw = {k: ins[k] for k in ("workflow", "expected_generation", "expected_ledger")}
+                    if "untag" in ins:
+                        bf.call("untag_transaction", row_ids=[row_id], tags=ins["untag"], **kw)
+                    elif "tag" in ins:
+                        bf.call("tag_transaction", row_ids=[row_id], tags=ins["tag"], **kw)
+                    else:
+                        bf.call("add_note", row_ids=[row_id], note=ins["add_note"],
+                                author="agent", **kw)
+            if page["remaining_in_cycle"] == 0:
+                return
+
+    def package(self, sweep):
+        """SKILL.md's Packaging, step 1 (the specialist's package snapshot), then step 2."""
+        bf = self.bf
+        token = self.call("begin_pass", trigger="package")["pass_token"]
+        accounts = [{"account_id": r["account_id"], "category": r["category"], "label": r["name"]}
+                    for r in bf.conn.execute("SELECT account_id, category, name FROM accounts")]
+        self.call("record_probe", pass_token=token, kind="bank_tools", ok=True)
+        self.call("record_probe", pass_token=token, kind="bank_accounts", ok=True,
+                  data={"accounts": accounts})
+        self.call("record_probe", pass_token=token, kind="bank_sync", ok=True)
+        self.call("record_probe", pass_token=token, kind="ledger", ok=True,
+                  data=sim.ledger_state(bf.listing()))
+        self.assertTrue(self.call("check_setup")["can_run"])
+        imp = self.call("import_ledger_export", path=bf.export(), pass_token=token,
+                        ledger_instance=bf.last_export_instance)
+        self.assertEqual(imp["erase_candidates"], [])
+        if sweep:
+            self.sweep(token)
+        self.call("end_pass", pass_token=token, outcome="complete")
+        pkg = self.call("build_quarterly_package", quarter="2026-Q3")
+        z = zipfile.ZipFile(pkg["path"])
+        rows = list(csv.DictReader(io.StringIO(z.read("ledger.csv").decode())))
+        return sorted(n for n in z.namelist() if "/" in n), rows
+
+    def matched_then_reclassified(self):
+        bf = self.bf
+        bf.fetch([bf.row("2026-07-05", ref="A1", amount=1000, counterparty="Adobe")])
+        rid = self.active()[0]["row_id"]
+        self.classify(rid, "software")
+        self.first_pass()
+        self.file(amount_minor=1000, document_date="2026-07-05")
+        self.assertEqual(len(sim.run_pass(self.conn, bf)["triage"]["matched"]), 1)
+        # the classification changes: a refund wants a credit note, not the invoice
+        bf.call("untag_transaction", row_ids=[rid], tags=["software"])
+        self.classify(rid, "refund")
+
+    def test_the_package_sees_the_new_classification(self):
+        self.matched_then_reclassified()
+        files, rows = self.package(sweep=True)
+        self.assertEqual(files, [])                               # the invoice does not ship
+        self.assertEqual([(r["status"], r["expectation_kind"]) for r in rows],
+                         [("MISSING", "credit-note")])
+
+    def test_without_the_sweep_the_invoice_is_withheld(self):
+        # the reproduction: Packaging without its sweep step shipped a stale picture
+        # (MATCHED, invoices/). Since fix E2 the build itself withholds a row not re-read
+        # since the import: unclassified, its document under unresolved/.
+        self.matched_then_reclassified()
+        files, rows = self.package(sweep=False)
+        self.assertEqual(files, ["unresolved/2026-07-05_Adobe_10.00.pdf"])
+        self.assertEqual([(r["status"], r["expectation_kind"]) for r in rows],
+                         [("UNCLASSIFIED", "")])
+
+
 if __name__ == "__main__":
     unittest.main()

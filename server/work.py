@@ -156,6 +156,9 @@ def describe(conn, pid: int) -> dict:
         "link": cp["document_link"] if cp is not None else None,
         "portal": bool(cp is not None and cp["source"] == "portal"),
         "class_observed_at": p["class_observed_at"], "unprojectable": p["unprojectable"],
+        # read since the latest import (lineage.is_fresh): a machine match and a package
+        # act only on a fresh classification
+        "fresh": lineage.is_fresh(conn, p),
         "broken_floor": p["broken_floor"],
         # exactly what record_match / propose_match compare (reducer.facts_of of the
         # live row): pass it back verbatim as row_snapshot. get_transaction's text

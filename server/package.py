@@ -103,7 +103,9 @@ def _freeze(conn, quarter: str) -> dict:
             "SELECT p.* , d.settled_at FROM packages p JOIN deliveries d ON d.package_id="
             "p.package_id WHERE p.quarter=? AND d.status='delivered' ORDER BY d.settled_at DESC,"
             " p.package_id DESC LIMIT 1", (quarter,)).fetchone()
-        return {"binding": dict(b), "lines": lines, "history": history, "unmatched": unmatched,
+        # the import every line's freshness was judged against (round E3, Terra S1)
+        return {"snapshot_id": lineage.latest_import(conn),
+                "binding": dict(b), "lines": lines, "history": history, "unmatched": unmatched,
                 "bank_through": snap["bank_through"] if snap else None,
                 "prev": dict(prev) if prev else None}
     finally:
@@ -113,6 +115,7 @@ def _freeze(conn, quarter: str) -> dict:
 def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple:
     files, used, named, manifest_rows, matched_docs = {}, set(), {}, [], []
     missing, unclassified, nice, unresolved_lines, anomalies = [], [], [], [], []
+    unread = []
     table = [list(COLUMNS)]
     for ln in frozen["lines"]:
         r, d = ln["row"], ln["d"]
@@ -127,8 +130,14 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
             and d["status"] in ("open", "matched", "proposed")
         if unknown:
             status = "UNCLASSIFIED"
+        # fix E2: a row not re-read since the latest import ships no classification and
+        # no document as its own — its kind may have changed (spec §Error handling:
+        # packaging ships rather than blocking; the caption says how many)
+        stale = d is not None and not d["fresh"] and d["status"] not in ("ineligible", "exempt")
+        if stale:
+            status, exp = "UNCLASSIFIED", {"kind": None, "tier": None}
         docname, confidence, link, notes = "", "", "", []
-        if d is not None and d["status"] == "matched" and d["current"]:
+        if not stale and d is not None and d["status"] == "matched" and d["current"]:
             doc = ln["docs"][d["current"]["match_id"]]
             folder = route(doc["kind"], exp["tier"] or "required")
             docname = _place(folder, doc, used, named, dates.effective_date(r))
@@ -146,7 +155,9 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 unresolved_lines.append((d, name))
         if d is not None:
             link = d["link"] or ""
-            if status == "MISSING":
+            if stale:
+                unread.append(d)
+            elif status == "MISSING":
                 missing.append((d, link))
             elif status == "UNCLASSIFIED":
                 unclassified.append((d, docname))
@@ -178,6 +189,9 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     notes += ["", "## Not yet classified", ""]
     notes += [f"- {_head(d)}" + (f" — holds {name}" if name else "")
               for d, name in unclassified] or ["- none"]
+    if unread:
+        notes += ["", "## Not re-read since the last bank check", ""]
+        notes += [f"- {_head(d)}" for d in unread]
     notes += ["", "## Nice to have, not found", ""]
     notes += [f"- {_head(d)} — {d['expectation']['kind']}" for d in nice] or ["- none"]
     notes += ["", "## Unresolved candidates", ""]
@@ -214,7 +228,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                  "ended. Not a filing set.", ""] + notes
     files["notes.md"] = ("\n".join(notes) + "\n").encode("utf-8")
     counts = {"payments": len(frozen["lines"]), "with_documents": len(matched_docs),
-              "missing": len(missing), "unclassified": len(unclassified)}
+              "missing": len(missing), "unclassified": len(unclassified), "unread": len(unread)}
     return (deterministic_zip(files), digest, partial,
             {"rows": manifest_rows, "documents": sorted(matched_docs), "counts": counts})
 
@@ -261,6 +275,9 @@ def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, si
         tail.append(f"{c['unclassified']} not yet classified")
     if tail:
         out.append(", ".join(tail) + " — listed in notes.md.")
+    if c.get("unread"):
+        out.append(f"{c['unread']} not re-read since the last bank check, so shipped unclassified "
+                   "— say \"go and check now\", then rebuild.")
     if partial:
         out.append("The quarter isn't over yet.")
     if oversize:
@@ -305,11 +322,21 @@ def _build(conn, quarter: str) -> dict:
         os.fsync(f.fileno())
     caption = _caption(quarter, manifest, frozen["prev"], digest, partial, b, path.name,
                        oversize, len(data))
-    with db.tx(conn):
-        pkg_id = conn.execute(
-            "INSERT INTO packages(quarter, filename, path, built_at, partial, digest, size,"
-            " oversize, caption, manifest_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (quarter, path.name, str(path), stamp, int(partial), digest, len(data),
-             int(oversize), caption, db.canonical(manifest))).lastrowid
+    try:
+        with db.tx(conn):
+            if lineage.latest_import(conn) != frozen["snapshot_id"]:
+                # round E3 (Terra S1): an import landed between the freeze and this
+                # commit, so rows judged fresh may no longer be; never register or hand
+                # out a zip built from a superseded snapshot
+                raise db.Refusal("the bank was re-read while building — build again")
+            pkg_id = conn.execute(
+                "INSERT INTO packages(quarter, filename, path, built_at, partial, digest, size,"
+                " oversize, caption, manifest_json, snapshot_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (quarter, path.name, str(path), stamp, int(partial), digest, len(data),
+                 int(oversize), caption, db.canonical(manifest),
+                 frozen["snapshot_id"])).lastrowid
+    except BaseException:
+        path.unlink(missing_ok=True)       # an unregistered zip is never left to hand out
+        raise
     return {"package_id": pkg_id, "filename": path.name, "path": str(path), "caption": caption,
             "oversize": oversize, "size": len(data), "digest": digest, "partial": partial}

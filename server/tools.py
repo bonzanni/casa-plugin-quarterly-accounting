@@ -304,7 +304,9 @@ def t_import(args):
 
 
 @register("list_projections",
-          "The next page of the sweep (resumes where the last one stopped). For each: row_id to "
+          "The next page of the sweep: the payments not read since this pass's import (resumes "
+          "where the last one stopped; remaining_in_cycle 0 = every one was), and the "
+          "snapshot_id to pass to record_observation. For each: row_id to "
           "read with get_transaction, desired tags, the accounting note. bank_writes says whether "
           "you may write and with which workflow and expected_generation.",
           obj({"pass_token": TOKEN, "limit": I}, ("pass_token",)))
@@ -319,14 +321,16 @@ def t_list_proj(args):
           "observed_notes: the notes shown; observed_first_seen: the row's first_seen — all "
           "three required), or not_found=true when it answered 'no transaction #N', or write_error with bank-feed's "
           "reply when a write did not take. Returns the exact writes to make; apply them, then "
-          "read the row again and record it.",
-          obj({"pid": I, "pass_token": TOKEN, "observed_tags": A, "observed_notes": A,
-               "observed_first_seen": S, "not_found": B, "write_error": S},
-              ("pid", "pass_token")))
+          "read the row again and record it. snapshot_id: the one list_projections returned "
+          "(the import's `snapshot` for an erase candidate).",
+          obj({"pid": I, "pass_token": TOKEN, "snapshot_id": I, "observed_tags": A,
+               "observed_notes": A, "observed_first_seen": S, "not_found": B, "write_error": S},
+              ("pid", "pass_token", "snapshot_id")))
 def t_observe(args):
-    _need(args, "pid", "pass_token")
+    _need(args, "pid", "pass_token", "snapshot_id")
     return sweep.record_observation(conn(), pid=_int(args, "pid"),
                                     token=_int(args, "pass_token"),
+                                    snapshot_id=_int(args, "snapshot_id"),
                                     observed_tags=args.get("observed_tags"),
                                     observed_notes=args.get("observed_notes"),
                                     not_found=_bool(args, "not_found", False),

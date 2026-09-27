@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -134,6 +134,8 @@ CREATE TABLE IF NOT EXISTS projections (
   reasons_json TEXT NOT NULL DEFAULT '[]',
   exp_kind TEXT, exp_tier TEXT, exp_row INTEGER,
   class_tags_json TEXT, class_observed_at TEXT, last_known_kind TEXT,
+  class_observed_snapshot INTEGER,  -- the latest snapshot_id when the sweep last read it (fix E2)
+  observed_revision INTEGER,     -- the projection's revision that read left it at (fix E2)
   observed_tags_json TEXT, observed_at TEXT,
   last_facts_json TEXT,          -- the destination row's facts when last seen (names an erased row)
   note_seq INTEGER, note_body TEXT,
@@ -198,13 +200,15 @@ CREATE TABLE IF NOT EXISTS packages (
   package_id INTEGER PRIMARY KEY AUTOINCREMENT, quarter TEXT NOT NULL,
   filename TEXT NOT NULL UNIQUE, path TEXT NOT NULL, built_at TEXT NOT NULL,
   partial INTEGER NOT NULL, digest TEXT NOT NULL, size INTEGER NOT NULL,
-  oversize INTEGER NOT NULL DEFAULT 0, caption TEXT NOT NULL, manifest_json TEXT NOT NULL);
+  oversize INTEGER NOT NULL DEFAULT 0, caption TEXT NOT NULL, manifest_json TEXT NOT NULL,
+  snapshot_id INTEGER);          -- the import the build froze (fix E4: its first send checks it)
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id INTEGER PRIMARY KEY AUTOINCREMENT, package_id INTEGER, doc_id INTEGER,
   channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
   staged_path TEXT NOT NULL, request_id TEXT,
   status TEXT NOT NULL CHECK (status IN ('staged', 'delivered', 'uncertain', 'failed')),
-  message_id TEXT, created_at TEXT NOT NULL, settled_at TEXT);
+  message_id TEXT, created_at TEXT NOT NULL, settled_at TEXT,
+  revoked_at TEXT);              -- an unsent first send an import superseded (fix E5)
 CREATE TABLE IF NOT EXISTS delivered_rows (
   package_id INTEGER NOT NULL, row_id INTEGER NOT NULL, pid INTEGER,
   facts_fp TEXT NOT NULL, kind TEXT, PRIMARY KEY (package_id, row_id));
@@ -224,6 +228,14 @@ MIGRATIONS: dict[int, list[str]] = {
     # ones the previous delivered_at order is kept as the tie-break.
     1: ["ALTER TABLE renders ADD COLUMN delivered_seq INTEGER",
         "UPDATE renders SET delivered_seq = 0 WHERE delivered_at IS NOT NULL"],
+    # 2 -> 3 (fix E2; its 1 -> 2 renumbered when merged after fix D): classification
+    # freshness. A migrated lineage has no stamp, so it is non-fresh until the next
+    # sweep reads it: the conservative start.
+    2: ["ALTER TABLE projections ADD COLUMN class_observed_snapshot INTEGER",
+        "ALTER TABLE projections ADD COLUMN observed_revision INTEGER",
+        # a package built before it names no import: its first send is refused (rebuild)
+        "ALTER TABLE packages ADD COLUMN snapshot_id INTEGER",
+        "ALTER TABLE deliveries ADD COLUMN revoked_at TEXT"],
 }
 
 

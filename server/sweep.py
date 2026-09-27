@@ -1,7 +1,9 @@
 """The sweep's server half (spec §"Mirroring decisions into bank-feed",
-§The sweep). Unconditional enumeration on a durable cursor: every projection
-except the merged and the erased (an erased row can take no write and its id
-never returns). The specialist reads each row with get_transaction and
+§The sweep). Enumeration on a durable cursor over every projection except the
+merged and the erased (an erased row can take no write and its id never
+returns), each owed a read after every import (fix E2: a classification read
+before the latest import is stale, and nothing may be decided from it). The
+specialist reads each row with get_transaction and
 records what it saw; the answer is the exact writes that reach the fixed
 point actual := (actual − owned) ∪ desired, plus the accounting note when
 the current one is not visible. An observation never exempts a projection
@@ -63,34 +65,50 @@ def _cursor(conn):
     return conn.execute("SELECT * FROM cursor WHERE id=1").fetchone()
 
 
-def _enumerable(conn) -> list:
+def _due(conn) -> list:
+    """The lineages this import's cycle still owes a read (fix E2): every
+    enumerable one — all but the merged and the erased — whose classification
+    is not fresh (lineage.is_fresh: not read since the latest import), plus every
+    fresh one that changed since that read (a decision moved its desired tags or
+    note, so it wants mirroring). An import makes every lineage due again, so an
+    observation exempts a lineage only until the next import, and only while it
+    stays unchanged (spec §The sweep: never from later sweeps)."""
     return [r[0] for r in conn.execute(
         "SELECT pid FROM projections WHERE merged_into IS NULL"
-        " AND (ended IS NULL OR ended='vanished') ORDER BY pid")]
+        " AND (ended IS NULL OR ended='vanished')"
+        " AND (class_observed_snapshot IS NULL OR class_observed_snapshot < ?"
+        "      OR observed_revision IS NULL OR observed_revision <> revision)"
+        " ORDER BY pid", (lineage.latest_import(conn),))]
 
 
 def list_projections(conn, *, token, limit: int = PAGE) -> dict:
-    """The next page of the sweep's cycle: every projection except the merged
-    and the erased, from the durable cursor. bank_writes is this pass's gate
-    (allowed, workflow, expected_generation, expected_ledger); every tag, untag
-    and note write the sweep asks for carries all three exactly as given."""
+    """The next page of the sweep's cycle: the lineages still due a read since
+    the latest import (_due), from the durable cursor, then wrapping to the
+    prefix an earlier, interrupted cycle skipped. remaining_in_cycle 0 means
+    every managed lineage was read since the latest import. bank_writes is this
+    pass's gate (allowed, workflow, expected_generation, expected_ledger); every
+    tag, untag and note write the sweep asks for carries all three exactly as
+    given."""
     if token is None:
         raise db.Refusal("the sweep belongs to a pass: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
         _require_proven_import(conn)
         cur = _cursor(conn)
-        pids = _enumerable(conn)
-        after = [p for p in pids if p > cur["last_pid"]]
-        if not after and pids:
-            completed = db.now() if cur["cycle_started_at"] else None
-            conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=?,"
-                         " last_cycle_completed_at=coalesce(?, last_cycle_completed_at)"
-                         " WHERE id=1", (db.now(), completed))
-            after = pids
-        elif cur["cycle_started_at"] is None:
-            conn.execute("UPDATE cursor SET cycle_started_at=? WHERE id=1", (db.now(),))
-        page = after[:max(1, int(limit))]
+        due = _due(conn)
+        if not due:
+            if cur["cycle_started_at"]:
+                conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=NULL,"
+                             " last_cycle_completed_at=? WHERE id=1", (db.now(),))
+            order = []
+        else:
+            after = [p for p in due if p > cur["last_pid"]]
+            if not after:                   # the cursor passed the end: wrap to the start
+                conn.execute("UPDATE cursor SET last_pid=0 WHERE id=1")
+            order = after + [p for p in due if p <= cur["last_pid"]]
+            if cur["cycle_started_at"] is None:
+                conn.execute("UPDATE cursor SET cycle_started_at=? WHERE id=1", (db.now(),))
+        page = order[:max(1, int(limit))]
         gate = passes.bank_write_gate(conn)
         items = []
         for pid in page:
@@ -100,7 +118,20 @@ def list_projections(conn, *, token, limit: int = PAGE) -> dict:
                           "note": lineage.note_text(conn, pid), "revision": p["revision"],
                           "unprojectable": p["unprojectable"]})
         return {"workflow": version.WORKFLOW, "bank_writes": gate, "projections": items,
-                "remaining_in_cycle": len(after) - len(page), "notice": NOTICE}
+                "remaining_in_cycle": len(order) - len(page),
+                "snapshot_id": lineage.latest_import(conn), "notice": NOTICE}
+
+
+def _require_snapshot(conn, snapshot_id) -> None:
+    """An observation is made against ONE import (round E3, Astra S1): the read it
+    records was taken after the import list_projections named. If another import
+    landed since, the read may predate it (a reclassification between the two),
+    so it is refused, never stamped fresh."""
+    if snapshot_id is None:
+        raise db.Refusal("pass the snapshot_id list_projections (or the import) returned")
+    if int(snapshot_id) != lineage.latest_import(conn):
+        raise db.Refusal("the bank was re-read meanwhile — list the sweep again and read this "
+                         "payment again; nothing was recorded")
 
 
 def _require_proven_import(conn) -> None:
@@ -130,7 +161,7 @@ def _ended_noop(conn, p) -> dict:
 def _confirm_erased(conn, pid: int) -> dict:
     cur = passes.current_pass(conn)
     p = lineage.projection(conn, pid)
-    if p["ended"]:
+    if p["ended"] == "erased":
         return _ended_noop(conn, p)
     if cur is None or cur["snapshot_id"] is None or not cur["account_seen"]:
         raise db.Refusal("nothing can be judged ended without this pass's own snapshot of the "
@@ -140,6 +171,13 @@ def _confirm_erased(conn, pid: int) -> dict:
     if present is not None:
         raise db.Refusal(f"row #{p['dest_row_id']} is in this pass's snapshot; it has not left "
                          "the ledger")
+    if p["ended"]:
+        # A vanished lineage whose row has since left the ledger (round E3, Astra S2):
+        # the confirmed absence is this import's sweep work for it — it leaves the due
+        # set — and it stays `vanished` (a row that vanished is not an erasure).
+        conn.execute("UPDATE projections SET class_observed_snapshot=?, observed_revision=?"
+                     " WHERE pid=?", (lineage.latest_import(conn), p["revision"], pid))
+        return _ended_noop(conn, p)
     ledger.end_lineage(conn, pid, "erased", cur["snapshot_id"])
     red = lineage.settle(conn, pid)
     _advance(conn, pid)
@@ -147,18 +185,22 @@ def _confirm_erased(conn, pid: int) -> dict:
             "instructions": {}, "bank_writes": None, "read_back": False}
 
 
-def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=None,
-                       not_found=False, write_error=None, observed_first_seen=None) -> dict:
+def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None,
+                       observed_notes=None, not_found=False, write_error=None,
+                       observed_first_seen=None) -> dict:
     """What get_transaction showed for one projection's row. Returns at most ONE
     write (untag, tag or add_note) with workflow, expected_generation and
     expected_ledger; the specialist makes it, reads the row again and records
     again until nothing is returned. not_found=True confirms an erasure (only
     for a row absent from this pass's own snapshot); write_error records a write
-    bank-feed refused, reported and never retried."""
+    bank-feed refused, reported and never retried. snapshot_id is the one
+    list_projections returned: the read belongs to that import, and is refused
+    if a newer one landed since."""
     if token is None:
         raise db.Refusal("an observation belongs to a pass: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
+        _require_snapshot(conn, snapshot_id)
         pid = lineage.resolve_pid(conn, pid)
         proj = lineage.projection(conn, pid)
         if proj["ended"] == "erased":
@@ -191,11 +233,16 @@ def record_observation(conn, *, pid, token, observed_tags=None, observed_notes=N
         observed = sorted(set(observed_tags))
         class_tags = [t for t in observed if t not in R.OWNED]
         conn.execute("UPDATE projections SET class_tags_json=?, class_observed_at=?,"
-                     " observed_tags_json=?, observed_at=? WHERE pid=?",
-                     (json.dumps(class_tags), db.now(), json.dumps(observed), db.now(), pid))
+                     " class_observed_snapshot=?, observed_tags_json=?, observed_at=?"
+                     " WHERE pid=?",
+                     (json.dumps(class_tags), db.now(), lineage.latest_import(conn),
+                      json.dumps(observed), db.now(), pid))
         red = lineage.settle(conn, pid)
         ledger.check_delivered_kind_half(conn, pid)
         proj = lineage.projection(conn, pid)
+        # the revision this read left the lineage at: a later change makes it due again
+        conn.execute("UPDATE projections SET observed_revision=? WHERE pid=?",
+                     (proj["revision"], pid))
         actual = set(observed)
         to_remove = sorted((actual & set(R.OWNED)) - red.desired)
         to_add = sorted(red.desired - actual)

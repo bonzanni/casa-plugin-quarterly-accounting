@@ -309,6 +309,22 @@ def settle(conn, pid: int) -> R.Reduction:
     return red
 
 
+def latest_import(conn) -> int:
+    """The latest successful import, as its snapshot id: AUTOINCREMENT, so it only
+    grows (a refused import rolls back and leaves none). 0 before any import."""
+    return conn.execute("SELECT coalesce(max(snapshot_id), 0) FROM snapshots").fetchone()[0]
+
+
+def is_fresh(conn, proj) -> bool:
+    """A lineage's classification is FRESH iff the sweep read its row after the
+    latest successful import (fix E2). The export carries no tags, so an import
+    makes every classification stale until the sweep re-reads the row; the one
+    thing that refreshes it is sweep.record_observation. Compared by snapshot id,
+    never by timestamp (a one-second clock cannot order an import and a read)."""
+    seen = proj["class_observed_snapshot"]
+    return seen is not None and seen >= latest_import(conn)
+
+
 def live_pids(conn) -> list:
     return [r[0] for r in conn.execute("SELECT pid FROM projections WHERE merged_into IS NULL"
                                        " ORDER BY pid")]

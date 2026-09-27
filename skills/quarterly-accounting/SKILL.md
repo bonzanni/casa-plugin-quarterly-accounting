@@ -116,10 +116,14 @@ pass, whichever comes first:
      its triage (or the next pass) judges the document; return that to Ellen;
    - the probes of its pass, step 1 (bank-feed tools, accounts, `sync`, the sync's probe,
      one `list_backups` answer, the ledger probe, `check_setup`) — stop if `can_run` is false;
-   - the snapshot of step 3 and the ends of step 4;
-   - judge ONLY that document, by the auto-match bar of step 6;
+   - the snapshot of step 3, the ends of step 4 and the sweep of step 5 (its reads refresh
+     each payment's classification, which decides the document kind it wants);
+   - judge ONLY that document, by the auto-match bar of step 6, and only against payments
+     whose item says `fresh: true` (read since this import). A payment it may fit that is not
+     fresh waits: the next pass's triage judges it. If the sweep did not reach
+     `remaining_in_cycle` 0, end the pass `interrupted`;
    - if nothing fits, suspect the data before the document: `sync` again, record its probe,
-     export and import again (step 3), and judge once more;
+     export and import again (step 3), sweep again (step 5), and judge once more;
    - `end_pass(pass_token, outcome="complete")` (`stopped` if it stopped), and return to
      Ellen which case it is, plus any `speak` for Ellen to send.
 3. Tell the operator which case it is, in one line, from what was recorded — never claim a
@@ -129,6 +133,7 @@ pass, whichever comes first:
    - clashes with a pairing: "Filed. I see a EUR 12.10 Twitter payment on 18 Sep, but it's already matched to invoice V-918. Which one is right?"
    - unreadable: "Filed, but I can't read an amount from it — is it EUR 12.10?"
    - out of range: "Filed. Nothing in Q3 is close to EUR 340.00. Is this for a different quarter?"
+   - not judged yet: "Filed. I'll match it at the next check."
    On the cron pass, inbox filing is silent: file, say nothing.
 
 ## Ellen: the pass (cron, or "go and check now")
@@ -198,22 +203,32 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
 3. **Snapshot.** `export_history(format="csv")`, then `import_ledger_export(path, pass_token,
    ledger_instance=<the reply's "Ledger instance:" id>)`. Read both values by their labels.
    If the import is refused, stop: return the refusal, and the pass ends `stopped` —
-   nothing after this step runs.
+   nothing after this step runs. That includes "could not withdraw a staged package —
+   nothing was imported": a package waiting to be sent could not be taken back, so the bank
+   is not re-read until it can be; return it for Ellen to relay. (A refusal that says to ask again — another session held
+   the store's documents lock — is called once more first, as for any refusal.)
 4. **Ends.** For each `erase_candidates` row: `get_transaction(row_id)`. If it answers
-   `no transaction #N`, call `record_observation(pid, pass_token, not_found=true)`. Do this
-   before any matching, so freed documents are free for this pass.
+   `no transaction #N`, call `record_observation(pid, pass_token, snapshot_id=<the import's
+   snapshot>, not_found=true)`. Do this before any matching, so freed documents are free for
+   this pass.
 5. **Sweep.** Repeat `list_projections(pass_token)` until `remaining_in_cycle` is 0 or you
-   are close to your turn budget. For each item, read the row with
+   are close to your turn budget. It lists the payments not read since this pass's import
+   (the import carries no classification, so what a payment wants is known only from a read
+   made after it) — `remaining_in_cycle` 0 means every one was. A payment not read since the
+   import is never matched: the server refuses it. Every `record_observation` of the sweep
+   passes the `snapshot_id` that `list_projections` returned. For each item, read the row with
    `get_transaction(row_id)`. If it answers `no transaction #N`, record `not_found=true` as
    in step 4 and go on. Otherwise
-   `record_observation(pid, pass_token, observed_tags=<every tag>, observed_notes=<every note
+   `record_observation(pid, pass_token, snapshot_id, observed_tags=<every tag>, observed_notes=<every note
    shown>, observed_first_seen=<the row's first seen>)`, all three every time, read from this
    read: the tags are every tag on the `Tags:` line and on the `Other workflows' tags` line
    (the `acct::` tags are there); the notes are each note line shown, oldest first, as
    shown (the `[author, date]` prefix and the bank-provided-text markers may stay or go —
    the server reads both); first seen is the timestamp on the row's `first seen …,
    last seen …` line. If it refuses because the bank ledger changed during this pass, stop the
-   pass at once.
+   pass at once. If it refuses because the bank was re-read meanwhile (another import landed
+   after your read), nothing was recorded: call `list_projections` again and read the payment
+   again with its new `snapshot_id`.
    If `bank_writes` is not allowed, make no bank-feed write and report its reason. Otherwise
    make the ONE write the returned `instructions` name, exactly:
    - `untag_transaction(row_ids=[row_id], tags=untag, workflow=…, expected_generation=…, expected_ledger=…)`, or
@@ -228,13 +243,18 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    built on — if it was wiped on purpose, the operator says 'the bank ledger was reset'".
    Then read the row again with `get_transaction`. If the write did not take — a tag it
    removed is still there, a tag it added is missing, or the note is not among the notes —
-   `record_observation(pid, pass_token, write_error=<bank-feed's reply to the write>)` and go
+   `record_observation(pid, pass_token, snapshot_id, write_error=<bank-feed's reply>)` and go
    on to the next item: it is reported, never retried. If the row is gone, record
    `not_found=true`. Otherwise record it again with what that read shows (tags, notes and
    first seen, as above); repeat until nothing is returned (at most an untag, a tag and a
    note). Never make two writes without a read between them. A refusal that this pass is no
    longer the current one stops the pass.
-6. **Triage.** `list_quarter_state(triage=true)` lists, required first, the payments that
+6. **Triage.** Only the items that say `fresh: true` — read by the sweep since this pass's
+   import. An item with `fresh: false` was not read yet: leave it (the server refuses to match
+   it) and mark it not searched; a later pass handles it. If the sweep did not reach
+   `remaining_in_cycle` 0, say so in the work order with the remaining count: the pass ends
+   `interrupted` (the next pass's sweep resumes where this one stopped).
+   `list_quarter_state(triage=true)` lists, required first, the payments that
    need a document and have none of the right kind. For each, compare against
    `list_unmatched_documents` and the KB (`get_counterparty`), reading candidate PDFs with
    `Read`. Correct a filed document's reading with `update_document_metadata(doc_id, …,
@@ -293,12 +313,30 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
 
 1. Delegate "quarterly-accounting package snapshot" to the specialist: `begin_pass(trigger=
    "package")`, the probes of its pass, step 1 (stop if `can_run` is false), the snapshot of
-   step 3, the ends of step 4, then `end_pass` (`stopped` if it stopped); it returns any
-   `speak` to Ellen. If it stopped, tell the operator why and build nothing.
+   step 3, the ends of step 4, then the sweep of step 5 — every row read and recorded, exactly
+   as in the pass (the export carries no classification tags: only the sweep's reads tell the
+   store what each payment is now, so a package built without it can ship a document the
+   payment no longer wants) — then `end_pass` (`stopped` if it stopped); it returns any
+   `speak` to Ellen, and whether the sweep reached `remaining_in_cycle` 0. If it stopped, tell
+   the operator why and build nothing. Build only after the sweep. If the sweep ran out of
+   room before 0, the package still ships (the operator asked), but every payment not read
+   since the import ships unclassified with its documents set aside, and the caption says
+   how many — send it as it is; the operator can say "go and check now", then rebuild.
 2. `build_quarterly_package(quarter)`. For Telegram: `stage_for_delivery(channel="telegram",
    package_id=…)`, then `send_media(path, kind="zip")` with the caption
    `build_quarterly_package` returned, then `record_delivery(delivery_id, outcome)`. A timeout
    is `uncertain`: do not send again unless the operator asks ("send it again", above).
+   If the build, or the first `stage_for_delivery` of a package, is refused because the bank
+   was re-read (while building, or since it was built), nothing was kept or staged: run
+   step 1 again (the re-read made every payment unread), then build again, once. A resend
+   ("send it again") is the exact file already sent and is never refused for this.
+   A bank check that lands after a package's first send was staged but before it went out
+   takes that send back: the staged file is removed, so `send_media` or `send_email` fails
+   because the file is gone, or `record_delivery` answers that the bank was re-read before it
+   was sent. Either way nothing was delivered: tell the operator the package needs building
+   again ("The bank was re-read before I could send it — ask for it again and I'll rebuild
+   it."). A send already under way at the moment of the check cannot be stopped; if it
+   arrives, the "a delivered quarter changed" alert covers it.
 3. "Email me the Q3 package": `stage_for_delivery(channel="email", package_id=…)`, then
    gmail's `send_email` to the operator's own address with the returned path attached and the
    returned `request_id`. Casa asks the operator for one tap showing the recipient. Then

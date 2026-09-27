@@ -18,6 +18,7 @@ import json
 import os
 import pathlib
 import secrets
+import shutil
 import tempfile
 
 import casa_handoff
@@ -110,28 +111,105 @@ def _stage(conn, channel, package_id, doc_id, pass_token) -> dict:
             path = pathlib.Path(casa_handoff.publish("quarterly-accounting", name, data=data)["path"])
         except casa_handoff.HandoffError as exc:
             raise db.Refusal(f"the handoff folder refused it ({exc.kind}): {exc}")
+        created = True                  # a fresh handoff entry of its own, always
         request_id = "qa-" + secrets.token_hex(8)
         note = ("attach it with gmail's send_email to the operator's own address only, passing "
                 "this request_id; Casa shows them the recipient before it sends")
     try:
         with db.tx(conn):
             passes.check_token(conn, pass_token)
+            if package_id is not None:
+                _require_current_snapshot(conn, package_id)
             did = conn.execute("INSERT INTO deliveries(package_id, doc_id, channel, staged_path,"
                                " request_id, status, created_at) VALUES (?,?,?,?,?, 'staged', ?)",
                                (package_id, doc_id, channel, str(path), request_id,
                                 db.now())).lastrowid
     except BaseException:
         if created:                     # nothing in the log names it: never leave it to be sent
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                pass
+            if channel == "email":      # the handoff entry is its own directory
+                shutil.rmtree(path.parent, ignore_errors=True)
+            else:
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
         raise
     out = {"delivery_id": did, "channel": channel, "path": str(path), "filename": name,
            "note": note}
     if request_id:
         out["request_id"] = request_id
     return out
+
+
+def _require_current_snapshot(conn, package_id) -> None:
+    """A package's FIRST send carries what the bank looked like at its build
+    (round E4, Terra + Astra): once a newer import has landed, the rows it judged
+    may have been reclassified, so it is refused — checked inside the write that
+    logs the delivery. A resend of a file already sent (delivered or uncertain)
+    is that exact file, as the spec offers; a delivered quarter that changed
+    underneath is alerted separately."""
+    sent = conn.execute("SELECT 1 FROM deliveries WHERE package_id=? AND status IN"
+                        " ('delivered', 'uncertain')", (package_id,)).fetchone()
+    if sent is not None:
+        return
+    built = conn.execute("SELECT snapshot_id FROM packages WHERE package_id=?",
+                         (package_id,)).fetchone()[0]
+    latest = conn.execute("SELECT coalesce(max(snapshot_id), 0) FROM snapshots").fetchone()[0]
+    if built is None or built != latest:
+        raise db.Refusal("the bank was re-read since this package was built — build it again")
+
+
+def revoke_superseded_first_sends(conn, snapshot_id) -> list:
+    """Inside an import's transaction, after its snapshot is recorded (round E5,
+    Terra S1): every delivery still `staged` that is a package's FIRST send
+    (no delivered or uncertain send of it) and was built under another snapshot
+    is revoked — marked failed with revoked_at, so record_delivery refuses it.
+    Returns the revoked rows; their staged bytes are withdrawn before the same
+    commit (withdraw_revoked). A resend of a file already sent is never revoked."""
+    assert conn.in_transaction
+    rows = conn.execute(
+        "SELECT d.delivery_id, d.channel, d.staged_path FROM deliveries d JOIN packages p"
+        " ON p.package_id=d.package_id WHERE d.status='staged' AND d.revoked_at IS NULL"
+        " AND (p.snapshot_id IS NULL OR p.snapshot_id<>?)"
+        " AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.package_id=d.package_id"
+        "  AND e.status IN ('delivered', 'uncertain'))", (snapshot_id,)).fetchall()
+    now = db.now()
+    for r in rows:
+        conn.execute("UPDATE deliveries SET status='failed', settled_at=?, revoked_at=?"
+                     " WHERE delivery_id=?", (now, now, r["delivery_id"]))
+    return [dict(r) for r in rows]
+
+
+def withdraw_revoked(conn) -> None:
+    """Inside the import's transaction, under the custody lock (rounds E6, E7):
+    remove the staged bytes of every revoked delivery whose copy is still there —
+    the Telegram outbox file, or this plugin's own handoff entry (one `<id>/`
+    directory per publish; casa_handoff has no retract call). A path a live,
+    unrevoked staged delivery still names is left alone. A removal that fails
+    refuses the WHOLE import: it rolls back (snapshot unchanged, nothing
+    revoked), so a superseded package is never left sendable under a committed
+    newer snapshot; a retry after recovery withdraws and commits. Copies already
+    removed before the failure stay removed: their send fails visibly."""
+    assert conn.in_transaction
+    for r in conn.execute("SELECT delivery_id, channel, staged_path FROM deliveries"
+                          " WHERE revoked_at IS NOT NULL ORDER BY delivery_id").fetchall():
+        path = pathlib.Path(r["staged_path"])
+        target = path.parent if r["channel"] == "email" else path
+        if not target.exists():
+            continue
+        if conn.execute("SELECT 1 FROM deliveries WHERE staged_path=? AND status='staged' AND"
+                        " revoked_at IS NULL", (r["staged_path"],)).fetchone() is not None:
+            continue
+        try:
+            if r["channel"] == "email":
+                shutil.rmtree(target)
+            else:
+                os.unlink(target)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise db.Refusal("could not withdraw a staged package — nothing was imported "
+                             f"({exc.strerror or exc}); fix that and import again") from None
 
 
 def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=None) -> dict:
@@ -142,6 +220,8 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
         d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?", (delivery_id,)).fetchone()
         if d is None:
             raise db.Refusal(f"there is no delivery #{delivery_id}")
+        if d["revoked_at"] is not None:
+            raise db.Refusal("the bank was re-read before this was sent — build it again")
         if d["status"] == "delivered":
             return {"delivery_id": delivery_id, "status": "delivered", "already": True}
         if outcome == "delivered" and d["channel"] == "email" and not message_id:

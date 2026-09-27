@@ -144,3 +144,88 @@ def pending_rendering(path, barrier, out):
     finally:
         conn.close()
 
+
+
+def import_export(export_path, token, instance, out):
+    """A second session's import_ledger_export under the same pass token (round
+    E3, Astra S1: an import landing between a read and its record)."""
+    import db
+    import ledger
+    conn = db.open_store()
+    try:
+        _report(out, lambda: ledger.import_ledger_export(
+            conn, path=export_path, token=token, ledger_instance=instance)["snapshot"])
+    finally:
+        conn.close()
+
+
+def build_paused(quarter, rendered, resume, out):
+    """build_quarterly_package, paused after its frozen inputs were rendered and
+    before the package is registered (round E3, Terra S1)."""
+    import db
+    import package
+    real = package._render
+
+    def paused(*a, **kw):
+        result = real(*a, **kw)
+        rendered.set()
+        resume.wait(30)
+        return result
+    package._render = paused
+    conn = db.open_store()
+    try:
+        _report(out, lambda: package.build_quarterly_package(conn, quarter))
+    finally:
+        conn.close()
+
+
+def import_paused(export_path, token, instance, withdrawn, resume, out):
+    """import_ledger_export, paused right after it withdrew the staged bytes of the
+    first sends it revokes and before its commit (round E6, Terra S1)."""
+    import db
+    import delivery
+    import ledger
+    real = delivery.withdraw_revoked
+
+    def paused(conn):
+        result = real(conn)
+        withdrawn.set()
+        resume.wait(30)
+        return result
+    delivery.withdraw_revoked = paused
+    conn = db.open_store()
+    try:
+        _report(out, lambda: ledger.import_ledger_export(
+            conn, path=export_path, token=token, ledger_instance=instance)["revoked_deliveries"])
+    finally:
+        conn.close()
+
+
+def hold_custody(held, release, out):
+    """Hold the custody lock until released (round E6, Astra S1: another session
+    filing or erasing documents)."""
+    import db
+    with db.custody_lock():
+        held.set()
+        release.wait(60)
+    out.put(("ok", None))
+
+
+def build_repeatedly(quarter, n, out):
+    """n package builds in a row: custody lock, then SQLite (the deadlock check)."""
+    import db
+    import package
+    conn = db.open_store()
+    results = []
+    try:
+        for _ in range(n):
+            try:
+                package.build_quarterly_package(conn, quarter)
+                results.append("ok")
+            except db.Refusal as exc:
+                results.append(f"{type(exc).__name__}: {exc}")
+        out.put(("ok", results))
+    except BaseException as exc:
+        out.put(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        conn.close()

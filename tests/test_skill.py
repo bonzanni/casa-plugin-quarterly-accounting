@@ -113,7 +113,7 @@ class TestSkill(TempEnv):
             self.assertIn(phrase, section, phrase)
         # read -> record -> write -> read again, in that order
         order = ["`get_transaction(row_id)`", "`record_observation(pid, pass_token, "
-                 "observed_tags=", "`untag_transaction(", "read the row again",
+                 "snapshot_id, observed_tags=", "`untag_transaction(", "read the row again",
                  "write_error=", "record it again"]
         sweep = section[section.index("**Sweep.**"):section.index("**Triage.**")]
         positions = [sweep.index(k) for k in order]
@@ -178,6 +178,52 @@ class TestSkill(TempEnv):
         section = SKILL[SKILL.index("## Test install and reset"):]
         self.assertIn("never pick a\n   backup otherwise", section)
         self.assertNotIn("under\n   `bank_writes`", section)
+
+    def test_packaging_sweeps_between_import_and_build(self):
+        # round E1 (Astra S1): only the sweep's reads refresh the classification
+        pack = " ".join(self.section("## Packaging", "## Install").split())
+        order = ["the snapshot of step 3", "the ends of step 4", "the sweep of step 5",
+                 "`end_pass`", "`build_quarterly_package(quarter)`"]
+        positions = [pack.index(k) for k in order]
+        self.assertEqual(positions, sorted(positions))
+        doc = " ".join(self.section("## Ellen: a document the operator hands over",
+                                    "## Ellen: the pass").split())
+        self.assertLess(doc.index("the sweep of step 5"), doc.index("judge ONLY that document"))
+
+    def test_only_payments_read_since_the_import_are_judged(self):
+        # fix E2 (controller ruling): triage and the handover judge only fresh items
+        triage = " ".join(self.section("**Triage.**", "7. **Identity").split())
+        self.assertTrue(triage.startswith("**Triage.** Only the items that say `fresh: true`"))
+        self.assertIn("the pass ends `interrupted`", triage)
+        doc = " ".join(self.section("## Ellen: a document the operator hands over",
+                                    "## Ellen: the pass").split())
+        self.assertIn("only against payments whose item says `fresh: true`", doc)
+        self.assertIn("end the pass `interrupted`", doc)
+        pack = " ".join(self.section("## Packaging", "## Install").split())
+        self.assertIn("ships unclassified with its documents set aside", pack)
+
+    def test_a_refused_import_stops_the_pass_including_a_failed_withdrawal(self):
+        # round E7: a withdrawal that fails refuses the whole import
+        snap = " ".join(self.section("**Snapshot.**", "4. **Ends.**").split())
+        self.assertIn("If the import is refused, stop: return the refusal, and the pass ends "
+                      "`stopped` — nothing after this step runs.", snap)
+        self.assertIn("could not withdraw a staged package — nothing was imported", snap)
+
+    def test_every_observation_names_the_import_it_was_read_under(self):
+        # round E3 (Astra S1): a read recorded after a newer import is refused
+        section = " ".join(self.section("## The specialist's pass", "## Packaging").split())
+        self.assertIn("snapshot_id=<the import's snapshot>, not_found=true", section)
+        self.assertIn("passes the `snapshot_id` that `list_projections` returned", section)
+        self.assertIn("read the payment again with its new `snapshot_id`", section)
+        pack = " ".join(self.section("## Packaging", "## Install").split())
+        self.assertIn("the first `stage_for_delivery` of a package, is refused because the bank "
+                      "was re-read", pack)
+        self.assertIn("A resend (\"send it again\") is the exact file already sent", pack)
+        # round E5: an import takes back an unsent first send
+        self.assertIn("fails because the file is gone, or `record_delivery` answers that the "
+                      "bank was re-read before it was sent", pack)
+        self.assertIn("A send already under way at the moment of the check cannot be stopped",
+                      pack)
 
 
 if __name__ == "__main__":

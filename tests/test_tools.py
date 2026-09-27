@@ -362,7 +362,8 @@ class TestArgumentTypes(ToolCase):
             if text.startswith("refused: missing argument"):
                 req = qa_server.TOOLS[n]["schema"]["required"]
                 filler = {"pid": 1, "doc_id": 1, "pass_token": 1, "kind": "gmail",
-                          "expected_revision": 0, "render_id": "r1", "channel": "telegram"}
+                          "expected_revision": 0, "render_id": "r1", "channel": "telegram",
+                          "snapshot_id": 1}
                 res = _tool(n, **{r: filler[r] for r in req if r != k}, **{k: "false"})
                 text = res["content"][0]["text"]
             self.assertEqual(text, f"refused: {k} must be true or false", (n, k))
