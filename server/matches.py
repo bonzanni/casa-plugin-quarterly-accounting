@@ -99,6 +99,12 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
         row = lineage.live_row(conn, proj)
         if proj["ended"] or not lineage.eligible(conn, row):
             raise db.Refusal("this payment is not managed any more (ended or ineligible)")
+        if not lineage.is_fresh(conn, proj):
+            # fix E2: the kind it wants is known only from a read made after the latest
+            # import; an older read may name a kind the payment no longer wants
+            raise db.Refusal("this payment has not been re-read since the latest bank import: "
+                             "observe it first (read the row and record_observation), then "
+                             "judge it")
         # The document is validated BEFORE the exemption branch, so an exempt
         # lineage's residue names only a real, relevant document of the kind the
         # payment would need (fix round 1: nonexistent/irrelevant/wrong-kind

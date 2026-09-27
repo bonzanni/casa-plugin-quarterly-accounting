@@ -484,13 +484,15 @@ class TestPackagingSeesTheClassification(Base):
         self.assertEqual([(r["status"], r["expectation_kind"]) for r in rows],
                          [("MISSING", "credit-note")])
 
-    def test_without_the_sweep_the_invoice_would_ship(self):
-        # the reproduction: Packaging without its sweep step ships a stale picture
+    def test_without_the_sweep_the_invoice_is_withheld(self):
+        # the reproduction: Packaging without its sweep step shipped a stale picture
+        # (MATCHED, invoices/). Since fix E2 the build itself withholds a row not re-read
+        # since the import: unclassified, its document under unresolved/.
         self.matched_then_reclassified()
         files, rows = self.package(sweep=False)
-        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])
+        self.assertEqual(files, ["unresolved/2026-07-05_Adobe_10.00.pdf"])
         self.assertEqual([(r["status"], r["expectation_kind"]) for r in rows],
-                         [("MATCHED", "invoice")])
+                         [("UNCLASSIFIED", "")])
 
 
 if __name__ == "__main__":

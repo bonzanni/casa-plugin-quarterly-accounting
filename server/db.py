@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -134,6 +134,8 @@ CREATE TABLE IF NOT EXISTS projections (
   reasons_json TEXT NOT NULL DEFAULT '[]',
   exp_kind TEXT, exp_tier TEXT, exp_row INTEGER,
   class_tags_json TEXT, class_observed_at TEXT, last_known_kind TEXT,
+  class_observed_snapshot INTEGER,  -- the latest snapshot_id when the sweep last read it (fix E2)
+  observed_revision INTEGER,     -- the projection's revision that read left it at (fix E2)
   observed_tags_json TEXT, observed_at TEXT,
   last_facts_json TEXT,          -- the destination row's facts when last seen (names an erased row)
   note_seq INTEGER, note_body TEXT,
@@ -215,7 +217,12 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 # Migrations from version N to N+1, appended when the schema changes. Each is
 # a list of statements applied inside the migrating transaction.
-MIGRATIONS: dict[int, list[str]] = {}
+MIGRATIONS: dict[int, list[str]] = {
+    # 1 -> 2 (fix E2): classification freshness. A migrated lineage has no stamp,
+    # so it is non-fresh until the next sweep reads it: the conservative start.
+    1: ["ALTER TABLE projections ADD COLUMN class_observed_snapshot INTEGER",
+        "ALTER TABLE projections ADD COLUMN observed_revision INTEGER"],
+}
 
 
 def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:

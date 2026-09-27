@@ -113,6 +113,7 @@ def _freeze(conn, quarter: str) -> dict:
 def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple:
     files, used, named, manifest_rows, matched_docs = {}, set(), {}, [], []
     missing, unclassified, nice, unresolved_lines, anomalies = [], [], [], [], []
+    unread = []
     table = [list(COLUMNS)]
     for ln in frozen["lines"]:
         r, d = ln["row"], ln["d"]
@@ -120,8 +121,14 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         exp = d["expectation"] if d else {"kind": None, "tier": None}
         if d is not None and d["status"] == "open" and exp["kind"] is None:
             status = "UNCLASSIFIED"
+        # fix E2: a row not re-read since the latest import ships no classification and
+        # no document as its own — its kind may have changed (spec §Error handling:
+        # packaging ships rather than blocking; the caption says how many)
+        stale = d is not None and not d["fresh"] and d["status"] not in ("ineligible", "exempt")
+        if stale:
+            status, exp = "UNCLASSIFIED", {"kind": None, "tier": None}
         docname, confidence, link, notes = "", "", "", []
-        if d is not None and d["status"] == "matched" and d["current"]:
+        if not stale and d is not None and d["status"] == "matched" and d["current"]:
             doc = ln["docs"][d["current"]["match_id"]]
             folder = route(doc["kind"], exp["tier"] or "required")
             docname = _place(folder, doc, used, named, dates.effective_date(r))
@@ -137,7 +144,9 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 unresolved_lines.append((d, name))
         if d is not None:
             link = d["link"] or ""
-            if status == "MISSING":
+            if stale:
+                unread.append(d)
+            elif status == "MISSING":
                 missing.append((d, link))
             elif status == "UNCLASSIFIED":
                 unclassified.append(d)
@@ -168,6 +177,9 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         notes.append("- none")
     notes += ["", "## Not yet classified", ""]
     notes += [f"- {_head(d)}" for d in unclassified] or ["- none"]
+    if unread:
+        notes += ["", "## Not re-read since the last bank check", ""]
+        notes += [f"- {_head(d)}" for d in unread]
     notes += ["", "## Nice to have, not found", ""]
     notes += [f"- {_head(d)} — {d['expectation']['kind']}" for d in nice] or ["- none"]
     notes += ["", "## Unresolved candidates", ""]
@@ -204,7 +216,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                  "ended. Not a filing set.", ""] + notes
     files["notes.md"] = ("\n".join(notes) + "\n").encode("utf-8")
     counts = {"payments": len(frozen["lines"]), "with_documents": len(matched_docs),
-              "missing": len(missing), "unclassified": len(unclassified)}
+              "missing": len(missing), "unclassified": len(unclassified), "unread": len(unread)}
     return (deterministic_zip(files), digest, partial,
             {"rows": manifest_rows, "documents": sorted(matched_docs), "counts": counts})
 
@@ -251,6 +263,9 @@ def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, si
         tail.append(f"{c['unclassified']} not yet classified")
     if tail:
         out.append(", ".join(tail) + " — listed in notes.md.")
+    if c.get("unread"):
+        out.append(f"{c['unread']} not re-read since the last bank check, so shipped unclassified "
+                   "— say \"go and check now\", then rebuild.")
     if partial:
         out.append("The quarter isn't over yet.")
     if oversize:

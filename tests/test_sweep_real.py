@@ -514,17 +514,42 @@ class TestCursor(Base):
         for item in first["projections"]:
             sim.observe_and_repair(self.conn, self.bf, self.token, item)
         self.assertEqual(first["remaining_in_cycle"], 5)
+        read_first = [i["pid"] for i in first["projections"]]
         self.new_pass()
+        # the new import made every lineage due again (fix E2); the cursor starts the
+        # new pass where the last one stopped, so the five never read come first
         second = sweep.list_projections(self.conn, token=self.token, limit=25)
-        self.assertEqual(len(second["projections"]), 5)
-        self.assertEqual(second["remaining_in_cycle"], 0)
+        pids = [i["pid"] for i in second["projections"]]
+        unread = sorted(set(lineage.live_pids(self.conn)) - set(read_first))
+        self.assertEqual(pids[:5], unread)
+        self.assertEqual(pids[5:], read_first[:20])
+        self.assertEqual(second["remaining_in_cycle"], 5)
         for item in second["projections"]:
             sim.observe_and_repair(self.conn, self.bf, self.token, item)
         third = sweep.list_projections(self.conn, token=self.token, limit=25)
-        self.assertEqual(len(third["projections"]), 25)          # a new cycle began
+        self.assertEqual([i["pid"] for i in third["projections"]], read_first[20:])
+        self.assertEqual(third["remaining_in_cycle"], 0)
+        for item in third["projections"]:
+            sim.observe_and_repair(self.conn, self.bf, self.token, item)
+        fourth = sweep.list_projections(self.conn, token=self.token, limit=25)
+        self.assertEqual((fourth["projections"], fourth["remaining_in_cycle"]), ([], 0))
         c = self.conn.execute("SELECT last_cycle_completed_at FROM cursor").fetchone()[0]
         self.assertIsNotNone(c)
 
+    def test_a_read_exempts_a_lineage_only_until_it_changes_or_the_next_import(self):
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1"), self.bf.row("2026-07-06", ref="R2")])
+        self.new_pass()
+        self.cycle()
+        again = sweep.list_projections(self.conn, token=self.token)
+        self.assertEqual((again["projections"], again["remaining_in_cycle"]), ([], 0))
+        pid = self.pid_of(self.rid(0))
+        with db.tx(self.conn):                 # a decision moves the lineage's revision
+            self.conn.execute("UPDATE projections SET revision=revision+1 WHERE pid=?", (pid,))
+        again = sweep.list_projections(self.conn, token=self.token)
+        self.assertEqual([i["pid"] for i in again["projections"]], [pid])
+        self.new_pass()
+        again = sweep.list_projections(self.conn, token=self.token)
+        self.assertEqual(len(again["projections"]), 2)
 
 
 class TestNoteAsRendered(Base):

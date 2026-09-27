@@ -118,9 +118,12 @@ pass, whichever comes first:
      one `list_backups` answer, the ledger probe, `check_setup`) — stop if `can_run` is false;
    - the snapshot of step 3, the ends of step 4 and the sweep of step 5 (its reads refresh
      each payment's classification, which decides the document kind it wants);
-   - judge ONLY that document, by the auto-match bar of step 6;
+   - judge ONLY that document, by the auto-match bar of step 6 — only once the sweep has
+     reported `remaining_in_cycle` 0 (every payment read since this import). If you run out
+     of room first, judge nothing: the next pass's triage judges it; end the pass
+     `interrupted` and return that to Ellen;
    - if nothing fits, suspect the data before the document: `sync` again, record its probe,
-     export and import again (step 3), sweep again (step 5), and judge once more;
+     export and import again (step 3), sweep again to 0 (step 5), and judge once more;
    - `end_pass(pass_token, outcome="complete")` (`stopped` if it stopped), and return to
      Ellen which case it is, plus any `speak` for Ellen to send.
 3. Tell the operator which case it is, in one line, from what was recorded — never claim a
@@ -130,6 +133,7 @@ pass, whichever comes first:
    - clashes with a pairing: "Filed. I see a EUR 12.10 Twitter payment on 18 Sep, but it's already matched to invoice V-918. Which one is right?"
    - unreadable: "Filed, but I can't read an amount from it — is it EUR 12.10?"
    - out of range: "Filed. Nothing in Q3 is close to EUR 340.00. Is this for a different quarter?"
+   - not judged yet: "Filed. I'll match it at the next check."
    On the cron pass, inbox filing is silent: file, say nothing.
 
 ## Ellen: the pass (cron, or "go and check now")
@@ -204,7 +208,10 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    `no transaction #N`, call `record_observation(pid, pass_token, not_found=true)`. Do this
    before any matching, so freed documents are free for this pass.
 5. **Sweep.** Repeat `list_projections(pass_token)` until `remaining_in_cycle` is 0 or you
-   are close to your turn budget. For each item, read the row with
+   are close to your turn budget. It lists the payments not read since this pass's import
+   (the import carries no classification, so what a payment wants is known only from a read
+   made after it) — `remaining_in_cycle` 0 means every one was. A payment not read since the
+   import is never matched: the server refuses it. For each item, read the row with
    `get_transaction(row_id)`. If it answers `no transaction #N`, record `not_found=true` as
    in step 4 and go on. Otherwise
    `record_observation(pid, pass_token, observed_tags=<every tag>, observed_notes=<every note
@@ -235,7 +242,10 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    first seen, as above); repeat until nothing is returned (at most an untag, a tag and a
    note). Never make two writes without a read between them. A refusal that this pass is no
    longer the current one stops the pass.
-6. **Triage.** `list_quarter_state(triage=true)` lists, required first, the payments that
+6. **Triage.** Only when the sweep reported `remaining_in_cycle` 0. If it did not, do no
+   triage: return the work order with the sweep's remaining count, and the pass ends
+   `interrupted` (the next pass's sweep resumes where this one stopped).
+   `list_quarter_state(triage=true)` lists, required first, the payments that
    need a document and have none of the right kind. For each, compare against
    `list_unmatched_documents` and the KB (`get_counterparty`), reading candidate PDFs with
    `Read`. Correct a filed document's reading with `update_document_metadata(doc_id, …,
@@ -298,8 +308,11 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    as in the pass (the export carries no classification tags: only the sweep's reads tell the
    store what each payment is now, so a package built without it can ship a document the
    payment no longer wants) — then `end_pass` (`stopped` if it stopped); it returns any
-   `speak` to Ellen. If it stopped, tell the operator why and build nothing. Build only after
-   the sweep.
+   `speak` to Ellen, and whether the sweep reached `remaining_in_cycle` 0. If it stopped, tell
+   the operator why and build nothing. Build only after the sweep. If the sweep ran out of
+   room before 0, the package still ships (the operator asked), but every payment not read
+   since the import ships unclassified with its documents set aside, and the caption says
+   how many — send it as it is; the operator can say "go and check now", then rebuild.
 2. `build_quarterly_package(quarter)`. For Telegram: `stage_for_delivery(channel="telegram",
    package_id=…)`, then `send_media(path, kind="zip")` with the caption
    `build_quarterly_package` returned, then `record_delivery(delivery_id, outcome)`. A timeout

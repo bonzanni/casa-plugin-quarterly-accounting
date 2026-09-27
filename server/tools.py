@@ -278,7 +278,8 @@ def t_import(args):
 
 
 @register("list_projections",
-          "The next page of the sweep (resumes where the last one stopped). For each: row_id to "
+          "The next page of the sweep: the payments not read since this pass's import (resumes "
+          "where the last one stopped; remaining_in_cycle 0 = every one was). For each: row_id to "
           "read with get_transaction, desired tags, the accounting note. bank_writes says whether "
           "you may write and with which workflow and expected_generation.",
           obj({"pass_token": TOKEN, "limit": I}, ("pass_token",)))

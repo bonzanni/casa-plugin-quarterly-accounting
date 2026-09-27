@@ -3,7 +3,8 @@
 bank-feed (tests/bankfeed.py). This is the executable reference for the
 procedure SKILL.md prescribes; the skill must say exactly this, in words:
 
-  list_projections -> for each item:
+  list_projections -> for each item (until remaining_in_cycle is 0; nothing is
+  judged until it is — sweep_within, run_pass(sweep_budget=...)):
     get_transaction(row_id); "no transaction #N" -> record_observation(not_found)
     else record_observation(observed_tags, observed_notes)
     make the ONE returned write (untag, tag or add_note) with workflow,
@@ -74,6 +75,20 @@ def sweep_cycle(conn, bf, token, limit=25) -> int:
             n += 1
         if page["remaining_in_cycle"] == 0:
             return n
+
+
+def sweep_within(conn, bf, token, budget) -> int:
+    """The sweep of SKILL.md step 5 for a specialist that has room for `budget`
+    reads: stops when remaining_in_cycle is 0 or the budget is spent. Returns
+    what remains (0: every payment was read since this pass's import)."""
+    n = 0
+    while True:
+        page = sweep.list_projections(conn, token=token, limit=max(1, min(25, budget - n)))
+        for item in page["projections"]:
+            observe_and_repair(conn, bf, token, item)
+            n += 1
+        if page["remaining_in_cycle"] == 0 or n >= budget:
+            return page["remaining_in_cycle"]
 
 
 # --- a whole pass, mechanically (Task 23) -----------------------------------
@@ -204,9 +219,11 @@ def triage(conn, bf, token) -> dict:
     return done
 
 
-def run_pass(conn, bf, trigger="cron", sync=None) -> dict:
+def run_pass(conn, bf, trigger="cron", sync=None, sweep_budget=None) -> dict:
     """One specialist delegation, in plan §D5's order. `sync` stands in for
-    bank-feed's sync (run between list_accounts and list_backups)."""
+    bank-feed's sync (run between list_accounts and list_backups). With a
+    `sweep_budget` the sweep may stop short; then, as SKILL.md step 6 says,
+    there is no triage and the pass ends `interrupted` (fix E2)."""
     token = passes.begin_pass(conn, trigger)["pass_token"]
     probe(conn, bf, token, sync)
     setup = binding.check_setup(conn)
@@ -230,9 +247,17 @@ def run_pass(conn, bf, trigger="cron", sync=None) -> dict:
         for c in imp["erase_candidates"]:
             if bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
                 sweep.record_observation(conn, pid=c["pid"], token=token, not_found=True)
-        sweep_cycle(conn, bf, token)
+        if sweep_budget is None:
+            sweep_cycle(conn, bf, token)
+            remaining = 0
+        else:
+            remaining = sweep_within(conn, bf, token, sweep_budget)
     except db.Refusal as exc:
         return _stopped(conn, token, gate, imp, None, exc)
+    if remaining:
+        end = passes.end_pass(conn, token, "interrupted", {})
+        return {"token": token, "import": imp, "gate": gate, "triage": None, "end": end,
+                "remaining": remaining}
     tri = triage(conn, bf, token)
     try:
         sweep_cycle(conn, bf, token)      # the annotations for what triage just decided

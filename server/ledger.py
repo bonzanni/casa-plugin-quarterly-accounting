@@ -71,9 +71,10 @@ def merge(conn, survivor: int, loser: int) -> None:
     lo = lineage.projection(conn, loser)
     if (lo["class_observed_at"] or "") > (s["class_observed_at"] or ""):
         conn.execute("UPDATE projections SET class_tags_json=?, class_observed_at=?,"
+                     " class_observed_snapshot=?,"
                      " last_known_kind=coalesce(?, last_known_kind) WHERE pid=?",
-                     (lo["class_tags_json"], lo["class_observed_at"], lo["last_known_kind"],
-                      survivor))
+                     (lo["class_tags_json"], lo["class_observed_at"],
+                      lo["class_observed_snapshot"], lo["last_known_kind"], survivor))
     if lo["search_state"] == "accepted-missing":
         conn.execute("UPDATE projections SET search_state='accepted-missing' WHERE pid=?",
                      (survivor,))

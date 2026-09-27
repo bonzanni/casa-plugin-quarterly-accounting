@@ -190,6 +190,19 @@ class TestSkill(TempEnv):
                                     "## Ellen: the pass").split())
         self.assertLess(doc.index("the sweep of step 5"), doc.index("judge ONLY that document"))
 
+    def test_nothing_is_judged_before_every_payment_was_read_since_the_import(self):
+        # fix E2: triage and the handover judge only after the sweep reported 0
+        triage = " ".join(self.section("**Triage.**", "7. **Identity").split())
+        self.assertTrue(triage.startswith("**Triage.** Only when the sweep reported "
+                                          "`remaining_in_cycle` 0."))
+        self.assertIn("the pass ends `interrupted`", triage)
+        doc = " ".join(self.section("## Ellen: a document the operator hands over",
+                                    "## Ellen: the pass").split())
+        self.assertIn("only once the sweep has reported `remaining_in_cycle` 0", doc)
+        self.assertIn("judge nothing: the next pass's triage judges it", doc)
+        pack = " ".join(self.section("## Packaging", "## Install").split())
+        self.assertIn("ships unclassified with its documents set aside", pack)
+
 
 if __name__ == "__main__":
     unittest.main()
