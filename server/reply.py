@@ -54,15 +54,28 @@ CLASS_SCOPES = {"payslips": ("salary", "payroll"), "statements": ("fees", "inter
                 "receipts": ("reimbursement",)}
 
 
+_ESCAPE_LEAD = re.compile(r"^accounting\s*[:,\-\u2013\u2014]\s*")
+_ESCAPE_TAIL = re.compile(r"\s*,\s*accounting$")
+
+
 def _clauses(text: str) -> list:
     """Sentences, lower-cased; a sentence ending in "?" keeps its "?" so the
-    caller can tell a question from a correction."""
-    # spec §Recognising a reply: "accounting" ANYWHERE binds the message to this
-    # plugin; it is the escape word, not part of any clause
-    t = re.sub(r"[,:]?\s*\baccounting\b\s*[,:]?", " ", text.strip(), flags=re.I)
-    parts = re.split(r"(?<!\d)\.(?!\d)|;|\n|(?<=\?)", t)
-    out = [re.sub(r"\s+", " ", p).strip(" ,:").lower() for p in parts]
-    return [p for p in out if p]
+    caller can tell a question from a correction.
+
+    spec §Recognising a reply: "accounting" anywhere binds the message to this
+    plugin. It is removed only where it stands as a marker at a clause boundary
+    ("accounting: …", "…, accounting", or a clause of its own), never from
+    inside a clause's content ("the ABC Accounting Services one", fix round 2).
+    A period ends a sentence only before whitespace or the end, so a name like
+    "accounting.zip" and an amount like "99.00" stay whole."""
+    parts = re.split(r"\.(?=\s|$)|;|\n|(?<=\?)", text.strip())
+    out = []
+    for p in parts:
+        c = re.sub(r"\s+", " ", p).strip(" ,:").lower()
+        c = _ESCAPE_TAIL.sub("", _ESCAPE_LEAD.sub("", c)).strip(" ,:")
+        if c and c != "accounting":
+            out.append(c)
+    return out
 
 
 _KIND_TOKEN = re.compile(r"\b(an?) (" + "|".join(sorted(views.KIND_WORD, key=len, reverse=True))

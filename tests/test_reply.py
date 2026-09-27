@@ -441,5 +441,29 @@ class TestFixRound1(Base):
         self.assertNotIn("Zapier", out["receipt"])
 
 
+
+class TestFixRound2(Base):
+    def test_the_escape_word_is_a_marker_not_clause_content(self):
+        abc = self.item("ABC Accounting Services", 9900, "2026-09-17")
+        z = self.item("Zapier", 1210, "2026-09-18")
+        v = self.item("Vercel", 2000, "2026-09-19")
+        self.deliver()
+        out = reply.apply_reply(self.conn, "the ABC Accounting Services one is wrong")
+        self.assertIsNone(self.author(abc))
+        self.assertIn("Unpaired ABC Accounting Services", out["receipt"])
+        out = reply.apply_reply(self.conn, "the Zapier one is wrong, accounting")
+        self.assertIsNone(self.author(z))
+        out = reply.apply_reply(self.conn, "accounting: the Vercel one is wrong")
+        self.assertIsNone(self.author(v))
+        self.assertNotIn("didn't understand", out["receipt"])
+
+    def test_a_zip_name_may_say_accounting(self):
+        import binding
+        out = reply.apply_reply(self.conn, "call the zips accounting.zip")
+        self.assertEqual(len(out["applied"]), 1, out["receipt"])
+        self.assertEqual(self.conn.execute("SELECT package_name FROM binding").fetchone()[0],
+                         binding.slug("accounting.zip"))
+
+
 if __name__ == "__main__":
     unittest.main()
