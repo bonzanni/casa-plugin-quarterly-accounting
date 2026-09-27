@@ -43,6 +43,14 @@ already written into bank-feed's ledger, nor Home Assistant backups.
 - `scripts/scan_identifiers.py .` — fails the build on an IBAN-shaped token anywhere outside
   `tests/upstream/`. No IBAN, company name, vendor list or operator identity belongs in this
   tree; when in doubt, run the script.
+- CI (`.github/workflows/ci.yml`) runs the suite, both scripts, and a pinned gitleaks over the
+  whole history. Accepted findings are declared by fingerprint in `.gitleaksignore`.
+
+## Releasing
+The version is `.claude-plugin/plugin.json`'s `version`. To release, bump it (MAJOR.MINOR.PATCH)
+and merge to `main`. When `ci` passes on that push, `.github/workflows/release.yml` tags the
+commit `v<version>`; a version that already has a tag is left alone. Tags are never pushed by
+hand.
 
 ## Reset loop (debugging on production)
 Quiesce first (no pass running, `/new` on both agents), then: ask the finance specialist to

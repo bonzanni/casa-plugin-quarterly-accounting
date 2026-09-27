@@ -2,3 +2,8 @@
 set -euo pipefail
 python3 scripts/scan_identifiers.py .
 python3 scripts/check_tool_agreement.py
+# CI scans the whole history with a pinned gitleaks; locally the staged change
+# is scanned when gitleaks is installed.
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --staged --no-banner --redact .
+fi

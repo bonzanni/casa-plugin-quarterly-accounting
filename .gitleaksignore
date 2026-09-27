@@ -1,0 +1,11 @@
+# Accepted gitleaks findings, one fingerprint per line (commit:path:rule:line).
+# A fingerprint is bound to the commit that introduced the finding, so a new
+# occurrence anywhere else is still reported.
+#
+# Both are the same public Firebase web API key inside the vendored, test-only
+# copy of bank-feed (tests/upstream/, copied verbatim from the public
+# casa-specialist-finance repository at its pinned tags). The source marks it
+# "public, not a secret": it identifies the Enable Banking sign-in web app, not
+# an account.
+af9c60cf78c6b6ed83fd0d6840e5d6478fb5fc06:tests/upstream/component-v0.13.2/plugins/bank-feed/server/fbauth.py:gcp-api-key:34
+af9c60cf78c6b6ed83fd0d6840e5d6478fb5fc06:tests/upstream/component-v0.19.0/plugins/bank-feed/server/fbauth.py:gcp-api-key:34

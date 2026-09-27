@@ -1,0 +1,66 @@
+# Cut the release tag for a version that reached main.
+#
+# The version lives in .claude-plugin/plugin.json. When `ci` concludes success
+# on a push to main, this job reads that version and, if no tag `v<version>`
+# exists yet, pushes a lightweight tag at exactly the commit `ci` passed on.
+# Bumping the version in plugin.json and merging it to main is therefore the
+# whole release procedure; an unchanged version is a no-op.
+#
+# The tag name is the only text this job publishes, and it is validated as
+# digits and dots. No GitHub Release, no notes.
+name: release
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Tag the version on main
+    # A push to main of this repository that ci passed. A pull_request run is
+    # excluded by event, another branch by head_branch, a fork by head_repository.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the tag ref
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Tag v<plugin.json version> if it does not exist yet
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$SHA" ]
+          git merge-base --is-ancestor "$SHA" origin/main
+
+          VERSION=$(python3 - <<'PY'
+          import json, re, sys
+          v = json.load(open(".claude-plugin/plugin.json")).get("version")
+          if not isinstance(v, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v):
+              sys.exit(f"plugin.json version {v!r} is not MAJOR.MINOR.PATCH")
+          print(v)
+          PY
+          )
+          TAG="v${VERSION}"
+
+          existing=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
+          if [ -n "$existing" ]; then
+            echo "$TAG already names $existing; not re-tagged"
+            exit 0
+          fi
+
+          git push origin "$SHA:refs/tags/$TAG"
+          echo "$TAG -> $SHA"
