@@ -6995,8 +6995,11 @@ class TestSearchBookkeeping(Base):
             self.token = self.pass_()
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual((p["search_state"], p["status"]), ("aged-out", "open"))
+        before = lineage.projection(self.conn, self.pid)["search_json"]
         work.record_search(self.conn, pid=self.pid, token=None, revive=True)
-        self.assertEqual(lineage.projection(self.conn, self.pid)["search_state"], "active")
+        p = lineage.projection(self.conn, self.pid)
+        self.assertEqual(p["search_state"], "active")
+        self.assertEqual(p["search_json"], before)            # no search is claimed
 
     def test_one_count_per_pass_and_a_candidate_resets(self):
         work.record_search(self.conn, pid=self.pid, token=self.token, queries=["a"])
@@ -7116,6 +7119,13 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
         state, streak = p["search_state"], p["passes_without_candidate"]
         if revive:
             state, streak = "active", 0
+        searched = bool(queries) or found_candidate or exhausted or incomplete
+        if revive and not searched:
+            # "have another look" re-arms the search; it is not a search (round p8, Astra S2)
+            conn.execute("UPDATE projections SET search_state=?, passes_without_candidate=?"
+                         " WHERE pid=?", (state, streak, pid))
+            lineage.settle(conn, pid)
+            return {"pid": pid, "search_state": state, "passes_without_candidate": streak}
         if queries:
             search["queries"] = (search.get("queries", []) + [q for q in queries
                                                              if q not in search.get("queries", [])])[-50:]
@@ -8319,6 +8329,16 @@ class TestGrammar(Base):
         self.assertEqual(self.author(hidden)[0], "auto")
         del shown_pid
 
+    def test_a_broad_rule_rebuilds_the_quarter_it_changed(self):
+        pid = self.item("Adobe", 5445, "2026-05-14", paired=False)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE binding SET watermark='2026-04-01'")
+        self.settle(pid)
+        r = views.build_review(self.conn, view="missing", quarter="2026-Q2")
+        views.mark_rendering_delivered(self.conn, r["render_id"])
+        out = reply.apply_reply(self.conn, "no invoices ever for Adobe; rebuild it")
+        self.assertEqual(out["instructions"], ["rebuild 2026-Q2"])
+
     def test_rebuild_is_decided_after_the_whole_reply(self):
         self.deliver()
         self.item("Zapier", 9900, "2026-09-17")                            # unseen
@@ -8723,12 +8743,13 @@ def _broad(conn, run, change, ok_line) -> None:
                 "SELECT pid, revision, digest FROM projections WHERE merged_into IS NULL"
                 " AND ended IS NULL")}
             res = change()
-            unseen = []
+            unseen, changed = [], []
             for pid, (rev, digest) in sorted(before.items()):
                 now = conn.execute("SELECT digest FROM projections WHERE pid=?",
                                    (pid,)).fetchone()[0]
                 if now == digest:
                     continue
+                changed.append(pid)
                 s_ = _shown(conn, pid)
                 if s_ is None or s_["projection_revision"] != rev:
                     unseen.append(pid)
@@ -8749,6 +8770,10 @@ def _broad(conn, run, change, ok_line) -> None:
         return
     run.applied.append({"broad": res if isinstance(res, dict) else {"changes": len(res)}})
     run.lines.append(ok_line() if callable(ok_line) else ok_line)
+    for pid in changed:                    # "rebuild it" rebuilds the quarters it changed (p8)
+        q = work.describe(conn, pid)["quarter"]
+        if q:
+            run.touched_quarters.add(q)
 
 
 def _last_delivered(conn):
@@ -9841,6 +9866,17 @@ class TestTelegram(Base):
         self.assertEqual(open(again["path"], "rb").read(), open(self.pkg["path"], "rb").read())
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM packages").fetchone()[0], 1)
 
+    def test_resend_follows_each_packages_latest_send(self):
+        old = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                          package_id=self.pkg["package_id"])
+        delivery.record_delivery(self.conn, delivery_id=old["delivery_id"], outcome="delivered")
+        newer = package.build_quarterly_package(self.conn, "2026-Q3")
+        for outcome in ("uncertain", "failed"):
+            d = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                            package_id=newer["package_id"])
+            delivery.record_delivery(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
+        self.assertEqual(delivery.resendable(self.conn), self.pkg["package_id"])
+
 
 class TestEmail(Base):
     def test_published_to_the_handoff_with_a_request_id(self):
@@ -10022,14 +10058,17 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None) -> dict:
 
 
 def resendable(conn, quarter=None):
+    """The package whose LATEST send is the most recent one that may have
+    arrived (uncertain or delivered). A package whose latest send failed is
+    skipped whatever its older sends said (round p8, Terra S2)."""
     sql = ("SELECT d.package_id, d.status FROM deliveries d JOIN packages p ON"
-           " p.package_id=d.package_id WHERE d.package_id IS NOT NULL")
+           " p.package_id=d.package_id WHERE d.delivery_id IN (SELECT max(delivery_id) FROM"
+           " deliveries WHERE package_id IS NOT NULL GROUP BY package_id)")
     args = []
     if quarter:
         sql += " AND p.quarter=?"
         args.append(quarter)
-    rows = conn.execute(sql + " ORDER BY d.delivery_id DESC", args).fetchall()
-    for r in rows:
+    for r in conn.execute(sql + " ORDER BY d.delivery_id DESC", args):
         if r["status"] in ("uncertain", "delivered"):
             return r["package_id"]
     return None
