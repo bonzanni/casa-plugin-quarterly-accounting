@@ -396,6 +396,13 @@ def _compose(conn, view, q, items, members, lead):
     if view in ("status", "all"):
         res, parts["silent"] = _residue_blocks(conn)
         secs.append(_Section("", res))
+        # a send that may not have arrived is offered, never resent by itself
+        # (spec §Packaging, "Delivery"); a block like any other, so the cap,
+        # the paging and the final fit all apply to it
+        import delivery
+        secs.append(_Section("", [_Block([f"{fname} may not have arrived —",
+                                          'say "send it again".'], order=("", pkg_id))
+                                  for pkg_id, fname in delivery.uncertain(conn)]))
     if view in ("status", "all", "missing", "quarter"):
         secs.append(_Section("MISSING", _item_blocks(missing, _missing_detail, q), gap=True))
     if view in ("status", "all"):
