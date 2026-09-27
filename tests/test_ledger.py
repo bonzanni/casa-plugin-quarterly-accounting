@@ -233,6 +233,40 @@ class TestDeliveredBankHalf(Base):
         self.assertEqual(out["delivered_changes"], 0)
 
 
+class TestDeliveredKindHalf(Base):
+    deliver = TestDeliveredBankHalf.deliver
+    alerts = TestDeliveredBankHalf.alerts
+
+    def kinded(self, pid, row_id, kind):
+        with db.tx(self.conn):
+            pkg = self.conn.execute("SELECT max(package_id) FROM packages").fetchone()[0]
+            self.conn.execute("INSERT INTO delivered_rows(package_id, row_id, pid, facts_fp,"
+                              " kind) VALUES (?,?,?,'{}',?)", (pkg, row_id, pid, kind))
+
+    def check(self, pid, **proj):
+        with db.tx(self.conn):
+            for k, v in proj.items():
+                self.conn.execute(f"UPDATE projections SET {k}=? WHERE pid=?", (v, pid))
+            return ledger.check_delivered_kind_half(self.conn, pid)
+
+    def test_a_reclassified_row_alerts_once_and_follows_the_lineage_through_a_merge(self):
+        self.imp([{"row_id": 1}, {"row_id": 2, "amount_minor": 5000}])
+        a, b = sorted(self.live())
+        self.deliver(1, dict(self.conn.execute("SELECT * FROM bank_rows WHERE row_id=1")
+                             .fetchone()), pid=a)
+        self.conn.execute("DELETE FROM delivered_rows")
+        self.kinded(a, 1, "invoice")
+        self.kinded(b, 2, "invoice")         # delivered under b, which then merged into a
+        self.assertEqual(self.check(a, exp_kind="invoice"), 0)
+        self.assertEqual(self.check(b, merged_into=a), 0)
+        self.assertEqual(self.check(a, exp_kind="receipt"), 2)
+        self.assertEqual(self.check(a), 0)                  # once per occurrence
+        self.assertEqual({(x["row_id"], x["change"]) for x in self.alerts()},
+                         {(1, "reclassified"), (2, "reclassified")})
+        self.assertEqual(self.check(a, exp_kind=None), 0)    # unknown is not a change
+        self.assertEqual(self.check(a, exp_kind="none", ended="erased"), 0)
+
+
 class TestInstance(Base):
     """Ledger identity is bank-feed's instance id (#69; plan §D4)."""
     OTHER = "b" * 32
