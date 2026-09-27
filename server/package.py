@@ -1,0 +1,313 @@
+# server/package.py
+"""The quarterly package — built only when the operator asks (spec
+§Packaging). The build freezes its inputs in ONE read transaction and renders
+from them deterministically, so the same frozen inputs give the same bytes
+and "identical to the package from 14 Oct" is a computed fact. Membership is
+the transaction's effective-date quarter, never where a file is stored. Only
+`matched` feeds a folder, and routing over (kind, tier) is total and exclusive.
+A build never overwrites: its filename is reserved by exclusive create,
+widening from the date to minutes, seconds and a short suffix."""
+from __future__ import annotations
+
+import contextlib
+import csv
+import hashlib
+import io
+import json
+import os
+import re
+import secrets
+
+import amounts
+import binding
+import dates
+import db
+import lineage
+import reducer as R
+import work
+import xlsx
+
+MAX_ZIP_BYTES = 20_000_000
+COLUMNS = ("date", "amount", "currency", "direction", "counterparty", "vendor", "status",
+           "confidence", "expectation_kind", "expectation_tier", "document", "link", "notes")
+STATUS = {"matched": "MATCHED", "proposed": "UNCONFIRMED", "open": "MISSING",
+          "optional": "OPTIONAL-MISSING", "no-document": "NO-DOCUMENT", "exempt": "NO-DOCUMENT",
+          "ineligible": "UNTRACKED"}
+xml_safe = xlsx.xml_safe
+deterministic_zip = xlsx.zip_files
+
+
+def route(kind: str, tier: str | None) -> str:
+    if tier == "required" and kind in ("invoice", "sales-invoice", "credit-note"):
+        return {"invoice": "invoices", "sales-invoice": "sales-invoices",
+                "credit-note": "credit-notes"}[kind]
+    return "documents"
+
+
+def _slug(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", s or "").strip("-")[:40] or "unknown"
+
+
+def doc_filename(doc: dict, used: set, fallback_date: str) -> str:
+    amount = f"{doc['amount_minor'] // 100}.{doc['amount_minor'] % 100:02d}" \
+        if doc.get("amount_minor") is not None else "0.00"
+    base = f"{doc.get('document_date') or fallback_date}_{_slug(doc.get('issuer') or doc.get('counterparty'))}_{amount}"
+    # `used` holds casefolded names: Adobe_… and ADOBE_… are one file on a
+    # case-insensitive filesystem (Windows/macOS extraction), and one would
+    # silently replace the other there.
+    name = f"{base}.{doc['ext']}"
+    n = 1
+    while name.casefold() in used:
+        n += 1
+        name = f"{base}_{doc['sha256'][:8]}{'' if n == 2 else f'-{n - 1}'}.{doc['ext']}"
+    used.add(name.casefold())
+    return name
+
+
+def _place(folder: str, doc: dict, used: set, named: dict, fallback_date: str) -> str:
+    """One document gets ONE name per folder, however many lines carry it."""
+    key = (folder, doc["doc_id"])
+    if key not in named:
+        named[key] = f"{folder}/{doc_filename(doc, used, fallback_date)}"
+    return named[key]
+
+
+def _freeze(conn, quarter: str) -> dict:
+    start, end = dates.quarter_bounds(quarter)
+    conn.execute("BEGIN")                 # one consistent WAL read snapshot for the whole build
+    try:
+        b = binding.get(conn)
+        if b is None:
+            raise db.Refusal("no account is bound yet")
+        rows = [dict(r) for r in conn.execute("SELECT * FROM bank_rows WHERE account_id=?"
+                                              " ORDER BY row_id", (b["account_id"],))]
+        in_q = [r for r in rows if start <= (dates.effective_date(r) or "") < end]
+        lines = []
+        for r in sorted((r for r in in_q if r["state"] == "active"),
+                        key=lambda r: (dates.effective_date(r), r["row_id"])):
+            a = conn.execute("SELECT pid FROM aliases WHERE row_id=?", (r["row_id"],)).fetchone()
+            d = work.describe(conn, lineage.resolve_pid(conn, a[0])) if a else None
+            docs = {}
+            if d is not None:
+                for c in ([d["current"]] if d["current"] else []) + d["candidates"]:
+                    row = conn.execute("SELECT * FROM documents WHERE doc_id=?",
+                                       (c["document"]["doc_id"],)).fetchone()
+                    docs[c["match_id"]] = dict(row)
+            lines.append({"row": r, "d": d, "docs": docs})
+        history = [r for r in in_q if r["state"] != "active"]
+        unmatched = [dict(x) for x in conn.execute(
+            "SELECT d.* FROM documents d JOIN document_status s ON s.doc_id=d.doc_id"
+            " WHERE s.status='unmatched' AND d.ingest_quarter=? ORDER BY d.doc_id", (quarter,))]
+        snap = conn.execute("SELECT bank_through FROM snapshots ORDER BY snapshot_id DESC"
+                            " LIMIT 1").fetchone()
+        prev = conn.execute(
+            "SELECT p.* , d.settled_at FROM packages p JOIN deliveries d ON d.package_id="
+            "p.package_id WHERE p.quarter=? AND d.status='delivered' ORDER BY d.settled_at DESC,"
+            " p.package_id DESC LIMIT 1", (quarter,)).fetchone()
+        return {"binding": dict(b), "lines": lines, "history": history, "unmatched": unmatched,
+                "bank_through": snap["bank_through"] if snap else None,
+                "prev": dict(prev) if prev else None}
+    finally:
+        conn.execute("COMMIT")
+
+
+def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple:
+    files, used, named, manifest_rows, matched_docs = {}, set(), {}, [], []
+    missing, unclassified, nice, unresolved_lines, anomalies = [], [], [], [], []
+    table = [list(COLUMNS)]
+    for ln in frozen["lines"]:
+        r, d = ln["row"], ln["d"]
+        status = "UNTRACKED" if d is None else STATUS.get(d["status"], "UNTRACKED")
+        exp = d["expectation"] if d else {"kind": None, "tier": None}
+        if d is not None and d["status"] == "open" and exp["kind"] is None:
+            status = "UNCLASSIFIED"
+        docname, confidence, link, notes = "", "", "", []
+        if d is not None and d["status"] == "matched" and d["current"]:
+            doc = ln["docs"][d["current"]["match_id"]]
+            folder = route(doc["kind"], exp["tier"] or "required")
+            docname = _place(folder, doc, used, named, dates.effective_date(r))
+            files[docname] = documents_bytes(doc)
+            matched_docs.append(doc["sha256"])
+            confidence = "; ".join(x for x in d["current"]["labels"] if x != "clean")
+            if d["current"]["author"] == "operator":
+                notes.append("confirmed by the operator")
+        elif d is not None and ln["docs"]:
+            for mid, doc in sorted(ln["docs"].items()):
+                name = _place("unresolved", doc, used, named, dates.effective_date(r))
+                files[name] = documents_bytes(doc)
+                unresolved_lines.append((d, name))
+        if d is not None:
+            link = d["link"] or ""
+            if status == "MISSING":
+                missing.append((d, link))
+            elif status == "UNCLASSIFIED":
+                unclassified.append(d)
+            elif status == "OPTIONAL-MISSING":
+                nice.append(d)
+            if d["broken_floor"]:
+                anomalies.append(f"{_head(d)}: bank-feed's history is broken ({d['broken_floor']}).")
+            if d["unprojectable"]:
+                anomalies.append(f"{_head(d)}: the bank ledger could not take its tag.")
+        vendor = d["counterparty"] if d else (r["counterparty"] or "")
+        table.append([dates.effective_date(r) or "", f"{r['amount_minor'] // 100}.{r['amount_minor'] % 100:02d}",
+                      r["currency"], r["direction"], r["counterparty"] or "", vendor, status,
+                      confidence, exp["kind"] or "", exp["tier"] or "", docname, link,
+                      "; ".join(notes)])
+        manifest_rows.append({"row_id": r["row_id"], "pid": d["pid"] if d else None,
+                              "facts_fp": db.canonical(R.facts_of(r)), "kind": exp["kind"]})
+    buf = io.StringIO(newline="")
+    csv.writer(buf, lineterminator="\n").writerows(table)
+    files["ledger.csv"] = buf.getvalue().encode("utf-8")
+    files["ledger.xlsx"] = xlsx.workbook(table)
+    partial = dates.is_partial(quarter, today)
+    notes = [f"# {dates.quarter_label(quarter)}", ""]
+    notes += ["## Missing required documents", ""]
+    for kind in ("invoice", "sales-invoice", "credit-note", "payslip", "statement", "receipt"):
+        for d, link in [(d, lk) for d, lk in missing if d["expectation"]["kind"] == kind]:
+            notes.append(f"- {_head(d)} — {kind}" + (f" — {link}" if link else ""))
+    if not missing:
+        notes.append("- none")
+    notes += ["", "## Not yet classified", ""]
+    notes += [f"- {_head(d)}" for d in unclassified] or ["- none"]
+    notes += ["", "## Nice to have, not found", ""]
+    notes += [f"- {_head(d)} — {d['expectation']['kind']}" for d in nice] or ["- none"]
+    notes += ["", "## Unresolved candidates", ""]
+    notes += [f"- {_head(d)}: {name}" for d, name in unresolved_lines] or ["- none"]
+    notes += ["", "## Documents filed but not matched", ""]
+    notes += [f"- {u.get('issuer') or u.get('counterparty') or 'unknown'} "
+              f"{u.get('document_number') or ''} ({u['kind']})" for u in frozen["unmatched"]] or ["- none"]
+    notes += ["", "## Anomalies", ""]
+    notes += [f"- {a}" for a in anomalies] or ["- none"]
+    if frozen["history"]:
+        notes += ["", "## Bank rows kept as history (not summed)", ""]
+        notes += [f"- #{h['row_id']} {h['state']} {dates.effective_date(h) or ''} "
+                  f"{amounts.fmt(h['amount_minor'], h['currency'])}"
+                  + (f" → #{h['superseded_by']}" if h["superseded_by"] else "")
+                  for h in frozen["history"]]
+    if oversize_note:
+        notes += ["", "## Too large to send", ""] + [f"- {x}" for x in oversize_note]
+    # The digest covers every file INCLUDING notes.md (round p6, Astra S2: a change
+    # visible only in notes.md was captioned "identical"); only the closing line,
+    # which carries the build date and the digest itself, is left out.
+    # The opening "Partial quarter" line carries the build date too, so it is
+    # left out of the digest as well; `partial` itself enters it, so a partial
+    # and a closed build of the same rows never compare identical. (Otherwise
+    # two unchanged partial builds on different days were captioned "Changed".)
+    body = ("\n".join(notes) + "\n").encode("utf-8")
+    digest = hashlib.sha256(b"".join(n.encode() + b"\0" + files[n] for n in sorted(files))
+                            + b"notes.md\0" + (b"partial\0" if partial else b"closed\0")
+                            + body).hexdigest()
+    period = "{} to {}".format(*dates.quarter_bounds(quarter))
+    notes += ["", f"built {today}, covers {period}, bank data through "
+                  f"{frozen['bank_through'] or 'not checked'}, digest {digest[:16]}"]
+    if partial:
+        notes = [f"Partial quarter — built {today}, before {dates.quarter_label(quarter)} "
+                 "ended. Not a filing set.", ""] + notes
+    files["notes.md"] = ("\n".join(notes) + "\n").encode("utf-8")
+    counts = {"payments": len(frozen["lines"]), "with_documents": len(matched_docs),
+              "missing": len(missing), "unclassified": len(unclassified)}
+    return (deterministic_zip(files), digest, partial,
+            {"rows": manifest_rows, "documents": sorted(matched_docs), "counts": counts})
+
+
+def _head(d) -> str:
+    return (f"{d['counterparty']} · {amounts.fmt(d['amount_minor'], d['currency'])} · "
+            f"{dates.short_day(d['date']) if d['date'] else 'no date'}")
+
+
+def documents_bytes(doc: dict) -> bytes:
+    return (db.data_dir() / "documents" / doc["sha256"][:2]
+            / f"{doc['sha256']}.{doc['ext']}").read_bytes()
+
+
+def _reserve(stem: str, stamp: str) -> tuple:
+    d = db.data_dir() / "packages"
+    d.mkdir(parents=True, exist_ok=True)
+    hhmm, hhmmss = stamp[11:13] + stamp[14:16], stamp[11:13] + stamp[14:16] + stamp[17:19]
+    tries = [stem, f"{stem}-{hhmm}", f"{stem}-{hhmmss}"]
+    while True:
+        name = (tries.pop(0) if tries else f"{stem}-{hhmmss}-{secrets.token_hex(2)}") + ".zip"
+        try:
+            fd = os.open(d / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o640)
+            return fd, d / name
+        except FileExistsError:
+            continue
+
+
+def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, size) -> str:
+    c = manifest["counts"]
+    out = [f"Accounting {dates.quarter_label(quarter)} · {c['payments']} payments · "
+           f"{c['with_documents']} with documents"]
+    if prev is not None:
+        when = dates.short_day(prev["settled_at"])
+        if prev["digest"] == digest:
+            out.append(f"Identical to the package from {when}.")
+        else:
+            added = len(set(manifest["documents"]) - set(json.loads(prev["manifest_json"])
+                                                         .get("documents", [])))
+            out.append(f"{added} document{'s' if added != 1 else ''} added since the package "
+                       f"from {when}." if added else f"Changed since the package from {when}.")
+    tail = [f"{c['missing']} still missing"] if c["missing"] else []
+    if c["unclassified"]:
+        tail.append(f"{c['unclassified']} not yet classified")
+    if tail:
+        out.append(", ".join(tail) + " — listed in notes.md.")
+    if partial:
+        out.append("The quarter isn't over yet.")
+    if oversize:
+        out.append(f"Too large for Telegram ({size / 1e6:.1f} MB; the limit is 20 MB) — kept "
+                   "here; notes.md names the largest files.")
+    if not b["package_name_announced"]:
+        out.append(f'Files are named "{filename}" — say "call the zips <name>" to change that.')
+    return "\n".join(out)
+
+
+def _custody():
+    """The interprocess custody lock over documents/ and packages/ (fix wave B,
+    db.custody_lock): a build reads held documents' bytes and writes into
+    packages/, which reset_store erases under that lock. Taken BEFORE the freeze
+    transaction, never inside one (lock order: custody, then SQLite). Until
+    that wave is merged into this line, db has no custody_lock and this is a
+    no-op."""
+    lock = getattr(db, "custody_lock", None)
+    return lock() if lock is not None else contextlib.nullcontext()
+
+
+def build_quarterly_package(conn, quarter: str) -> dict:
+    dates.parse_quarter(quarter)
+    if conn.in_transaction:
+        raise RuntimeError("build_quarterly_package opens its own transactions")
+    with _custody():
+        return _build(conn, quarter)
+
+
+def _build(conn, quarter: str) -> dict:
+    stamp = db.now()
+    today = stamp[:10]
+    frozen = _freeze(conn, quarter)
+    data, digest, partial, manifest = _render(frozen, quarter, today)
+    oversize = len(data) > MAX_ZIP_BYTES
+    if oversize:
+        sizes = sorted(((len(documents_bytes(ln["docs"][ln["d"]["current"]["match_id"]])),
+                         _head(ln["d"])) for ln in frozen["lines"]
+                        if ln["d"] and ln["d"]["status"] == "matched" and ln["d"]["current"]),
+                       reverse=True)[:10]
+        data, digest, partial, manifest = _render(
+            frozen, quarter, today, [f"{h}: {n / 1e6:.1f} MB" for n, h in sizes])
+    b = frozen["binding"]
+    stem = f"{b['package_name']}-{quarter}{'-partial' if partial else ''}-{today}"
+    fd, path = _reserve(stem, stamp)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    caption = _caption(quarter, manifest, frozen["prev"], digest, partial, b, path.name,
+                       oversize, len(data))
+    with db.tx(conn):
+        pkg_id = conn.execute(
+            "INSERT INTO packages(quarter, filename, path, built_at, partial, digest, size,"
+            " oversize, caption, manifest_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (quarter, path.name, str(path), stamp, int(partial), digest, len(data),
+             int(oversize), caption, db.canonical(manifest))).lastrowid
+    return {"package_id": pkg_id, "filename": path.name, "path": str(path), "caption": caption,
+            "oversize": oversize, "size": len(data), "digest": digest, "partial": partial}
