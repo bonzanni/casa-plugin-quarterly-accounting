@@ -175,7 +175,6 @@ def _rebind(conn) -> None:
 
 
 def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dict:
-    import binding
     import passes
     if token is None:
         raise db.Refusal("an import belongs to a pass: pass the pass_token from begin_pass")
@@ -186,6 +185,21 @@ def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dic
     except casa_handoff.HandoffError as exc:
         raise db.Refusal(f"that is not a handoff file ({exc.kind}): {exc}")
     rows = parse(name, data)
+    # The custody lock is taken BEFORE any transaction (lock order: custody, then the
+    # SQLite write lock — as ingest, reset_store, reap_orphans, the package build and
+    # delivery staging take it): the import withdraws the staged bytes of every first
+    # send it revokes, and commits the revocation, while no staging can put bytes back
+    # (round E6, Terra + Astra S1). Held past the bound: Busy, and nothing imported.
+    if conn.in_transaction:
+        raise RuntimeError("import_ledger_export takes the custody lock before its transaction")
+    with db.custody_lock(bound_s=db.LOCK_BOUND_S):
+        return _import(conn, rows, token, ledger_instance)
+
+
+def _import(conn, rows, token, ledger_instance) -> dict:
+    import binding
+    import delivery
+    import passes
     # The gate is decided and PERSISTED before the import's transaction opens: a
     # refusal (gate_json, meta.gate_refusal) recorded inside it would roll back
     # with the Refusal below and stop sticking (plan §D11; Task 8 review).
@@ -330,12 +344,16 @@ def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dic
         out["delivered_changes"] = check_delivered_bank_half(conn, by_id)
         # 5. an unsent first send staged under an earlier snapshot is revoked in this
         # same commit (round E5, Terra S1): the plugin cannot hold a lock across the
-        # external send, so the import takes the send away instead
-        import delivery
+        # external send, so the import takes the send away instead. Its bytes are
+        # withdrawn BEFORE the commit, under the custody lock (round E6): no moment has
+        # the revocation committed and the bytes still sendable. A commit that then
+        # fails leaves a send that fails visibly, never one recorded delivered.
         revoked = delivery.revoke_superseded_first_sends(conn, sid)
         out["revoked_deliveries"] = [r["delivery_id"] for r in revoked]
-    delivery.remove_revoked_files(conn, revoked)
-    return out
+        # every revoked delivery whose bytes are still there (this import's, and any
+        # an earlier withdrawal failed on) is withdrawn now; a failure stays retryable
+        out["withdraw_failed"] = delivery.withdraw_revoked(conn)
+        return out
 
 
 def check_delivered_kind_half(conn, pid: int) -> int:

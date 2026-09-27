@@ -6,12 +6,15 @@ enumerates exactly the non-fresh lineages; a machine match and a package
 never act on a non-fresh one. Against the REAL bank-feed, through
 qa_server.handle and the rendered get_transaction text where the skill is
 exercised."""
+import contextlib
 import csv
 import io
 import multiprocessing
 import os
 import pathlib
 import random
+import sqlite3
+import time
 import unittest
 import zipfile
 
@@ -35,7 +38,7 @@ class ToolPass(test_e2e.Base):
         from tests.test_tools import _fresh_conn
         _fresh_conn(self)._CONN = self.conn
 
-    def begin(self, trigger):
+    def begin(self, trigger, do_import=True):
         bf = self.bf
         token = call("begin_pass", trigger=trigger)["pass_token"]
         accounts = [{"account_id": r["account_id"], "category": r["category"], "label": r["name"]}
@@ -47,6 +50,8 @@ class ToolPass(test_e2e.Base):
         call("record_probe", pass_token=token, kind="ledger", ok=True,
              data=sim.ledger_state(bf.listing()))
         self.assertTrue(call("check_setup")["can_run"])
+        if not do_import:
+            return token
         imp = call("import_ledger_export", path=bf.export(), pass_token=token,
                    ledger_instance=bf.last_export_instance)
         self.assertEqual(imp["erase_candidates"], [])
@@ -249,7 +254,10 @@ class TestSnapshotBoundCommits(ToolPass):
         self.assertEqual({r["counterparty"]: (r["status"], r["expectation_kind"]) for r in rows},
                          {"Adobe": ("MISSING", "credit-note"), "Zapier": ("MISSING", "invoice")})
 
-    def test_a_build_whose_snapshot_was_superseded_before_registration_is_refused(self):
+    def test_an_import_cannot_land_inside_a_build_in_flight(self):
+        # round E6: the import takes the custody lock the build holds from its freeze
+        # through its registration, so N+1 cannot land in between; it waits (here:
+        # refuses Busy at a short bound) and lands after the build registered under N
         ids = self.two_rows_matched()
         bf, a = self.bf, ids["A1"]
         token = self.begin("package")
@@ -265,15 +273,25 @@ class TestSnapshotBoundCommits(ToolPass):
         self.addCleanup(proc.join, 30)
         self.addCleanup(resume.set)
         self.assertTrue(rendered.wait(60), "the build never rendered")
-        call("import_ledger_export", path=bf.export(), pass_token=token,
-             ledger_instance=bf.last_export_instance)                # N+1 lands meanwhile
+        n = lineage.latest_import(self.conn)
+        saved, db.LOCK_BOUND_S = db.LOCK_BOUND_S, 0.5
+        try:
+            out_text = _raw("import_ledger_export", path=bf.export(), pass_token=token,
+                            ledger_instance=bf.last_export_instance)
+        finally:
+            db.LOCK_BOUND_S = saved
+        self.assertTrue(out_text.startswith("refused: "), out_text)
+        self.assertEqual(lineage.latest_import(self.conn), n)       # nothing imported
         resume.set()
         proc.join(60)
         got = out.get(timeout=5)
-        self.assertEqual(got, ("error", "Refusal: the bank was re-read while building — "
-                                        "build again"))
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 0)
-        self.assertEqual(list((db.data_dir() / "packages").iterdir()), [])  # no orphan zip
+        self.assertEqual(got[0], "ok", got)                          # registered under N
+        call("import_ledger_export", path=bf.export(), pass_token=token,
+             ledger_instance=bf.last_export_instance)                # N+1 lands after it
+        self.assertEqual(_raw("stage_for_delivery", channel="telegram",
+                              package_id=got[1]["package_id"]),
+                         "refused: the bank was re-read since this package was built — "
+                         "build it again")
         self.assertEqual(self.sweep(token), 0)
         call("end_pass", pass_token=token, outcome="complete")
         _, files, rows, _ = self.zip_of()
@@ -302,9 +320,16 @@ class TestSnapshotBoundCommits(ToolPass):
             real = package._render
 
             def racing(*a, **kw):
+                # the registration check is defense in depth behind the custody lock
+                # (round E6): an import that bypassed the lock is simulated here
                 result = real(*a, **kw)
-                call("import_ledger_export", path=bf.export(), pass_token=token,
-                     ledger_instance=bf.last_export_instance)
+                held = db.custody_lock
+                db.custody_lock = lambda **_: contextlib.nullcontext()
+                try:
+                    call("import_ledger_export", path=bf.export(), pass_token=token,
+                         ledger_instance=bf.last_export_instance)
+                finally:
+                    db.custody_lock = held
                 return result
             package._render = racing
             try:
@@ -479,6 +504,116 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
         self.assertEqual(os.listdir(self.outbox), [again["filename"]])
         self.assertEqual(call("record_delivery", delivery_id=again["delivery_id"],
                               outcome="delivered")["status"], "delivered")
+
+
+class TestWithdrawalUnderTheCustodyLock(ToolPass):
+    """Round E6 (Terra, Astra S1): the import withdraws the staged bytes before it
+    commits the revocation, under the custody lock taken before its transaction."""
+    built = TestImportRevokesAnUnsentFirstSend.built
+    def staged(self):
+        pkg = self.built()
+        d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"])
+        self.assertEqual(os.listdir(self.outbox), [d["filename"]])
+        return pkg, d
+
+    def state(self, delivery_id):
+        # what another session sees: committed rows (a plain reader: open_store would
+        # wait for the write lock the paused import holds)
+        c = sqlite3.connect(str(db.data_dir() / db.DB_NAME))
+        c.row_factory = sqlite3.Row
+        try:
+            r = c.execute("SELECT status, revoked_at FROM deliveries WHERE delivery_id=?",
+                          (delivery_id,)).fetchone()
+            return r["status"], r["revoked_at"] is not None
+        finally:
+            c.close()
+
+    def spawn(self, target, *args):
+        ctx = multiprocessing.get_context("spawn")
+        ev, resume, out = ctx.Event(), ctx.Event(), ctx.Queue()
+        proc = ctx.Process(target=target, args=(*args, ev, resume, out))
+        proc.start()
+        self.addCleanup(proc.join, 30)
+        self.addCleanup(resume.set)
+        self.assertTrue(ev.wait(60), f"{target.__name__} never reached its pause")
+        return proc, resume, out
+
+    def short_bound(self):
+        saved = db.LOCK_BOUND_S
+        db.LOCK_BOUND_S = 0.5
+        self.addCleanup(setattr, db, "LOCK_BOUND_S", saved)
+
+    def test_the_bytes_are_gone_before_the_revocation_commits(self):
+        _, d = self.staged()
+        token = self.begin("cron", do_import=False)
+        proc, resume, out = self.spawn(_procs.import_paused, self.bf.export(), token,
+                                       self.bf.last_export_instance)
+        # paused between withdrawal and commit: nothing sendable, nothing revoked yet
+        self.assertEqual(os.listdir(self.outbox), [])
+        self.assertEqual(self.state(d["delivery_id"]), ("staged", False))
+        resume.set()
+        proc.join(60)
+        self.assertEqual(out.get(timeout=5), ("ok", [d["delivery_id"]]))
+        self.assertEqual(self.state(d["delivery_id"]), ("failed", True))
+        self.assertEqual(os.listdir(self.outbox), [])
+
+    def test_an_import_refuses_whole_while_the_custody_lock_is_held(self):
+        pkg, d = self.staged()
+        token = self.begin("cron", do_import=False)
+        n = lineage.latest_import(self.conn)
+        proc, release, out = self.spawn(_procs.hold_custody)
+        self.short_bound()
+        text = _raw("import_ledger_export", path=self.bf.export(), pass_token=token,
+                    ledger_instance=self.bf.last_export_instance)
+        self.assertTrue(text.startswith("refused: "), text)
+        self.assertEqual(lineage.latest_import(self.conn), n)       # nothing imported
+        self.assertEqual(self.state(d["delivery_id"]), ("staged", False))
+        self.assertEqual((self.outbox / d["filename"]).read_bytes(),
+                         pathlib.Path(pkg["path"]).read_bytes())    # intact, still consistent
+        release.set()
+        proc.join(60)
+        imp = call("import_ledger_export", path=self.bf.export(), pass_token=token,
+                   ledger_instance=self.bf.last_export_instance)
+        self.assertEqual(imp["revoked_deliveries"], [d["delivery_id"]])
+        self.assertEqual(os.listdir(self.outbox), [])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores the mode")
+    def test_a_failed_withdrawal_stays_retryable(self):
+        _, d = self.staged()
+        os.chmod(self.outbox, 0o500)                    # the unlink will fail
+        self.addCleanup(os.chmod, self.outbox, 0o770)
+        token = self.begin("cron", do_import=False)
+        imp = call("import_ledger_export", path=self.bf.export(), pass_token=token,
+                   ledger_instance=self.bf.last_export_instance)
+        self.assertEqual(imp["revoked_deliveries"], [d["delivery_id"]])
+        self.assertEqual([f["delivery_id"] for f in imp["withdraw_failed"]], [d["delivery_id"]])
+        self.assertEqual(self.state(d["delivery_id"]), ("failed", True))
+        os.chmod(self.outbox, 0o770)
+        imp = call("import_ledger_export", path=self.bf.export(), pass_token=token,
+                   ledger_instance=self.bf.last_export_instance)       # the next import retries
+        self.assertEqual((imp["revoked_deliveries"], imp["withdraw_failed"]), ([], []))
+        self.assertEqual(os.listdir(self.outbox), [])
+
+    def test_imports_and_builds_in_two_processes_never_deadlock(self):
+        self.built()
+        token = self.begin("cron")
+        ctx = multiprocessing.get_context("spawn")
+        out = ctx.Queue()
+        proc = ctx.Process(target=_procs.build_repeatedly, args=("2026-Q3", 6, out))
+        proc.start()
+        self.addCleanup(proc.join, 30)
+        snaps, deadline = [], time.monotonic() + 120
+        while (proc.is_alive() or len(snaps) < 2) and time.monotonic() < deadline:
+            snaps.append(call("import_ledger_export", path=self.bf.export(), pass_token=token,
+                              ledger_instance=self.bf.last_export_instance)["snapshot"])
+        proc.join(120)
+        self.assertFalse(proc.is_alive(), "the builds never finished")
+        got = out.get(timeout=5)
+        self.assertEqual(got[0], "ok", got)
+        # every build ran whole between two imports (the lock serializes them), so none
+        # was superseded before registering, and none waited past the bound
+        self.assertEqual(got[1], ["ok"] * 6)
+        self.assertEqual(snaps, sorted(set(snaps)))
 
 
 def _raw(name, **args):

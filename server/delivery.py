@@ -164,8 +164,8 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
     Terra S1): every delivery still `staged` that is a package's FIRST send
     (no delivered or uncertain send of it) and was built under another snapshot
     is revoked — marked failed with revoked_at, so record_delivery refuses it.
-    Returns the revoked rows; their staged bytes are removed after the commit
-    (remove_revoked_files). A resend of a file already sent is never revoked."""
+    Returns the revoked rows; their staged bytes are withdrawn before the same
+    commit (withdraw_revoked). A resend of a file already sent is never revoked."""
     assert conn.in_transaction
     rows = conn.execute(
         "SELECT d.delivery_id, d.channel, d.staged_path FROM deliveries d JOIN packages p"
@@ -180,29 +180,36 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
     return [dict(r) for r in rows]
 
 
-def remove_revoked_files(conn, revoked) -> None:
-    """After the revoking commit: the Telegram outbox copy is deleted, and the
-    email handoff copy — this plugin's own published entry, one directory per
-    publish (casa_handoff offers no retract call) — is removed. Under the custody
-    lock, and only a path no live staged delivery still names (a later staging of
-    the same bytes reuses the outbox file)."""
-    if not revoked:
-        return
-    with db.custody_lock():
-        for r in revoked:
-            live = conn.execute("SELECT 1 FROM deliveries WHERE staged_path=? AND"
-                                " status='staged' AND revoked_at IS NULL",
-                                (r["staged_path"],)).fetchone()
-            if live is not None:
-                continue
-            path = pathlib.Path(r["staged_path"])
+def withdraw_revoked(conn) -> list:
+    """Inside the import's transaction, under the custody lock (round E6): remove
+    the staged bytes of every revoked delivery whose copy is still there — the
+    Telegram outbox file, or this plugin's own handoff entry (one `<id>/`
+    directory per publish; casa_handoff has no retract call). A path a live,
+    unrevoked staged delivery still names is left alone. A removal that fails is
+    returned and stays retryable: the revoked row keeps naming the path, and the
+    next import tries again."""
+    assert conn.in_transaction
+    failed = []
+    for r in conn.execute("SELECT delivery_id, channel, staged_path FROM deliveries"
+                          " WHERE revoked_at IS NOT NULL ORDER BY delivery_id").fetchall():
+        path = pathlib.Path(r["staged_path"])
+        target = path.parent if r["channel"] == "email" else path
+        if not target.exists():
+            continue
+        if conn.execute("SELECT 1 FROM deliveries WHERE staged_path=? AND status='staged' AND"
+                        " revoked_at IS NULL", (r["staged_path"],)).fetchone() is not None:
+            continue
+        try:
             if r["channel"] == "email":
-                shutil.rmtree(path.parent, ignore_errors=True)
+                shutil.rmtree(target)
             else:
-                try:
-                    os.unlink(path)
-                except FileNotFoundError:
-                    pass
+                os.unlink(target)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            failed.append({"delivery_id": r["delivery_id"], "path": str(target),
+                           "error": str(exc)})
+    return failed
 
 
 def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=None) -> dict:
