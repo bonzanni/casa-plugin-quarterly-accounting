@@ -864,6 +864,33 @@ class TestIdentity(Base):
     def test_a_display_alias_survives_an_unrelated_item_view(self):
         self.alias_after("item")
 
+    def at_pid(self, pid):
+        """The next lineage gets this pid (payments far apart share a ref prefix)."""
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE sqlite_sequence SET seq=? WHERE name='projections'",
+                              (pid - 1,))
+
+    def test_a_ref_printed_on_two_payments_asks(self):
+        # round 9 (Astra S1): payments 73 (Alpha) and 223 (Beta) both printed "ref 7291";
+        # the scope kept 7291 -> 223 only and "ref 7291 is wrong" unpaired Beta silently
+        self.item("Seed", 100, "2026-09-01")                    # creates the sequence row
+        self.at_pid(73)
+        alpha = self.item("Alpha", 5445, "2026-09-14", labels=("guessed",))
+        self.item("Alpha", 5445, "2026-09-14", labels=("guessed",))
+        self.at_pid(223)
+        beta = self.item("Beta", 7000, "2026-09-16", labels=("guessed",))
+        self.item("Beta", 7000, "2026-09-16", labels=("guessed",))
+        self.assertEqual((alpha, beta), (73, 223))
+        r = self.deliver(view="check")
+        self.assertEqual(" ".join(r["text"].split()).count("ref 7291"), 2)
+        out = reply.apply_reply(self.conn, "ref 7291 is wrong")
+        self.assertEqual(out["applied"], [])
+        self.assertIn("Which one?", out["receipt"])
+        self.assertEqual((self.author(alpha)[0], self.author(beta)[0]), ("auto", "auto"))
+        reply.apply_reply(self.conn, "the Alpha ref 7291 one is wrong")
+        self.assertIsNone(self.author(alpha))
+        self.assertEqual(self.author(beta)[0], "auto")
+
     def test_a_name_that_displays_like_another_asks_with_equal_facts(self):
         a = self.item("A\u00b7B", 5445, "2026-09-14", labels=("guessed",))
         b = self.item("A\u2022B", 5445, "2026-09-14", labels=("guessed",))

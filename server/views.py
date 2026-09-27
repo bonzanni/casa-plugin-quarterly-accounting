@@ -938,7 +938,12 @@ def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=
         if _NAMES is not None:
             # the generated refs this rendering printed on payments it binds: a reply's
             # "ref <hex>" is honoured only against these (round 6)
-            refs = {_NAMES.pids[p]: p for p in printed if _NAMES.pids.get(p)}
+            # hex -> EVERY payment printed with that ref (round 9: refs are distinct only
+            # within a payee-collision group, so two groups can print the same hex)
+            refs: dict = {}
+            for p in sorted(printed):
+                if _NAMES.pids.get(p):
+                    refs.setdefault(_NAMES.pids[p], []).append(p)
             if refs:
                 scope["refs"] = refs
             # the payee name each bound payment was SHOWN as: a reply resolves names

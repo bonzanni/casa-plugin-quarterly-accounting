@@ -209,7 +209,7 @@ def _delivered_refs(conn) -> dict:
     out: dict = {}
     for pid, scope in _shown_scopes(conn):
         for k, v in scope.get("refs", {}).items():
-            if int(v) == pid:
+            if pid in (v if isinstance(v, list) else [v]):
                 out.setdefault(k, set()).add(pid)
     return out
 

@@ -504,3 +504,71 @@ class TestSeenNameProperty(Base):
             if not changed:
                 self.assertTrue(out["asks"] or out["reshow"] or "not applied" in out["receipt"],
                                 out["receipt"])
+
+
+def _ref_collisions(k=3, upto=4000):
+    """Pairs of pids whose 4-hex lineage refs coincide."""
+    seen, out = {}, []
+    for p in range(2, upto):
+        h = views.lineage_ref(p)[:4]
+        if h in seen and (not out or seen[h] > out[-1][1]):
+            out.append((seen[h], p))
+            if len(out) == k:
+                break
+        seen.setdefault(h, p)
+    return out
+
+
+class TestRefCollisionProperty(Base):
+    """fix wave D round 9: refs are distinct only within a payee-collision group,
+    so two groups can print the same "ref <hex>". A ref reading unions every
+    payment printed with that ref: a correction never lands on another payment."""
+    def test_a_ref_correction_never_lands_on_another_payment(self):
+        rng = random.Random(9)
+        self.item("Seed", 1, False)
+        pids = {}
+        for a, b in _ref_collisions():
+            for start, name in ((a, "Alpha%d" % a), (b, "Beta%d" % b)):
+                with db.tx(self.conn):
+                    self.conn.execute("UPDATE sqlite_sequence SET seq=? WHERE"
+                                      " name='projections'", (start - 1,))
+                amount = rng.choice((5445, 7000))
+                for _ in range(2):                            # twins: a ref is printed
+                    self.n += 1
+                    self.row(self.n, counterparty=name, amount_minor=amount,
+                             booking_date="2026-09-14", value_date="2026-09-14")
+                    pid = self.lineage_for(self.n)
+                    self.classify(pid, {"software"})
+                    self.settle(pid)
+                    d = self.doc(counterparty=name, issuer=name, amount_minor=amount,
+                                 document_date="2026-09-14", document_number="N%d" % pid)
+                    matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
+                                         expected_revision=self.rev(pid),
+                                         row_snapshot=self.snapshot(pid), token=self.token,
+                                         labels=("guessed",))
+                    pids[pid] = name
+
+        def paired(p):
+            return self.conn.execute("SELECT 1 FROM match_state WHERE pid=? AND state IN"
+                                     " ('matched','proposed')", (p,)).fetchone() is not None
+        asked = 0
+        for _ in range(10):
+            r = views.build_review(self.conn, view="check", quarter="2026-Q3")
+            views.mark_rendering_delivered(self.conn, r["render_id"])
+            refs = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                                " render_id=?", (r["render_id"],))
+                              .fetchone()[0]).get("refs", {})
+            live = [p for p in pids if paired(p) and any(p in v for v in refs.values())]
+            if not live:
+                break
+            target = rng.choice(live)
+            hexes = [h for h, v in refs.items() if target in v]
+            words = rng.choice((["ref", hexes[0]], [pids[target], "ref", hexes[0]]))
+            before = {p: paired(p) for p in pids}
+            out = reply.apply_reply(self.conn, "the %s one is wrong" % " ".join(words))
+            changed = [p for p in pids if before[p] != paired(p)]
+            self.assertLessEqual(set(changed), {target}, (words, out["receipt"]))
+            if words[0] == "ref" and len(refs[hexes[0]]) > 1:
+                self.assertEqual(changed, [], out["receipt"])
+                asked += 1
+        self.assertGreater(asked, 0)                  # the generator reached a shared ref
