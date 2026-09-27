@@ -4,6 +4,7 @@ replaced by tests/sim.triage (the auto-match bar on filed metadata); every
 bank-feed interaction is the real one."""
 import csv
 import io
+import re
 import unittest
 import zipfile
 
@@ -78,7 +79,13 @@ class TestFixtureQuarter(Base):
                   amount_minor=121000, document_date="2026-07-14")
         out = sim.run_pass(self.conn, bf)
         self.assertEqual(len(out["triage"]["matched"]), 2)
+        matched = self.conn.execute(
+            "SELECT p.dest_row_id FROM projections p JOIN match_state m"
+            " ON m.match_id=p.current_match WHERE p.status='matched' AND m.author='auto'"
+            " AND p.ended IS NULL AND p.merged_into IS NULL ORDER BY p.dest_row_id").fetchall()
+        self.assertEqual([r[0] for r in matched], sorted([ids["A1"], ids["C1"]]))
         self.assertEqual(self.owned(ids["A1"]), ["acct::matched"])
+        self.assertEqual(self.owned(ids["C1"]), ["acct::matched"])
         self.assertEqual(self.owned(ids["Z1"]), ["acct::open"])
         self.assertEqual(self.owned(ids["T1"]), ["acct::no-document-expected"])
         self.assertEqual(self.owned(ids["S1"]), [])                        # optional: no tag
@@ -88,8 +95,9 @@ class TestFixtureQuarter(Base):
         self.assertEqual(sorted(n for n in z.namelist() if "/" in n),
                          ["invoices/2026-06-30_Adobe_54.45.pdf",
                           "sales-invoices/2026-07-14_Voorbeeld-BV_1210.00.pdf"])
-        st = {r["counterparty"]: r["status"] for r in
-              csv.DictReader(io.StringIO(z.read("ledger.csv").decode()))}
+        rows = list(csv.DictReader(io.StringIO(z.read("ledger.csv").decode())))
+        self.assertEqual(len(rows), 6)
+        st = {r["counterparty"]: r["status"] for r in rows}
         self.assertEqual(st, {"Adobe": "MATCHED", "Zapier": "MISSING", "Client BV": "MATCHED",
                               "Own savings": "NO-DOCUMENT", "Payroll": "OPTIONAL-MISSING",
                               "Mystery": "UNCLASSIFIED"})
@@ -121,6 +129,7 @@ class TestEndsE2E(Base):
         self.first_pass()
         doc = self.file(amount_minor=1000, document_date="2026-07-05")
         sim.run_pass(self.conn, bf)
+        (old_pid,) = lineage.live_pids(self.conn)
         bf.purge_before("2026-08-01")
 
         def resync():
@@ -132,6 +141,8 @@ class TestEndsE2E(Base):
                                     (self.active()[0]["row_id"],)).fetchone()[0]
         cur = work.describe(self.conn, new_pid)["current"]
         self.assertEqual((cur["document"]["doc_id"], cur["author"]), (doc, "auto"))
+        self.assertNotEqual(new_pid, old_pid)
+        self.assertEqual(lineage.projection(self.conn, old_pid)["ended"], "erased")
 
     def test_a_purge_between_a_syncs_plan_and_its_apply_is_a_new_lineage(self):
         import apply
@@ -192,6 +203,49 @@ class TestEndsE2E(Base):
         self.assertEqual(self.owned(self.active()[0]["row_id"]), ["acct::open"])
 
 
+class TestPassStops(Base):
+    def test_an_import_refusal_ends_the_pass_stopped(self):
+        # row #N now names a different transaction than the one the store holds
+        # (first_seen differs): the import refuses and poisons the pass's writes;
+        # the pass must END (stopped), not stay live holding the marker.
+        bf = self.bf
+        bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000)])
+        self.first_pass()
+        rid = self.active()[0]["row_id"]
+        tags_before = bf.tags(rid)
+        bf.conn.execute("UPDATE transactions SET first_seen='2026-09-21T08:00:00Z'"
+                        " WHERE row_id=?", (rid,))
+        bf.conn.commit()
+        snapshots = self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        out = sim.run_pass(self.conn, bf)
+        self.assertIsNone(out["import"])
+        self.assertIn("different transaction", out["refused"])
+        self.assertEqual(out["end"]["outcome"], "stopped")
+        self.assertIsNone(passes.current_pass(self.conn))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0],
+                         snapshots)
+        self.assertEqual(bf.tags(rid), tags_before)
+        self.assertEqual(passes.begin_pass(self.conn, "cron")["status"], "started")
+
+
+    def test_a_failed_sync_is_probed_as_failed_and_does_not_advance_bank_through(self):
+        bf = self.bf
+        bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000)])
+        self.first_pass()
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE snapshots SET bank_through='2026-09-01'")
+
+        def failing():
+            raise RuntimeError("bank unreachable")
+        out = sim.run_pass(self.conn, bf, sync=failing)
+        probe = self.conn.execute("SELECT ok, detail FROM probes WHERE kind='bank_sync'"
+                                  ).fetchone()
+        self.assertEqual((probe[0], "bank unreachable" in probe[1]), (0, True))
+        self.assertEqual(self.conn.execute(
+            "SELECT bank_through FROM snapshots WHERE snapshot_id=?",
+            (out["import"]["snapshot"],)).fetchone()[0], "2026-09-01")
+
+
 class TestRestoreAndReset(Base):
     def _backups(self):
         text = self.bf.listing()
@@ -236,6 +290,45 @@ class TestRestoreAndReset(Base):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0], 0)
         out = sim.run_pass(self.conn, bf)                   # and the next pass refuses again
         self.assertFalse(out["gate"]["allowed"])
+
+    def test_restoring_purges_pre_erasure_backup_stops_the_pass_for_reset_store(self):
+        # spec §Testing / "Undoing a purge is a restore": the REAL purge tool takes the
+        # pre-erasure backup its reply names; restoring it advances the generation and
+        # the pass stops for reset_store.
+        bf = self.bf
+        bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000),
+                  bf.row("2026-08-05", ref="R2", amount=2000)])
+        self.first_pass()
+        rows_before = {r["provider_ref"]: r["row_id"] for r in self.active()}
+        self.assertEqual([self.owned(r) for r in rows_before.values()],
+                         [["acct::open"], ["acct::open"]])
+        reply = bf.call("purge", before_date="2026-08-01", user_work="keep")
+        m = re.search(r"restore_backup backup_id=(\S+?)\s", reply)
+        self.assertIsNotNone(m, reply)
+        pre_erasure = m.group(1)
+        self.assertEqual(len(self.active()), 1)
+        out = sim.run_pass(self.conn, bf)
+        self.assertTrue(out["gate"]["allowed"])
+        self.assertEqual(len(out["import"]["erase_candidates"]), 1)
+        ended = self.conn.execute("SELECT COUNT(*) FROM projections WHERE ended='erased'"
+                                  ).fetchone()[0]
+        self.assertEqual(ended, 1)
+        gen = bf.generation()
+        restored = bf.call("restore_backup", backup_id=pre_erasure)
+        self.assertEqual(len(self.active()), 2, restored)
+        self.assertEqual(bf.generation(), gen + 1)
+        tags = {r["row_id"]: bf.tags(r["row_id"]) for r in self.active()}
+        n_proj = self.conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0]
+        out = sim.run_pass(self.conn, bf)
+        self.assertFalse(out["gate"]["allowed"])
+        self.assertIn("reset_store", out["gate"]["reason"])
+        self.assertEqual(out["end"]["outcome"], "stopped")
+        self.assertNotIn("refused", out)          # stopped at check_setup, before any export
+        self.assertEqual({r["row_id"]: bf.tags(r["row_id"]) for r in self.active()}, tags)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0],
+                         n_proj)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM projections WHERE"
+                                           " ended='erased'").fetchone()[0], 1)
 
     def test_a_restore_after_the_generation_was_read_rejects_the_write(self):
         bf = self.bf

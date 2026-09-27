@@ -77,13 +77,17 @@ def sweep_cycle(conn, bf, token, limit=25) -> int:
 
 
 # --- a whole pass, mechanically (Task 23) -----------------------------------
-# The specialist's delegation in the order plan §D5 fixes: sync, the
-# classifier, export_history + import_ledger_export, erase confirmations, the
-# sweep (observations and tag repair), triage. Only triage's judgment is
+# The specialist's delegation in the order plan §D5 fixes: the probes (with
+# sync), tx-classifier's own drain (waited for, never done here),
+# export_history + import_ledger_export, erase confirmations, the sweep
+# (observations and tag repair), triage. Only triage's judgment is
 # replaced: `triage` applies the auto-match bar of SKILL.md step 6 to filed
 # metadata (the real specialist reads the PDFs). Every bank-feed interaction
 # is the real one.
+import re  # noqa: E402
+
 import binding  # noqa: E402
+import db  # noqa: E402
 import documents  # noqa: E402
 import ledger  # noqa: E402
 import matches  # noqa: E402
@@ -91,17 +95,44 @@ import passes  # noqa: E402
 import work  # noqa: E402
 
 
-def probe(conn, bf, token):
-    """What the specialist records first: bank-feed's tools, its accounts (with
-    the category label_account wrote), a sync, and list_backups' ledger state."""
+def ledger_state(listing: str) -> dict:
+    """The ledger probe's data from ONE list_backups answer (spec: generation,
+    registrations and instance are captured together, under bank-feed's locks),
+    each value read by its label — bank-feed may prepend sentences."""
+    gen = re.search(r"^Restore generation: (\d+)$", listing, re.M)
+    inst = re.search(r"^Ledger instance: ([0-9a-f]{32})$", listing, re.M)
+    registered = {}
+    if "Registered workflows:" in listing:
+        block = listing.split("Registered workflows:", 1)[1].split("Restores:", 1)[0]
+        for line in block.splitlines():
+            m = re.match(r"\s+(\S+) -> (\S+)", line)
+            if m:
+                registered[m.group(1)] = m.group(2)
+    return {"generation": int(gen.group(1)) if gen else None, "registered": registered,
+            "instance": inst.group(1) if inst else None}
+
+
+def probe(conn, bf, token, sync=None):
+    """SKILL.md step 1, in its order: bank-feed's tools, list_accounts (with the
+    category label_account wrote), sync and the probe of ITS outcome (the
+    import stamps bank_through from it), then ONE list_backups for the ledger
+    probe. `sync` stands in for bank-feed's sync: None means the ledger was
+    already fetched (the tests' bf.fetch); a callable returning False or
+    raising is a failed sync."""
     accounts = [{"account_id": r["account_id"], "category": r["category"], "label": r["name"]}
                 for r in bf.conn.execute("SELECT account_id, category, name FROM accounts")]
     passes.record_probe(conn, token, "bank_tools", True)
     passes.record_probe(conn, token, "bank_accounts", True, data={"accounts": accounts})
-    passes.record_probe(conn, token, "bank_sync", True)
-    passes.record_probe(conn, token, "ledger", True,
-                        data={"generation": bf.generation(), "registered": bf.registered(),
-                              "instance": bf.instance()})
+    ok, detail = True, ""
+    if sync is not None:
+        try:
+            ok = sync() is not False
+            detail = "" if ok else "sync failed"
+        except Exception as exc:          # what a failed sync reply reports
+            ok, detail = False, f"sync failed: {exc}"
+    passes.record_probe(conn, token, "bank_sync", ok, detail)
+    state = ledger_state(bf.listing())
+    passes.record_probe(conn, token, "ledger", True, data=state)   # the gate judges a missing instance
 
 
 def _fits(item, doc):
@@ -175,19 +206,28 @@ def triage(conn, bf, token) -> dict:
 
 def run_pass(conn, bf, trigger="cron", sync=None) -> dict:
     """One specialist delegation, in plan §D5's order. `sync` stands in for
-    bank-feed's sync (a callable run between the probes and the export)."""
+    bank-feed's sync (run between list_accounts and list_backups)."""
     token = passes.begin_pass(conn, trigger)["pass_token"]
-    probe(conn, bf, token)
-    if sync is not None:
-        sync()
-    bf.call("apply_rules")                # the classifier (a no-op without rules)
-    gate = binding.check_setup(conn)["bank_writes"]
-    if not gate["allowed"]:
-        end = passes.end_pass(conn, token, "stopped", {})
-        return {"token": token, "import": None, "gate": gate, "triage": None, "end": end}
+    probe(conn, bf, token, sync)
+    setup = binding.check_setup(conn)
+    gate = setup["bank_writes"]
+    if not setup["can_run"] or not gate["allowed"]:
+        end = passes.end_pass(conn, token, "stopped", {"conditions": setup["conditions"]})
+        return {"token": token, "import": None, "gate": gate, "triage": None, "end": end,
+                "conditions": setup["conditions"]}
+    # tx-classifier drains its own queue on sync's trailer, in this same
+    # session: the pass waits for it and never classifies (spec §Weekly pass
+    # step 2). In these tests the rows are tagged before the pass.
     path = bf.export()
-    imp = ledger.import_ledger_export(conn, path=path, token=token,
-                                      ledger_instance=bf.last_export_instance)
+    try:
+        imp = ledger.import_ledger_export(conn, path=path, token=token,
+                                          ledger_instance=bf.last_export_instance)
+    except db.Refusal as exc:
+        # the ledger switched or changed under the pass: nothing was imported,
+        # the pass stops (its bank writes were poisoned by the import)
+        end = passes.end_pass(conn, token, "stopped", {"refused": str(exc)})
+        return {"token": token, "import": None, "gate": gate, "triage": None, "end": end,
+                "refused": str(exc)}
     for c in imp["erase_candidates"]:
         if bf.call("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
             sweep.record_observation(conn, pid=c["pid"], token=token, not_found=True)
