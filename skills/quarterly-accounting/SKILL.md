@@ -203,7 +203,9 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
 3. **Snapshot.** `export_history(format="csv")`, then `import_ledger_export(path, pass_token,
    ledger_instance=<the reply's "Ledger instance:" id>)`. Read both values by their labels.
    If the import is refused, stop: return the refusal, and the pass ends `stopped` —
-   nothing after this step runs. (A refusal that says to ask again — another session held
+   nothing after this step runs. That includes "could not withdraw a staged package —
+   nothing was imported": a package waiting to be sent could not be taken back, so the bank
+   is not re-read until it can be; return it for Ellen to relay. (A refusal that says to ask again — another session held
    the store's documents lock — is called once more first, as for any refusal.)
 4. **Ends.** For each `erase_candidates` row: `get_transaction(row_id)`. If it answers
    `no transaction #N`, call `record_observation(pid, pass_token, snapshot_id=<the import's

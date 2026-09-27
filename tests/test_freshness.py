@@ -578,21 +578,41 @@ class TestWithdrawalUnderTheCustodyLock(ToolPass):
         self.assertEqual(os.listdir(self.outbox), [])
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores the mode")
-    def test_a_failed_withdrawal_stays_retryable(self):
-        _, d = self.staged()
-        os.chmod(self.outbox, 0o500)                    # the unlink will fail
-        self.addCleanup(os.chmod, self.outbox, 0o770)
-        token = self.begin("cron", do_import=False)
-        imp = call("import_ledger_export", path=self.bf.export(), pass_token=token,
-                   ledger_instance=self.bf.last_export_instance)
-        self.assertEqual(imp["revoked_deliveries"], [d["delivery_id"]])
-        self.assertEqual([f["delivery_id"] for f in imp["withdraw_failed"]], [d["delivery_id"]])
-        self.assertEqual(self.state(d["delivery_id"]), ("failed", True))
-        os.chmod(self.outbox, 0o770)
-        imp = call("import_ledger_export", path=self.bf.export(), pass_token=token,
-                   ledger_instance=self.bf.last_export_instance)       # the next import retries
-        self.assertEqual((imp["revoked_deliveries"], imp["withdraw_failed"]), ([], []))
-        self.assertEqual(os.listdir(self.outbox), [])
+    def test_a_failed_withdrawal_refuses_the_whole_import_on_either_channel(self):
+        # round E7 (Terra, Astra S1): a withdrawal that fails must not leave the
+        # superseded package sendable under a committed newer snapshot
+        for channel in ("telegram", "email"):
+            with self.subTest(channel=channel):
+                pkg = self.built() if channel == "telegram" else self.rebuilt()
+                d = call("stage_for_delivery", channel=channel, package_id=pkg["package_id"])
+                staged = pathlib.Path(d["path"])
+                locked = staged.parent          # the outbox, or the handoff entry's own dir
+                os.chmod(locked, 0o500)                      # the withdrawal will fail
+                self.addCleanup(lambda p=locked: p.exists() and os.chmod(p, 0o770))
+                token = self.begin("cron", do_import=False)
+                n = lineage.latest_import(self.conn)
+                text = _raw("import_ledger_export", path=self.bf.export(), pass_token=token,
+                            ledger_instance=self.bf.last_export_instance)
+                self.assertTrue(text.startswith("refused: could not withdraw a staged package "
+                                                "— nothing was imported"), text)
+                self.assertEqual(lineage.latest_import(self.conn), n)   # snapshot unchanged
+                self.assertEqual(self.state(d["delivery_id"]), ("staged", False))  # not revoked
+                self.assertEqual(staged.read_bytes(), pathlib.Path(pkg["path"]).read_bytes())
+                os.chmod(locked, 0o770)                      # recovered: the retry commits
+                imp = call("import_ledger_export", path=self.bf.export(), pass_token=token,
+                           ledger_instance=self.bf.last_export_instance)
+                self.assertEqual(imp["snapshot"], n + 1)
+                self.assertEqual(imp["revoked_deliveries"], [d["delivery_id"]])
+                self.assertFalse(staged.exists())
+                self.assertEqual(self.state(d["delivery_id"]), ("failed", True))
+                call("end_pass", pass_token=token, outcome="interrupted")
+
+    def rebuilt(self):
+        """A fresh package built after a complete sweep, under the latest import."""
+        token = self.begin("package")
+        self.assertEqual(self.sweep(token), 0)
+        call("end_pass", pass_token=token, outcome="complete")
+        return self.zip_of()[0]
 
     def test_imports_and_builds_in_two_processes_never_deadlock(self):
         self.built()

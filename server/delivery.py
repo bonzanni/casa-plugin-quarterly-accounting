@@ -180,16 +180,17 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
     return [dict(r) for r in rows]
 
 
-def withdraw_revoked(conn) -> list:
-    """Inside the import's transaction, under the custody lock (round E6): remove
-    the staged bytes of every revoked delivery whose copy is still there — the
-    Telegram outbox file, or this plugin's own handoff entry (one `<id>/`
+def withdraw_revoked(conn) -> None:
+    """Inside the import's transaction, under the custody lock (rounds E6, E7):
+    remove the staged bytes of every revoked delivery whose copy is still there —
+    the Telegram outbox file, or this plugin's own handoff entry (one `<id>/`
     directory per publish; casa_handoff has no retract call). A path a live,
-    unrevoked staged delivery still names is left alone. A removal that fails is
-    returned and stays retryable: the revoked row keeps naming the path, and the
-    next import tries again."""
+    unrevoked staged delivery still names is left alone. A removal that fails
+    refuses the WHOLE import: it rolls back (snapshot unchanged, nothing
+    revoked), so a superseded package is never left sendable under a committed
+    newer snapshot; a retry after recovery withdraws and commits. Copies already
+    removed before the failure stay removed: their send fails visibly."""
     assert conn.in_transaction
-    failed = []
     for r in conn.execute("SELECT delivery_id, channel, staged_path FROM deliveries"
                           " WHERE revoked_at IS NOT NULL ORDER BY delivery_id").fetchall():
         path = pathlib.Path(r["staged_path"])
@@ -207,9 +208,8 @@ def withdraw_revoked(conn) -> list:
         except FileNotFoundError:
             pass
         except OSError as exc:
-            failed.append({"delivery_id": r["delivery_id"], "path": str(target),
-                           "error": str(exc)})
-    return failed
+            raise db.Refusal("could not withdraw a staged package — nothing was imported "
+                             f"({exc.strerror or exc}); fix that and import again") from None
 
 
 def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=None) -> dict:

@@ -347,12 +347,13 @@ def _import(conn, rows, token, ledger_instance) -> dict:
         # external send, so the import takes the send away instead. Its bytes are
         # withdrawn BEFORE the commit, under the custody lock (round E6): no moment has
         # the revocation committed and the bytes still sendable. A commit that then
-        # fails leaves a send that fails visibly, never one recorded delivered.
+        # fails leaves a send that fails visibly, never one recorded delivered; a
+        # withdrawal that fails refuses the import whole (round E7).
         revoked = delivery.revoke_superseded_first_sends(conn, sid)
         out["revoked_deliveries"] = [r["delivery_id"] for r in revoked]
-        # every revoked delivery whose bytes are still there (this import's, and any
-        # an earlier withdrawal failed on) is withdrawn now; a failure stays retryable
-        out["withdraw_failed"] = delivery.withdraw_revoked(conn)
+        # every revoked delivery whose bytes are still there is withdrawn now; one that
+        # cannot be refuses the whole import, which rolls back (round E7)
+        delivery.withdraw_revoked(conn)
         return out
 
 

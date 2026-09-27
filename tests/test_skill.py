@@ -202,6 +202,13 @@ class TestSkill(TempEnv):
         pack = " ".join(self.section("## Packaging", "## Install").split())
         self.assertIn("ships unclassified with its documents set aside", pack)
 
+    def test_a_refused_import_stops_the_pass_including_a_failed_withdrawal(self):
+        # round E7: a withdrawal that fails refuses the whole import
+        snap = " ".join(self.section("**Snapshot.**", "4. **Ends.**").split())
+        self.assertIn("If the import is refused, stop: return the refusal, and the pass ends "
+                      "`stopped` — nothing after this step runs.", snap)
+        self.assertIn("could not withdraw a staged package — nothing was imported", snap)
+
     def test_every_observation_names_the_import_it_was_read_under(self):
         # round E3 (Astra S1): a read recorded after a newer import is refused
         section = " ".join(self.section("## The specialist's pass", "## Packaging").split())
