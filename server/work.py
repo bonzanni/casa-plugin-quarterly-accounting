@@ -19,6 +19,12 @@ AGE_OUT_PASSES = 3
 def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhausted=False,
                   incomplete=False, identity_unknown=None, revive=False) -> dict:
     import passes
+    searched = bool(queries) or found_candidate or exhausted or incomplete
+    # D10: search bookkeeping is machine-authored, so it needs the pass token like any
+    # other machine write — except a quiet revive ("have another look", no search effort),
+    # which is how an operator's reply re-arms an item outside a pass (fix round 1, finding 4).
+    if token is None and not (revive and not searched):
+        raise db.Refusal("search bookkeeping is a pass's work: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
         pid = lineage.resolve_pid(conn, pid)
@@ -29,11 +35,15 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
         state, streak = p["search_state"], p["passes_without_candidate"]
         if revive:
             state, streak = "active", 0
-        searched = bool(queries) or found_candidate or exhausted or incomplete
-        if revive and not searched:
-            # "have another look" re-arms the search; it is not a search (round p8, Astra S2)
-            conn.execute("UPDATE projections SET search_state=?, passes_without_candidate=?"
-                         " WHERE pid=?", (state, streak, pid))
+        identity = p["identity_question"] if identity_unknown is None else int(bool(identity_unknown))
+        if not searched:
+            # No search effort was spent here: a quiet revive (state/streak above) and/or an
+            # identity-only call move nothing else — age-out budget is never spent on a call
+            # that ran no query and found no candidate (fix round 1, finding 2: an
+            # identity-only call was silently stamping last_searched_at and counting toward
+            # AGE_OUT_PASSES with no Gmail query ever run).
+            conn.execute("UPDATE projections SET search_state=?, passes_without_candidate=?,"
+                         " identity_question=? WHERE pid=?", (state, streak, identity, pid))
             lineage.settle(conn, pid)
             return {"pid": pid, "search_state": state, "passes_without_candidate": streak}
         if queries:
@@ -49,7 +59,6 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
             search["last_counted_pass"] = pass_id
         if state == "active" and streak >= AGE_OUT_PASSES:
             state = "aged-out"
-        identity = p["identity_question"] if identity_unknown is None else int(bool(identity_unknown))
         conn.execute("UPDATE projections SET search_json=?, search_state=?,"
                      " passes_without_candidate=?, identity_question=? WHERE pid=?",
                      (db.canonical(search), state, streak, identity, pid))
@@ -114,6 +123,7 @@ def _match_summary(conn, match_id) -> dict:
 
 
 def describe(conn, pid: int) -> dict:
+    pid = lineage.resolve_pid(conn, pid)
     p = lineage.projection(conn, pid)
     # an erased row is gone from the snapshot: name it from its last known facts
     row = lineage.live_row(conn, p) or json.loads(p["last_facts_json"] or "{}")
