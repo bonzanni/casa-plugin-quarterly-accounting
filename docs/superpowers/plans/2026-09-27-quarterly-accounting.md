@@ -40,6 +40,21 @@ The agents drive the whole flow through the skill:
 - **Operator rulings, 2026-09-27:** D1, D8, D9 accepted; D4 accepted with the reset sentence (upstream #69, now shipped); `reset_store` as the eraser. The errata are applied to the spec.
 - Execution is subagent-driven, from a fresh session.
 
+## Before you start (executor)
+
+The two upstream repositories the tests copy from are **siblings of this repository**: `casa-specialist-finance` and `casa-plugin-gmail`, in the same parent directory. The path below is derived from the main repository's `.git`, so it holds from a git worktree too. Set them once, and check that the pinned tags are there:
+
+```bash
+PARENT="$(dirname "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")"
+export FINANCE_REPO="$PARENT/casa-specialist-finance"
+export GMAIL_REPO="$PARENT/casa-plugin-gmail"
+git -C "$FINANCE_REPO" rev-parse -q --verify refs/tags/v0.19.0 >/dev/null && \
+git -C "$FINANCE_REPO" rev-parse -q --verify refs/tags/v0.13.2 >/dev/null && \
+git -C "$GMAIL_REPO"   rev-parse -q --verify refs/tags/v0.9.0  >/dev/null && echo "upstream tags present"
+```
+
+The scripts fall back to these sibling paths when the variables are unset. They never fetch. If a tag is missing, stop and ask; do not fetch it yourself. Other sessions share those working trees, so read them only through `git archive` / `git show <tag>:`, which is what every step here does.
+
 ## Global Constraints
 
 - Python **3.11**, **standard library only** in `server/`. No `requirements.txt`, no vendored third-party code in `server/`. `casa_handoff.py` is vendored **verbatim** from bank-feed (spec §Casa baseline).
@@ -700,12 +715,13 @@ git commit -m "feat: plugin scaffold — stdlib dispatcher, manifest, tool-list 
 #!/usr/bin/env bash
 # scripts/vendor-bankfeed.sh <tag>  — copy casa-specialist-finance's
 # plugins/bank-feed at <tag> into tests/upstream/component-<tag>/ (test-only;
-# MIT, same author). FINANCE_REPO must name a local clone that already has the
-# tag. Reads only through `git archive` — never the other repo's worktree,
+# MIT, same author). FINANCE_REPO names a local clone that already has the tag;
+# unset, it is the sibling ../casa-specialist-finance of this repository. Reads only through `git archive` — never the other repo's worktree,
 # which other sessions may have checked out at anything — and never fetches.
 set -euo pipefail
 tag="${1:?usage: vendor-bankfeed.sh <tag>}"
-repo="${FINANCE_REPO:?set FINANCE_REPO to a local casa-specialist-finance clone}"
+# default: the sibling clone next to this repository
+repo="${FINANCE_REPO:-$(dirname "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")/casa-specialist-finance}"
 git -C "$repo" rev-parse -q --verify "refs/tags/$tag" >/dev/null \
   || { echo "tag $tag is not in $repo — fetch it there yourself; this script never does" >&2; exit 1; }
 dest="tests/upstream/component-${tag}"
@@ -721,8 +737,7 @@ echo "vendored $tag ($sha) into $dest"
 Run it for both trees:
 ```bash
 chmod +x scripts/vendor-bankfeed.sh
-export FINANCE_REPO=<absolute path of the local casa-specialist-finance clone>
-scripts/vendor-bankfeed.sh v0.19.0
+scripts/vendor-bankfeed.sh v0.19.0      # FINANCE_REPO from "Before you start", or the sibling default
 scripts/vendor-bankfeed.sh v0.13.2
 cp tests/upstream/component-v0.19.0/plugins/bank-feed/server/casa_handoff.py server/casa_handoff.py
 ```
@@ -9996,7 +10011,7 @@ git commit -m "feat: deterministic quarterly package — frozen inputs, total ro
 
 ```bash
 mkdir -p tests/upstream/gmail-v0.9.0
-: "${GMAIL_REPO:?set GMAIL_REPO to a local casa-plugin-gmail clone that has tag v0.9.0}"
+: "${GMAIL_REPO:=$(dirname "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")/casa-plugin-gmail}"   # sibling default
 git -C "$GMAIL_REPO" show v0.9.0:server/sent_log.py > tests/upstream/gmail-v0.9.0/sent_log.py.tmp
 mv tests/upstream/gmail-v0.9.0/sent_log.py.tmp tests/upstream/gmail-v0.9.0/sent_log.py
 printf 'repo: bonzanni/casa-plugin-gmail\ntag: v0.9.0\ncommit: fce8ed4\npath: server/sent_log.py\npurpose: test-only; pins why an uncertain email is never retried automatically\n' > tests/upstream/gmail-v0.9.0/UPSTREAM.txt
