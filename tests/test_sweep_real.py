@@ -526,5 +526,61 @@ class TestCursor(Base):
         self.assertIsNotNone(c)
 
 
+
+class TestNoteAsRendered(Base):
+    """Task 22 review, item 1: the specialist transcribes get_transaction's TEXT,
+    where bank-feed fences each note and prefixes it with [author, date]. That
+    text must read as the current note, or every pass appends a duplicate."""
+    @staticmethod
+    def parse(text):
+        import re
+        tags, notes, in_notes = [], [], False
+        for line in text.splitlines():
+            if line.startswith("Tags: ") and line != "Tags: none":
+                tags += line[len("Tags: "):].split(", ")
+            elif line.startswith("Other workflows' tags (not classifications): "):
+                tags += line.split(": ", 1)[1].split(", ")
+            elif line.startswith("Notes"):
+                in_notes = line != "Notes: none"
+            elif in_notes and line.startswith("  ["):
+                notes.append(line[2:])
+        first_seen = re.search(r"first seen (\S+), last seen", text).group(1)
+        return tags, notes, first_seen
+
+    def test_a_note_transcribed_from_get_transaction_needs_no_new_note(self):
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.new_pass()
+        self.cycle()
+        rid = self.rid()
+        before = len(self.bf.notes(rid))
+        text = self.bf.call("get_transaction", row_id=rid)
+        self.assertIn(sweep.FENCE_OPEN + "Accounting revision ", text)   # really fenced
+        tags, notes, first_seen = self.parse(text)
+        self.assertEqual(sorted(tags), sorted(self.bf.tags(rid)))
+        r = sweep.record_observation(self.conn, pid=self.pid_of(rid), token=self.token,
+                                     observed_tags=tags, observed_notes=notes,
+                                     observed_first_seen=first_seen)
+        self.assertEqual(r["instructions"], {})
+        # markers removed by the reader: also the current note
+        bare = [sweep.shown_note(n) for n in notes]
+        r = sweep.record_observation(self.conn, pid=self.pid_of(rid), token=self.token,
+                                     observed_tags=tags, observed_notes=bare,
+                                     observed_first_seen=first_seen)
+        self.assertEqual(r["instructions"], {})
+        self.assertEqual(len(self.bf.notes(rid)), before)
+
+    def test_a_stale_rendered_note_still_asks_for_the_current_one(self):
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        self.new_pass()
+        self.cycle()
+        rid = self.rid()
+        tags, notes, first_seen = self.parse(self.bf.call("get_transaction", row_id=rid))
+        stale = [n.replace("Accounting revision ", "Accounting revision 0") for n in notes]
+        r = sweep.record_observation(self.conn, pid=self.pid_of(rid), token=self.token,
+                                     observed_tags=tags, observed_notes=stale,
+                                     observed_first_seen=first_seen)
+        self.assertIn("add_note", r["instructions"])
+
+
 if __name__ == "__main__":
     unittest.main()

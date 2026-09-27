@@ -12,6 +12,7 @@ import dates
 import db
 import kb
 import lineage
+import reducer as R
 
 AGE_OUT_PASSES = 3
 
@@ -133,7 +134,8 @@ def describe(conn, pid: int) -> dict:
     pid = lineage.resolve_pid(conn, pid)
     p = lineage.projection(conn, pid)
     # an erased row is gone from the snapshot: name it from its last known facts
-    row = lineage.live_row(conn, p) or json.loads(p["last_facts_json"] or "{}")
+    live = lineage.live_row(conn, p)
+    row = live or json.loads(p["last_facts_json"] or "{}")
     cp = kb.counterparty_for(conn, row.get("counterparty"))
     eff = dates.effective_date(row) if row else None
     cands = [r[0] for r in conn.execute("SELECT match_id FROM match_state WHERE pid=? AND"
@@ -155,6 +157,10 @@ def describe(conn, pid: int) -> dict:
         "portal": bool(cp is not None and cp["source"] == "portal"),
         "class_observed_at": p["class_observed_at"], "unprojectable": p["unprojectable"],
         "broken_floor": p["broken_floor"],
+        # exactly what record_match / propose_match compare (reducer.facts_of of the
+        # live row): pass it back verbatim as row_snapshot. get_transaction's text
+        # cannot rebuild it (signed decimals, fenced text, labels). None: no live row.
+        "row_snapshot": R.facts_of(live) if live is not None else None,
     }
 
 

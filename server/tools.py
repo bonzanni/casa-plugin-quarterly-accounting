@@ -179,7 +179,7 @@ def t_set_exp(args):
 # --- matching ----------------------------------------------------------------
 @register("record_match",
           "Pair a payment (pid) with a document. author='auto' (the specialist, during a pass: "
-          "pass_token, row_snapshot from a fresh get_transaction, labels, resolves naming exactly "
+          "pass_token, row_snapshot: the item's value from list_quarter_state, verbatim, labels, resolves naming exactly "
           "the payment's unresolved candidates) or 'operator' (render_id and the revision the "
           "operator was shown). expected_revision is the payment's revision. During a pass, pass the pass_token.",
           obj({"pid": I, "doc_id": I, "author": S, "expected_revision": I, "render_id": S,

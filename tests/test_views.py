@@ -393,6 +393,21 @@ class TestSheet(Base):
                       text)
         self.assertEqual(text.count("not checked yet"), 1)
 
+    def test_a_package_or_handover_pass_keeps_the_interrupted_block(self):
+        # Task 22 review, item 5: those passes are not reviews; ending one must not
+        # erase what the interrupted review still owes the operator.
+        self.add(counterparty="Seen")
+        self.add(counterparty="Unreached", searched=False)
+        passes.end_pass(self.conn, self.token, "interrupted", {"checked": 1, "total": 2})
+        for trigger in ("package", "handover"):
+            tok = self.pass_(trigger=trigger)
+            passes.end_pass(self.conn, tok, "complete", {})
+            self.assertIn("Review interrupted.\n1 of 2 new payments checked.", self.render()["text"],
+                          trigger)
+        tok = self.pass_(trigger="cron")
+        passes.end_pass(self.conn, tok, "complete", {})
+        self.assertNotIn("Review interrupted.", self.render()["text"])
+
     def test_degraded_counts_agree_with_coverage_and_skip_the_item_view(self):
         old = self.add(counterparty="OldCo", booking_date="2026-05-04")
         with db.tx(self.conn):

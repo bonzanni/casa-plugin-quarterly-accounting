@@ -286,6 +286,35 @@ class TestMachineWritesNeedAPass(ToolCase):
                           qa_server.TOOLS[n]["description"], n)
 
 
+class TestRowSnapshotFromTheListing(ToolCase):
+    """Task 22 review, item 2: get_transaction's text cannot rebuild the facts
+    record_match compares (signed decimals, fenced text, labels), so the item the
+    specialist judges from carries them, and passing that value back is accepted."""
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        self.token = self.pass_()
+        self.row(1, remittance="INV-1 \u00b7 \"quoted\"", needs_review=1,
+                 review_reason="low_confidence")
+        self.pid = self.lineage_for(1)
+        self.classify(self.pid, {"software"})
+        self.settle(self.pid)
+
+    def test_the_listed_row_snapshot_is_accepted_verbatim(self):
+        item = next(d for d in _json("list_quarter_state", triage=True)["triage"]
+                    if d["pid"] == self.pid)
+        self.assertIsNotNone(item["row_snapshot"])
+        out = _json("record_match", pid=self.pid, doc_id=self.doc(), author="auto",
+                    expected_revision=item["revision"], row_snapshot=item["row_snapshot"],
+                    pass_token=self.token)
+        self.assertEqual(out["state"], "matched")
+
+    def test_the_quarter_listing_carries_it_too(self):
+        items = _json("list_quarter_state", quarter="2026-Q3")["items"]
+        self.assertEqual([d["row_snapshot"]["amount_minor"] for d in items
+                          if d["pid"] == self.pid], [10000])
+
+
 class TestArgumentTypes(ToolCase):
     def test_every_boolean_refuses_a_string(self):
         import tools  # noqa: F401
