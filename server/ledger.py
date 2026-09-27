@@ -21,7 +21,6 @@ import json
 
 import casa_handoff
 import db
-import dates
 import lineage
 import reducer as R
 
@@ -101,7 +100,12 @@ def check_delivered_bank_half(conn, by_id: dict) -> int:
         for d in conn.execute("SELECT * FROM delivered_rows WHERE package_id=?",
                               (pkg["package_id"],)):
             row = by_id.get(d["row_id"])
-            if row is None:
+            ended = None
+            if d["pid"] is not None:
+                p = lineage.projection(conn, lineage.resolve_pid(conn, d["pid"]))
+                ended = p["ended"]
+            if row is None or ended == "erased":
+                # an erased lineage's row id may name another ledger's payment (re-bind)
                 change = "erased"
             elif row["state"] != "active":
                 change = row["state"]
@@ -131,18 +135,25 @@ def _require_same_ledger(conn, b, ledger_instance: str) -> None:
     closed, the old aliases dropped). The acknowledgement is consumed by the
     next successful import whatever it met (round p3), and rolls back with a
     refused one."""
+    import passes
     ack = b["ledger_reset_ack"]
-    conn.execute("UPDATE binding SET ledger_reset_ack=0 WHERE id=1")   # rolls back with a refusal
     bound = b["ledger_instance"]
-    if bound is None or bound == ledger_instance:
-        return
-    if ack:
+    if bound is not None and bound != ledger_instance and not ack:
+        # Reachable mid-pass: the ledger probe is re-recorded with the new instance
+        # after this pass's gate allowed the old one. The ledger switched under the
+        # pass, so its bank writes stop. This runs before any write of the import:
+        # poison rolls back the import's transaction, commits the verdict in its own
+        # and re-opens BEGIN IMMEDIATE for the enclosing tx() to unwind.
+        passes.poison(conn, "the bank ledger switched during this pass (instance "
+                            f"{ledger_instance[:8]}…, bound to {bound[:8]}…); nothing more is "
+                            "written until a pass proves the ledger again")
+        raise db.Refusal(f"this export comes from ledger instance {ledger_instance[:8]}…, not "
+                         f"the {bound[:8]}… this store was built on. Nothing was imported or "
+                         "ended. If the bank ledger was wiped on purpose, the operator says "
+                         "\"the bank ledger was reset\".")
+    conn.execute("UPDATE binding SET ledger_reset_ack=0 WHERE id=1")   # rolls back with a refusal
+    if bound is not None and bound != ledger_instance:
         _rebind(conn)
-        return
-    raise db.Refusal(f"this export comes from ledger instance {ledger_instance[:8]}…, not the "
-                     f"{bound[:8]}… this store was built on. Nothing was imported or ended. If "
-                     "the bank ledger was wiped on purpose, the operator says \"the bank "
-                     "ledger was reset\".")
 
 
 def _rebind(conn) -> None:
@@ -195,10 +206,11 @@ def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dic
         mine = [r for r in rows if r["account_id"] == b["account_id"]]
         by_id = {r["row_id"]: r for r in mine}
         max_id = max((r["row_id"] for r in rows), default=0)
-        # Both identity checks come BEFORE any write in this transaction: each one
+        # The identity checks come BEFORE any write in this transaction: each one
         # proves the ledger changed under this pass, so it poisons the pass's bank
-        # writes (as record_observation does) — and poison discards the caller's
-        # open transaction.
+        # writes (as record_observation does). poison ROLLS BACK this transaction,
+        # commits the verdict in its own, and re-opens BEGIN IMMEDIATE so the
+        # enclosing tx() unwinds cleanly on the Refusal raised right after.
         probe = conn.execute("SELECT data_json FROM probes WHERE kind='ledger'").fetchone()
         probed = json.loads(probe["data_json"] or "{}").get("instance")
         if ledger_instance != probed:
@@ -257,18 +269,21 @@ def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dic
                                                 "facts": old_facts.get(p["dest_row_id"])})
                 continue
             broken = False
+            walked = {r["row_id"]}          # a malformed export may carry a cycle
             while r["state"] == "superseded" and r["superseded_by"] is not None:
                 nxt = by_id.get(r["superseded_by"])
-                if nxt is None:
+                if nxt is None or nxt["row_id"] in walked:
+                    why = "absent" if nxt is None else "a cycle"
                     out["broken_floor"].append({"pid": pid, "row_id": r["row_id"],
                                                 "missing": r["superseded_by"]})
                     conn.execute("UPDATE projections SET broken_floor=? WHERE pid=?",
-                                 (f"#{r['row_id']} → #{r['superseded_by']} (absent)", pid))
+                                 (f"#{r['row_id']} → #{r['superseded_by']} ({why})", pid))
                     lineage.add_residue(conn, pid, "broken-floor", f"#{r['superseded_by']}")
                     broken = True
                     break
                 conn.execute("INSERT OR IGNORE INTO aliases(row_id, pid, first_seen)"
                              " VALUES (?,?,?)", (nxt["row_id"], pid, nxt["first_seen"]))
+                walked.add(nxt["row_id"])
                 r = nxt
             if broken:
                 conn.execute("UPDATE projections SET dest_row_id=? WHERE pid=?",

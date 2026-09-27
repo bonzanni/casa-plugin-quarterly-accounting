@@ -84,6 +84,42 @@ class TestResolution(Base):
         self.assertEqual(self.conn.execute("SELECT merged_into FROM projections WHERE pid=?",
                                            (p2,)).fetchone()[0], p1)
 
+    def test_a_losers_pairing_survives_the_fan_in_merge(self):
+        import reducer
+        self.imp([{"row_id": 1}, {"row_id": 2, "first_seen": "2026-07-03T09:00:00Z"}])
+        p1, p2 = sorted(self.live())
+        self.classify(p1, {"software"})
+        self.classify(p2, {"software"})
+        d = self.doc()
+        with db.tx(self.conn):
+            row = lineage.live_row(self.conn, lineage.projection(self.conn, p2))
+            mid = self.conn.execute("INSERT INTO matches(pid_created, doc_id, created_seq)"
+                                    " VALUES (?, ?, 0)", (p2, d)).lastrowid
+            lineage.append(self.conn, p2, "pair", "operator", match_id=mid, doc_id=d,
+                           fp=reducer.fingerprint(reducer.facts_of(row), "invoice"))
+            lineage.settle(self.conn, p2)
+        self.assertEqual(self.live()[p2]["status"], "matched")
+        out = self.imp([
+            {"row_id": 1, "state": "superseded", "superseded_by": 3},
+            {"row_id": 2, "state": "superseded", "superseded_by": 3,
+             "first_seen": "2026-07-03T09:00:00Z"},
+            {"row_id": 3, "first_seen": "2026-07-05T08:00:00Z"}])
+        self.assertEqual(out["merged"], [[p1, p2]])
+        ms = self.conn.execute("SELECT pid, state FROM match_state WHERE match_id=?",
+                               (mid,)).fetchone()
+        self.assertEqual((ms["pid"], ms["state"]), (p1, "matched"))
+        self.assertEqual(self.live()[p1]["status"], "matched")
+
+    def test_a_superseded_by_cycle_is_a_broken_floor_not_a_hang(self):
+        self.imp([{"row_id": 1}])
+        (pid,) = self.live()
+        out = self.imp([{"row_id": 1, "state": "superseded", "superseded_by": 2},
+                        {"row_id": 2, "state": "superseded", "superseded_by": 1,
+                         "first_seen": "2026-07-04T08:00:00Z"}])
+        self.assertEqual(out["broken_floor"], [{"pid": pid, "row_id": 2, "missing": 1}])
+        self.assertIsNone(self.live()[pid]["ended"])
+        self.assertEqual(len(self.live()), 1)
+
     def test_a_rebound_ledgers_row_never_merges_into_an_ended_lineage(self):
         # round p4 (Astra S1): after a re-bind, the new ledger allocates the old row id
         import binding
@@ -145,7 +181,7 @@ class TestResolution(Base):
 
 
 class TestDeliveredBankHalf(Base):
-    def deliver(self, row_id, facts_row):
+    def deliver(self, row_id, facts_row, pid=None):
         import reducer
         with db.tx(self.conn):
             pkg = self.conn.execute(
@@ -155,9 +191,9 @@ class TestDeliveredBankHalf(Base):
             self.conn.execute("INSERT INTO deliveries(package_id, channel, staged_path, status,"
                               " created_at) VALUES (?, 'telegram', '/x', 'delivered', ?)",
                               (pkg, db.now()))
-            self.conn.execute("INSERT INTO delivered_rows(package_id, row_id, facts_fp)"
-                              " VALUES (?,?,?)",
-                              (pkg, row_id, db.canonical(reducer.facts_of(facts_row))))
+            self.conn.execute("INSERT INTO delivered_rows(package_id, row_id, pid, facts_fp)"
+                              " VALUES (?,?,?,?)",
+                              (pkg, row_id, pid, db.canonical(reducer.facts_of(facts_row))))
 
     def alerts(self):
         return [json.loads(r[0]) for r in self.conn.execute(
@@ -174,6 +210,27 @@ class TestDeliveredBankHalf(Base):
         out = self.imp([])
         self.assertEqual(out["delivered_changes"], 1)
         self.assertEqual([a["change"] for a in self.alerts()], ["corrected", "erased"])
+
+
+    def test_after_a_rebind_a_delivered_row_is_erased_not_corrected(self):
+        # the new ledger reuses row id 1 for another payment: that is not a correction
+        import binding
+        self.imp([{"row_id": 1}])
+        (pid,) = self.live()
+        self.deliver(1, dict(self.conn.execute("SELECT * FROM bank_rows WHERE row_id=1")
+                             .fetchone()), pid=pid)
+        binding.acknowledge_ledger_reset(self.conn)
+        other = "b" * 32
+        self.token = self.pass_(instance=other)
+        self.instance = other
+        out = self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z",
+                         "amount_minor": 9900, "counterparty": "Zapier"}])
+        self.assertEqual(out["delivered_changes"], 1)
+        self.assertEqual([a["change"] for a in self.alerts()], ["erased"])
+        self.token = self.pass_(instance=other)
+        out = self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z",
+                         "amount_minor": 9900, "counterparty": "Zapier"}])
+        self.assertEqual(out["delivered_changes"], 0)
 
 
 class TestInstance(Base):
@@ -281,6 +338,21 @@ class TestInstance(Base):
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
         self.assertIsNone(passes.current_pass(self.conn)["snapshot_id"])
         self.assertFalse(self.conn.in_transaction)
+
+    def test_a_ledger_switched_mid_pass_under_a_matching_probe_stops_the_pass(self):
+        import passes
+        self.imp([{"row_id": 1}])
+        self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
+        # still in this pass: list_backups is re-read and shows another instance,
+        # and the export is read from it too
+        passes.record_probe(self.conn, self.token, "ledger", True,
+                            data={"generation": 0, "registered": {}, "instance": self.OTHER})
+        self.instance = self.OTHER
+        with self.assertRaises(db.Refusal):
+            self.imp([{"row_id": 7}])
+        self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
+        self.assertIsNone(passes.current_pass(self.conn)["snapshot_id"])
+        self.assertIsNone(list(self.live().values())[0]["ended"])
 
     def test_an_export_from_another_instance_than_the_probe_stops_the_pass(self):
         import passes
