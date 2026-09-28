@@ -126,7 +126,50 @@ Skill: the specialist lists triage again while `remaining` is above 0 and there 
 and finishes with the last page's `remaining`. It passes the item's `row_digest`. Ellen
 follows `next` in a quarter listing.
 
-## The token is never lost again
+## Revision 3 (after design round D2 on 967b75c: Astra DNS, Terra DNS)
+
+Revision 2's store-backed triage traversal (`triage_listed`) is dropped. It recorded a
+page as shown when the page was built, which is not the same as the agent receiving it.
+Two sequences break it:
+- The answer is lost after the commit. A retry with the same token then skips that page
+  (Astra and Terra).
+- A payment changes after it was shown. It stays marked as shown, so it is never listed
+  again, and `remaining` is 0 (Astra).
+
+The store cannot know what the agent received. So the traversal must be something the
+agent can replay, over an order that cannot change.
+
+**B (replaces revision 2's B).** Every paged list is a stateless cursor over an
+immutable order: pids for `list_quarter_state` in both modes, doc_ids for
+`list_unmatched_documents`. The cursor is `after=[id]`, and `next` is the last id shown
+while more follow.
+- A lost answer is replayed exactly by calling again with the same `after`.
+- An item whose tier, date or facts change between pages keeps its place.
+- An item already shown that must be judged again, because a match was refused as
+  changed, is re-read with the new `list_quarter_state(pid=…)`. That returns the one item
+  in the listed shape, or null if it has ended.
+- The cost: triage no longer puts required payments first across pages. It pages in pid
+  order, which roughly follows import order. Whatever a delegation does not reach is
+  still counted in the last page's `remaining` and reached by a later step or pass.
+  Order within the continuation's `work` is the same pid order.
+- An item that joins triage mid-traversal with a pid behind the cursor is not listed in
+  this traversal. That is the same snapshot-at-listing semantics as before issue #3. The
+  next traversal (the judge step, or the next pass) lists it.
+- No schema change.
+
+**A, amended.**
+- `row_digest` is the full sha256, 64 hex characters, of the canonical facts. It is not
+  truncated.
+- A listed item's `labels` are de-duplicated, and so are the stored labels written from
+  now on.
+- A listed document's `collisions` holds at most 5 ids, plus `collision_count`.
+
+**"The token is never lost" is narrowed:** the token is never lost because of the
+answer's size. A crash after the claim commits and before the answer is written is the
+residual issue #2 already accepted (round X3). The lease lapses after 600 s, and the next
+`continue_pass` claims the step again.
+
+## The token is never lost to the answer's size (revision 1)
 
 `continue_pass` measures its rendered answer inside the claiming transaction; above
 `RESULT_LIMIT` it raises, the transaction rolls back and nothing is claimed — a loud
