@@ -1148,6 +1148,11 @@ server cannot recall text Ellen already holds. If the operator acts on it,
 `resend_target` answers that the package did arrive and resends nothing — truthful, and
 no second copy.
 
+**R8 — a notice rendered by another call first (accepted, code reviews C1 and C8).**
+Between `end_pass`'s commit and its own rendering, another call can render the notice
+the pass raised and mark it delivered. The operator still hears it once, through that
+other call; `end_pass`'s `speak` then does not repeat it.
+
 **Q1 — release number.** Two tools, three new tool arguments and a migration suggest
 v0.2.0. Any bump changes `WORKFLOW` to `acct@<new>`, and `check_setup` then reports
 `acct@0.1.0`'s writes as an older workflow still present. That is a report, not a stop.
@@ -1331,3 +1336,37 @@ changed" one import late. Accepting such an upgrade stays correct: it did arrive
 - **A lineage is alerted when its own row is read.** Pinned: a kind that changes and
   changes back outside a lineage's own read raises nothing; reading another lineage
   never alerts it.
+
+### Round C8 (escalation: one predicate)
+
+Rounds C6, C7 and C8 returned the same shape of finding: the rule that decided whether
+"send it again" was OFFERED disagreed with the rule that decided whether a resend could
+be STAGED. The patches (a status list, a revocation branch) are replaced by one
+predicate, `delivery.resend_refusal(conn, package_id)`: None when a resend can be
+staged, else the operator's sentence. It refuses when the package has arrived; was never
+sent; is being sent right now (latest send staged); its latest send was revoked; or no
+send of it can have reached the accountant (none delivered or uncertain) and the bank
+was re-read since the build — a first copy would carry outdated numbers. A send that may
+have arrived (`uncertain`) stays resendable as the exact file after a newer import,
+exactly as staging already allowed.
+
+- `stage_for_delivery(resend=True)` refuses with that sentence, before any byte is
+  written and again in the committing transaction.
+- `offerable()` is `resend_refusal(...) is None`, with no rule of its own; `views._compose`,
+  `alerts._units`, `alerts.pending_in_tx` and `resend_target` all use it. An outcome
+  notice for a package not owed a resend is told with its reason in one clause instead
+  of the invitation ("didn't go out — the bank has changed since it was built — ask for
+  the Q3 2026 package again"). `resend_target` answers an offered package no longer
+  eligible with that package's own sentence.
+- C7's failed-send revocation branch is removed: an old-snapshot failed send is simply
+  not offered, and the operator's own new request no longer hears "ask for it again"
+  from its own import. The staged-send revocation (bytes withdrawn) is unchanged, and
+  `uncertain` sends are never revoked.
+- **The pin that ends this class:** over every combination of {latest send: uncertain,
+  failed, staged, delivered} × {snapshot current, newer} × {arrived or not} × {revoked or
+  not}, a package is offered exactly when `stage_for_delivery(resend=True)` stages it,
+  the refusal is the predicate's sentence, and the predicate matches its stated rule.
+- The structural pin now catches any function that builds an "offers" key in any form
+  or writes an offer phrase ("send it again", "may not have arrived", "didn't go out")
+  outside its docstring, and requires it to CALL `offerable(` or `resend_refusal(`.
+- Accepted as a residual: R8.

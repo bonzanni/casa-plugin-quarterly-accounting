@@ -105,7 +105,6 @@ def _units(conn, rows) -> list:
     collection alerts, then the package notices, then each package's changes. A
     unit is (alert_id, (package, quarter) or None, its wrapped lines)."""
     import delivery
-    offer_now = {pid for pid, _, _ in delivery.offerable(conn)}   # THE rule, asked now
     out = []
     for a in rows:
         if a["kind"] in COLLECTION:
@@ -116,16 +115,18 @@ def _units(conn, rows) -> list:
     for a in rows:
         if a["kind"] in PACKAGE or a["kind"] == "package-uncertain":
             c = json.loads(a["detail"])
-            offered = c.get("package_id") in offer_now
+            # the outcome is told either way; the invitation only while THE predicate
+            # says a resend can be staged, else its reason in one clause
+            why = delivery.resend_refusal(conn, c["package_id"]) \
+                if a["kind"] in OFFERING else None
             if a["kind"] == "package-uncertain":
                 fname = conn.execute("SELECT filename FROM packages WHERE package_id=?",
                                      (c["package_id"],)).fetchone()[0]
-                # the outcome is told either way; the invitation only while it is owed
-                lines = delivery.offer_lines(fname) if offered \
-                    else views._wrap(f"{fname} may not have arrived.")
-            elif a["kind"] == "package-send-failed" and not offered:
+                lines = delivery.offer_lines(fname) if why is None \
+                    else views._wrap(f"{fname} may not have arrived — {why}.")
+            elif a["kind"] == "package-send-failed" and why is not None:
                 lines = views._wrap(f"The {dates.quarter_label(c['quarter'])} package didn't go "
-                                    "out.")
+                                    f"out — {why}.")
             else:
                 reason = (c.get("reason") or "").rstrip(". ")
                 lines = views._wrap(PACKAGE[a["kind"]].format(
@@ -237,10 +238,10 @@ def pending_in_tx(conn, must=None):
         return None
     text, ids = _batch(_units(conn, rows), must)
     import delivery
-    offer_now = {pid for pid, _, _ in delivery.offerable(conn)}   # THE rule, asked now
     offers = sorted({json.loads(a["detail"])["package_id"] for a in rows
-                     if a["alert_id"] in ids and a["kind"] in OFFERING}
-                    & offer_now)
+                     if a["alert_id"] in ids and a["kind"] in OFFERING
+                     and delivery.resend_refusal(conn, json.loads(a["detail"])["package_id"])
+                     is None})
     scope = {"alerts": sorted(ids)}
     if offers:
         scope["offers"] = offers

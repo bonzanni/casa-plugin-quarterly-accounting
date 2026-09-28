@@ -121,6 +121,10 @@ def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_toke
     if conn.in_transaction:
         raise RuntimeError("stage_for_delivery takes the custody lock before its own transaction")
     passes.check_token(conn, pass_token)                     # early refusals only
+    if resend and package_id is not None:
+        why = resend_refusal(conn, package_id)               # THE predicate, as offered
+        if why is not None:
+            raise db.Refusal(why)
     req = None if resend or package_id is None else request_of_package(conn, package_id)
     if req is not None:
         passes.check_package_token(conn, req["request_id"], package_token)
@@ -129,10 +133,11 @@ def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_toke
                              f"{req['channel']}, or ask for the package again by {channel}")
     with db.custody_lock():
         return _stage(conn, channel, package_id, doc_id, pass_token,
-                      req["request_id"] if req is not None else None, package_token)
+                      req["request_id"] if req is not None else None, package_token, resend)
 
 
-def _stage(conn, channel, package_id, doc_id, pass_token, request_id, package_token) -> dict:
+def _stage(conn, channel, package_id, doc_id, pass_token, request_id, package_token,
+           resend=False) -> dict:
     if request_id is not None:
         again = _staged_again(conn, request_id, package_token, pass_token)
         if again is not None:
@@ -179,7 +184,11 @@ def _stage(conn, channel, package_id, doc_id, pass_token, request_id, package_to
                 passes.check_token(conn, pass_token)
                 if request_id is not None:
                     passes.check_package_token(conn, request_id, package_token)
-                if package_id is not None:
+                if package_id is not None and resend:
+                    why = resend_refusal(conn, package_id)   # bound in the committing tx
+                    if why is not None:
+                        raise db.Refusal(why)
+                elif package_id is not None:
                     _require_current_snapshot(conn, package_id)
                 did = conn.execute(
                     "INSERT INTO deliveries(package_id, doc_id, channel, staged_path,"
@@ -249,8 +258,9 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
     """Inside an import's transaction, after its snapshot is recorded (round E5,
     Terra S1): every delivery still `staged` that is a package's FIRST send
     (no delivered or uncertain send of it) and was built under another snapshot
-    is revoked — marked failed with revoked_at, so record_delivery refuses it;
-    so is a first send that already FAILED (its offer is taken back).
+    is revoked — marked failed with revoked_at, so record_delivery refuses it.
+    (A send that already failed is not revoked: resend_refusal simply offers no
+    resend of it once the bank changed.)
     Its package request, if any, becomes `revoked`, with its package notice
     raised in the same transaction. Returns the revoked rows; their staged bytes
     are withdrawn before the same commit (withdraw_revoked). A resend of a file
@@ -265,23 +275,12 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
         " AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.package_id=d.package_id"
         "  AND e.status IN ('delivered', 'uncertain'))", (snapshot_id,)).fetchall()
     now = db.now()
-    # A send that FAILED never reached the accountant either: resending that file would
-    # deliver outdated numbers as their first copy, so its offer is taken back too. An
-    # `uncertain` send is never revoked — it may have arrived, and resending that exact
-    # file stays allowed.
-    failed = conn.execute(
-        "SELECT d.delivery_id, d.channel, d.staged_path, d.package_id, p.quarter"
-        " FROM deliveries d JOIN packages p"
-        " ON p.package_id=d.package_id WHERE d.status='failed' AND d.revoked_at IS NULL"
-        " AND (p.snapshot_id IS NULL OR p.snapshot_id<>?)"
-        " AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.package_id=d.package_id"
-        "  AND e.status IN ('delivered', 'uncertain'))", (snapshot_id,)).fetchall()
     latest = {}
-    for r in list(rows) + list(failed):
+    for r in rows:
         conn.execute("UPDATE deliveries SET status='failed', settled_at=coalesce(settled_at, ?),"
                      " revoked_at=? WHERE delivery_id=?", (now, now, r["delivery_id"]))
         req = conn.execute("SELECT request_id FROM package_requests WHERE delivery_id=? AND"
-                           " state IN ('staged', 'failed')", (r["delivery_id"],)).fetchone()
+                           " state='staged'", (r["delivery_id"],)).fetchone()
         if req is not None:
             conn.execute("UPDATE package_requests SET state='revoked', updated_at=? WHERE"
                          " request_id=?", (now, req[0]))
@@ -293,7 +292,7 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
     for r in latest.values():
         alerts.raise_package(conn, "package-revoked", f"delivery:{r['delivery_id']}:revoked",
                              quarter=r["quarter"], package_id=r["package_id"])
-    return [dict(r) for r in list(rows) + list(failed)]
+    return [dict(r) for r in rows]
 
 
 def withdraw(conn, rows, *, refusal: str) -> None:
@@ -487,42 +486,69 @@ _LATEST = ("SELECT d.package_id, d.status, d.revoked_at, p.filename, p.quarter F
            " deliveries WHERE package_id IS NOT NULL GROUP BY package_id)")
 
 
-def resendable(conn, quarter=None):
-    """The most recent package whose latest send is uncertain, else the most
-    recent one whose latest send was delivered (the brief's interface). A
-    package whose latest send failed is skipped whatever its older sends said
-    (round p8, Terra S2). What "send it again" resends is resend_target, which
-    binds to what the operator was shown, not this."""
+def resend_refusal(conn, package_id):
+    """THE predicate for "send it again" (escalated after the same shape of finding
+    in three rounds): None when a resend of this package can be staged, else the
+    operator's sentence saying why not. Staging a resend refuses with exactly this
+    sentence, and a package is OFFERED exactly when this is None (offerable, every
+    composer of an offer, resend_target) — so nothing can be offered that staging
+    would refuse, by construction.
+
+    Refused when: the package has arrived (any send delivered); it was never sent;
+    its latest send is still being sent (staged); its latest send was revoked (an
+    import took it back); or no send of it can have reached the accountant (none
+    delivered or uncertain) and the bank has been re-read since it was built — its
+    first copy would carry outdated numbers. A send that may have arrived
+    (uncertain) is resendable as the exact file, whatever was imported since."""
+    import dates
+    q = conn.execute("SELECT quarter, snapshot_id FROM packages WHERE package_id=?",
+                     (package_id,)).fetchone()
+    if q is None:
+        return "nothing is waiting to be sent again"
+    label = dates.quarter_label(q["quarter"])
+    if arrived(conn, package_id) is not None:
+        return arrived_words(conn, package_id)
+    latest = conn.execute("SELECT * FROM deliveries WHERE package_id=? ORDER BY delivery_id"
+                          " DESC LIMIT 1", (package_id,)).fetchone()
+    if latest is None:
+        return f"the {label} package was never sent — nothing to send again"
+    if latest["status"] == "staged":
+        return f"the {label} package is being sent right now — nothing to send again yet"
+    if latest["revoked_at"] is not None:
+        return f"the bank has changed since it was built — ask for the {label} package again"
+    maybe_sent = conn.execute("SELECT 1 FROM deliveries WHERE package_id=? AND status IN"
+                              " ('delivered', 'uncertain')", (package_id,)).fetchone()
+    if maybe_sent is None:
+        current = conn.execute("SELECT coalesce(max(snapshot_id), 0) FROM snapshots"
+                               ).fetchone()[0]
+        if q["snapshot_id"] is None or q["snapshot_id"] != current:
+            return f"the bank has changed since it was built — ask for the {label} package again"
+    return None
+
+
+def offerable(conn, quarter=None) -> list:
+    """Packages owed "send it again" — resend_refusal is None — as (package_id,
+    filename, the latest send's status), oldest package first; `quarter` scopes
+    them to a quarter-scoped view."""
     sql, args = _LATEST, []
     if quarter:
         sql += " AND p.quarter=?"
         args.append(quarter)
-    rows = conn.execute(sql + " ORDER BY d.delivery_id DESC", args).fetchall()
-    for want in ("uncertain", "delivered"):
-        for r in rows:
-            if r["status"] == want and (want == "delivered"
-                                        or arrived(conn, r["package_id"]) is None):
-                return r["package_id"]
-    return None
-
-
-# THE rule for a package still owed "send it again": its most recent send is uncertain,
-# or failed and not revoked (a revoked send is rebuilt, never resent), and the package
-# has not arrived by any send. The status view's offers and resend_target both use it.
-_OFFERABLE = (_LATEST + " AND (d.status='uncertain' OR (d.status='failed' AND d.revoked_at IS"
-              " NULL)) AND NOT EXISTS (SELECT 1 FROM deliveries a WHERE"
-              " a.package_id=d.package_id AND a.status='delivered')")
-
-
-def offerable(conn, quarter=None) -> list:
-    """Packages owed "send it again" (_OFFERABLE), as (package_id, filename, status),
-    oldest package first; `quarter` scopes them to a quarter-scoped view."""
-    sql, args = _OFFERABLE, []
-    if quarter:
-        sql += " AND p.quarter=?"
-        args.append(quarter)
     return [(r["package_id"], r["filename"], r["status"])
-            for r in conn.execute(sql + " ORDER BY d.package_id", args)]
+            for r in conn.execute(sql + " ORDER BY d.package_id", args)
+            if resend_refusal(conn, r["package_id"]) is None]
+
+
+def resendable(conn, quarter=None):
+    """The most recent package owed "send it again" (resend_refusal is None), an
+    uncertain one before a failed one; None when there is none. What "send it
+    again" resends is resend_target, which binds to what the operator was shown."""
+    rows = sorted(offerable(conn, quarter), key=lambda r: r[0], reverse=True)
+    for want in ("uncertain", "failed"):
+        for pid, _, status in rows:
+            if status == want:
+                return pid
+    return None
 
 
 def uncertain(conn, quarter=None) -> list:
@@ -534,24 +560,23 @@ def uncertain(conn, quarter=None) -> list:
 def resend_target(conn) -> int:
     """What "send it again" resends: the package the most recent DELIVERED
     rendering offered (D3: an operator's words bind to what they were shown).
-    An offered package that has since arrived (any send of it delivered —
-    arrived()) is no longer waiting, and is said so. None waiting, or several, is a refusal in the operator's words —
+    An offered package that is no longer eligible (resend_refusal) is answered
+    with its own reason. None waiting, or several, is a refusal in the operator's words —
     several are told apart by the date in their filenames (spec §"What the
     operator never has to learn")."""
     last = db.last_delivered(conn)
     offered = json.loads(last["scope_json"]).get("offers", []) if last else []
-    waiting, came = [], []
+    waiting, why = [], None
     for pid in offered:
-        if arrived(conn, pid) is not None:
-            came.append(pid)
-            continue
-        r = conn.execute(_OFFERABLE + " AND d.package_id=?", (pid,)).fetchone()
-        if r is not None:
-            waiting.append(r)
+        refusal = resend_refusal(conn, pid)
+        if refusal is None:
+            waiting.append(conn.execute("SELECT package_id, filename FROM packages WHERE"
+                                        " package_id=?", (pid,)).fetchone())
+        else:
+            why = refusal
     if not waiting:
-        if came:
-            raise db.Refusal(arrived_words(conn, came[-1]))
-        raise db.Refusal("nothing is waiting to be sent again")
+        # an offered package no longer eligible is answered with its own reason
+        raise db.Refusal(why or "nothing is waiting to be sent again")
     if len(waiting) > 1:
         names = [r["filename"] for r in waiting]
         raise db.Refusal("more than one package may not have arrived: "

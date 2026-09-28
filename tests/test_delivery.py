@@ -128,7 +128,10 @@ class TestTelegram(Base):
             d = delivery.stage_for_delivery(self.conn, channel="telegram",
                                             package_id=newer["package_id"])
             delivery.record_delivery(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
-        self.assertEqual(delivery.resendable(self.conn), self.pkg["package_id"])
+        # one predicate (resend_refusal): a package that arrived is never resent; the newer
+        # one, whose latest send failed under the current snapshot, is the one owed
+        self.assertEqual(delivery.resendable(self.conn), newer["package_id"])
+        self.assertIsNotNone(delivery.resend_refusal(self.conn, self.pkg["package_id"]))
 
 
 class TestPassFence(Base):

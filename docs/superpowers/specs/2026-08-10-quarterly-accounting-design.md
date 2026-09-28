@@ -2520,11 +2520,13 @@ The mechanics, in the order a pass meets them:
   copy's failure is not offered, and "send it again" answers that it did arrive. A
   package that becomes delivered is compared, in that same step, with the bank and with
   the classification the store holds — the pass's own change detection — so a change
-  since its build is said at once. A package is owed "send it again" when its latest
-  send is uncertain, or failed and not revoked, and it has not arrived; the status view,
-  every notice that offers it, and "send it again" apply that one rule. A failed first
-  send is revoked by a newer import like an unsent one (a resend would deliver outdated
-  numbers as a first copy); an uncertain one is not (it may have arrived). Every tool call
+  since its build is said at once. Whether "send it again" is offered and whether a
+  resend can be staged are one predicate: a resend is owed unless the package arrived,
+  was never sent, is being sent right now, had its latest send taken back, or — no send
+  of it having possibly reached the accountant — the bank was re-read since it was built.
+  A send that may have arrived is resendable as the exact file. Staging refuses with the
+  predicate's sentence; the status view, every notice and "send it again" offer only
+  what it allows, and a notice for a package not owed a resend says why instead. Every tool call
   that raises a notice returns it in its own `speak` (`begin_pass` on a reclaim
   included), and a pass's end carries every notice raised during that pass. A write
   made outside the transaction that checked a token (a pass's poisoned verdict)

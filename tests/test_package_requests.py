@@ -10,6 +10,7 @@ import threading
 import unittest
 from unittest import mock
 
+from tests._base import StoreCase
 from tests.test_continuation import STALE, Flow
 from tests import sim
 import alerts  # noqa: E402
@@ -1117,40 +1118,35 @@ class TestReviewC7(Requests):
         self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
         return pkg, d, sim.run_pass(self.conn, self.bf)     # a newer snapshot
 
-    def test_a_failed_first_send_is_revoked_by_a_newer_import(self):
-        # L1: a failed send never reached the accountant — resending it would deliver
-        # outdated numbers as their first copy, so the import takes the offer back
+    STALE = "the bank has changed since it was built — ask for the Q3 2026 package again"
+
+    def test_a_failed_first_send_is_not_offered_after_a_newer_import(self):
+        # C7 L1, as generalized in C8: nothing is revoked; the one rule simply offers no
+        # resend of a send that never arrived once the bank changed (staging refuses it)
         pkg, d, run = self.failed_then_a_newer_import()
         row = self.conn.execute("SELECT status, revoked_at FROM deliveries WHERE"
                                 " delivery_id=?", (d["delivery_id"],)).fetchone()
-        self.assertEqual(row["status"], "failed")
-        self.assertIsNotNone(row["revoked_at"])
-        self.assertIn(d["delivery_id"], run["import"]["revoked_deliveries"])
-        self.assertEqual([a[0] for a in self.conn.execute(
-            "SELECT occurrence_key FROM alerts WHERE kind='package-revoked'")],
-            [f"delivery:{d['delivery_id']}:revoked"])
-        self.assertIn("The bank was re-read before I could send the Q3 2026 package",
-                      " ".join(run["end"]["speak"]["text"].split()))
-        self.assertEqual(self.conn.execute(
-            "SELECT count(*) FROM alerts WHERE sent_at IS NULL AND kind='package-send-failed'"
-            ).fetchone()[0], 0)
-        self.call("mark_rendering_delivered", render_id=run["end"]["speak"]["render_id"])
+        self.assertEqual((row["status"], row["revoked_at"]), ("failed", None))
+        self.assertEqual(self.alerts_of("package-revoked"), [])
+        self.assertEqual(delivery.resend_refusal(self.conn, pkg["package_id"]), self.STALE)
+        if run["end"]["speak"]:
+            self.call("mark_rendering_delivered", render_id=run["end"]["speak"]["render_id"])
         view = self.call("build_review", view="status", quarter="2026-Q3")
         self.assertNotIn(pkg["filename"], view["text"])
         self.call("mark_rendering_delivered", render_id=view["render_id"])
         self.assertTrue(self.text("stage_for_delivery", channel="telegram",
-                                  resend=True).startswith("refused: "))
+                                  resend=True).startswith("refused: nothing is waiting"))
 
-    def test_the_revocation_closes_an_offer_not_yet_told(self):
+    def test_an_untold_failed_offer_is_told_without_the_invitation(self):
         self.seed(1, documents=1)
         p, pkg, d = self.staged()
         self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
                   package_token=p)                       # its offer is never delivered
         run = sim.run_pass(self.conn, self.bf)
-        self.assertEqual(self.conn.execute(
-            "SELECT count(*) FROM alerts WHERE sent_at IS NULL AND kind='package-send-failed'"
-            ).fetchone()[0], 0)
-        self.assertNotIn("didn't go out", run["end"]["speak"]["text"])
+        text = " ".join(run["end"]["speak"]["text"].split())
+        self.assertIn("The Q3 2026 package didn't go out — " + self.STALE, text)
+        self.assertNotIn("send it again", text)
+        self.assertNotIn("offers", self.scope(run["end"]["speak"]))
 
     def test_an_uncertain_send_stays_offered_after_a_newer_import(self):
         self.seed(1, documents=1)
@@ -1187,27 +1183,205 @@ class TestReviewC7(Requests):
         self.assertNotIn("offers", self.scope(speak))
 
     def test_every_offer_is_built_from_the_one_rule(self):
-        # structural pin: every function that composes offer wording or an offer scope
-        # asks delivery.offerable() (or its _OFFERABLE query) — none decides on its own
-        import ast
-        from tests._base import ROOT
-        builders = {}
-        for f in (ROOT / "server").glob("*.py"):
-            src = f.read_text()
-            for fn in ast.walk(ast.parse(src)):
-                if not isinstance(fn, ast.FunctionDef):
-                    continue
-                body = ast.get_source_segment(src, fn)
-                makes = ("offer_lines(" in body or 'scope["offers"]' in body
-                         or "offer=" in body.replace("offer=None", ""))
-                if makes and fn.name not in ("offer_lines", "__init__"):
-                    builders[(f.stem, fn.name)] = ("offerable(" in body
-                                                   or "_OFFERABLE" in body)
-        # views._build_review only COLLECTS the offer= of blocks _compose built
-        self.assertEqual(builders.pop(("views", "_build_review")), False)
-        self.assertEqual(set(builders), {("alerts", "_units"), ("alerts", "pending_in_tx"),
-                                         ("views", "_compose")})
-        self.assertTrue(all(builders.values()), builders)
+        # structural pin (tightened in C8): every function that composes offer wording
+        # (the phrases), an offer scope ("offers" in any form) or an offer-carrying block
+        # CALLS delivery.offerable() or delivery.resend_refusal() — none decides alone
+        self.assertEqual(offer_builders(), {("alerts", "_units"): True,
+                                            ("alerts", "pending_in_tx"): True,
+                                            ("views", "_compose"): True,
+                                            ("delivery", "resend_target"): True})
+
+
+PHRASES = ("send it again", "may not have arrived", "didn't go out")
+# the phrase's owner, the reply grammar that PARSES it, and the one collector of what
+# views._compose built
+EXEMPT = {("delivery", "offer_lines"), ("reply", "_clauses"), ("views", "_build_review")}
+
+
+def offer_builders() -> dict:
+    """{(module, function): whether it CALLS offerable( / resend_refusal(} for every
+    server function that composes an offer: a string constant (not its docstring)
+    carrying an offer phrase or naming "offers", a subscript or dict key "offers", or
+    an offer= keyword."""
+    import ast
+    from tests._base import ROOT
+    out = {}
+    for f in (ROOT / "server").glob("*.py"):
+        tree = ast.parse(f.read_text())
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef) or (f.stem, fn.name) in EXEMPT:
+                continue
+            doc = fn.body[0].value if fn.body and isinstance(fn.body[0], ast.Expr) \
+                and isinstance(fn.body[0].value, ast.Constant) else None
+            makes, asks = False, False
+            for node in (n for stmt in fn.body for n in ast.walk(stmt)):   # not decorators
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                        and node is not doc:
+                    v = node.value
+                    if v == "offers" or any(ph in v for ph in PHRASES):
+                        makes = True
+                if isinstance(node, ast.keyword) and node.arg in ("offer", "offers") \
+                        and not (isinstance(node.value, ast.Constant)
+                                 and node.value.value is None):
+                    makes = True
+                if isinstance(node, ast.Call):
+                    name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+                    if name in ("offerable", "resend_refusal"):
+                        asks = True
+            if makes:
+                out[(f.stem, fn.name)] = asks
+    return out
+
+
+class TestReviewC8(Requests):
+    """Escalation, C6-C8: whether "send it again" is OFFERED and whether a resend can
+    be STAGED are one predicate, delivery.resend_refusal."""
+    def test_a_failed_report_after_a_newer_import_offers_what_staging_allows(self):
+        # Astra: a send that was uncertain before a newer import is reported failed late
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        os.unlink(d["path"])
+        again = self.call("stage_for_delivery", channel="telegram", resend=True)
+        run = sim.run_pass(self.conn, self.bf)             # a newer snapshot
+        if run["end"]["speak"]:
+            self.call("mark_rendering_delivered", render_id=run["end"]["speak"]["render_id"])
+        late = self.call("record_delivery", delivery_id=again["delivery_id"], outcome="failed")
+        why = delivery.resend_refusal(self.conn, pkg["package_id"])
+        offered = "send it again" in late["speak"]["text"]
+        staged = self.text("stage_for_delivery", channel="telegram", resend=True)
+        self.assertEqual(offered, why is None)
+        if why is None:
+            self.assertFalse(staged.startswith("refused: "), staged)
+        else:
+            self.assertEqual(staged, "refused: " + why)
+
+    def test_asking_again_after_a_failed_send_says_nothing_about_asking_again(self):
+        # Claude: the operator asks for the quarter again after a failed send; their own
+        # pass's import must not tell them to ask for it again while it is being built
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        said = []
+        end, c = self.handed_over()                        # the new request's own pass
+        said.append(end["speak"])
+        p2 = self.call("build_quarterly_package", quarter="2026-Q3",
+                       package_token=end["package_token"])
+        said.append(self.claim().get("speak"))
+        for speak in said:
+            if speak:
+                self.assertNotIn("ask for it again", speak["text"])
+                self.assertNotIn("ask for the", speak["text"])
+        self.assertEqual(self.alerts_of("package-revoked"), [])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 2)
+        self.assertTrue(p2["package_id"])
+
+
+class TestOfferIsExactlyStaging(StoreCase):
+    """THE pin: over every state combination, a package is offered exactly when
+    stage_for_delivery(resend=True) would stage it."""
+    def setUp(self):
+        super().setUp()
+        import package as _package
+        self._package = _package
+        self.bind()
+        self.pass_()
+        self.row(1)
+        pid = self.lineage_for(1)
+        self.classify(pid, {"software"})
+        self.settle(pid)
+        self.end_live_pass()
+
+    def snapshot(self):
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
+                              " VALUES ('p-x', ?, 0, 0)", (db.now(),))
+
+    def delivery(self, pkg, status, revoked=False):
+        with db.tx(self.conn):
+            n = self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]
+            return self.conn.execute(
+                "INSERT INTO deliveries(package_id, channel, staged_path, status, created_at,"
+                " settled_at, revoked_at, lease_at) VALUES (?, 'telegram', ?, ?, ?, ?, ?, ?)",
+                (pkg, f"/gone/{n}.zip", status, db.now(),
+                 None if status == "staged" else db.now(),
+                 db.now() if revoked else None, db.now())).lastrowid
+
+    def test_offered_exactly_when_staging_succeeds(self):
+        import itertools
+        combos = itertools.product(("uncertain", "failed", "staged", "delivered"),
+                                   ("current", "newer"), (False, True), (False, True))
+        seen = 0
+        for latest, snap, came, revoked in combos:
+            where = (latest, snap, came, revoked)
+            self.snapshot()
+            pkg = self._package.build_quarterly_package(self.conn, "2026-Q3",
+                                                        bound=False)["package_id"]
+            if came:
+                self.delivery(pkg, "delivered")
+            self.delivery(pkg, latest, revoked=revoked)
+            if snap == "newer":
+                self.snapshot()
+            offered = pkg in {p for p, _, _ in delivery.offerable(self.conn)}
+            why = delivery.resend_refusal(self.conn, pkg)
+            # and the predicate itself: owed only when nothing arrived, the latest send
+            # is settled (not in flight) and not revoked, and — unless it may have
+            # arrived (uncertain) — the bank has not changed since the build
+            owed = (not came and latest in ("uncertain", "failed") and not revoked
+                    and (latest == "uncertain" or snap == "current"))
+            self.assertEqual(why is None, owed, where)
+            try:
+                delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg,
+                                            resend=True)
+                staged, refusal = True, None
+            except db.Refusal as exc:
+                staged, refusal = False, str(exc)
+            self.assertEqual(offered, staged, where)
+            self.assertEqual(why is None, staged, where)
+            if not staged:
+                self.assertEqual(refusal, why, where)
+            seen += 1
+        self.assertEqual(seen, 32)
+
+    def test_an_ineligible_resend_is_refused_before_any_byte_is_written(self):
+        pkg = self._package.build_quarterly_package(self.conn, "2026-Q3",
+                                                    bound=False)["package_id"]
+        self.delivery(pkg, "delivered")
+        written = []
+        with mock.patch.object(delivery, "_to_outbox",
+                               lambda path, data: written.append(path)):
+            with self.assertRaises(db.Refusal):
+                delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg,
+                                            resend=True)
+        self.assertEqual(written, [])
+
+    def test_the_predicate_binds_in_the_committing_transaction(self):
+        # the package arrives while the resend's copy is being written: nothing is staged
+        pkg = self._package.build_quarterly_package(self.conn, "2026-Q3",
+                                                    bound=False)["package_id"]
+        self.delivery(pkg, "uncertain")
+        real = delivery._to_outbox
+        other = db.open_store()
+        self.addCleanup(other.close)
+
+        def write_then_arrive(path, data):
+            out = real(path, data)
+            with db.tx(other):
+                other.execute("UPDATE deliveries SET status='delivered' WHERE package_id=?",
+                              (pkg,))
+            return out
+        with mock.patch.object(delivery, "_to_outbox", write_then_arrive):
+            with self.assertRaises(db.Refusal) as cm:
+                delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg,
+                                            resend=True)
+        self.assertIn("did arrive", str(cm.exception))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries WHERE"
+                                           " status='staged'").fetchone()[0], 0)
+        self.assertEqual(os.listdir(self.outbox), [])
 
 
 if __name__ == "__main__":
