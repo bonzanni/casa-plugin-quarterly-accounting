@@ -342,8 +342,30 @@ class TestJudgeDue(Flow):
         self.assertEqual((c["step"], c["ended"]), ("judge", "expired"))
         out = self.text("end_pass", pass_token=c["pass_token"], outcome="complete")
         self.assertTrue(out.startswith("refused: not ended: 1 payment"), out)
+        self.assertIn("End it interrupted", out)            # never a second judge step
         self.assertEqual(self.call("end_pass", pass_token=c["pass_token"],
                                    outcome="interrupted")["outcome"], "interrupted")
+
+    def test_a_payment_reopened_during_the_judge_step_keeps_the_pass_from_complete(self):
+        # C6 (Terra): the judge covered only what was due when it started
+        self.seed(3, documents=1)
+        t1 = self.begin()
+        self.start(t1)
+        self.specialist(t1)
+        t2 = self.claim()["continue"]["pass_token"]
+        self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
+        due = set(work.judge_due_pids(self.conn))
+        self.assertEqual(len(due), 1)
+        # during the judge a second payment's invoice is filed while it is open
+        self.file(amount_minor=1001, document_date="2026-07-06")
+        self.assertEqual(len(work.judge_due_pids(self.conn)), 2)
+        self.specialist(t2, step="judge")                 # finishes without matching
+        t3 = self.claim()["continue"]["pass_token"]
+        out = self.text("end_pass", pass_token=t3, outcome="complete")
+        self.assertTrue(out.startswith("refused: not ended: 1 payment"), out)
+        self.assertIn("End it interrupted", out)
+        self.assertEqual(self.call("end_pass", pass_token=t3, outcome="interrupted")["outcome"],
+                         "interrupted")
 
     def test_nothing_fitting_is_not_due(self):
         self.seed(3, documents=0)

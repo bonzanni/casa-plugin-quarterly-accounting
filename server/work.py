@@ -277,6 +277,10 @@ def _paged(items: list, after, limit: int, view) -> dict:
 
 
 def judge_due(conn) -> int:
+    return len(judge_due_pids(conn))
+
+
+def judge_due_pids(conn) -> list:
     """How many fresh, booked payments still in triage have an unmatched document that
     meets the necessary part of the auto-match bar: the expected kind, the same
     currency, the exact amount (C3 refutation defense, Astra). A payment can join
@@ -289,15 +293,14 @@ def judge_due(conn) -> int:
         "SELECT d.kind, d.amount_minor, d.currency FROM documents d JOIN document_status s"
         " ON s.doc_id=d.doc_id WHERE s.status='unmatched' AND d.irrelevant=0"
         " AND d.amount_minor IS NOT NULL")}
-    kinds = {(k, a) for k, a, _ in docs}
-    n = 0
+    out = []
     for d in triage(conn):
         if not d["fresh"] or d["pending"]:
             continue
         k, a = d["expectation"]["kind"], d["amount_minor"]
-        if (k, a, d["currency"]) in docs or ((k, a) in kinds and (k, a, None) in docs):
-            n += 1
-    return n
+        if (k, a, d["currency"]) in docs or (k, a, None) in docs:
+            out.append(d["pid"])
+    return sorted(out)
 
 
 def work_list(conn) -> dict:

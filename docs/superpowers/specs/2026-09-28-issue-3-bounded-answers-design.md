@@ -182,6 +182,21 @@ while more follow.
   again once the judge step has finished, so it cannot loop. A judge step that expired or
   errored waives nothing (code round C5, Terra): that pass ends `interrupted` by the
   outcome rule. Any other outcome is unaffected.
+- **Generalized at code round C6 (Terra: a rejection *during* the judge step).** The
+  C3 defense, C4, C5 and C6 findings all have one shape: an operator action reopens a
+  payment after the last point that judged it. No count taken earlier can promise
+  completeness; only the pass's end can. The rule is now: a pass that swept is
+  `complete` only if every payment judge-due at its end (checked live in `end_pass`'s
+  transaction) was covered by a judgment in this pass. "Covered" means it was due when a
+  judge step started that then finished; the judge step records that set when it
+  starts. `end_pass` then goes one of three ways:
+  - With no judge step yet, it asks for one.
+  - With a finished judge step, a payment due now that was not in its set refuses
+    `complete`. The pass is `interrupted`, and the next pass judges it.
+  - With a judge step that expired or errored, any due payment refuses `complete`, and
+    the pass is `interrupted`.
+
+  It never asks for a second judge step, so it cannot loop.
 - The single-payment re-read `pid=` goes through the same page guard (code round C3,
   Astra: 4,200 candidates returned 21,728 characters there).
 - No schema change.

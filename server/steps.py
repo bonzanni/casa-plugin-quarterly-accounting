@@ -125,6 +125,11 @@ def start(conn, token, step: str, carry: dict) -> dict:
                         (m["pass_id"], step)).fetchone() is not None:
             raise db.Refusal(f"the {step} step was already started in this pass")
         now = db._clock().replace(microsecond=0)
+        if step == "judge":
+            # the payments this judgment covers (issue #3, C6): end_pass lets the pass
+            # be complete only if every payment judge-due at its end was due here
+            import work
+            carry = {**carry, "due_at_start": work.judge_due_pids(conn)}
         conn.execute("INSERT INTO pass_steps(pass_id, step, started_at, carry_json)"
                      " VALUES (?,?,?,?)", (m["pass_id"], step, _stamp(now), db.canonical(carry)))
         if step == "snapshot":

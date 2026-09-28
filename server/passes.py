@@ -276,24 +276,34 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
 
 
 def _judgment_owed(conn, pass_id: str) -> None:
-    """A pass that swept but never judged ends `complete` only when no payment is
-    judge-due NOW (issue #3, code round C4): the continuation's judge_due was taken
-    before the Gmail round, and a pairing the operator rejects meanwhile reopens a
-    payment whose document is already filed. Checked live, in end_pass's own
-    transaction; once the judge step has FINISHED it is not asked again, so it cannot
-    loop. A judge step that expired or errored waives nothing (C5, Terra): that pass is
-    not complete (the outcome rule makes it `interrupted`)."""
+    """A pass that swept is `complete` only if every payment judge-due at its end
+    (work.judge_due_pids, checked live in end_pass's own transaction) was covered by a
+    judgment in this pass (issue #3, code rounds C4-C6). An operator can reopen a
+    payment whose document is already filed at any moment — during triage, the Gmail
+    round, the judge step — so no count taken earlier can promise it; the pass's end
+    can. Covered = due when a judge step that then FINISHED started. With no judge step
+    yet, Ellen runs it; otherwise (a judge step expired, or the payment reopened after
+    it started) the pass is `interrupted` and the next pass judges it. Never asks for a
+    second judge step, so it cannot loop."""
     import work
-    steps = {r["step"]: r["finished_at"] for r in conn.execute(
-        "SELECT step, finished_at FROM pass_steps WHERE pass_id=?", (pass_id,))}
-    if "sweep" not in steps or steps.get("judge") is not None:
+    steps = {r["step"]: r for r in conn.execute(
+        "SELECT step, finished_at, carry_json FROM pass_steps WHERE pass_id=?", (pass_id,))}
+    if "sweep" not in steps:
         return
-    n = work.judge_due(conn)
-    if n:
-        raise db.Refusal(f"not ended: {n} payment{'s' if n > 1 else ''} with a filed document "
-                         "that may fit {} not judged in this pass. Start the judge step "
-                         "(record_step step=\"judge\") and end the pass after it".format(
-                             "were" if n > 1 else "was"))
+    due = set(work.judge_due_pids(conn))
+    judge = steps.get("judge")
+    if judge is not None and judge["finished_at"] is not None:
+        due -= set(json.loads(judge["carry_json"] or "{}").get("due_at_start", []))
+    if not due:
+        return
+    n = len(due)
+    what = (f"{n} payment{'s' if n > 1 else ''} with a filed document that may fit "
+            f"{'were' if n > 1 else 'was'} not judged in this pass")
+    if judge is None:
+        raise db.Refusal(f"not ended: {what}. Start the judge step (record_step "
+                         "step=\"judge\") and end the pass after it")
+    raise db.Refusal(f"not ended: {what}. End it interrupted: the next pass judges "
+                     f"{'them' if n > 1 else 'it'}")
 
 
 def _hand_over(conn, pass_id: str, outcome: str):
