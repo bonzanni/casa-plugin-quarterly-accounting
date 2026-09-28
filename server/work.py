@@ -227,9 +227,12 @@ def listed(d: dict) -> dict:
     # every candidate's id (the set `resolves` must name), a few summarised
     out["candidate_ids"] = [m["match_id"] for m in d["candidates"]]
     out["candidates"] = [_match_view(m) for m in d["candidates"][:CANDIDATES_SHOWN]]
-    # what record_match / propose_match compare: pass it back as row_digest
-    out["row_digest"] = (R.digest(d["row_snapshot"]) if d["row_snapshot"] is not None
-                         else None)
+    # what record_match / propose_match compare: pass it back as row_digest. The
+    # payment reference stays readable (C2, Astra): it is the tie-break between
+    # otherwise identical payments.
+    snap = d["row_snapshot"]
+    out["row_digest"] = R.digest(snap) if snap is not None else None
+    out["remittance"] = snap["remittance"] if snap is not None else None
     return budget.bounded(out, 200, longer={"link": 500, "last_queries": 120,
                                             "counterparty": 80, "number": 40,
                                             "issuer": 80, "recipient": 80})

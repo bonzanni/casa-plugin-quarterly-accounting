@@ -93,7 +93,9 @@ Revision 2 replaces both assumptions.
   the sha256 of the canonical `facts_of(live row)`. `record_match` and `propose_match`
   take `row_digest`, and a digest that differs from the live row's is refused with the
   message the snapshot mismatch gives today. `row_snapshot` is still accepted, for
-  existing callers. Exactly one of the two is required. The skill names only
+  existing callers. Exactly one of the two is required. The payment reference stays
+  readable next to the digest, as `remittance` clipped at 200 (code round C2, Astra): it
+  is the tie-break between otherwise identical payments. The skill names only
   `row_digest`. The facts the specialist judges from (amount, currency, date, the bank
   texts clipped at 200) are all still in the item.
 - `budget.page` never admits an item over the page budget. Such an item raises an error
@@ -152,9 +154,11 @@ while more follow.
   order, which roughly follows import order. Whatever a delegation does not reach is
   still counted in the last page's `remaining` and reached by a later step or pass.
   Order within the continuation's `work` is the same pid order.
-- An item that joins triage mid-traversal with a pid behind the cursor is not listed in
-  this traversal. That is the same snapshot-at-listing semantics as before issue #3. The
-  next traversal (the judge step, or the next pass) lists it.
+- An item that joins a list mid-traversal with an id behind the cursor is not listed in
+  this traversal: a payment entering triage, or a document that becomes unmatched when
+  its pairing is retired (code round C2, Terra). That is the same snapshot-at-listing
+  semantics as before issue #3, for all three lists. The next traversal lists it: the
+  judge step or the next pass for triage, the next listing for documents.
 - No schema change.
 
 **A, amended.**

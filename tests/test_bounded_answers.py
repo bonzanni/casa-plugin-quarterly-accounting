@@ -55,6 +55,8 @@ class Bounded(Flow):
             self.call("record_search", pid=pid, pass_token=self.t1,
                       queries=[f"q{j} " + "has:attachment adobe invoice " * 12 for j in range(50)])
         self.pids = pids
+        self.huge = next(p for p in pids if work.describe(self.conn, p)["amount_minor"] == 1007)
+        self.assertEqual(work.describe(self.conn, self.huge)["row_snapshot"]["remittance"], HUGE)
 
     def finish(self):
         tri = self.call("list_quarter_state", triage=True, pass_token=self.t1)
@@ -66,7 +68,7 @@ class Bounded(Flow):
         # without the listing shapes, the same items would not fit one answer
         full = [work.describe(self.conn, pid) for pid in self.pids[:work.TRIAGE_LIMIT]]
         self.assertGreater(budget.size(full), 5 * budget.RESULT_LIMIT)
-        self.assertGreater(budget.size(work.describe(self.conn, self.pids[7])),
+        self.assertGreater(budget.size(work.describe(self.conn, self.huge)),
                            budget.RESULT_LIMIT)
 
     def test_the_continuation_fits_and_carries_the_token(self):
@@ -157,6 +159,13 @@ class Bounded(Flow):
                           for p in self.pids if p not in gone}, {"required"})
         self.assertEqual(seen, self.pids)          # page 1 listed `gone` before it left
 
+    def test_the_payment_reference_is_listed(self):
+        # C2 (Astra): the reference tells identical payments apart
+        item = self.page(pid=self.pids[0])["item"]
+        self.assertEqual(item["remittance"], REMITTANCE[:140])
+        huge = self.page(pid=self.huge)["item"]["remittance"]
+        self.assertEqual((len(huge), huge[-1]), (200, "…"))
+
     def test_one_item_is_reread_by_pid(self):
         pid = self.pids[3]
         one = self.page(pid=pid)["item"]
@@ -164,7 +173,7 @@ class Bounded(Flow):
         self.assertEqual(one, listed)
 
     def test_the_huge_field_is_clipped_and_the_digest_still_binds_it(self):
-        item = self.page(pid=self.pids[7])["item"]
+        item = self.page(pid=self.huge)["item"]
         self.assertLessEqual(budget.size(item), budget.PAGE_BUDGET)
         doc = self.file(amount_minor=1007, document_date="2026-07-08")
         out = self.call("record_match", pid=item["pid"], doc_id=doc, author="auto",
