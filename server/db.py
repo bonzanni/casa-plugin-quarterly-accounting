@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -75,15 +75,38 @@ CREATE TABLE IF NOT EXISTS binding (
 
 CREATE TABLE IF NOT EXISTS pass_marker (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  generation INTEGER NOT NULL, live INTEGER NOT NULL,
-  pass_id TEXT, trigger TEXT, started_at TEXT);
+  generation INTEGER NOT NULL, live INTEGER NOT NULL,   -- generation: the live pass token
+  pass_id TEXT, trigger TEXT, started_at TEXT,
+  claimed_step TEXT,             -- the step the current token continues (continue_pass)
+  lease_at TEXT);                -- when the token's holder last made progress
 CREATE TABLE IF NOT EXISTS passes (
   pass_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, trigger TEXT NOT NULL,
   started_at TEXT NOT NULL, ended_at TEXT, outcome TEXT,
   account_seen INTEGER NOT NULL DEFAULT 0,
   snapshot_id INTEGER,
   gate_json TEXT,                -- this pass's bank-write verdict, decided once (sticky refusal)
-  report_json TEXT);
+  report_json TEXT,
+  reply TEXT NOT NULL DEFAULT 'telegram');   -- where a continuation reports: telegram | silent
+CREATE TABLE IF NOT EXISTS pass_steps (
+  pass_id TEXT NOT NULL,
+  step TEXT NOT NULL CHECK (step IN ('sweep', 'judge', 'handover', 'snapshot')),
+  started_at TEXT NOT NULL,      -- written by Ellen before she delegates
+  finished_at TEXT,
+  finished_by TEXT CHECK (finished_by IN ('specialist', 'resident')),
+  finish_json TEXT,              -- counts, stopped (clipped), failed
+  carry_json TEXT NOT NULL DEFAULT '{}',   -- doc_ids / report: ids and counts only
+  PRIMARY KEY (pass_id, step));
+CREATE TABLE IF NOT EXISTS package_requests (
+  request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  quarter TEXT NOT NULL, channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
+  pass_id TEXT NOT NULL, pass_outcome TEXT, reason TEXT,
+  package_id INTEGER, delivery_id INTEGER,
+  token INTEGER, lease_at TEXT,
+  state TEXT NOT NULL CHECK (state IN ('snapshot', 'snapshot-done', 'built', 'staged',
+        'delivered', 'uncertain', 'failed', 'stopped', 'recovery-failed', 'revoked',
+        'withdrawn', 'superseded')),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state);
 CREATE TABLE IF NOT EXISTS probes (
   kind TEXT PRIMARY KEY, ok INTEGER NOT NULL, detail TEXT, data_json TEXT,
   observed_at TEXT NOT NULL, pass_id TEXT, failing_since TEXT);
@@ -208,7 +231,11 @@ CREATE TABLE IF NOT EXISTS deliveries (
   staged_path TEXT NOT NULL, request_id TEXT,
   status TEXT NOT NULL CHECK (status IN ('staged', 'delivered', 'uncertain', 'failed')),
   message_id TEXT, created_at TEXT NOT NULL, settled_at TEXT,
-  revoked_at TEXT);              -- an unsent first send an import superseded (fix E5)
+  revoked_at TEXT,               -- an unsent first send an import superseded (fix E5)
+  withdrawn_at TEXT);            -- staged bytes taken back when a stalled request was reclaimed
+-- every delivery has a path of its own: a holder that was superseded can never hold
+-- the path of a later copy
+CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_staged_path ON deliveries(staged_path);
 CREATE TABLE IF NOT EXISTS delivered_rows (
   package_id INTEGER NOT NULL, row_id INTEGER NOT NULL, pid INTEGER,
   facts_fp TEXT NOT NULL, kind TEXT, PRIMARY KEY (package_id, row_id));
@@ -236,6 +263,38 @@ MIGRATIONS: dict[int, list[str]] = {
         # a package built before it names no import: its first send is refused (rebuild)
         "ALTER TABLE packages ADD COLUMN snapshot_id INTEGER",
         "ALTER TABLE deliveries ADD COLUMN revoked_at TEXT"],
+    # 3 -> 4: a pass spans turns. Its steps and the claim that continues them live in
+    # the store, and a package request carries its own rotating token. Every delivery
+    # gets a staged path of its own; a v0.1.0 resend could reuse an earlier send's
+    # outbox name, so before the UNIQUE index goes on, every older row that shares a
+    # path with a newer one is renamed out of the way (the newest row owns the file).
+    3: ["ALTER TABLE pass_marker ADD COLUMN claimed_step TEXT",
+        "ALTER TABLE pass_marker ADD COLUMN lease_at TEXT",
+        "ALTER TABLE passes ADD COLUMN reply TEXT NOT NULL DEFAULT 'telegram'",
+        """CREATE TABLE IF NOT EXISTS pass_steps (
+  pass_id TEXT NOT NULL,
+  step TEXT NOT NULL CHECK (step IN ('sweep', 'judge', 'handover', 'snapshot')),
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  finished_by TEXT CHECK (finished_by IN ('specialist', 'resident')),
+  finish_json TEXT,
+  carry_json TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (pass_id, step))""",
+        """CREATE TABLE IF NOT EXISTS package_requests (
+  request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  quarter TEXT NOT NULL, channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
+  pass_id TEXT NOT NULL, pass_outcome TEXT, reason TEXT,
+  package_id INTEGER, delivery_id INTEGER,
+  token INTEGER, lease_at TEXT,
+  state TEXT NOT NULL CHECK (state IN ('snapshot', 'snapshot-done', 'built', 'staged',
+        'delivered', 'uncertain', 'failed', 'stopped', 'recovery-failed', 'revoked',
+        'withdrawn', 'superseded')),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+        "CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state)",
+        "ALTER TABLE deliveries ADD COLUMN withdrawn_at TEXT",
+        "UPDATE deliveries SET staged_path = staged_path || '#' || delivery_id WHERE delivery_id"
+        " NOT IN (SELECT max(delivery_id) FROM deliveries GROUP BY staged_path)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_staged_path ON deliveries(staged_path)"],
 }
 
 
