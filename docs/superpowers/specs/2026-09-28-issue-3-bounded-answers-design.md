@@ -66,6 +66,66 @@ the next page skip one. `total` and `counts` are over the whole list, not the pa
 
 **`list_unmatched_documents`**: the same page budget, document text fields clipped.
 
+## Revision 2 (after code round C1 on 3ea4edc: Astra DNS, Terra DNS)
+
+Round C1 found two holes, and both come from one bad assumption: that what the list holds
+stays well-behaved. (1) Verbatim fields (`row_snapshot`, the bank's counterparty, a KB
+link) are bounded only "in practice". A 24,000-character remittance or a long link made
+one item bigger than the page, and `budget.page` let it in anyway. (2) The cursor was the
+sort key of the last item shown, and that key can change. A `set_expectation` between
+pages moved an unvisited payment from optional to required, which put it behind the
+cursor. It was then never listed and never counted (`remaining` 0). Also,
+`list_unmatched_documents` cut its list with no way to fetch the rest.
+
+Revision 2 replaces both assumptions.
+
+**A. Every item has a size bound by construction.**
+- A listed item passes through `budget.bounded(item, 200)`, which clips every string in
+  it. Named exceptions: `link` is clipped at 500, and `upsert_counterparty` refuses a
+  `document_link` over 500 characters, so the stored value is bounded too.
+- Every list inside an item has a bound:
+  - `reasons` and `labels` come from fixed vocabularies.
+  - `search.last_queries` holds at most 3.
+  - `candidates` holds at most 3 summaries.
+  - `candidate_ids` lists every candidate's id: it is the set `resolves` must name, and
+    it is only integers.
+- `row_snapshot` leaves the listing. In its place goes `row_digest`: 16 hex characters,
+  the sha256 of the canonical `facts_of(live row)`. `record_match` and `propose_match`
+  take `row_digest`, and a digest that differs from the live row's is refused with the
+  message the snapshot mismatch gives today. `row_snapshot` is still accepted, for
+  existing callers. Exactly one of the two is required. The skill names only
+  `row_digest`. The facts the specialist judges from (amount, currency, date, the bank
+  texts clipped at 200) are all still in the item.
+- `budget.page` never admits an item over the page budget. Such an item raises an error
+  naming its pid. It is reachable only through more than about 1,000 candidates on one
+  payment. The test builds the largest item the clips allow and asserts it is under
+  `PAGE_BUDGET`.
+
+**B. A traversal never skips an item.**
+- `list_quarter_state(quarter=…)` pages in pid order, which never changes. Its cursor is
+  `after=[pid]`.
+- `list_unmatched_documents` pages in doc_id order and gains `after` / `next`.
+- Triage keeps its priority order (required first, then oldest), and that order can
+  change. So with a `pass_token` the traversal lives in the store:
+  - A table `triage_listed(token, pid)` records every pid a page has shown to that
+    token's holder.
+  - Each call first checks the token (a stale holder is refused, as for every pass
+    write). It then deletes the rows of other tokens and returns the next page, in the
+    current priority order, of triage items this token has not been shown yet.
+  - `remaining` counts the triage items not yet shown to this token.
+  - So a payment whose tier or date changes, or one that joins triage partway through,
+    is listed exactly once. A payment that leaves triage is simply not listed.
+  - Every claim rotates the token, so the judge step's holder starts a fresh traversal.
+  - Without a `pass_token`, triage answers only its first page (`remaining` is still
+    counted).
+- Schema 5 → 6 adds `triage_listed`. `tests/schema_history.py` freezes DDL_V5.
+- The continuation's `work` is computed at the claim and records nothing: the Gmail
+  round's list is not the specialist's traversal.
+
+Skill: the specialist lists triage again while `remaining` is above 0 and there is time,
+and finishes with the last page's `remaining`. It passes the item's `row_digest`. Ellen
+follows `next` in a quarter listing.
+
 ## The token is never lost again
 
 `continue_pass` measures its rendered answer inside the claiming transaction; above
