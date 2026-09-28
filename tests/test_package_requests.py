@@ -1061,5 +1061,52 @@ class TestALateDeliveryIsCheckedAgainstTheBank(Requests):
         self.assertIn("corrected by the bank", text)
 
 
+class TestReviewC6(Requests):
+    def test_a_late_delivered_report_tells_a_reclassification_too(self):
+        # K1: the delivered path runs the pass's own change detection, both halves
+        self.seed(1, documents=1)
+        self.assertEqual(len(sim.run_pass(self.conn, self.bf)["triage"]["matched"]), 1)
+        p, pkg, d = self.staged()
+        self.clock.advance(steps.LEASE_S)
+        r = self.claim()
+        self.call("mark_rendering_delivered", render_id=r["speak"]["render_id"])
+        rid = self.active()[0]["row_id"]
+        self.bf.call("untag_transaction", row_ids=[rid], tags=["software"])
+        self.classify(rid, "refund")
+        out = sim.run_pass(self.conn, self.bf)              # import and sweep: not delivered yet
+        if out["end"]["speak"]:
+            self.call("mark_rendering_delivered", render_id=out["end"]["speak"]["render_id"])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM alerts WHERE"
+                                           " kind='delivered-changed'").fetchone()[0], 0)
+        up = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="delivered")
+        changes = [json.loads(a[0])["change"] for a in self.conn.execute(
+            "SELECT detail FROM alerts WHERE kind='delivered-changed'")]
+        self.assertEqual(changes, ["reclassified"])
+        self.assertIn("now categorised differently", up["speak"]["text"])
+
+    def test_a_failed_send_stays_offered_in_the_status_view(self):
+        # K2: a delivered status view rebinds "send it again" — it must still offer the
+        # package whose send failed, by the same rule the notice follows
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        os.unlink(d["path"])
+        view = self.call("build_review", view="status", quarter="2026-Q3")
+        self.assertIn(pkg["filename"], view["text"])
+        self.assertIn("didn't go out", view["text"])
+        self.call("mark_rendering_delivered", render_id=view["render_id"])
+        again = self.call("stage_for_delivery", channel="telegram", resend=True)
+        self.assertEqual(again["filename"], pkg["filename"])
+
+    def test_a_revoked_send_is_not_offered_in_the_status_view(self):
+        self.seed(1, documents=1)
+        _, pkg, d = self.staged()
+        sim.run_pass(self.conn, self.bf)                     # revokes the unsent first send
+        view = self.call("build_review", view="status", quarter="2026-Q3")
+        self.assertNotIn(pkg["filename"], view["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

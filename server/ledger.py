@@ -101,14 +101,15 @@ def check_delivered_bank_half(conn, by_id: dict) -> int:
 
 
 def check_delivered_package(conn, package_id: int) -> list:
-    """The same check for ONE package that has just become delivered, against the
-    latest snapshot the store holds, inside the caller's transaction: a package
-    reported delivered after a newer import is compared with the bank now, not one
-    import late. Returns the new alerts' ids."""
+    """The pass's own change detection — BOTH halves, bank and classification —
+    for ONE package that has just become delivered, against what the store holds
+    now, inside the caller's transaction: a package reported delivered after a
+    newer import or sweep is compared with them now, not one pass late. Returns
+    the new alerts' ids."""
     pkg = conn.execute("SELECT package_id, quarter, filename FROM packages WHERE package_id=?",
                        (package_id,)).fetchall()
     by_id = {r["row_id"]: dict(r) for r in conn.execute("SELECT * FROM bank_rows")}
-    return _delivered_changes(conn, by_id, pkg)
+    return _delivered_changes(conn, by_id, pkg) + _kind_changes(conn, [package_id])
 
 
 def _delivered_changes(conn, by_id: dict, packages) -> list:
@@ -388,18 +389,26 @@ def check_delivered_kind_half(conn, pid: int) -> int:
     belongs to this lineage when its pid RESOLVES to it (as in
     check_delivered_bank_half). An ended lineage derives no kind: an erased
     one is reported once as "erased" by the bank half."""
-    pid = lineage.resolve_pid(conn, pid)
-    p = lineage.projection(conn, pid)
-    if p["exp_kind"] is None or p["ended"]:
-        return 0
-    new = 0
+    latest = [r[0] for r in conn.execute(
+        "SELECT max(p2.package_id) FROM packages p2 JOIN deliveries d2"
+        " ON d2.package_id=p2.package_id AND d2.status='delivered' GROUP BY p2.quarter")]
+    return len(_kind_changes(conn, latest, pid))
+
+
+def _kind_changes(conn, package_ids, pid=None) -> list:
+    """The classification half over `package_ids`' delivered rows (only those of the
+    lineage `pid`, when given). Returns the new alerts' ids."""
+    new = []
+    marks = ",".join("?" * len(package_ids)) or "NULL"
     for d in conn.execute(
             "SELECT d.*, pk.filename, pk.quarter FROM delivered_rows d JOIN packages pk"
             " ON pk.package_id=d.package_id WHERE d.pid IS NOT NULL AND d.package_id IN"
-            " (SELECT max(p2.package_id) FROM packages p2 JOIN deliveries d2"
-            "  ON d2.package_id=p2.package_id AND d2.status='delivered' GROUP BY p2.quarter)"
-            " ORDER BY d.package_id, d.row_id").fetchall():
-        if lineage.resolve_pid(conn, d["pid"]) != pid or d["kind"] is None \
+            f" ({marks}) ORDER BY d.package_id, d.row_id", list(package_ids)).fetchall():
+        own = lineage.resolve_pid(conn, d["pid"])
+        if pid is not None and own != lineage.resolve_pid(conn, pid):
+            continue
+        p = lineage.projection(conn, own)
+        if p["exp_kind"] is None or p["ended"] or d["kind"] is None \
                 or d["kind"] == p["exp_kind"]:
             continue
         key = f"delivered:{d['package_id']}:{d['row_id']}:kind:{p['exp_kind']}"
@@ -408,5 +417,6 @@ def check_delivered_kind_half(conn, pid: int) -> int:
                            (key, db.canonical({"package": d["filename"], "quarter": d["quarter"],
                                                "row_id": d["row_id"], "change": "reclassified"}),
                             db.now()))
-        new += cur.rowcount
+        if cur.rowcount:
+            new.append(cur.lastrowid)
     return new

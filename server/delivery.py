@@ -454,13 +454,17 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
         return out
 
 
-def offer_lines(filename: str) -> list:
-    """The words that offer a package whose send may not have arrived — the same
-    in the status view and in the package notice record_delivery raises."""
+def offer_lines(filename: str, status: str = "uncertain") -> list:
+    """The words that offer a package whose send may not have arrived (or, for a
+    send that failed, did not go out) — the same in the status view and in the
+    package notice record_delivery raises."""
+    if status == "failed":
+        return [f"{filename} didn't go out —", 'say "send it again".']
     return [f"{filename} may not have arrived —", 'say "send it again".']
 
 
-_LATEST = ("SELECT d.package_id, d.status, p.filename, p.quarter FROM deliveries d JOIN packages p"
+_LATEST = ("SELECT d.package_id, d.status, d.revoked_at, p.filename, p.quarter FROM deliveries d"
+           " JOIN packages p"
            " ON p.package_id=d.package_id WHERE d.delivery_id IN (SELECT max(delivery_id) FROM"
            " deliveries WHERE package_id IS NOT NULL GROUP BY package_id)")
 
@@ -484,17 +488,29 @@ def resendable(conn, quarter=None):
     return None
 
 
-def uncertain(conn, quarter=None) -> list:
-    """Packages whose most recent send is uncertain (offered in words), as
-    (package_id, filename), oldest package first; `quarter` scopes them to a
-    quarter-scoped view."""
-    sql, args = (_LATEST + " AND d.status='uncertain' AND NOT EXISTS (SELECT 1 FROM deliveries"
-                 " a WHERE a.package_id=d.package_id AND a.status='delivered')"), []
+# THE rule for a package still owed "send it again": its most recent send is uncertain,
+# or failed and not revoked (a revoked send is rebuilt, never resent), and the package
+# has not arrived by any send. The status view's offers and resend_target both use it.
+_OFFERABLE = (_LATEST + " AND (d.status='uncertain' OR (d.status='failed' AND d.revoked_at IS"
+              " NULL)) AND NOT EXISTS (SELECT 1 FROM deliveries a WHERE"
+              " a.package_id=d.package_id AND a.status='delivered')")
+
+
+def offerable(conn, quarter=None) -> list:
+    """Packages owed "send it again" (_OFFERABLE), as (package_id, filename, status),
+    oldest package first; `quarter` scopes them to a quarter-scoped view."""
+    sql, args = _OFFERABLE, []
     if quarter:
         sql += " AND p.quarter=?"
         args.append(quarter)
-    return [(r["package_id"], r["filename"])
+    return [(r["package_id"], r["filename"], r["status"])
             for r in conn.execute(sql + " ORDER BY d.package_id", args)]
+
+
+def uncertain(conn, quarter=None) -> list:
+    """The offerable packages whose most recent send is uncertain, as (package_id,
+    filename)."""
+    return [(pid, f) for pid, f, st in offerable(conn, quarter) if st == "uncertain"]
 
 
 def resend_target(conn) -> int:
@@ -508,12 +524,11 @@ def resend_target(conn) -> int:
     offered = json.loads(last["scope_json"]).get("offers", []) if last else []
     waiting, came = [], []
     for pid in offered:
-        r = conn.execute(_LATEST + " AND d.package_id=?", (pid,)).fetchone()
-        if r is None:
-            continue
         if arrived(conn, pid) is not None:
             came.append(pid)
-        else:
+            continue
+        r = conn.execute(_OFFERABLE + " AND d.package_id=?", (pid,)).fetchone()
+        if r is not None:
             waiting.append(r)
     if not waiting:
         if came:

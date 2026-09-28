@@ -1138,6 +1138,15 @@ to a lost one. Once it is marked delivered, it is never offered again.
 call must carry (`must=`) are printed first, but when they alone exceed one Telegram
 message the fit cuts them: those that do not fit are deferred to the next rendering,
 never lost. It was reproduced only with 50 packages staged across 50 quarters at once.
+The same holds for one package with many simultaneous corrections: 90 changes to one
+package overflowed one rendering, and the 17 that did not fit came with the next
+(accepted, code review C6).
+
+**R7 — an offer already in Ellen's hands (accepted, code review C6).** A rendering handed
+to Ellen that still says "send it again" can be sent after the package arrived: the
+server cannot recall text Ellen already holds. If the operator acts on it,
+`resend_target` answers that the package did arrive and resends nothing — truthful, and
+no second copy.
 
 **Q1 — release number.** Two tools, three new tool arguments and a migration suggest
 v0.2.0. Any bump changes `WORKFLOW` to `acct@<new>`, and `check_setup` then reports
@@ -1282,3 +1291,21 @@ A package reported delivered is compared with the bank in that same transaction
 (`ledger.check_delivered_package`), and the changes are in `record_delivery`'s `speak`:
 a report that arrives after a newer import no longer raises "a delivered quarter
 changed" one import late. Accepting such an upgrade stays correct: it did arrive.
+
+### Round C6
+
+- **A delivered package is checked by the pass's own change detection, both halves.**
+  The classification half (`ledger._kind_changes`) and the bank half
+  (`ledger._delivered_changes`) are each one function over a set of packages. The pass
+  runs them at its own moments (the bank half at the import, the classification half
+  at each sweep read, over the latest delivered package of each quarter);
+  `ledger.check_delivered_package`, which `record_delivery(delivered)` calls, runs both
+  for the package that just became delivered. A reclassification already known when a
+  late delivered report arrives is told in that report's `speak`, not a pass later.
+- **One rule for "owed send it again".** `delivery._OFFERABLE`: the package's most
+  recent send is `uncertain`, or `failed` and not revoked, and the package has not
+  arrived. The status view's offer block (`delivery.offerable`, its words by status:
+  "may not have arrived" / "didn't go out") and `resend_target` both use it, so a
+  delivered status view never rebinds "send it again" away from a package whose send
+  failed. A revoked send is rebuilt, never resent, and is not offered.
+- Accepted as residuals: R6 (extended) and R7.
