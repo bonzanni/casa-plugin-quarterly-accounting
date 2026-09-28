@@ -32,7 +32,21 @@ OPERATOR_LINES = (
     "Filed, but I can't read an amount from it — is it EUR 12.10?",
     "Nothing more to show.",
     "Filed. Nothing in Q3 is close to EUR 340.00. Is this for a different quarter?",
+    # issue #2: the pending lines, the answers to a notice and to busy, the handover cases
+    "Checking the bank — this takes a few minutes; I'll send the result here.",
+    "Filed. Checking it against the payments — I'll tell you shortly.",
+    "Reading the bank first — the <quarter> package follows in a few minutes.",
+    "A check is running — ask again in a few minutes.",
+    "A check is running — started N minutes ago.",
+    "Ask again in a few minutes.",
+    "Filed. It could fit more than one payment — it's in 'anything I should check?'.",
+    "Filed. I'll match it at the next check.",
 )
+OUTCOME_RULE = ("The outcome for `end_pass`: `stopped` when `can_run` is false or the step's "
+                "finish says `stopped`; `failed` when the step ended unfinished and nothing was "
+                "imported this pass; `interrupted` when anything remains (`remaining_in_cycle`, "
+                "`triage_remaining`, `work` truncated or `not_fresh`, an item not searched) or "
+                "the step ended unfinished after the import; `complete` otherwise.")
 
 
 class TestSkill(TempEnv):
@@ -56,7 +70,8 @@ class TestSkill(TempEnv):
                                         "instructions", "speak", "reshow", "true", "false",
                                         "bank_writes", "request_id", "labels", "runners_up",
                                         "can_run", "remaining_in_cycle", "erase_candidates",
-                                        "expected_ledger", "receipt_pages", "not_fresh"}:
+                                        "expected_ledger", "receipt_pages", "not_fresh",
+                                        "time_up", "wrap_up", "time_left_s"}:
                 continue
             if "_" in n:
                 self.assertIn(n, ours | EXTERNAL, n)
@@ -150,7 +165,7 @@ class TestSkill(TempEnv):
         self.assertIn("`receipt_pages` — send EVERY page, in order", SKILL)
 
     def test_the_gmail_probe_is_always_made(self):
-        rnd = self.section("**Gmail round.**", "\n5. ")
+        rnd = self.section("**Gmail round.**", "\n5. If anything was filed")
         self.assertIn("Always make the Gmail probe first", rnd)
         self.assertNotIn("skip it when", rnd)
 
@@ -183,7 +198,7 @@ class TestSkill(TempEnv):
         # round E1 (Astra S1): only the sweep's reads refresh the classification
         pack = " ".join(self.section("## Packaging", "## Install").split())
         order = ["the snapshot of step 3", "the ends of step 4", "the sweep of step 5",
-                 "`end_pass`", "`build_quarterly_package(quarter)`"]
+                 "`end_pass`", "`build_quarterly_package(quarter, package_token)`"]
         positions = [pack.index(k) for k in order]
         self.assertEqual(positions, sorted(positions))
         doc = " ".join(self.section("## Ellen: a document the operator hands over",
@@ -229,14 +244,17 @@ class TestSkill(TempEnv):
     # --- fix wave F -----------------------------------------------------------------------
     def test_ellen_holds_the_package_and_handover_passes(self):
         # (5) a delegation that dies must not strand the marker: Ellen begins and ends
-        for head, until, trigger in (("## Ellen: a document the operator hands over",
-                                      "## Ellen: the pass", "handover"),
-                                     ("## Packaging", "## Install", "package")):
+        for head, until, begin in (("## Ellen: a document the operator hands over",
+                                    "## Ellen: the pass", 'begin_pass(trigger="handover")'),
+                                   ("## Packaging", "## Install",
+                                    'begin_pass(trigger="package", reply="telegram")')):
             sec = " ".join(self.section(head, until).split())
-            self.assertIn(f'`begin_pass(trigger="{trigger}")` yourself', sec, head)
+            self.assertIn(f"`{begin}` yourself", sec, head)
+            self.assertLess(sec.index("`continue_pass()`"), sec.index(f"`{begin}`"), head)
             self.assertRegex(sec.lower(), r"then `end_pass(\([^)]*\))?` yourself", head)
             self.assertIn("never calls `begin_pass` or `end_pass` here", sec, head)
-            self.assertIn("`failed` if the delegation errored or ran out of turns", sec, head)
+            self.assertIn("by the outcome rule above", sec, head)
+            self.assertNotIn("ran out of turns", sec, head)
         spec = " ".join(self.section("## The specialist's pass", "## Packaging").split())
         self.assertNotIn("begin_pass(", spec)
 
@@ -255,8 +273,76 @@ class TestSkill(TempEnv):
 
     def test_a_post_triage_sweep_mirrors_what_triage_decided(self):
         # aligned to tests/sim.run_pass: triage, then the sweep once more
-        ident = " ".join(self.section("7. **Identity", "8. **Return").split())
+        ident = " ".join(self.section("7. **Identity", "8. **Finish").split())
         self.assertIn("run it once more", ident)
+
+    # --- issue #2: a pass that outlives its delegation ------------------------------------
+    def test_a_delegation_that_answers_later(self):
+        flat = " ".join(SKILL.split())
+        self.assertIn("a system notification says a delegation to the finance specialist "
+                      "returned or failed", SKILL.split("---")[1])
+        later = " ".join(self.section("## Ellen: a delegation that answers later",
+                                      "## Ellen: answering anything").split())
+        for phrase in ("call `continue_pass()` first", "every continuation gets a NEW token",
+                       "Never use a token, step or work list from an earlier turn or from the "
+                       "notification", "this pass is no longer the current one",
+                       "this package request has been taken over"):
+            self.assertIn(phrase, later, phrase)
+        self.assertIn(OUTCOME_RULE, flat)
+        self.assertNotIn("`failed` if the delegation errored or ran out of turns", flat)
+        import tools  # noqa: F401
+        # the tool the model reads at the moment it gets the new token says it too
+        self.assertIn("use only that one from now on",
+                      qa_server.TOOLS["continue_pass"]["description"])
+
+    def test_every_flow_continues_before_it_begins_and_starts_its_step(self):
+        for head, until, step in (("## Ellen: a document the operator hands over",
+                                   "## Ellen: the pass", "handover"),
+                                  ("## Ellen: the pass", "## The specialist's pass", "sweep"),
+                                  ("## Packaging", "## Install", "snapshot")):
+            sec = " ".join(self.section(head, until).split())
+            self.assertLess(sec.index("`continue_pass()`"), sec.index("`begin_pass("), head)
+            start = sec.index(f'record_step(pass_token, step="{step}", action="start"')
+            self.assertLess(sec.index("`begin_pass("), start, head)
+            self.assertIn("`status: pending`", sec, head)
+
+    def test_the_gmail_round_works_from_the_store(self):
+        rnd = " ".join(self.section("**Gmail round.**", "\n5. If anything was filed").split())
+        self.assertIn("The work list is the continuation's `work`", rnd)
+        self.assertIn("never a list from the specialist's reply", rnd)
+        for field in ("`search_hint`", "`window_days`", "`has:attachment`", "search Sent"):
+            self.assertIn(field, rnd, field)
+        self.assertNotIn("work order", SKILL)
+
+    def test_the_handover_reads_the_recorded_pairing(self):
+        doc = " ".join(self.section("## Ellen: a document the operator hands over",
+                                    "## Ellen: the pass").split())
+        self.assertIn("from the continuation's `documents`", doc)
+        self.assertIn("Never infer a match", doc)
+
+    def test_the_specialist_finishes_inside_the_clock(self):
+        spec = " ".join(self.section("## The specialist's pass", "## Packaging").split())
+        self.assertIn("Your last action, always — done, stopped or out of time — is "
+                      "`record_step(pass_token, step=<the step Ellen named>, "
+                      "action=\"finish\", remaining_in_cycle=…, triage_remaining=…)`", spec)
+        self.assertIn("the first line being `quarterly-accounting: <step> finished`", spec)
+        self.assertIn("If a write answers that this pass is no longer the current one, stop "
+                      "and return: the pass has moved on and your recorded work is kept.", spec)
+        sweep = " ".join(self.section("5. **Sweep.**", "6. **Triage.**").split())
+        self.assertIn("until `remaining_in_cycle` is 0 or `time_up`", sweep)
+        self.assertNotIn("turn budget", spec)
+        self.assertIn("`list_quarter_state(triage=true, pass_token=…)`", spec)
+        self.assertIn("`upsert_counterparty(name, search_hint=…, pass_token=…)`", spec)
+
+    def test_package_continuations_never_resend(self):
+        pack = " ".join(self.section("## Packaging", "## Install").split())
+        self.assertIn("Its answer carries `package_token` and `next`", pack)
+        self.assertIn("Never send the file again yourself", pack)
+        self.assertIn("never write a failure line of your own", pack)
+        self.assertIn('`send_media(path, kind="zip", filename=<the returned filename>',
+                      pack)
+        self.assertIn("Every `speak` that `end_pass` or `continue_pass` returns is sent and "
+                      "marked delivered, including on a cron turn.", pack)
 
     def test_the_quarter_format_and_the_uncertain_offer(self):
         self.assertIn('("give me Q3" is `quarter="Q3"`)', " ".join(SKILL.split()))

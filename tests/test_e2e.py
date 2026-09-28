@@ -446,7 +446,8 @@ class ToolFlow(Base):
                     else:
                         bf.call("add_note", row_ids=[row_id], note=ins["add_note"],
                                 author="agent", **kw)
-            if page["remaining_in_cycle"] == 0 or (budget is not None and n >= budget):
+            if page["remaining_in_cycle"] == 0 or (budget is not None and n >= budget) \
+                    or page["time_up"]:
                 return page["remaining_in_cycle"]
 
     def snapshot_pass(self, trigger="package"):

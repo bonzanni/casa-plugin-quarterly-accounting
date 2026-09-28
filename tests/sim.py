@@ -3,8 +3,9 @@
 bank-feed (tests/bankfeed.py). This is the executable reference for the
 procedure SKILL.md prescribes; the skill must say exactly this, in words:
 
-  list_projections -> for each item (until remaining_in_cycle is 0 or the room runs
-  out; triage then judges only fresh items — sweep_within, run_pass(sweep_budget=...)):
+  list_projections -> for each item (until remaining_in_cycle is 0, `time_up`, or the
+  room runs out; triage then judges only fresh items — sweep_within,
+  run_pass(sweep_budget=...)):
     get_transaction(row_id); "no transaction #N" -> record_observation(not_found)
     else record_observation(observed_tags, observed_notes, observed_first_seen)
     every record_observation carries list_projections' snapshot_id (the import's
@@ -80,7 +81,7 @@ def sweep_cycle(conn, bf, token, limit=25, quarter=None) -> int:
         for item in page["projections"]:
             observe_and_repair(conn, bf, token, item, page["snapshot_id"])
             n += 1
-        if page["remaining_in_cycle"] == 0:
+        if page["remaining_in_cycle"] == 0 or page["time_up"]:
             return n
 
 
@@ -94,7 +95,7 @@ def sweep_within(conn, bf, token, budget) -> int:
         for item in page["projections"]:
             observe_and_repair(conn, bf, token, item, page["snapshot_id"])
             n += 1
-        if page["remaining_in_cycle"] == 0 or n >= budget:
+        if page["remaining_in_cycle"] == 0 or n >= budget or page["time_up"]:
             return page["remaining_in_cycle"]
 
 

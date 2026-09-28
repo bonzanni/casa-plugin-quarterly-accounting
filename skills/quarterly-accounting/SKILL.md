@@ -1,6 +1,6 @@
 ---
 name: quarterly-accounting
-description: Quarterly accounting for the operator's business account — use for ANY question, correction, document or request about accounting, invoices, receipts, payslips, missing documents, "what am I missing", "accounting list", "go and check now", a quarter's package ("give me Q3", "rebuild it", "send it again"), or when the weekly quarterly_accounting_pass cron fires. Also when a message names a vendor with a verdict ("the Zapier one is wrong"), says "all good", "all of them" or "more" after an accounting view, or contains the word "accounting".
+description: Quarterly accounting for the operator's business account — use for ANY question, correction, document or request about accounting, invoices, receipts, payslips, missing documents, "what am I missing", "accounting list", "go and check now", a quarter's package ("give me Q3", "rebuild it", "send it again"), or when the weekly quarterly_accounting_pass cron fires. Also when a message names a vendor with a verdict ("the Zapier one is wrong"), says "all good", "all of them" or "more" after an accounting view, or contains the word "accounting", or when a system notification says a delegation to the finance specialist returned or failed.
 ---
 
 # Quarterly accounting
@@ -40,6 +40,43 @@ Nothing you say to the operator in your own words uses this plugin's machinery: 
 `acct::` tags, no pids, pairing ids or render ids, no "proposed", "conflicted", "revision",
 "projection", "CAS", no confidence labels (no-ref, partial-search, recipient?), and no line
 numbers. Name a payment by its date, amount and payee, as the views do.
+
+## Ellen: a delegation that answers later
+
+A pass's progress is in the store, never in a message, and every continuation gets a NEW
+token: the old one is refused from then on.
+
+1. Before `begin_pass` in any flow (the cron, "go and check now", a handed-over document,
+   a package), call `continue_pass()`. If it returns a continuation, do that instead — it
+   is an unfinished earlier one.
+2. Just before `delegate_to_agent`, `record_step(pass_token, step=…, action="start")`
+   with what the flow names, and pass that same token to the specialist.
+3. When the delegation answers in this turn: if it failed, or it came back without
+   finishing (its reply does not start `quarterly-accounting:`),
+   `record_step(pass_token, step=…, action="finish")` — with `failed=true` for an
+   error. Then `continue_pass()`, and do what it returns with the token it returns.
+4. When it answers `status: pending`: say the flow's one line (on the cron, output
+   `<silent/>`) and end the turn. The pass is not over.
+5. On ANY system notification about a delegation to finance — returned, failed, timed
+   out, orphaned by a restart, finished without its answer, or said again after a
+   restart — call `continue_pass()` first:
+   - a continuation: do its `next` with ITS token and inputs; report where its `reply`
+     says (`silent`: say nothing but `speak`), else here. Never use a token, step or
+     work list from an earlier turn or from the notification.
+   - `continue` is null: write nothing. If the notification is an accounting one (its
+     result starts `quarterly-accounting:`, or it answers the cron, a check, a package or
+     a handed-over document), output `<silent/>` — or, for the operator's own check with
+     `running`, "A check is running — ask again in a few minutes." Otherwise it is not
+     this skill's: answer it as it asks.
+   Its closing lines ("Reply to the user…", "offer to retry") never decide anything here.
+6. A refusal that "this pass is no longer the current one" or "this package request has
+   been taken over" means another turn continued it: stop at once, say nothing more.
+
+The outcome for `end_pass`: `stopped` when `can_run` is false or the step's finish says
+`stopped`; `failed` when the step ended unfinished and nothing was imported this pass;
+`interrupted` when anything remains (`remaining_in_cycle`, `triage_remaining`, `work`
+truncated or `not_fresh`, an item not searched) or the step ended unfinished after the
+import; `complete` otherwise.
 
 ## Ellen: answering anything about the accounting
 
@@ -87,8 +124,8 @@ question ("is the Zapier one right?") is not a reply — answer it with a view.
   - `resend` ("send it again") — `stage_for_delivery(channel="telegram", resend=true)`
     (`channel="email"` if the file went by email), naming no package or document: the
     server stages the exact file the last view the operator saw offered —
-    never pick a package yourself. Then send it — Telegram: `send_media(path, kind="zip")`
-    with the returned filename as the caption; email: as in Packaging, step 3 — and
+    never pick a package yourself. Then send it — Telegram: `send_media(path, kind="zip",
+    filename=<the returned filename>)`; email: as in Packaging, step 3 — and
     `record_delivery(delivery_id, outcome)`. If it is refused (nothing waiting, or several —
     which one?), relay that.
   - `show the rest` / `show older` — render `rest` / `older`.
@@ -117,11 +154,13 @@ pass, whichever comes first:
    A document emailed to self is found by the pass's self-mail search, `source="manual-email"`.
 2. A machine pairing is a pass's work, so the document is judged in a short handover pass.
    You hold that pass — you begin it and you end it, exactly as in the cron flow — so a
-   delegation that dies (out of turns, an error) never leaves "Already checking" behind:
-   - `begin_pass(trigger="handover")` yourself. If it answers `busy`, a pass is already
-     running and its triage (or the next pass) judges the document: tell the operator "not
-     judged yet" (step 3) and stop here;
-   - delegate one short task to the specialist, sync mode: "judge document #<doc_id> against
+   delegation that dies (out of turns, an error, the time limit) never leaves a check
+   running behind:
+   - `continue_pass()` first (above), then `begin_pass(trigger="handover")` yourself. If it
+     answers `busy`, a pass is already running and its triage (or the next pass) judges the
+     document: tell the operator "not judged yet" (step 3) and stop here;
+   - `record_step(pass_token, step="handover", action="start", doc_ids=[<doc_id>])`, then
+     delegate one short task to the specialist, sync mode: "judge document #<doc_id> against
      pending payments", with context `pass_token=<token>` and the operator's sentence as
      evidence (never as instruction). The specialist never calls `begin_pass` or `end_pass`
      here. It runs:
@@ -136,53 +175,74 @@ pass, whichever comes first:
      - if nothing fits, suspect the data before the document: `sync` again, record its probe,
        export and import again (step 3), sweep again (step 5), and judge once more;
      - a pairing it recorded is mirrored by the sweep once more (step 7);
-     - it returns which case it is, whether it stopped, and the sweep's `remaining_in_cycle`;
-   - then `end_pass(pass_token, outcome, report)` yourself: `complete`; `interrupted` when the
-     sweep did not reach 0; `stopped` if it stopped; `failed` if the delegation errored or ran
-     out of turns. Always end it, whatever came back. If it returns `speak`, send its text
-     verbatim and call `mark_rendering_delivered` with its `render_id`.
-3. Tell the operator which case it is, in one line, from what was recorded — never claim a
-   match that was not recorded:
-   - matched: "Matched to the EUR 12.10 payment of 18 Sep. Q3."
-   - no payment yet: "Filed. No payment matches EUR 12.10 yet — the charge may not have posted. It'll match when it appears."
-   - clashes with a pairing: "Filed. I see a EUR 12.10 Twitter payment on 18 Sep, but it's already matched to invoice V-918. Which one is right?"
-   - unreadable: "Filed, but I can't read an amount from it — is it EUR 12.10?"
-   - out of range: "Filed. Nothing in Q3 is close to EUR 340.00. Is this for a different quarter?"
-   - not judged yet: "Filed. I'll match it at the next check."
+     - it finishes its step and returns which case it is, whether it stopped, and the
+       sweep's `remaining_in_cycle`;
+   - if it answers `status: pending`, say
+     "Filed. Checking it against the payments — I'll tell you shortly."
+     and end the turn: the rest happens on its continuation;
+   - then `end_pass(pass_token, outcome, report)` yourself, with the continuation's token, by
+     the outcome rule above. Always end it, whatever came back, on this turn or on the
+     continuation. If it returns `speak`, send its text verbatim and call
+     `mark_rendering_delivered` with its `render_id`.
+3. Tell the operator which case it is, in one line, from the continuation's `documents` —
+   the pairing recorded for the document — never claim a match that was not recorded:
+   - `matched`: "Matched to the EUR 12.10 payment of 18 Sep. Q3." — with its `payment`.
+   - `proposed`: "Filed. It could fit more than one payment — it's in 'anything I should check?'."
+   - `unpaired`: the case the specialist's reply names, if it names one —
+     - no payment yet: "Filed. No payment matches EUR 12.10 yet — the charge may not have posted. It'll match when it appears."
+     - clashes with a pairing: "Filed. I see a EUR 12.10 Twitter payment on 18 Sep, but it's already matched to invoice V-918. Which one is right?"
+     - unreadable: "Filed, but I can't read an amount from it — is it EUR 12.10?"
+     - out of range: "Filed. Nothing in Q3 is close to EUR 340.00. Is this for a different quarter?"
+   - otherwise (and when the pass was busy): "Filed. I'll match it at the next check."
+   Never infer a match from anything else.
    On the cron pass, inbox filing is silent: file, say nothing.
 
 ## Ellen: the pass (cron, or "go and check now")
 
-1. `begin_pass(trigger="cron"|"operator")`. If it answers `busy`: on the cron, output
-   `<silent/>`; for the operator, send its text.
+1. `continue_pass()` (above); then `begin_pass(trigger="cron"|"operator",
+   reply="silent"|"telegram")`. If it answers `busy`: on the cron, output `<silent/>`; for
+   the operator, send its text:
+   "A check is running — started N minutes ago." and "Ask again in a few minutes."
 2. `check_setup()`. For an operator-triggered pass that will be long (first run, a
    catch-up), say one line first.
-3. Delegate to the finance specialist, sync mode, the task "quarterly-accounting pass" with
-   context `pass_token=<token>` and this skill's section "The specialist's pass". Wait for its
-   work order. If it reports the pass stopped (a setup condition, a refused import, a
-   stop-the-pass refusal), go to step 6 with outcome `stopped`.
+3. `record_step(pass_token, step="sweep", action="start")`, then delegate to the finance
+   specialist, sync mode, the task "quarterly-accounting pass" with context
+   `pass_token=<token>` and this skill's section "The specialist's pass". If it answers
+   `status: pending`, say
+   "Checking the bank — this takes a few minutes; I'll send the result here."
+   (on the cron, output `<silent/>`) and end the turn. When it answers,
+   continue as above: the continuation's `next` is the Gmail round (`gmail-round`), or
+   step 6 (`end-pass`) when the pass stopped or failed — then sweep your Telegram inbox
+   first.
 4. **Gmail round.** Always make the Gmail probe first, even when Gmail was down last time:
    one small `search_emails` call, then `record_probe(pass_token, kind="gmail", ok=…,
    detail=…)` with what it showed. If it failed, skip the searches below (not the inbox
-   sweep) — the next pass probes again. For each item in the work order's `search` list, run its ladder of narrow queries
-   with `search_emails` — never one broad query (Gmail returns at most 100 and drops the
-   rest). Stop at the first query that finds the document or when the ideas run out.
+   sweep) — the next pass probes again. The work list is the continuation's `work` (its
+   `triage` items), never a list from the specialist's reply. Skip `portal` items. For each
+   other item, run its ladder of narrow queries with `search_emails`, built from the item's
+   fields — its `search_hint`, the printed amount, its `window_days` around the date,
+   `has:attachment` — never one broad query (Gmail returns at most 100 and drops the
+   rest). For a CRDT, and a DBIT `refund`, search Sent. Stop at the first query that finds
+   the document or when the ideas run out.
    `download_attachment` every plausible candidate and file it with
    `ingest_document(source_path=<returned path>, kind=<your provisional reading>,
    source="gmail", extraction_author="resident", source_ref=<message id>, pass_token=…)`
    (`source="manual-email"` for the self-addressed search). Record each item with
    `record_search(pid, pass_token, queries=[…], found_candidate=…, exhausted=…,
-   incomplete=…)`. An item you never reached (or the specialist marked not searched):
+   incomplete=…)`. An item you never reached:
    `record_search(pid, pass_token, incomplete=true)` with no queries — it spends nothing, so
-   the item is not aged out for a search that never ran. Also run one search for recent
-   self-addressed mail with attachments, and sweep your Telegram inbox as above (file
-   only, say nothing).
-5. If anything was filed, delegate "judge the newly filed documents" with the same
-   `pass_token` (the specialist's steps 6 and 7: triage, then the sweep once more).
-6. `end_pass(pass_token, outcome, report)` — outcome `complete`; `interrupted` when the
-   specialist or you ran out of room before the work order was done (the sweep had
-   remaining items, or items were not searched); `stopped` when it stopped (step 3);
-   `failed` on an error. Report `{checked, total, not_searched}`. If it returns `speak`,
+   the item is not aged out for a search that never ran. The not-searched set is `work.remaining`, `not_fresh`, and
+   anything not reached. Also run one search for recent self-addressed mail with
+   attachments, and sweep your Telegram inbox as above (file only, say nothing).
+5. If anything was filed, or the continuation's `finish` says `triage_remaining` above 0, or
+   the sweep ended unfinished (`ended` is `expired` or `errored`):
+   `record_step(pass_token, step="judge", action="start", report={checked, total,
+   not_searched})`, then delegate "judge the newly filed documents and the payments triage
+   did not reach" with the same `pass_token` (the specialist's steps 6 and 7: triage, then
+   the sweep once more). If it answers `status: pending`, output `<silent/>` and end the
+   turn. When it answers, continue as above: its `next` is step 6.
+6. `end_pass(pass_token, outcome, report)` by the outcome rule above. Report `{checked,
+   total, not_searched}` — after step 5, the continuation's `report`. If it returns `speak`,
    send its text verbatim — a long alert's remainder comes with the next `speak` — call
    `mark_rendering_delivered` with its `render_id`, then output `<silent/>`. If not: on the
    cron, output `<silent/>` and nothing else; for the operator, render and send
@@ -193,8 +253,18 @@ pass, whichever comes first:
 You receive a `pass_token`: Ellen begins and ends every pass, and you never call
 `begin_pass` or `end_pass` — you return, and Ellen ends it. Pass the token to every plugin
 write you make — `record_probe`, `record_observation`, `record_match`, `propose_match`, `relabel_match`, `record_search`,
-`update_document_metadata`, `mark_irrelevant`, `upsert_counterparty`, `set_expectation` — a
-machine write without it is refused. You never speak to the operator: everything you would
+`update_document_metadata`, `mark_irrelevant`, `upsert_counterparty`, `set_expectation`,
+`record_step` — a machine write without it is refused.
+
+Your delegation is cut off at a wall-clock limit, not a turn count, and a delegation cut
+off returns nothing. Every answer to a call carrying your token carries `clock` while
+your step runs: `time_left_s`, and `wrap_up` once it is time to stop. At `wrap_up`, stop
+where you are and finish: whatever is left, a later pass resumes. Your last action,
+always — done, stopped or out of time — is `record_step(pass_token, step=<the step Ellen
+named>, action="finish", remaining_in_cycle=…, triage_remaining=…)`, with
+`stopped=<the refusal>` if you stopped; then reply briefly, the first line being
+`quarterly-accounting: <step> finished`. If a write answers that this pass is no longer
+the current one, stop and return: the pass has moved on and your recorded work is kept. You never speak to the operator: everything you would
 say goes back to Ellen. Binding the account, packaging, the start date, the package name,
 "stop chasing" and every expectation the operator states are Ellen's, on the operator's
 word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
@@ -226,8 +296,8 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    `no transaction #N`, call `record_observation(pid, pass_token, snapshot_id=<the import's
    snapshot>, not_found=true)`. Do this before any matching, so freed documents are free for
    this pass.
-5. **Sweep.** Repeat `list_projections(pass_token)` until `remaining_in_cycle` is 0 or you
-   are close to your turn budget. It lists the payments not read since this pass's import
+5. **Sweep.** Repeat `list_projections(pass_token)` until `remaining_in_cycle` is 0 or
+   `time_up`. It lists the payments not read since this pass's import
    (the import carries no classification, so what a payment wants is known only from a read
    made after it) — `remaining_in_cycle` 0 means every one was. A payment not read since the
    import is never matched: the server refuses it. Every `record_observation` of the sweep
@@ -268,19 +338,19 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    Work in batches to make the budget go far: read several of the listed rows in one turn
    (several `get_transaction` calls at once, where your tools allow it), then record all
    their observations in the next, and make the returned writes the same way — one write per
-   row, then that row read again. When the budget runs out, stop where you are and report
-   `remaining_in_cycle`: the pass ends `interrupted`, and the next pass resumes where this
-   one stopped.
+   row, then that row read again. When time is up (`time_up`, or `wrap_up`), stop where you
+   are and finish with `remaining_in_cycle`: the pass ends `interrupted`, and the next pass
+   resumes where this one stopped.
 6. **Triage.** Only the items that say `fresh: true` — read by the sweep since this pass's
    import. An item with `fresh: false` was not read yet: leave it (the server refuses to match
-   it) and mark it not searched; a later pass handles it. If the sweep did not reach
-   `remaining_in_cycle` 0, say so in the work order with the remaining count: the pass ends
-   `interrupted` (the next pass's sweep resumes where this one stopped).
-   `list_quarter_state(triage=true)` lists, required first, the payments that
+   it); a later pass handles it. If the sweep did not reach `remaining_in_cycle` 0, finish
+   with the remaining count: the pass ends `interrupted` (the next pass's sweep resumes
+   where this one stopped).
+   `list_quarter_state(triage=true, pass_token=…)` lists, required first, the payments that
    need a document and have none of the right kind — only those read since this import
-   (`not_fresh` counts the others: mark them not searched), at most 50 at a time. If it says
-   `truncated`, judge what is listed and put its `remaining` count in the work order; a
-   later pass reaches the rest. For each, compare against
+   (`not_fresh` counts the others), at most 50 at a time. If it says `truncated`, judge
+   what is listed and finish with its `remaining` count as `triage_remaining`; a later
+   pass reaches the rest. For each, compare against
    `list_unmatched_documents` and the KB (`get_counterparty`), reading candidate PDFs with
    `Read`. Correct a filed document's reading with `update_document_metadata(doc_id, …,
    pass_token=…)`; a quotation, order confirmation or losing duplicate is
@@ -331,19 +401,21 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    lists exactly the payments steps 6 and 7 changed since their read (a new pairing, a
    portal), and its writes put their tags and notes on the bank ledger in this pass rather
    than the next. Same procedure, same `snapshot_id` rule.
-8. **Return a work order**, one line per item: `matched` (label) / `proposed` / `portal` /
-   `no-document` / `not-yet-classified` / `missing`, with the tier, and for every `missing` a
-   search plan of narrow queries with discriminators ("want EUR 54.45 within ~10 days of 6 May;
-   ignore payment confirmations"; for a CRDT, "our sales invoice for EUR 1,210.00 to <client>,
-   probably in Sent"; a DBIT `refund` is the business's own credit note, in Sent). Mark any
-   item you ran out of room for as not searched. The work order is for Ellen, never for the
-   operator.
+8. **Finish and reply briefly.** `record_step(pass_token, step=…, action="finish",
+   remaining_in_cycle=…, triage_remaining=…)` (with `stopped=…` if you stopped), then a
+   short reply whose first line is `quarterly-accounting: <step> finished` — what was
+   matched, proposed or left missing, for Ellen, never for the operator. Ellen's Gmail round
+   is built from the store, not from your reply: a search idea for a vendor ("their
+   invoices come from billing@, subject 'Your receipt'"; a CRDT's is our own sales invoice,
+   in Sent) goes into `upsert_counterparty(name, search_hint=…, pass_token=…)`.
 
 ## Packaging (only when the operator asks)
 
-1. `begin_pass(trigger="package")` yourself — you hold the package pass, begin to end,
-   exactly as in the cron flow. If it answers `busy`, send its text: a pass is running, and
-   the package is built when the operator asks again after it. Then delegate
+1. `continue_pass()` (above); then `begin_pass(trigger="package", reply="telegram")`
+   yourself — you hold the package pass, begin to end, exactly as in the cron flow. If it
+   answers `busy`, send its text: a pass is running, and the package is built when the
+   operator asks again after it. Then `record_step(pass_token, step="snapshot",
+   action="start", quarter=<the quarter>, channel="telegram"|"email")` and delegate
    "quarterly-accounting package snapshot" to the specialist, sync mode, with context
    `pass_token=<token>` and the quarter: the probes of its pass, step 1 (stop if `can_run` is
    false), the snapshot of step 3, the ends of step 4, then the sweep of step 5 for that
@@ -351,23 +423,29 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    read and recorded, exactly as in the pass (the export carries no classification tags:
    only the sweep's reads tell the store what each payment is now, so a package built
    without it can ship a document the payment no longer wants). It never calls `begin_pass`
-   or `end_pass` here, and returns whether it stopped and whether the sweep reached
-   `remaining_in_cycle` 0. Then `end_pass` yourself — `end_pass(pass_token, outcome,
-   report)`: `complete`; `interrupted` if the sweep did not reach 0; `stopped` if it
-   stopped; `failed` if the delegation errored or ran out of turns — always, whatever came
-   back. Send any `speak` it returns and mark it delivered. If it stopped, tell the operator
-   why and build nothing. Build only after the sweep. If the sweep ran out of room before 0,
+   or `end_pass` here; it finishes its step and returns whether it stopped and whether the
+   sweep reached `remaining_in_cycle` 0. If it answers `status: pending`, say
+   "Reading the bank first — the <quarter> package follows in a few minutes."
+   and end the turn. At the
+   continuation's `end-pass-then-build`, then `end_pass` yourself —
+   `end_pass(pass_token, outcome, report)` by the outcome rule above — always, whatever
+   came back. Its answer carries `package_token` and `next`: do `next` with that token
+   (`build` is step 2). Send any `speak` it returns and mark it delivered: a package that
+   stopped is told there (`next` is null) — build nothing, and write no line of your own.
+   Build only after the sweep. If the sweep ran out of room before 0,
    the package still ships (the operator asked), but every payment not read since the
    import ships unclassified with its documents set aside, and the caption says how many —
    send it as it is; the operator can say "go and check now", then rebuild.
-2. `build_quarterly_package(quarter)`. For Telegram: `stage_for_delivery(channel="telegram",
-   package_id=…)`, then `send_media(path, kind="zip")` with the caption
-   `build_quarterly_package` returned, then `record_delivery(delivery_id, outcome)`. A timeout
-   is `uncertain`: do not send again unless the operator asks ("send it again", above).
+2. `build_quarterly_package(quarter, package_token)`. For Telegram:
+   `stage_for_delivery(channel="telegram", package_id=…, package_token=…)`, then
+   `send_media(path, kind="zip", filename=<the returned filename>, caption=…)` with the
+   caption `build_quarterly_package` returned — the staged path's own name is random and
+   never shown — then `record_delivery(delivery_id, outcome, package_token=…)`. A timeout is
+   `uncertain`: do not send again unless the operator asks ("send it again", above).
    `record_delivery` then returns `speak`, the line that tells the operator the package may
-   not have arrived: send its text verbatim and call `mark_rendering_delivered` with its
-   `render_id` — that is what "send it again" binds to. The same holds for a resend that
-   times out, and for an email recorded `uncertain`.
+   not have arrived (or, for `failed`, that it didn't go out): send its text verbatim and
+   call `mark_rendering_delivered` with its `render_id` — that is what "send it again" binds
+   to. The same holds for a resend that times out, and for an email recorded `uncertain`.
    If the build, or the first `stage_for_delivery` of a package, is refused because the bank
    was re-read (while building, or since it was built), nothing was kept or staged: run
    step 1 again (the re-read made every payment unread), then build again, once. A resend
@@ -375,15 +453,26 @@ word: never call `bind_account`, `build_quarterly_package`, `set_watermark`,
    A bank check that lands after a package's first send was staged but before it went out
    takes that send back: the staged file is removed, so `send_media` or `send_email` fails
    because the file is gone, or `record_delivery` answers that the bank was re-read before it
-   was sent. Either way nothing was delivered: tell the operator the package needs building
-   again ("The bank was re-read before I could send it — ask for it again and I'll rebuild
-   it."). A send already under way at the moment of the check cannot be stopped; if it
-   arrives, the "a delivered quarter changed" alert covers it.
-3. "Email me the Q3 package": `stage_for_delivery(channel="email", package_id=…)`, then
-   gmail's `send_email` to the operator's own address with the returned path attached and the
-   returned `request_id`. Casa asks the operator for one tap showing the recipient. Then
-   `record_delivery(delivery_id, outcome, message_id=…)` — `delivered` only with the returned
-   message id, otherwise `uncertain`. Never email anyone else.
+   was sent. Either way nothing was delivered, and the operator is told through a `speak`
+   (that check's `end_pass`, or the next `continue_pass`) — never in your own words. A send
+   already under way at the moment of the check cannot be stopped; if it arrives, the "a
+   delivered quarter changed" alert covers it.
+3. "Email me the Q3 package": `stage_for_delivery(channel="email", package_id=…,
+   package_token=…)`, then gmail's `send_email` to the operator's own address with the
+   returned path attached and the returned `request_id`. Casa asks the operator for one tap
+   showing the recipient. Then `record_delivery(delivery_id, outcome, message_id=…,
+   package_token=…)` — `delivered` only with the returned message id, otherwise
+   `uncertain`. Never email anyone else.
+
+A continuation of a package request (`continue_pass` returned a `package_token`): `build`
+and `stage` resume step 2 at that point, with ITS token. `next: null` with a `speak`: send
+it verbatim, then `mark_rendering_delivered` — a stopped package, a failed recovery, a
+withdrawn or revoked send. Never send the file again yourself, and never write a failure
+line of your own.
+
+Every `speak` that `end_pass` or `continue_pass` returns is sent and marked delivered,
+including on a cron turn. It is how anything owed about a package reaches the operator
+exactly once.
 
 ## Install (once)
 
