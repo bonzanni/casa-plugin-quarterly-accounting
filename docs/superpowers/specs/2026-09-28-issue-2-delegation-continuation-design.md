@@ -760,7 +760,9 @@ the pass has moved on and your recorded work is kept."
 - **Step 2**:
   - `build_quarterly_package(quarter, package_token)`;
   - `stage_for_delivery(channel=…, package_id=…, package_token=…)`;
-  - the send;
+  - the send. For Telegram this is `send_media(path, kind="zip", filename=<the returned
+    filename>, caption=…)`; the same `filename` goes on the resend path and a single
+    document's send. The staged path's own name is random and is never shown;
   - `record_delivery(delivery_id, outcome, package_token=…)`.
 
   The resend and single-document paths are unchanged and token-free.
