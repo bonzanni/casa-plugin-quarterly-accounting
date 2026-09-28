@@ -329,6 +329,22 @@ class TestJudgeDue(Flow):
         self.assertEqual(self.call("end_pass", pass_token=t3, outcome="complete")["outcome"],
                          "complete")
 
+    def test_an_expired_judge_step_waives_nothing(self):
+        # C5 (Terra): only a judge step that finished stops the live check
+        self.seed(3, documents=1)
+        t1 = self.begin()
+        self.start(t1)
+        self.specialist(t1)
+        t2 = self.claim()["continue"]["pass_token"]
+        self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
+        self.clock.advance(3600)                       # the judge delegation never answers
+        c = self.claim()["continue"]
+        self.assertEqual((c["step"], c["ended"]), ("judge", "expired"))
+        out = self.text("end_pass", pass_token=c["pass_token"], outcome="complete")
+        self.assertTrue(out.startswith("refused: not ended: 1 payment"), out)
+        self.assertEqual(self.call("end_pass", pass_token=c["pass_token"],
+                                   outcome="interrupted")["outcome"], "interrupted")
+
     def test_nothing_fitting_is_not_due(self):
         self.seed(3, documents=0)
         self.file(amount_minor=999_999, document_date="2026-07-05")      # no payment's amount

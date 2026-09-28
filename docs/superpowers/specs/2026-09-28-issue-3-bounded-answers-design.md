@@ -179,7 +179,9 @@ while more follow.
   Astra and Terra). So `end_pass(outcome="complete")`, for a pass that swept but never
   ran the judge step, re-checks `judge_due` live in its own transaction. When it is
   above 0 it refuses, and Ellen runs step 5 and ends the pass after it. It is never asked
-  again once the judge step has run, so it cannot loop. Any other outcome is unaffected.
+  again once the judge step has finished, so it cannot loop. A judge step that expired or
+  errored waives nothing (code round C5, Terra): that pass ends `interrupted` by the
+  outcome rule. Any other outcome is unaffected.
 - The single-payment re-read `pid=` goes through the same page guard (code round C3,
   Astra: 4,200 candidates returned 21,728 characters there).
 - No schema change.

@@ -280,11 +280,13 @@ def _judgment_owed(conn, pass_id: str) -> None:
     judge-due NOW (issue #3, code round C4): the continuation's judge_due was taken
     before the Gmail round, and a pairing the operator rejects meanwhile reopens a
     payment whose document is already filed. Checked live, in end_pass's own
-    transaction; once the judge step has run it is not asked again, so it cannot loop."""
+    transaction; once the judge step has FINISHED it is not asked again, so it cannot
+    loop. A judge step that expired or errored waives nothing (C5, Terra): that pass is
+    not complete (the outcome rule makes it `interrupted`)."""
     import work
-    steps = {r[0] for r in conn.execute("SELECT step FROM pass_steps WHERE pass_id=?",
-                                        (pass_id,))}
-    if "sweep" not in steps or "judge" in steps:
+    steps = {r["step"]: r["finished_at"] for r in conn.execute(
+        "SELECT step, finished_at FROM pass_steps WHERE pass_id=?", (pass_id,))}
+    if "sweep" not in steps or steps.get("judge") is not None:
         return
     n = work.judge_due(conn)
     if n:
