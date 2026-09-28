@@ -251,6 +251,8 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
     with db.tx(conn):
         check_token(conn, token)
         m = _marker(conn)
+        if outcome == "complete":
+            _judgment_owed(conn, m["pass_id"])
         full = {**(report or {}), **throughput(conn, m["pass_id"])}
         conn.execute("UPDATE passes SET ended_at=?, outcome=?, report_json=? WHERE pass_id=?",
                      (db.now(), outcome, db.canonical(full), m["pass_id"]))
@@ -271,6 +273,25 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
     owed = ([notice] if notice is not None else []) + alerts.pass_notices(conn, m["pass_id"])
     out["speak"] = alerts.pending_rendering(conn, must=owed)
     return out
+
+
+def _judgment_owed(conn, pass_id: str) -> None:
+    """A pass that swept but never judged ends `complete` only when no payment is
+    judge-due NOW (issue #3, code round C4): the continuation's judge_due was taken
+    before the Gmail round, and a pairing the operator rejects meanwhile reopens a
+    payment whose document is already filed. Checked live, in end_pass's own
+    transaction; once the judge step has run it is not asked again, so it cannot loop."""
+    import work
+    steps = {r[0] for r in conn.execute("SELECT step FROM pass_steps WHERE pass_id=?",
+                                        (pass_id,))}
+    if "sweep" not in steps or "judge" in steps:
+        return
+    n = work.judge_due(conn)
+    if n:
+        raise db.Refusal(f"not ended: {n} payment{'s' if n > 1 else ''} with a filed document "
+                         "that may fit {} not judged in this pass. Start the judge step "
+                         "(record_step step=\"judge\") and end the pass after it".format(
+                             "were" if n > 1 else "was"))
 
 
 def _hand_over(conn, pass_id: str, outcome: str):

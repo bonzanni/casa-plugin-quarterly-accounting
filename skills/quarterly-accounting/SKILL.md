@@ -259,7 +259,9 @@ pass, whichever comes first:
    did not reach" with context `pass_token=<token>, step=judge` (the same token; the specialist's steps 6 and 7: triage, then
    the sweep once more). If it answers `status: pending`, output `<silent/>` and end the
    turn. When it answers, continue as above: its `next` is step 6.
-6. `end_pass(pass_token, outcome, report)` by the outcome rule above. Report `{checked,
+6. `end_pass(pass_token, outcome, report)` by the outcome rule above. If it refuses
+   because a payment was not judged in this pass (`not ended: …`), do step 5 now, then
+   end the pass after it. Report `{checked,
    total, not_searched}` — after step 5, the continuation's `report`. If it returns `speak`,
    send its text verbatim — a long alert's remainder comes with the next `speak` — call
    `mark_rendering_delivered` with its `render_id`, then output `<silent/>`. If not: on the

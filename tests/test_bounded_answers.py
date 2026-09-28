@@ -303,6 +303,32 @@ class TestJudgeDue(Flow):
         c = self.claim()["continue"]
         self.assertEqual((c["next"], c["judge_due"]), ("gmail-round", 1))
 
+    def test_a_pass_that_swept_is_not_complete_while_a_judgment_is_due(self):
+        # C4 (Astra, Terra): judge_due is taken before the Gmail round; end_pass
+        # re-checks it live
+        self.seed(3, documents=1)
+        t1 = self.begin()
+        self.start(t1)
+        self.specialist(t1)
+        t2 = self.claim()["continue"]["pass_token"]
+        out = self.text("end_pass", pass_token=t2, outcome="complete")
+        self.assertTrue(out.startswith("refused: not ended: 1 payment with a filed document"),
+                        out)
+        self.assertEqual(self.call("end_pass", pass_token=t2, outcome="interrupted")["outcome"],
+                         "interrupted")                # any other outcome is unaffected
+
+    def test_after_the_judge_step_complete_is_accepted(self):
+        self.seed(3, documents=1)
+        t1 = self.begin()
+        self.start(t1)
+        self.specialist(t1)
+        t2 = self.claim()["continue"]["pass_token"]
+        self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
+        self.specialist(t2, step="judge")
+        t3 = self.claim()["continue"]["pass_token"]
+        self.assertEqual(self.call("end_pass", pass_token=t3, outcome="complete")["outcome"],
+                         "complete")
+
     def test_nothing_fitting_is_not_due(self):
         self.seed(3, documents=0)
         self.file(amount_minor=999_999, document_date="2026-07-05")      # no payment's amount
