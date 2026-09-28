@@ -951,5 +951,115 @@ class TestAnEmailWaitsForItsTap(Requests):
                                   outcome="delivered").startswith('{'))
 
 
+class TestAPackageThatArrivedIsNeverOfferedAgain(Requests):
+    """Review C5 (J1): whether "send it again" is offered or honoured is a fact about
+    the PACKAGE — has it a delivered send? — never about one delivery."""
+    ARRIVED = "refused: the Q3 2026 package did arrive (sent 28 Sep) — nothing to send again"
+
+    def lease(self, channel):
+        return delivery.EMAIL_RECOVERY_LEASE_S if channel == "email" else steps.LEASE_S
+
+    def upgraded_then_the_resend_stalls(self, channel):
+        self.seed(1, documents=1)
+        p, pkg, d1 = self.staged(channel)
+        self.clock.advance(self.lease(channel))
+        r = self.claim()                                     # D1 recovered: offered
+        self.call("mark_rendering_delivered", render_id=r["speak"]["render_id"])
+        d2 = self.call("stage_for_delivery", channel=channel, resend=True)
+        self.clock.t = self.clock.t.replace(hour=12)
+        d1_day = self.clock.t
+        self.call("record_delivery", delivery_id=d1["delivery_id"], outcome="delivered",
+                  message_id="m-1")                         # evidence: D1 did arrive
+        self.clock.advance(self.lease(channel))
+        r2 = self.claim()                                    # D2 stalls: recovered quietly
+        self.assertIsNone(r2["continue"]["next"])
+        if r2.get("speak"):
+            self.assertNotIn("send it again", r2["speak"]["text"])
+        offers = self.conn.execute("SELECT count(*) FROM alerts WHERE sent_at IS NULL AND"
+                                   " kind IN ('package-uncertain', 'package-send-failed')"
+                                   ).fetchone()[0]
+        self.assertEqual(offers, 0)
+        day = f"{d1_day.day} {d1_day.strftime('%b')}"
+        self.assertEqual(self.text("stage_for_delivery", channel=channel, resend=True),
+                         f"refused: the Q3 2026 package did arrive (sent {day}) — nothing to "
+                         "send again")
+        view = self.call("build_review", view="status", quarter="2026-Q3")
+        self.assertNotIn("send it again", view["text"])
+
+    def test_after_an_upgrade_a_stalled_resend_offers_nothing_on_telegram(self):
+        self.upgraded_then_the_resend_stalls("telegram")
+
+    def test_after_an_upgrade_a_stalled_resend_offers_nothing_on_email(self):
+        self.upgraded_then_the_resend_stalls("email")
+
+    def test_a_delivered_resend_closes_the_offer_still_open(self):
+        self.seed(1, documents=1)
+        p, pkg, d1 = self.staged()
+        out = self.call("record_delivery", delivery_id=d1["delivery_id"], outcome="uncertain",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        os.unlink(d1["path"])
+        d2 = self.call("stage_for_delivery", channel="telegram", resend=True)
+        again = self.call("record_delivery", delivery_id=d2["delivery_id"], outcome="uncertain")
+        self.assertIn("send it again", again["speak"]["text"])      # open, not delivered yet
+        os.unlink(d2["path"])
+        d3 = self.call("stage_for_delivery", channel="telegram", resend=True)
+        self.call("record_delivery", delivery_id=d3["delivery_id"], outcome="delivered")
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM alerts WHERE sent_at IS NULL AND kind='package-uncertain'"
+            ).fetchone()[0], 0)
+        self.assertIsNone(self.claim()["speak"])
+        self.assertEqual(self.text("stage_for_delivery", channel="telegram", resend=True),
+                         self.ARRIVED)
+
+    def test_an_extra_copy_that_fails_after_the_package_arrived_offers_nothing(self):
+        self.seed(1, documents=1)
+        p, pkg, d1 = self.staged()
+        out = self.call("record_delivery", delivery_id=d1["delivery_id"], outcome="uncertain",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        os.unlink(d1["path"])
+        d2 = self.call("stage_for_delivery", channel="telegram", resend=True)
+        os.unlink(d2["path"])
+        # the first copy turns out delivered; the extra copy's send then fails
+        self.call("record_delivery", delivery_id=d2["delivery_id"], outcome="delivered")
+        with db.tx(self.conn):          # a stray copy of an arrived package, still staged
+            self.conn.execute("INSERT INTO deliveries(package_id, channel, staged_path, status,"
+                              " created_at, lease_at) VALUES (?, 'telegram', '/nowhere/x.zip',"
+                              " 'staged', ?, ?)", (pkg["package_id"], db.now(), db.now()))
+        d3 = self.conn.execute("SELECT max(delivery_id) FROM deliveries").fetchone()[0]
+        r = self.call("record_delivery", delivery_id=d3, outcome="failed")
+        self.assertNotIn("speak", r)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM alerts WHERE kind="
+                                           "'package-send-failed'").fetchone()[0], 0)
+
+
+class TestALateDeliveryIsCheckedAgainstTheBank(Requests):
+    """Review C5 (J2): a package reported delivered after a newer import is checked
+    against the bank in that same transaction — the accountant holds its rows now."""
+    def test_the_upgrade_says_what_changed_since_its_build(self):
+        self.seed(1, documents=1)
+        p, pkg, d1 = self.staged()
+        self.clock.advance(steps.LEASE_S)
+        r = self.claim()
+        self.call("mark_rendering_delivered", render_id=r["speak"]["render_id"])
+        bf = self.bf
+        rid = self.active()[0]["row_id"]
+        bf.call("untag_transaction", row_ids=[rid], tags=["software"])
+        bf.fetch([bf.row("2026-07-05", ref="R0", amount=1500, counterparty="Adobe")])
+        out = sim.run_pass(self.conn, bf)                  # the newer import: nothing yet
+        self.assertEqual(out["import"]["delivered_changes"], 0)
+        if out["end"]["speak"]:
+            self.call("mark_rendering_delivered", render_id=out["end"]["speak"]["render_id"])
+        up = self.call("record_delivery", delivery_id=d1["delivery_id"], outcome="delivered")
+        self.assertEqual(up["status"], "delivered")
+        changed = self.conn.execute("SELECT count(*) FROM alerts WHERE kind='delivered-changed'"
+                                    ).fetchone()[0]
+        self.assertGreater(changed, 0)
+        text = " ".join(up["speak"]["text"].split())
+        self.assertIn(f"The package {pkg['filename']} changed underneath:", text)
+        self.assertIn("corrected by the bank", text)
+
+
 if __name__ == "__main__":
     unittest.main()

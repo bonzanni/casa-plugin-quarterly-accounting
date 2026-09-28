@@ -331,18 +331,50 @@ def stalled_sends(conn, lease_s: float) -> list:
         >= (EMAIL_RECOVERY_LEASE_S if r["channel"] == "email" else lease_s)]
 
 
-def recover_staged(conn, d) -> int:
+OFFER_KINDS = ("package-uncertain", "package-send-failed")
+
+
+def arrived(conn, package_id):
+    """THE package-level fact the operator cares about: has this package arrived
+    (any of its sends recorded delivered)? The delivered send, or None. An offer, a
+    recovery's notice and "send it again" are all decided by it, never by one
+    delivery."""
+    return conn.execute("SELECT * FROM deliveries WHERE package_id=? AND status='delivered'"
+                        " ORDER BY settled_at LIMIT 1", (package_id,)).fetchone()
+
+
+def close_offers(conn, package_id) -> None:
+    """A package that arrived is never offered again: every open "send it again"
+    offer of it is closed (inside the caller's transaction)."""
+    conn.execute("UPDATE alerts SET sent_at=? WHERE sent_at IS NULL AND kind IN (?, ?) AND"
+                 " json_extract(detail, '$.package_id')=?", (db.now(), *OFFER_KINDS, package_id))
+
+
+def arrived_words(conn, package_id) -> str:
+    import dates
+    d = arrived(conn, package_id)
+    q = conn.execute("SELECT quarter FROM packages WHERE package_id=?",
+                     (package_id,)).fetchone()[0]
+    return (f"the {dates.quarter_label(q)} package did arrive (sent "
+            f"{dates.short_day(d['settled_at'])}) — nothing to send again")
+
+
+def recover_staged(conn, d):
     """Recover one stalled staged package send, inside the caller's transaction and
     under the custody lock the caller holds: its staged bytes are taken back first
     (whoever staged it may still hold the path, and Casa's send tools check no
     token of ours), the send is settled `uncertain` — it may already have gone —
-    and its per-delivery notice offers "send it again". A removal that fails
-    refuses the whole call: nothing changes. Returns the notice's alert_id."""
+    and its per-delivery notice offers "send it again" — unless the package has
+    already arrived by another send: then this extra copy settles quietly. A
+    removal that fails refuses the whole call: nothing changes. Returns the
+    notice's alert_id, or None."""
     import alerts
     withdraw(conn, [dict(d)], refusal="could not take back a staged package — nothing changed")
     now = db.now()
     conn.execute("UPDATE deliveries SET status='uncertain', settled_at=?, withdrawn_at=?"
                  " WHERE delivery_id=?", (now, now, d["delivery_id"]))
+    if arrived(conn, d["package_id"]) is not None:
+        return None
     quarter = conn.execute("SELECT quarter FROM packages WHERE package_id=?",
                            (d["package_id"],)).fetchone()[0]
     return alerts.raise_package(conn, "package-uncertain", f"delivery:{d['delivery_id']}:uncertain",
@@ -389,10 +421,7 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
         if req is not None:
             conn.execute("UPDATE package_requests SET state=?, updated_at=? WHERE request_id=?",
                          (outcome, db.now(), req["request_id"]))
-        if upgrade:
-            # the recovery's "may not have arrived" is answered: it is never offered again
-            conn.execute("UPDATE alerts SET sent_at=? WHERE occurrence_key=? AND sent_at IS"
-                         " NULL", (db.now(), f"delivery:{delivery_id}:uncertain"))
+
         if outcome == "delivered" and d["package_id"] is not None:
             # the rows exactly as the package froze them: facts_fp is
             # db.canonical(reducer.facts_of(row)), what ledger's delivered checks compare;
@@ -406,8 +435,16 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
                              (d["package_id"], r["row_id"], r["pid"], r["facts_fp"],
                               r["kind"] or r.get("last_known_kind")))
             conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
+            # the package arrived: no offer of it stays open, and the accountant's copy is
+            # compared with the bank now (a late report may follow a newer import)
+            close_offers(conn, d["package_id"])
+            import ledger
+            changed = ledger.check_delivered_package(conn, d["package_id"])
         out = {"delivery_id": delivery_id, "status": outcome}
-        if outcome in ("uncertain", "failed") and d["package_id"] is not None:
+        if outcome == "delivered" and d["package_id"] is not None and changed:
+            out["speak"] = alerts.pending_in_tx(conn, must=changed)
+        if outcome in ("uncertain", "failed") and d["package_id"] is not None \
+                and arrived(conn, d["package_id"]) is None:
             quarter = conn.execute("SELECT quarter FROM packages WHERE package_id=?",
                                    (d["package_id"],)).fetchone()[0]
             kind = "package-uncertain" if outcome == "uncertain" else "package-send-failed"
@@ -441,7 +478,8 @@ def resendable(conn, quarter=None):
     rows = conn.execute(sql + " ORDER BY d.delivery_id DESC", args).fetchall()
     for want in ("uncertain", "delivered"):
         for r in rows:
-            if r["status"] == want:
+            if r["status"] == want and (want == "delivered"
+                                        or arrived(conn, r["package_id"]) is None):
                 return r["package_id"]
     return None
 
@@ -450,7 +488,8 @@ def uncertain(conn, quarter=None) -> list:
     """Packages whose most recent send is uncertain (offered in words), as
     (package_id, filename), oldest package first; `quarter` scopes them to a
     quarter-scoped view."""
-    sql, args = _LATEST + " AND d.status='uncertain'", []
+    sql, args = (_LATEST + " AND d.status='uncertain' AND NOT EXISTS (SELECT 1 FROM deliveries"
+                 " a WHERE a.package_id=d.package_id AND a.status='delivered')"), []
     if quarter:
         sql += " AND p.quarter=?"
         args.append(quarter)
@@ -461,18 +500,24 @@ def uncertain(conn, quarter=None) -> list:
 def resend_target(conn) -> int:
     """What "send it again" resends: the package the most recent DELIVERED
     rendering offered (D3: an operator's words bind to what they were shown).
-    An offered package whose latest send has since been delivered is no longer
-    waiting. None waiting, or several, is a refusal in the operator's words —
+    An offered package that has since arrived (any send of it delivered —
+    arrived()) is no longer waiting, and is said so. None waiting, or several, is a refusal in the operator's words —
     several are told apart by the date in their filenames (spec §"What the
     operator never has to learn")."""
     last = db.last_delivered(conn)
     offered = json.loads(last["scope_json"]).get("offers", []) if last else []
-    waiting = []
+    waiting, came = [], []
     for pid in offered:
         r = conn.execute(_LATEST + " AND d.package_id=?", (pid,)).fetchone()
-        if r is not None and r["status"] != "delivered":
+        if r is None:
+            continue
+        if arrived(conn, pid) is not None:
+            came.append(pid)
+        else:
             waiting.append(r)
     if not waiting:
+        if came:
+            raise db.Refusal(arrived_words(conn, came[-1]))
         raise db.Refusal("nothing is waiting to be sent again")
     if len(waiting) > 1:
         names = [r["filename"] for r in waiting]

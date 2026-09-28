@@ -1251,3 +1251,34 @@ Each is fixed by replacing the assumption.
   `delivered`, and the recovery's "may not have arrived" notice is closed so no stale
   offer remains. Every other late outcome for a recovered send stays refused.
 - Accepted as a residual: R6.
+
+### Round C5
+
+Review note: the Astra pass-side run was refused twice by the reviewing model's content
+filter and never concluded; the H1 (poison fence) part of round C4 rests on the Terra and
+Claude verdicts.
+
+All three findings sat in the late-delivered upgrade, with one cause: an offer, a
+recovery's notice and resend eligibility were each decided per DELIVERY, when the
+question is whether THIS PACKAGE arrived. Replaced by one package-level fact,
+`delivery.arrived(package)` — the package has a `delivered` send:
+
+- a recovered, failed or uncertain send of a package that arrived raises no "may not
+  have arrived / send it again" offer: the extra copy settles quietly;
+- a package's first `delivered` send — a normal report or the upgrade — closes every open
+  offer of it (`close_offers`);
+- the status view offers only packages that have not arrived, and "send it again" for an
+  offered package that arrived is refused with "the Q3 2026 package did arrive (sent
+  <day>) — nothing to send again". An explicit new package request still works.
+
+Audit of every place that raises or honours a resend offer: `record_delivery`
+(uncertain / failed notices), `recover_staged` (a stalled send's notice), `views` status
+offer block (`delivery.uncertain`), `alerts.pending_in_tx` (the `offers` scope, fed only
+by open offer notices, which `close_offers` closes), `delivery.resend_target` and
+`delivery.resendable` (honouring), `reply` (emits the `resend` instruction only, deciding
+nothing). Each now reads `arrived`.
+
+A package reported delivered is compared with the bank in that same transaction
+(`ledger.check_delivered_package`), and the changes are in `record_delivery`'s `speak`:
+a report that arrives after a newer import no longer raises "a delivered quarter
+changed" one import late. Accepting such an upgrade stays correct: it did arrive.

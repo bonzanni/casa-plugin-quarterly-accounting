@@ -154,9 +154,11 @@ class TestSendItAgainAfterATimeout(ToolCase):
     def test_a_delivered_send_offers_nothing_and_a_failed_one_offers_it_again(self):
         # issue #2: a send that did not go out is a package notice, offered like a timeout
         import os
-        for outcome in ("delivered", "failed"):
+        # two packages: once a package arrived, a failed extra copy of it offers nothing
+        # (TestAPackageThatArrivedIsNeverOfferedAgain), so the failure is another package's
+        for outcome, pkg in (("delivered", self.other), ("failed", self.pkg)):
             staged = _json("stage_for_delivery", channel="telegram",
-                           package_id=self.other["package_id"])
+                           package_id=pkg["package_id"])
             out = _json("record_delivery", delivery_id=staged["delivery_id"], outcome=outcome)
             for f in os.listdir(self.outbox):
                 os.unlink(self.outbox / f)
@@ -168,7 +170,7 @@ class TestSendItAgainAfterATimeout(ToolCase):
             scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
                                                  " render_id=?",
                                                  (out["speak"]["render_id"],)).fetchone()[0])
-            self.assertEqual(scope["offers"], [self.other["package_id"]])
+            self.assertEqual(scope["offers"], [self.pkg["package_id"]])
 
 
 class TestEndPass(ToolCase):

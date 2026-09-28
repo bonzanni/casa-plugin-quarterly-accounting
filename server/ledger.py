@@ -91,14 +91,29 @@ def check_delivered_bank_half(conn, by_id: dict) -> int:
     delivered row's bank facts with the snapshot; a change raises one
     `delivered-changed` alert per occurrence (spec §"When the plugin may
     speak first"). Returns the number of new alerts."""
-    new = 0
     latest = conn.execute(
         "SELECT p.package_id, p.quarter, p.filename FROM packages p"
         " JOIN deliveries d ON d.package_id=p.package_id AND d.status='delivered'"
         " WHERE p.package_id IN (SELECT max(p2.package_id) FROM packages p2 JOIN deliveries d2"
         "  ON d2.package_id=p2.package_id AND d2.status='delivered' GROUP BY p2.quarter)"
         " GROUP BY p.package_id").fetchall()
-    for pkg in latest:
+    return len(_delivered_changes(conn, by_id, latest))
+
+
+def check_delivered_package(conn, package_id: int) -> list:
+    """The same check for ONE package that has just become delivered, against the
+    latest snapshot the store holds, inside the caller's transaction: a package
+    reported delivered after a newer import is compared with the bank now, not one
+    import late. Returns the new alerts' ids."""
+    pkg = conn.execute("SELECT package_id, quarter, filename FROM packages WHERE package_id=?",
+                       (package_id,)).fetchall()
+    by_id = {r["row_id"]: dict(r) for r in conn.execute("SELECT * FROM bank_rows")}
+    return _delivered_changes(conn, by_id, pkg)
+
+
+def _delivered_changes(conn, by_id: dict, packages) -> list:
+    new = []
+    for pkg in packages:
         for d in conn.execute("SELECT * FROM delivered_rows WHERE package_id=?",
                               (pkg["package_id"],)):
             row = by_id.get(d["row_id"])
@@ -122,7 +137,8 @@ def check_delivered_bank_half(conn, by_id: dict) -> int:
                                                    "quarter": pkg["quarter"],
                                                    "row_id": d["row_id"], "change": change}),
                                 db.now()))
-            new += cur.rowcount
+            if cur.rowcount:
+                new.append(cur.lastrowid)
     return new
 
 
