@@ -174,7 +174,7 @@ def build_paused(quarter, rendered, resume, out):
     package._render = paused
     conn = db.open_store()
     try:
-        _report(out, lambda: package.build_quarterly_package(conn, quarter))
+        _report(out, lambda: package.build_quarterly_package(conn, quarter, bound=False))
     finally:
         conn.close()
 
@@ -220,12 +220,25 @@ def build_repeatedly(quarter, n, out):
     try:
         for _ in range(n):
             try:
-                package.build_quarterly_package(conn, quarter)
+                package.build_quarterly_package(conn, quarter, bound=False)
                 results.append("ok")
             except db.Refusal as exc:
                 results.append(f"{type(exc).__name__}: {exc}")
         out.put(("ok", results))
     except BaseException as exc:
         out.put(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        conn.close()
+
+
+def continue_pass(path, barrier, out):
+    """continue_pass from a sibling session, released by the barrier together with
+    another (issue #2: two notices race one claim)."""
+    import db
+    import steps
+    conn = db.open_store(path)
+    try:
+        barrier.wait(30)
+        out.put(steps.claim(conn))
     finally:
         conn.close()

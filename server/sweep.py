@@ -104,7 +104,14 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
     `quarter` (fix wave F, throughput) narrows the page to that quarter's
     payments: a package needs only its own rows fresh, and freshness stays per
     lineage. remaining_in_cycle then counts that quarter's; the cycle itself
-    completes only when no lineage of any quarter is due."""
+    completes only when no lineage of any quarter is due.
+
+    Time (issue #2): while a step of the pass runs, the page is capped by what is
+    left of steps.SWEEP_STOP_S at steps.ROW_COST_S a row, so the specialist
+    finishes its step inside the delegation's ceiling. A page with no time left
+    is `time_up`: no items, and the cursor does not move. With no step running
+    the page is as it always was."""
+    import steps
     if token is None:
         raise db.Refusal("the sweep belongs to a pass: pass the pass_token")
     with db.tx(conn):
@@ -114,6 +121,13 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
         due_all = _due(conn)
         due = due_all if quarter is None else [p for p in due_all
                                                 if _in_quarter(conn, p, quarter)]
+        allowance = steps.sweep_allowance(conn)
+        cap = None if allowance is None else int(allowance // steps.ROW_COST_S)
+        if cap is not None and cap < 1 and due:
+            return {"workflow": version.WORKFLOW, "bank_writes": passes.bank_write_gate(conn),
+                    "projections": [], "quarter": quarter, "remaining_in_cycle": len(due),
+                    "snapshot_id": lineage.latest_import(conn), "notice": NOTICE,
+                    "time_up": True}
         if not due_all:
             if cur["cycle_started_at"]:
                 conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=NULL,"
@@ -128,7 +142,7 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
             order = after + [p for p in due if p <= cur["last_pid"]]
             if cur["cycle_started_at"] is None:
                 conn.execute("UPDATE cursor SET cycle_started_at=? WHERE id=1", (db.now(),))
-        page = order[:max(1, int(limit))]
+        page = order[:max(1, int(limit) if cap is None else min(int(limit), cap))]
         gate = passes.bank_write_gate(conn)
         items = []
         for pid in page:
@@ -139,7 +153,7 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
                           "unprojectable": p["unprojectable"]})
         return {"workflow": version.WORKFLOW, "bank_writes": gate, "projections": items,
                 "quarter": quarter, "remaining_in_cycle": len(order) - len(page),
-                "snapshot_id": lineage.latest_import(conn), "notice": NOTICE}
+                "snapshot_id": lineage.latest_import(conn), "notice": NOTICE, "time_up": False}
 
 
 def _require_snapshot(conn, snapshot_id) -> None:

@@ -62,9 +62,7 @@ class StoreCase(TempEnv):
         records first (the ledger probe carries list_backups' instance id).
         Returns the new pass token."""
         import passes
-        cur = passes.current_pass(self.conn)
-        if cur is not None:
-            passes.end_pass(self.conn, cur["generation"], "complete", {})
+        self.end_live_pass()
         token = passes.begin_pass(self.conn, trigger)["pass_token"]
         b = self.conn.execute("SELECT account_id FROM binding").fetchone()
         accts = accounts if accounts is not None else (
@@ -76,6 +74,25 @@ class StoreCase(TempEnv):
                             data={"generation": generation, "registered": registered or {},
                                   "instance": instance or self.LEDGER})
         return token
+
+    def end_live_pass(self):
+        """End the live pass, if any, with its current token (the marker's: a claim
+        rotates it past the pass's own generation)."""
+        import passes
+        m = self.conn.execute("SELECT generation, live FROM pass_marker").fetchone()
+        if m is not None and m["live"]:
+            passes.end_pass(self.conn, m["generation"], "complete", {})
+
+    def package_token(self, quarter="2026-Q3", channel="telegram"):
+        """A package request as the skill makes one — begin_pass(package), the snapshot
+        step, end_pass — with no import of its own. Returns the package_token end_pass
+        hands over."""
+        import passes
+        import steps
+        self.end_live_pass()
+        token = passes.begin_pass(self.conn, "package")["pass_token"]
+        steps.start(self.conn, token, "snapshot", {"quarter": quarter, "channel": channel})
+        return passes.end_pass(self.conn, token, "complete", {})["package_token"]
 
     _doc_n = 0
 

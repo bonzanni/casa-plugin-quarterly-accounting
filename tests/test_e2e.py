@@ -18,6 +18,7 @@ import lineage  # noqa: E402
 import package  # noqa: E402
 import passes  # noqa: E402
 import work  # noqa: E402
+import version  # noqa: E402
 
 PDF = b"%PDF-1.4\n%%EOF\n"
 
@@ -91,7 +92,8 @@ class TestFixtureQuarter(Base):
         self.assertEqual(self.owned(ids["T1"]), ["acct::no-document-expected"])
         self.assertEqual(self.owned(ids["S1"]), [])                        # optional: no tag
         self.assertEqual(self.owned(ids["U1"]), ["acct::open"])            # unclassified
-        pkg = package.build_quarterly_package(self.conn, "2026-Q3")
+        end = sim.package_pass(self.conn, self.bf)
+        pkg = package.build_quarterly_package(self.conn, "2026-Q3", end["package_token"])
         z = zipfile.ZipFile(pkg["path"])
         self.assertEqual(sorted(n for n in z.namelist() if "/" in n),
                          ["invoices/2026-06-30_Adobe_54.45.pdf",
@@ -232,7 +234,7 @@ class TestPassStops(Base):
     def test_a_sweep_refusal_ends_the_pass_stopped(self):
         # the row changes under the pass AFTER the import proved the ledger: the
         # sweep's record_observation refuses (first_seen mismatch, poisoned); the
-        # pass must END (stopped) so no live marker answers "Already checking".
+        # pass must END (stopped) so no live marker answers "A check is running".
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000)])
         self.first_pass()
@@ -286,7 +288,7 @@ class TestRestoreAndReset(Base):
         sim.run_pass(self.conn, bf)
         rid = self.active()[0]["row_id"]
         self.assertEqual(self.owned(rid), ["acct::open"])
-        install = bf.registered()["acct@0.1.0"]
+        install = bf.registered()[version.WORKFLOW]
         bf.call("restore_backup", backup_id=install)
         out = sim.run_pass(self.conn, bf)
         self.assertFalse(out["gate"]["allowed"])
@@ -296,15 +298,15 @@ class TestRestoreAndReset(Base):
         self.assertFalse([n for n in bf.notes(rid) if n.startswith("Accounting revision")])
         out = sim.run_pass(self.conn, bf)
         self.assertTrue(out["gate"]["allowed"])
-        self.assertIn("acct@0.1.0", bf.registered())
-        self.assertNotEqual(bf.registered()["acct@0.1.0"], install)
+        self.assertIn(version.WORKFLOW, bf.registered())
+        self.assertNotEqual(bf.registered()[version.WORKFLOW], install)
 
     def test_a_restored_weekly_backup_keeps_the_registration_and_names_the_install_backup(self):
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000)])
         self.first_pass()
         sim.run_pass(self.conn, bf)
-        install = bf.registered()["acct@0.1.0"]
+        install = bf.registered()[version.WORKFLOW]
         bf.call("backup", reason="weekly")
         weekly = [b for b in self._backups() if b != install][-1]
         bf.call("restore_backup", backup_id=weekly)
@@ -362,13 +364,13 @@ class TestRestoreAndReset(Base):
         bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000)])
         self.first_pass()
         sim.run_pass(self.conn, bf)
-        install = bf.registered()["acct@0.1.0"]
+        install = bf.registered()[version.WORKFLOW]
         token = passes.begin_pass(self.conn, "cron")["pass_token"]
         sim.probe(self.conn, bf, token)
         gen = passes.bank_write_gate(self.conn)["expected_generation"]
         bf.call("restore_backup", backup_id=install)
         rid = self.active()[0]["row_id"]
-        bf.call("tag_transaction", row_ids=[rid], tags=["acct::matched"], workflow="acct@0.1.0",
+        bf.call("tag_transaction", row_ids=[rid], tags=["acct::matched"], workflow=version.WORKFLOW,
                 expected_generation=gen)
         self.assertNotIn("acct::matched", bf.tags(rid))
 
@@ -448,9 +450,13 @@ class ToolFlow(Base):
                 return page["remaining_in_cycle"]
 
     def snapshot_pass(self, trigger="package"):
-        """Ellen's begin_pass, then the specialist's probes (step 1) and snapshot (step 3)."""
+        """Ellen's begin_pass and the snapshot step, then the specialist's probes (step 1)
+        and snapshot (step 3)."""
         bf = self.bf
         token = self.call("begin_pass", trigger=trigger)["pass_token"]
+        if trigger == "package":
+            self.call("record_step", pass_token=token, step="snapshot", action="start",
+                      quarter="2026-Q3", channel="telegram")
         accounts = [{"account_id": r["account_id"], "category": r["category"], "label": r["name"]}
                     for r in bf.conn.execute("SELECT account_id, category, name FROM accounts")]
         self.call("record_probe", pass_token=token, kind="bank_tools", ok=True)
@@ -470,8 +476,9 @@ class ToolFlow(Base):
         token = self.snapshot_pass()
         if sweep:
             self.sweep(token)
-        self.call("end_pass", pass_token=token, outcome="complete")
-        pkg = self.call("build_quarterly_package", quarter="2026-Q3")
+        end = self.call("end_pass", pass_token=token, outcome="complete")
+        pkg = self.call("build_quarterly_package", quarter="2026-Q3",
+                        package_token=end["package_token"])
         z = zipfile.ZipFile(pkg["path"])
         rows = list(csv.DictReader(io.StringIO(z.read("ledger.csv").decode())))
         return sorted(n for n in z.namelist() if "/" in n), rows
@@ -526,10 +533,17 @@ class TestWaveF(ToolFlow):
         self.file(amount_minor=2000, document_date="2026-07-06")
         self.assertEqual(len(sim.run_pass(self.conn, bf)["triage"]["matched"]), 2)
 
+    def build(self, end, quarter="2026-Q3"):
+        pkg = self.call("build_quarterly_package", quarter=quarter,
+                        package_token=end["package_token"])
+        pkg["package_token"] = end["package_token"]
+        return pkg
+
     def deliver(self, pkg):
-        staged = self.call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"])
+        staged = self.call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
+                           package_token=pkg["package_token"])
         return self.call("record_delivery", delivery_id=staged["delivery_id"],
-                         outcome="delivered")
+                         outcome="delivered", package_token=pkg["package_token"])
 
     def test_a_row_shipped_unread_raises_no_false_changed_alert(self):
         # (1) the package pass's sweep has room for one of the two payments: the other
@@ -538,8 +552,7 @@ class TestWaveF(ToolFlow):
         self.two_matched()
         token = self.snapshot_pass()
         self.assertEqual(self.sweep(token, budget=1), 1)
-        self.call("end_pass", pass_token=token, outcome="interrupted")
-        pkg = self.call("build_quarterly_package", quarter="2026-Q3")
+        pkg = self.build(self.call("end_pass", pass_token=token, outcome="interrupted"))
         z = zipfile.ZipFile(pkg["path"])
         rows = list(csv.DictReader(io.StringIO(z.read("ledger.csv").decode())))
         self.assertEqual(sorted(r["status"] for r in rows), ["MATCHED", "UNCLASSIFIED"])
@@ -558,12 +571,12 @@ class TestWaveF(ToolFlow):
         self.two_matched()
         token = self.snapshot_pass()
         self.sweep(token, budget=1)
-        self.call("end_pass", pass_token=token, outcome="interrupted")
+        end = self.call("end_pass", pass_token=token, outcome="interrupted")
         stale = [r[0] for r in self.conn.execute(
             "SELECT pid FROM projections WHERE class_observed_snapshot <"
             " (SELECT max(snapshot_id) FROM snapshots)")]
         self.assertEqual(len(stale), 1)
-        pkg = self.call("build_quarterly_package", quarter="2026-Q3")
+        pkg = self.build(end)
         self.deliver(pkg)
         rid = sim.lineage_row(self.conn, stale[0])
         self.bf.call("untag_transaction", row_ids=[rid], tags=["software"])
@@ -602,7 +615,7 @@ class TestWaveF(ToolFlow):
         # (2d) the pass records its throughput
         self.assertEqual((report["swept_this_pass"], report["remaining_in_cycle"]), (1, 1))
         self.assertEqual(self.call("check_setup")["last_pass"]["report"]["swept_this_pass"], 1)
-        pkg = self.call("build_quarterly_package", quarter="2026-Q3")
+        pkg = self.build(end)
         self.assertNotIn("not re-read", pkg["caption"])
 
     def test_give_me_q3(self):
@@ -612,10 +625,12 @@ class TestWaveF(ToolFlow):
         self.two_matched()
         token = self.snapshot_pass()
         self.sweep(token, quarter="Q3")
-        self.call("end_pass", pass_token=token, outcome="complete")
+        end = self.call("end_pass", pass_token=token, outcome="complete")
         autumn = _dt.datetime(2026, 10, 5, 9, 0, tzinfo=_dt.timezone.utc)
         with mock.patch.object(db, "_clock", lambda: autumn):
-            pkg = self.call("build_quarterly_package", quarter="Q3")
+            pkg = self.call("build_quarterly_package", quarter="Q3",
+                            package_token=end["package_token"])
+        pkg["package_token"] = end["package_token"]
         self.assertTrue(pkg["filename"].endswith("-2026-Q3-2026-10-05.zip"), pkg["filename"])
         self.assertEqual(self.deliver(pkg)["status"], "delivered")
 

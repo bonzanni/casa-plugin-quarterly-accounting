@@ -319,19 +319,48 @@ def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, si
     return "\n".join(out)
 
 
-def build_quarterly_package(conn, quarter: str) -> dict:
+def _request_for_build(conn, quarter: str, package_token) -> int:
+    """The package request this build is for: the one holding `package_token`,
+    open and not yet staged, for this quarter. Refuses otherwise. Returns its id."""
+    import passes
+    if package_token is None:
+        raise db.Refusal("a package is built for a package request: pass the package_token "
+                         "end_pass or continue_pass gave you")
+    req = conn.execute("SELECT * FROM package_requests WHERE token=?",
+                       (int(package_token),)).fetchone()
+    if req is None:
+        raise db.Refusal("this package request has been taken over by a later turn — stop, "
+                         "nothing was written")
+    req = passes.check_package_token(conn, req["request_id"], package_token)
+    if req["quarter"] != quarter:
+        raise db.Refusal(f"this package_token is for the {dates.quarter_label(req['quarter'])} "
+                         "package")
+    if req["state"] not in ("snapshot-done", "built"):
+        raise db.Refusal("this package request already staged its send — stage it, or stop")
+    return req["request_id"]
+
+
+def build_quarterly_package(conn, quarter: str, package_token=None, *, bound=True) -> dict:
+    """Build the quarter's zip for the package request holding `package_token`.
+    The token is checked before the custody lock (an early refusal) and again in
+    the transaction that registers the zip and links it to the request, so a
+    holder rotated while it waited registers nothing and leaves no zip behind.
+    bound=False builds outside any request (in-process callers and tests only;
+    the tool always binds)."""
     dates.parse_quarter(quarter)
     if conn.in_transaction:
         raise RuntimeError("build_quarterly_package opens its own transactions")
+    if bound:
+        _request_for_build(conn, quarter, package_token)
     # The custody lock over documents/ and packages/ (db.custody_lock): a build
     # reads held documents' bytes and writes into packages/, which reset_store
     # erases under that lock. Taken BEFORE the freeze transaction, never inside
     # one (lock order: custody, then SQLite).
     with db.custody_lock():
-        return _build(conn, quarter)
+        return _build(conn, quarter, package_token if bound else None, bound)
 
 
-def _build(conn, quarter: str) -> dict:
+def _build(conn, quarter: str, package_token=None, bound=False) -> dict:
     stamp = db.now()
     today = stamp[:10]
     frozen = _freeze(conn, quarter)
@@ -355,6 +384,8 @@ def _build(conn, quarter: str) -> dict:
                        oversize, len(data))
     try:
         with db.tx(conn):
+            # the binding check: in the transaction that registers and links the zip
+            request_id = _request_for_build(conn, quarter, package_token) if bound else None
             if lineage.latest_import(conn) != frozen["snapshot_id"]:
                 # round E3 (Terra S1): an import landed between the freeze and this
                 # commit, so rows judged fresh may no longer be; never register or hand
@@ -366,6 +397,9 @@ def _build(conn, quarter: str) -> dict:
                 (quarter, path.name, str(path), stamp, int(partial), digest, len(data),
                  int(oversize), caption, db.canonical(manifest),
                  frozen["snapshot_id"])).lastrowid
+            if request_id is not None:
+                conn.execute("UPDATE package_requests SET package_id=?, state='built',"
+                             " updated_at=? WHERE request_id=?", (pkg_id, db.now(), request_id))
     except BaseException:
         path.unlink(missing_ok=True)       # an unregistered zip is never left to hand out
         raise

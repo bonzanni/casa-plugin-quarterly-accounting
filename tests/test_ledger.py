@@ -5,6 +5,7 @@ from tests._base import StoreCase
 import db  # noqa: E402
 import ledger  # noqa: E402
 import lineage  # noqa: E402
+import version  # noqa: E402
 
 
 class Base(StoreCase):
@@ -355,7 +356,7 @@ class TestInstance(Base):
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
 
     def test_nothing_is_imported_while_the_gate_refuses(self):
-        self.token = self.pass_(generation=1, registered={"acct@0.1.0": "b-1"})
+        self.token = self.pass_(generation=1, registered={version.WORKFLOW: "b-1"})
         with self.assertRaises(db.Refusal):
             self.imp([{"row_id": 1}])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0], 0)

@@ -16,10 +16,11 @@ import matches
 import package
 import passes
 import reply
+import steps
 import sweep
 import views
 import work
-from qa_server import register
+from qa_server import register as _register
 
 _CONN = None
 
@@ -29,6 +30,24 @@ def conn():
     if _CONN is None:
         _CONN = db.open_store()
     return _CONN
+
+
+def register(name, description, schema):
+    """qa_server.register, plus the clock (issue #2): every answer to a call that
+    carries a pass_token also carries `clock` — the time left for the running
+    step — while that token is live and its step runs."""
+    def deco(fn):
+        def with_clock(args):
+            out = fn(args)
+            token = args.get("pass_token")
+            if isinstance(out, dict) and isinstance(token, int) and not isinstance(token, bool):
+                c = steps.clock(conn(), token)
+                if c is not None:
+                    out["clock"] = c
+            return out
+        _register(name, description, schema)(with_clock)
+        return fn
+    return deco
 
 
 def _need(args, *names):
@@ -135,7 +154,10 @@ B = {"type": "boolean"}
 O = {"type": "object"}
 A = {"type": "array", "items": {"type": "string"}}
 AI = {"type": "array", "items": {"type": "integer"}}
-TOKEN = {"type": "integer", "description": "the pass_token from begin_pass"}
+TOKEN = {"type": "integer", "description": "the pass_token from begin_pass (or the NEW one "
+                                           "continue_pass gave you)"}
+PKG_TOKEN = {"type": "integer", "description": "the package_token end_pass or continue_pass "
+                                               "gave you"}
 Q = {"type": "string", "description": "YYYY-Qn, e.g. 2026-Q3 (Qn and Qn YYYY accepted)"}
 
 
@@ -375,12 +397,61 @@ def t_observe(args):
 
 # --- passes and setup ------------------------------------------------------------
 @register("begin_pass",
-          "Start a pass (trigger: cron, operator, package, handover). Returns pass_token, or "
-          "'busy' with the text to say when another pass is running.",
-          obj({"trigger": S}, ("trigger",)))
+          "Start a pass (trigger: cron, operator, package, handover) — after continue_pass "
+          "found nothing to continue. reply: where its continuation reports (silent for the "
+          "cron, telegram otherwise; that is the default). Returns pass_token, or 'busy' with "
+          "the text to say when another pass is running.",
+          obj({"trigger": S, "reply": S}, ("trigger",)))
 def t_begin(args):
     _need(args, "trigger")
-    return passes.begin_pass(conn(), args["trigger"])
+    return passes.begin_pass(conn(), args["trigger"], args.get("reply"))
+
+
+@register("record_step",
+          "Record a delegated step of the pass (step: sweep, judge, handover, snapshot). Ellen, "
+          "just before delegate_to_agent: action=\"start\" (a handover names doc_ids; a "
+          "snapshot names quarter and channel; a judge carries report={checked, total, "
+          "not_searched}), then passes the same pass_token to the specialist. The specialist, "
+          "as its last action: action=\"finish\" with remaining_in_cycle, triage_remaining, "
+          "and stopped=<the refusal> if it stopped. Ellen finishes it herself only when the "
+          "delegation came back in her turn without a finish (failed=true on an error).",
+          obj({"pass_token": TOKEN, "step": S, "action": S, "quarter": Q, "channel": S,
+               "doc_ids": AI, "report": O, "remaining_in_cycle": I, "triage_remaining": I,
+               "stopped": S, "failed": B}, ("pass_token", "step", "action")))
+def t_step(args):
+    _need(args, "pass_token", "step", "action")
+    token, step, action = _int(args, "pass_token"), args["step"], args["action"]
+    carry = {"quarter": _quarter(args), "channel": args.get("channel"),
+             "doc_ids": args.get("doc_ids"), "report": args.get("report")}
+    fin = {"remaining_in_cycle": _int(args, "remaining_in_cycle"),
+           "triage_remaining": _int(args, "triage_remaining")}
+    if action == "start":
+        for k in ("remaining_in_cycle", "triage_remaining", "stopped", "failed"):
+            if args.get(k) is not None:
+                raise db.Refusal(f'{k} goes with action="finish"')
+        return steps.start(conn(), token, step, carry)
+    if action == "finish":
+        for k, v in carry.items():
+            if v is not None:
+                raise db.Refusal({"doc_ids": "doc_ids go with a handover start",
+                                  "report": "report goes with a judge start",
+                                  "quarter": "quarter goes with a snapshot start",
+                                  "channel": "channel goes with a snapshot start"}[k])
+        return steps.finish(conn(), token, step, counts=fin, stopped=args.get("stopped"),
+                            failed=_bool(args, "failed", False))
+    raise db.Refusal('action is "start" or "finish"')
+
+
+@register("continue_pass",
+          "Call after every delegation returns in your turn, on every system notification about "
+          "a delegation to finance, and before beginning any check, handover or package. When "
+          "something is due, this claims it for you alone and returns a NEW pass_token (or "
+          "package_token) — use only that one from now on — with the next step, where to report "
+          "(`reply`) and everything the step needs. Otherwise continue is null: write nothing. "
+          "Send any `speak` verbatim, then mark_rendering_delivered.",
+          obj({}))
+def t_continue(args):
+    return _deliverable("continue_pass", steps.claim(conn()))
 
 
 @register("end_pass",
@@ -491,8 +562,9 @@ def t_stop(args):
           "(required first; every quarter unless quarter is given): only the payments read since "
           "the latest import (fresh_only=false for all; not_fresh counts the others), at most "
           "limit (default 50; truncated and remaining say what was left out). Read it fresh for "
-          "every question; never answer from memory. Counts and totals come from build_review.",
-          obj({"quarter": Q, "triage": B, "fresh_only": B, "limit": I}))
+          "every question; never answer from memory. Counts and totals come from build_review."
+          " During a pass, pass the pass_token.",
+          obj({"quarter": Q, "triage": B, "fresh_only": B, "limit": I, "pass_token": TOKEN}))
 def t_state(args):
     return work.list_quarter_state(conn(), _quarter(args),
                                    triage_only=_bool(args, "triage", False),
@@ -542,12 +614,14 @@ def t_reply(args):
 
 # --- packaging ---------------------------------------------------------------------
 @register("build_quarterly_package",
-          "Build the quarter's zip from what is known now (partial while the quarter runs). "
-          "Returns its path and the caption to send with it.",
-          obj({"quarter": Q}, ("quarter",)))
+          "Build the quarter's zip from what is known now (partial while the quarter runs), for "
+          "the package request whose package_token end_pass or continue_pass gave you. Returns "
+          "its path and the caption to send with it.",
+          obj({"quarter": Q, "package_token": PKG_TOKEN}, ("quarter", "package_token")))
 def t_build(args):
-    _need(args, "quarter")
-    return package.build_quarterly_package(conn(), _quarter(args))
+    _need(args, "quarter", "package_token")
+    return package.build_quarterly_package(conn(), _quarter(args),
+                                           _int(args, "package_token"))
 
 
 @register("stage_for_delivery",
@@ -555,10 +629,12 @@ def t_build(args):
           "email (gmail send_email to the operator's own address only, with the returned "
           "request_id). Then record_delivery. For apply_reply's `resend` instruction (\"send it "
           "again\") pass resend=true and neither id: it stages the exact file the last view the "
-          "operator saw offered, or refuses with the words to say. During a pass, pass the "
+          "operator saw offered, or refuses with the words to say. A package built for a "
+          "package request needs its package_token; staging it again returns the same send. "
+          "Telegram: pass the returned filename to send_media. During a pass, pass the "
           "pass_token.",
-          obj({"channel": S, "package_id": I, "doc_id": I, "resend": B, "pass_token": TOKEN},
-              ("channel",)))
+          obj({"channel": S, "package_id": I, "doc_id": I, "resend": B, "pass_token": TOKEN,
+               "package_token": PKG_TOKEN}, ("channel",)))
 def t_stage(args):
     _need(args, "channel")
     resend = _bool(args, "resend", False)
@@ -570,19 +646,23 @@ def t_stage(args):
         package_id = delivery.resend_target(conn())
     return delivery.stage_for_delivery(conn(), channel=args["channel"],
                                        package_id=package_id, doc_id=doc_id,
-                                       pass_token=_int(args, "pass_token"))
+                                       pass_token=_int(args, "pass_token"),
+                                       package_token=_int(args, "package_token"),
+                                       resend=resend)
 
 
 @register("record_delivery",
           "Record a send's outcome: delivered (email: only with the message id), uncertain (a "
-          "timeout — never resend by yourself), failed. For a package recorded uncertain it "
-          "returns `speak`: send its text verbatim, then mark_rendering_delivered with its "
-          "render_id — it is what lets the operator say \"send it again\". During a pass, pass "
-          "the pass_token.",
-          obj({"delivery_id": I, "outcome": S, "message_id": S, "pass_token": TOKEN},
-              ("delivery_id", "outcome")))
+          "timeout — never resend by yourself), failed. A send staged for a package request "
+          "needs its package_token. For a package recorded uncertain or failed it returns "
+          "`speak`: send its text verbatim, then mark_rendering_delivered with its render_id — "
+          "it is what lets the operator say \"send it again\". During a pass, pass the "
+          "pass_token.",
+          obj({"delivery_id": I, "outcome": S, "message_id": S, "pass_token": TOKEN,
+               "package_token": PKG_TOKEN}, ("delivery_id", "outcome")))
 def t_record_delivery(args):
     _need(args, "delivery_id", "outcome")
     return _deliverable("record_delivery", delivery.record_delivery(
         conn(), delivery_id=_int(args, "delivery_id"), outcome=args["outcome"],
-        message_id=args.get("message_id"), pass_token=_int(args, "pass_token")))
+        message_id=args.get("message_id"), pass_token=_int(args, "pass_token"),
+        package_token=_int(args, "package_token")))

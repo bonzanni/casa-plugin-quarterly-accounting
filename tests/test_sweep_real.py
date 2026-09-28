@@ -13,6 +13,7 @@ import lineage  # noqa: E402
 import matches  # noqa: E402
 import passes  # noqa: E402
 import sweep  # noqa: E402
+import version  # noqa: E402
 
 PDF = b"%PDF-1.4\n%%EOF\n"
 
@@ -54,7 +55,7 @@ class Base(StoreCase):
         return sorted(t for t in self.bf.tags(row_id) if t in lineage.R.OWNED)
 
     def wf(self, tags, row_id, verb="tag_transaction"):
-        return self.bf.call(verb, row_ids=[row_id], tags=tags, workflow="acct@0.1.0",
+        return self.bf.call(verb, row_ids=[row_id], tags=tags, workflow=version.WORKFLOW,
                             expected_generation=self.bf.generation())
 
     def ingest(self, **kw):
@@ -303,7 +304,7 @@ class TestEndsAndErasure(Base):
         rid = self.rid()
         current = [n for n in self.bf.notes(rid) if n.startswith("Accounting revision ")][-1]
         self.bf.call("add_note", row_ids=[rid], note="Accounting revision 1: stale.",
-                     author="agent", workflow="acct@0.1.0",
+                     author="agent", workflow=version.WORKFLOW,
                      expected_generation=self.bf.generation())
         self.new_pass()
         self.cycle()
@@ -346,7 +347,7 @@ class TestEndsAndErasure(Base):
                        for d in (5, 6, 7)])
         self.new_pass()
         ids = [r["row_id"] for r in self.bf.rows(state="active")]
-        wf = {"workflow": "acct@0.1.0"}
+        wf = {"workflow": version.WORKFLOW}
 
         def stale_matched(rid):              # first request: untag acct::matched
             self.bf.call("tag_transaction", row_ids=[rid], tags=["acct::matched"],
