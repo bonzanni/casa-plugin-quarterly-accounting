@@ -40,7 +40,8 @@ class TestQuarterWords(ToolCase):
         self.assertEqual((out["quarter"], [d["pid"] for d in out["items"]]), ("2026-Q3", [self.pid]))
 
     def test_the_package_of_q3_2026(self):
-        out = _json("build_quarterly_package", quarter="Q3 2026")
+        out = _json("build_quarterly_package", quarter="Q3 2026",
+                    package_token=self.package_token())
         self.assertIn("-2026-Q3-", out["filename"])
 
     def test_stop_chasing_q3_and_start_from_q2(self):
@@ -51,7 +52,7 @@ class TestQuarterWords(ToolCase):
     def test_anything_else_is_a_refusal_in_words_never_an_error(self):
         calls = [("build_review", {"view": "quarter", "quarter": "the third quarter"}),
                  ("list_quarter_state", {"quarter": "Q5"}),
-                 ("build_quarterly_package", {"quarter": "Q3-2026"}),
+                 ("build_quarterly_package", {"quarter": "Q3-2026", "package_token": 1}),
                  ("stop_chasing", {"quarter": "summer"}),
                  ("set_watermark", {"when": "Q7"}),
                  ("set_watermark", {"when": "2026-13-45"}),
@@ -129,8 +130,8 @@ class TestSendItAgainAfterATimeout(ToolCase):
         pid = self.lineage_for(1)
         self.classify(pid, {"software"})
         self.settle(pid)
-        self.other = package.build_quarterly_package(self.conn, "2026-Q3")
-        self.pkg = package.build_quarterly_package(self.conn, "2026-Q3")
+        self.other = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        self.pkg = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
 
     def test_timeout_offer_mark_delivered_then_send_it_again(self):
         import os
@@ -145,19 +146,31 @@ class TestSendItAgainAfterATimeout(ToolCase):
         _json("mark_rendering_delivered", render_id=speak["render_id"])
         self.assertIn("resend", _json("apply_reply", text="send it again")["instructions"])
         again = _json("stage_for_delivery", channel="telegram", resend=True)
-        self.assertEqual(os.path.basename(again["path"]), self.pkg["filename"])
+        self.assertEqual(again["filename"], self.pkg["filename"])
+        self.assertNotEqual(again["path"], staged["path"])          # a path of its own
         self.assertEqual(pathlib.Path(again["path"]).read_bytes(),
                          pathlib.Path(self.pkg["path"]).read_bytes())
 
-    def test_a_delivered_or_failed_send_offers_nothing(self):
-        for outcome in ("delivered", "failed"):
+    def test_a_delivered_send_offers_nothing_and_a_failed_one_offers_it_again(self):
+        # issue #2: a send that did not go out is a package notice, offered like a timeout
+        import os
+        # two packages: once a package arrived, a failed extra copy of it offers nothing
+        # (TestAPackageThatArrivedIsNeverOfferedAgain), so the failure is another package's
+        for outcome, pkg in (("delivered", self.other), ("failed", self.pkg)):
             staged = _json("stage_for_delivery", channel="telegram",
-                           package_id=self.other["package_id"])
+                           package_id=pkg["package_id"])
             out = _json("record_delivery", delivery_id=staged["delivery_id"], outcome=outcome)
-            self.assertIsNone(out.get("speak"), outcome)
-            import os
             for f in os.listdir(self.outbox):
                 os.unlink(self.outbox / f)
+            if outcome == "delivered":
+                self.assertIsNone(out.get("speak"), outcome)
+                continue
+            self.assertEqual(out["speak"]["text"], "The Q3 2026 package didn't go out. Say "
+                                                   '"send it again" and I\'ll\nsend it.')
+            scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                                 " render_id=?",
+                                                 (out["speak"]["render_id"],)).fetchone()[0])
+            self.assertEqual(scope["offers"], [self.pkg["package_id"]])
 
 
 class TestEndPass(ToolCase):

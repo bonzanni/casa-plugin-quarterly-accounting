@@ -5,6 +5,7 @@ from tests._base import StoreCase
 import db  # noqa: E402
 import ledger  # noqa: E402
 import lineage  # noqa: E402
+import version  # noqa: E402
 
 
 class Base(StoreCase):
@@ -278,6 +279,27 @@ class TestDeliveredKindHalf(Base):
         self.assertEqual(self.check(a, exp_kind=None), 0)    # unknown is not a change
         self.assertEqual(self.check(a, exp_kind="none", ended="erased"), 0)
 
+    def test_a_lineage_is_alerted_when_its_own_row_is_read(self):
+        # review C7 (L3): reading X never alerts Y; Y is alerted when Y is read, so a
+        # short-lived change of Y's kind that is undone before Y's read raises nothing
+        self.imp([{"row_id": 1}, {"row_id": 2, "amount_minor": 5000}])
+        x, y = sorted(self.live())
+        self.deliver(1, dict(self.conn.execute("SELECT * FROM bank_rows WHERE row_id=1")
+                             .fetchone()), pid=x)
+        self.conn.execute("DELETE FROM delivered_rows")
+        self.kinded(x, 1, "invoice")
+        self.kinded(y, 2, "invoice")
+        self.check(x, exp_kind="invoice")
+        self.check(y, exp_kind="invoice")
+        with db.tx(self.conn):          # Y's kind moves outside Y's own read
+            self.conn.execute("UPDATE projections SET exp_kind='receipt' WHERE pid=?", (y,))
+        self.assertEqual(self.check(x), 0)                  # X's read: nothing about Y
+        with db.tx(self.conn):          # ...and moves back before Y is read
+            self.conn.execute("UPDATE projections SET exp_kind='invoice' WHERE pid=?", (y,))
+        self.assertEqual(self.check(y), 0)
+        self.assertEqual(self.alerts(), [])
+        self.assertEqual(self.check(y, exp_kind="receipt"), 1)   # Y's own read tells it
+
 
 class TestInstance(Base):
     """Ledger identity is bank-feed's instance id (#69; plan §D4)."""
@@ -355,7 +377,7 @@ class TestInstance(Base):
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
 
     def test_nothing_is_imported_while_the_gate_refuses(self):
-        self.token = self.pass_(generation=1, registered={"acct@0.1.0": "b-1"})
+        self.token = self.pass_(generation=1, registered={version.WORKFLOW: "b-1"})
         with self.assertRaises(db.Refusal):
             self.imp([{"row_id": 1}])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0], 0)

@@ -155,6 +155,9 @@ def describe(conn, pid: int) -> dict:
         "search_state": p["search_state"], "search": json.loads(p["search_json"] or "{}"),
         "identity_question": bool(p["identity_question"]),
         "link": cp["document_link"] if cp is not None else None,
+        # the Gmail round's query ladder starts from the KB (issue #2): never from a reply
+        "search_hint": cp["search_hint"] if cp is not None else None,
+        "window_days": cp["window_days"] if cp is not None else 10,
         "portal": bool(cp is not None and cp["source"] == "portal"),
         "class_observed_at": p["class_observed_at"], "unprojectable": p["unprojectable"],
         # read since the latest import (lineage.is_fresh): a machine match and a package

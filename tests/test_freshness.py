@@ -38,9 +38,14 @@ class ToolPass(test_e2e.Base):
         from tests.test_tools import _fresh_conn
         _fresh_conn(self)._CONN = self.conn
 
-    def begin(self, trigger, do_import=True):
+    package_token = None
+
+    def begin(self, trigger, do_import=True, channel="telegram"):
         bf = self.bf
         token = call("begin_pass", trigger=trigger)["pass_token"]
+        if trigger == "package":        # the skill: the snapshot step names the quarter
+            call("record_step", pass_token=token, step="snapshot", action="start",
+                 quarter="2026-Q3", channel=channel)
         accounts = [{"account_id": r["account_id"], "category": r["category"], "label": r["name"]}
                     for r in bf.conn.execute("SELECT account_id, category, name FROM accounts")]
         call("record_probe", pass_token=token, kind="bank_tools", ok=True)
@@ -90,8 +95,33 @@ class ToolPass(test_e2e.Base):
             if budget is not None and n >= budget:
                 return page["remaining_in_cycle"]
 
-    def zip_of(self, quarter="2026-Q3"):
-        pkg = call("build_quarterly_package", quarter=quarter)
+    def end(self, token, outcome):
+        """end_pass; a package pass's answer hands over its request's package_token. The
+        specialist's snapshot finish comes first (a request builds only from a finished
+        snapshot step)."""
+        if self.conn.execute("SELECT trigger FROM pass_marker").fetchone()[0] == "package":
+            call("record_step", pass_token=token, step="snapshot", action="finish")
+        out = call("end_pass", pass_token=token, outcome=outcome)
+        if "package_token" in out:
+            self.package_token = out["package_token"]
+        return out
+
+    def request(self, channel="telegram"):
+        """A package request: begin_pass(package), the snapshot step and this pass's
+        own import (a request builds only from its own pass's import), end_pass.
+        Returns the package_token end_pass hands over."""
+        token = self.begin("package", channel=channel)
+        self.sweep(token)
+        out = self.end(token, "complete")["package_token"]
+        self.package_token = None
+        return out
+
+    def zip_of(self, quarter="2026-Q3", channel="telegram"):
+        token, self.package_token = self.package_token, None
+        if token is None:
+            token = self.request(channel)
+        pkg = call("build_quarterly_package", quarter=quarter, package_token=token)
+        pkg["package_token"] = token
         z = zipfile.ZipFile(pkg["path"])
         rows = list(csv.DictReader(io.StringIO(z.read("ledger.csv").decode())))
         return pkg, sorted(n for n in z.namelist() if "/" in n), rows, z
@@ -124,7 +154,7 @@ class TestAstraInterruptedCycle(ToolPass):
         bf = self.bf
         token = self.begin("cron")
         self.assertGreater(self.sweep(token, budget=1), 0)          # row 1 read, row 2 not
-        call("end_pass", pass_token=token, outcome="interrupted")
+        self.end(token, "interrupted")
         bf.call("untag_transaction", row_ids=[ids["A1"]], tags=["software"])
         self.classify(ids["A1"], "refund")                           # now wants a credit note
         token = self.begin("package")
@@ -132,7 +162,7 @@ class TestAstraInterruptedCycle(ToolPass):
         self.assertEqual(sorted(i["row_id"] for i in first["projections"]),
                          sorted(ids.values()))                       # BOTH are due again
         self.assertEqual(self.sweep(token), 0)
-        call("end_pass", pass_token=token, outcome="complete")
+        self.end(token, "complete")
         _, files, rows, _ = self.zip_of()
         self.assertEqual(files, [])                                  # the invoice does not ship
         self.assertEqual({r["counterparty"]: (r["status"], r["expectation_kind"]) for r in rows},
@@ -254,7 +284,7 @@ class TestSnapshotBoundCommits(ToolPass):
                               "and read this payment again; nothing was recorded")
         self.assertFalse(work.describe(self.conn, item["pid"])["fresh"])
         self.assertEqual(self.sweep(token), 0)                       # read again, under N+1
-        call("end_pass", pass_token=token, outcome="complete")
+        self.end(token, "complete")
         _, files, rows, _ = self.zip_of()
         self.assertEqual(files, [])
         self.assertEqual({r["counterparty"]: (r["status"], r["expectation_kind"]) for r in rows},
@@ -268,7 +298,7 @@ class TestSnapshotBoundCommits(ToolPass):
         bf, a = self.bf, ids["A1"]
         token = self.begin("package")
         self.assertEqual(self.sweep(token), 0)
-        call("end_pass", pass_token=token, outcome="complete")
+        self.end(token, "complete")
         bf.call("untag_transaction", row_ids=[a], tags=["software"])
         self.classify(a, "refund")
         token = self.begin("cron")                   # its import is N; the build freezes N
@@ -299,7 +329,7 @@ class TestSnapshotBoundCommits(ToolPass):
                          "refused: the bank was re-read since this package was built — "
                          "build it again")
         self.assertEqual(self.sweep(token), 0)
-        call("end_pass", pass_token=token, outcome="complete")
+        self.end(token, "complete")
         _, files, rows, _ = self.zip_of()
         self.assertEqual(files, [])
         self.assertEqual({r["counterparty"]: r["expectation_kind"] for r in rows},
@@ -340,7 +370,7 @@ class TestSnapshotBoundCommits(ToolPass):
             package._render = racing
             try:
                 with self.assertRaises(db.Refusal):
-                    package.build_quarterly_package(self.conn, "2026-Q3")
+                    package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
             finally:
                 package._render = real
             self.assertEqual(list((db.data_dir() / "packages").iterdir()), [])
@@ -352,7 +382,7 @@ class TestSnapshotBoundCommits(ToolPass):
                 refused += 1
                 self.assertFalse(work.describe(self.conn, item["pid"])["fresh"])
             self.assertEqual(call("list_projections", pass_token=token)["snapshot_id"], n + 1)
-            call("end_pass", pass_token=token, outcome="interrupted")
+            self.end(token, "interrupted")
         self.assertGreater(refused, 0)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 0)
 
@@ -405,7 +435,7 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
         bf, a = self.bf, ids["A1"]
         token = self.begin("package")
         self.assertEqual(self.sweep(token), 0)
-        call("end_pass", pass_token=token, outcome="complete")
+        self.end(token, "complete")
         pkg, files, rows, _ = self.zip_of()
         self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])     # MATCHED/invoice
         if before_import:
@@ -414,7 +444,7 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
         self.classify(a, "refund")
         token = self.begin("cron")                                     # import N+1
         self.assertEqual(self.sweep(token), 0)
-        call("end_pass", pass_token=token, outcome="complete")
+        self.end(token, "complete")
         return pkg
 
     def outbox_files(self):
@@ -427,23 +457,32 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
     def test_the_first_send_of_a_superseded_package_is_refused(self):
         pkg = self.built_then_superseded()
         handoff_before = self.handoff_files()
-        for channel in ("telegram", "email"):
-            out = _raw("stage_for_delivery", channel=channel, package_id=pkg["package_id"])
-            self.assertEqual(out, "refused: the bank was re-read since this package was built "
-                                  "— build it again")
+        # a request is staged by the channel it was asked for (its email variant is a
+        # request of its own, and meets the same snapshot check)
+        out = _raw("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
+                   package_token=pkg["package_token"])
+        self.assertEqual(out, "refused: the bank was re-read since this package was built "
+                              "— build it again")
+        self.assertTrue(_raw("stage_for_delivery", channel="email",
+                             package_id=pkg["package_id"],
+                             package_token=pkg["package_token"]).startswith(
+                                 "refused: this package was asked for by telegram"))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0], 0)
         self.assertEqual(self.outbox_files(), [])
         self.assertEqual(self.handoff_files(), handoff_before)
         # built again after the sweep, it ships the truth and stages
         pkg2, files, rows, _ = self.zip_of()
         self.assertEqual(files, [])
-        staged = call("stage_for_delivery", channel="telegram", package_id=pkg2["package_id"])
-        self.assertEqual(self.outbox_files(), [staged["filename"]])
+        staged = call("stage_for_delivery", channel="telegram", package_id=pkg2["package_id"],
+                      package_token=pkg2["package_token"])
+        self.assertEqual(self.outbox_files(), [os.path.basename(staged["path"])])
 
     def test_a_resend_of_a_package_already_sent_still_works_after_a_newer_import(self):
         def send_uncertain(pkg):
-            d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"])
-            call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain")
+            d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
+                     package_token=pkg["package_token"])
+            call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain",
+                 package_token=pkg["package_token"])
             for f in os.listdir(self.outbox):              # Casa consumed the outbox copy
                 os.unlink(self.outbox / f)
         pkg = self.built_then_superseded(before_import=send_uncertain)
@@ -465,7 +504,7 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
         self.two_rows_matched()
         token = self.begin("package")
         self.assertEqual(self.sweep(token), 0)
-        call("end_pass", pass_token=token, outcome="complete")
+        self.end(token, "complete")
         pkg, files, _, _ = self.zip_of()
         self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])
         return pkg
@@ -476,12 +515,18 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
 
     def test_a_first_send_staged_before_an_import_is_revoked(self):
         pkg = self.built()
-        tg = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"])
-        em = call("stage_for_delivery", channel="email", package_id=pkg["package_id"])
-        self.assertEqual(os.listdir(self.outbox), [tg["filename"]])
+        tg = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
+                  package_token=pkg["package_token"])
+        # one staged send per request, and a second request would import again: the emailed
+        # copy is a package built outside any request under the same import (its first send
+        # is revoked all the same, with its notice)
+        import package
+        pkg2 = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        em = call("stage_for_delivery", channel="email", package_id=pkg2["package_id"])
+        self.assertEqual(os.listdir(self.outbox), [os.path.basename(tg["path"])])
         self.assertEqual(len(self.handoff_entries()), 1)
         token = self.begin("cron")                                  # import N+1
-        call("end_pass", pass_token=token, outcome="interrupted")
+        self.end(token, "interrupted")
         self.assertEqual(os.listdir(self.outbox), [])                # nothing left to send
         self.assertEqual(self.handoff_entries(), [])
         for d in (tg, em):
@@ -497,8 +542,10 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
 
     def test_a_resend_of_a_file_already_sent_is_not_revoked(self):
         pkg = self.built()
-        d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"])
-        call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain")
+        d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
+                 package_token=pkg["package_token"])
+        call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain",
+             package_token=pkg["package_token"])
         for f in os.listdir(self.outbox):                  # Casa consumed the outbox copy
             os.unlink(self.outbox / f)
         r = call("build_review", view="status", quarter="2026-Q3")
@@ -506,8 +553,8 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
         self.assertIn("resend", call("apply_reply", text="send it again")["instructions"])
         again = call("stage_for_delivery", channel="telegram", resend=True)
         token = self.begin("cron")                                  # import N+1
-        call("end_pass", pass_token=token, outcome="interrupted")
-        self.assertEqual(os.listdir(self.outbox), [again["filename"]])
+        self.end(token, "interrupted")
+        self.assertEqual(os.listdir(self.outbox), [os.path.basename(again["path"])])
         self.assertEqual(call("record_delivery", delivery_id=again["delivery_id"],
                               outcome="delivered")["status"], "delivered")
 
@@ -518,8 +565,9 @@ class TestWithdrawalUnderTheCustodyLock(ToolPass):
     built = TestImportRevokesAnUnsentFirstSend.built
     def staged(self):
         pkg = self.built()
-        d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"])
-        self.assertEqual(os.listdir(self.outbox), [d["filename"]])
+        d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
+                 package_token=pkg["package_token"])
+        self.assertEqual(os.listdir(self.outbox), [os.path.basename(d["path"])])
         return pkg, d
 
     def state(self, delivery_id):
@@ -574,7 +622,7 @@ class TestWithdrawalUnderTheCustodyLock(ToolPass):
         self.assertTrue(text.startswith("refused: "), text)
         self.assertEqual(lineage.latest_import(self.conn), n)       # nothing imported
         self.assertEqual(self.state(d["delivery_id"]), ("staged", False))
-        self.assertEqual((self.outbox / d["filename"]).read_bytes(),
+        self.assertEqual(pathlib.Path(d["path"]).read_bytes(),
                          pathlib.Path(pkg["path"]).read_bytes())    # intact, still consistent
         release.set()
         proc.join(60)
@@ -589,8 +637,9 @@ class TestWithdrawalUnderTheCustodyLock(ToolPass):
         # superseded package sendable under a committed newer snapshot
         for channel in ("telegram", "email"):
             with self.subTest(channel=channel):
-                pkg = self.built() if channel == "telegram" else self.rebuilt()
-                d = call("stage_for_delivery", channel=channel, package_id=pkg["package_id"])
+                pkg = self.built() if channel == "telegram" else self.rebuilt(channel)
+                d = call("stage_for_delivery", channel=channel, package_id=pkg["package_id"],
+                         package_token=pkg["package_token"])
                 staged = pathlib.Path(d["path"])
                 locked = staged.parent          # the outbox, or the handoff entry's own dir
                 os.chmod(locked, 0o500)                      # the withdrawal will fail
@@ -611,13 +660,13 @@ class TestWithdrawalUnderTheCustodyLock(ToolPass):
                 self.assertEqual(imp["revoked_deliveries"], [d["delivery_id"]])
                 self.assertFalse(staged.exists())
                 self.assertEqual(self.state(d["delivery_id"]), ("failed", True))
-                call("end_pass", pass_token=token, outcome="interrupted")
+                self.end(token, "interrupted")
 
-    def rebuilt(self):
+    def rebuilt(self, channel="telegram"):
         """A fresh package built after a complete sweep, under the latest import."""
-        token = self.begin("package")
+        token = self.begin("package", channel=channel)
         self.assertEqual(self.sweep(token), 0)
-        call("end_pass", pass_token=token, outcome="complete")
+        self.end(token, "complete")
         return self.zip_of()[0]
 
     def test_imports_and_builds_in_two_processes_never_deadlock(self):
@@ -667,7 +716,7 @@ class TestPackageWithANonFreshMember(ToolPass):
         self.classify(ids["A1"], "refund")
         token = self.begin("package")
         self.assertEqual(self.sweep(token, budget=1), 1)             # Zapier read, Adobe not
-        call("end_pass", pass_token=token, outcome="interrupted")
+        self.end(token, "interrupted")
         pkg, files, rows, z = self.zip_of()
         self.assertEqual(files, ["unresolved/2026-07-06_Adobe_10.00.pdf"])
         st = {r["counterparty"]: (r["status"], r["expectation_kind"], r["document"]) for r in rows}
@@ -679,7 +728,7 @@ class TestPackageWithANonFreshMember(ToolPass):
         # after a complete sweep the same build ships the truth
         token = self.begin("package")
         self.assertEqual(self.sweep(token), 0)
-        call("end_pass", pass_token=token, outcome="complete")
+        self.end(token, "complete")
         pkg, files, rows, _ = self.zip_of()
         self.assertEqual(files, [])
         st = {r["counterparty"]: (r["status"], r["expectation_kind"]) for r in rows}
@@ -724,7 +773,7 @@ class TestFreshnessProperty(ToolPass):
                     ok = False
                     self.assertIn("not been re-read", str(exc))
                 self.assertEqual(ok, fresh, (trial, ref))
-            call("end_pass", pass_token=token, outcome="interrupted")
+            self.end(token, "interrupted")
             _, files, rows, _ = self.zip_of()
             for d in work.list_quarter_state(self.conn, "2026-Q3")["items"]:
                 r = next(x for x in rows if x["counterparty"] == d["counterparty"])
@@ -734,7 +783,7 @@ class TestFreshnessProperty(ToolPass):
             token = self.begin("cron")
             self.assertFalse(any(lineage.is_fresh(self.conn, lineage.projection(self.conn, p))
                                  for p in lineage.live_pids(self.conn)))
-            call("end_pass", pass_token=token, outcome="interrupted")
+            self.end(token, "interrupted")
 
 
 if __name__ == "__main__":

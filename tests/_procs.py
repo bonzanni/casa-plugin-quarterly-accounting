@@ -174,7 +174,7 @@ def build_paused(quarter, rendered, resume, out):
     package._render = paused
     conn = db.open_store()
     try:
-        _report(out, lambda: package.build_quarterly_package(conn, quarter))
+        _report(out, lambda: package.build_quarterly_package(conn, quarter, bound=False))
     finally:
         conn.close()
 
@@ -220,12 +220,52 @@ def build_repeatedly(quarter, n, out):
     try:
         for _ in range(n):
             try:
-                package.build_quarterly_package(conn, quarter)
+                package.build_quarterly_package(conn, quarter, bound=False)
                 results.append("ok")
             except db.Refusal as exc:
                 results.append(f"{type(exc).__name__}: {exc}")
         out.put(("ok", results))
     except BaseException as exc:
         out.put(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        conn.close()
+
+
+def continue_pass(path, barrier, out):
+    """continue_pass from a sibling session, released by the barrier together with
+    another (issue #2: two notices race one claim)."""
+    import db
+    import steps
+    conn = db.open_store(path)
+    try:
+        barrier.wait(30)
+        out.put(steps.claim(conn))
+    finally:
+        conn.close()
+
+
+def import_poison_paused(export_path, token, instance, rolled_back, resume, out):
+    """import_ledger_export with a mismatched ledger instance, paused inside poison()
+    right after it rolled back the checked transaction and before its own verdict
+    transaction (review C4: a superseded caller must not poison the live pass)."""
+    import contextlib
+    import inspect
+
+    import db
+    import ledger
+    real = db.tx
+
+    @contextlib.contextmanager
+    def tx(conn, *a, **kw):
+        if any(f.function == "poison" for f in inspect.stack()):
+            rolled_back.set()
+            resume.wait(60)
+        with real(conn, *a, **kw):
+            yield conn
+    db.tx = tx
+    conn = db.open_store()
+    try:
+        _report(out, lambda: ledger.import_ledger_export(conn, path=export_path, token=token,
+                                                          ledger_instance=instance))
     finally:
         conn.close()

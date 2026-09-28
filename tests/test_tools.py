@@ -24,6 +24,7 @@ EXPECTED = {
     "record_search", "stop_chasing",
     "list_quarter_state", "build_review", "mark_rendering_delivered", "apply_reply",
     "build_quarterly_package", "stage_for_delivery", "record_delivery",
+    "record_step", "continue_pass",
 }
 
 
@@ -80,14 +81,14 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 33)
+        self.assertEqual(len(EXPECTED), 35)
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 33)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 35)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
@@ -196,7 +197,7 @@ class TestPassTokens(ToolCase):
         pid = self.lineage_for(1)
         self.classify(pid, {"software"})
         self.settle(pid)
-        pkg = package.build_quarterly_package(self.conn, "2026-Q3")
+        pkg = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
         self.pass_()                                          # a newer pass reclaims the marker
         self.assertTrue(_text("stage_for_delivery", channel="telegram",
                               package_id=pkg["package_id"], pass_token=token)
@@ -220,8 +221,8 @@ class TestResend(ToolCase):
         pid = self.lineage_for(1)
         self.classify(pid, {"software"})
         self.settle(pid)
-        self.a = package.build_quarterly_package(self.conn, "2026-Q3")
-        self.b = package.build_quarterly_package(self.conn, "2026-Q3")
+        self.a = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        self.b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
         self.assertNotEqual(self.a["filename"], self.b["filename"])
 
     def send(self, pkg_id, outcome):
@@ -242,7 +243,7 @@ class TestResend(ToolCase):
         self.assertIn(self.a["filename"], self.show())
         self.assertIn("resend", _json("apply_reply", text="send it again")["instructions"])
         staged = _json("stage_for_delivery", channel="telegram", resend=True)
-        self.assertEqual(os.path.basename(staged["path"]), self.a["filename"])
+        self.assertEqual(staged["filename"], self.a["filename"])
         self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),
                          pathlib.Path(self.a["path"]).read_bytes())
 
@@ -320,7 +321,7 @@ class TestMachineWritesNeedAPass(ToolCase):
         optional = [n for n, t in qa_server.TOOLS.items()
                     if "pass_token" in t["schema"]["properties"]
                     and "pass_token" not in t["schema"]["required"]]
-        self.assertEqual(len(optional), 10, optional)
+        self.assertEqual(len(optional), 11, optional)       # + list_quarter_state (the clock)
         for n in optional:
             self.assertIn("During a pass, pass the pass_token.",
                           qa_server.TOOLS[n]["description"], n)
@@ -360,7 +361,7 @@ class TestArgumentTypes(ToolCase):
         import tools  # noqa: F401
         bools = [(n, k) for n, t in qa_server.TOOLS.items()
                  for k, v in t["schema"]["properties"].items() if v.get("type") == "boolean"]
-        self.assertEqual(len(bools), 12, bools)             # fix wave F: + fresh_only
+        self.assertEqual(len(bools), 13, bools)             # fix wave F: + fresh_only; + failed
         for n, k in bools:
             res = _tool(n, **{k: "false"})
             text = res["content"][0]["text"]
@@ -368,7 +369,7 @@ class TestArgumentTypes(ToolCase):
                 req = qa_server.TOOLS[n]["schema"]["required"]
                 filler = {"pid": 1, "doc_id": 1, "pass_token": 1, "kind": "gmail",
                           "expected_revision": 0, "render_id": "r1", "channel": "telegram",
-                          "snapshot_id": 1}
+                          "snapshot_id": 1, "step": "sweep", "action": "finish"}
                 res = _tool(n, **{r: filler[r] for r in req if r != k}, **{k: "false"})
                 text = res["content"][0]["text"]
             self.assertEqual(text, f"refused: {k} must be true or false", (n, k))

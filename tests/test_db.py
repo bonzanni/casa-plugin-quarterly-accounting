@@ -53,11 +53,11 @@ class TestSchema(TempEnv):
                     " VALUES (1, 'telegram', '/x/out/q3.zip', 'staged', '2026-09-03T00:00:00Z')")
         return old
 
-    def _assert_v3_behaviour(self, c, old_seq: int):
+    def _assert_current_behaviour(self, c, old_seq: int, deliveries=1, first_sent=False):
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
-        self.assertEqual(db.SCHEMA_VERSION, 3)
-        # the migrated store has every column a fresh schema-3 store has
+        self.assertEqual(db.SCHEMA_VERSION, 4)
+        # the migrated store has every column and index a fresh store has
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -69,13 +69,18 @@ class TestSchema(TempEnv):
             return {t: sorted(r[1] for r in conn.execute(f"PRAGMA table_info({t})"))
                     for t in tables}
         self.assertEqual(columns(c), columns(fresh))
+
+        def indexes(conn):
+            return sorted(r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE"
+                                                     " type='index' AND sql IS NOT NULL"))
+        self.assertEqual(indexes(c), indexes(fresh))
         # the data survived
         self.assertEqual(c.execute("SELECT count(*) FROM renders").fetchone()[0], 2)
         self.assertEqual(c.execute("SELECT text FROM renders WHERE render_id='r-old'")
                          .fetchone()[0], "old words")
         self.assertEqual(c.execute("SELECT count(*) FROM snapshots").fetchone()[0], 1)
         self.assertEqual(c.execute("SELECT count(*) FROM packages").fetchone()[0], 1)
-        self.assertEqual(c.execute("SELECT count(*) FROM deliveries").fetchone()[0], 1)
+        self.assertEqual(c.execute("SELECT count(*) FROM deliveries").fetchone()[0], deliveries)
         # fix wave D: the delivery sequence — the old delivery orders below any later one
         self.assertEqual(c.execute("SELECT delivered_seq FROM renders WHERE render_id='r-old'")
                          .fetchone()[0], old_seq)
@@ -95,10 +100,11 @@ class TestSchema(TempEnv):
         self.assertEqual((pk[0], pk[1]), (None, "dg"))
         self.assertIsNone(c.execute("SELECT revoked_at FROM deliveries").fetchone()[0])
         import delivery
-        with self.assertRaises(db.Refusal):
-            delivery._require_current_snapshot(c, 1)
+        if not first_sent:
+            with self.assertRaises(db.Refusal):
+                delivery._require_current_snapshot(c, 1)
 
-    def test_a_schema_1_store_migrates_to_3_keeping_its_data(self):
+    def test_a_schema_1_store_migrates_to_current_keeping_its_data(self):
         # schema 1 as released (6509806): no delivered_seq, no freshness, no package snapshot
         from tests.schema_history import DDL_V1
         self.assertNotIn("delivered_seq", DDL_V1)
@@ -106,14 +112,14 @@ class TestSchema(TempEnv):
         self._released_store(DDL_V1, 1).close()
         c = db.open_store()
         self.addCleanup(c.close)
-        self._assert_v3_behaviour(c, old_seq=0)
+        self._assert_current_behaviour(c, old_seq=0)
         c.close()
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)
         self.assertEqual(c2.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "3")
+                         .fetchone()[0], "4")
 
-    def test_a_fix_d_schema_2_store_migrates_to_3_keeping_its_sequence(self):
+    def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
         # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
         from tests.schema_history import DDL_V2
         self.assertIn("delivered_seq", DDL_V2)
@@ -125,9 +131,57 @@ class TestSchema(TempEnv):
         old.close()
         c = db.open_store()
         self.addCleanup(c.close)
-        self._assert_v3_behaviour(c, old_seq=7)
+        self._assert_current_behaviour(c, old_seq=7)
         self.assertGreater(c.execute("SELECT delivered_seq FROM renders WHERE render_id='r-new'")
                            .fetchone()[0], 7)
+
+    def test_a_v0_1_0_schema_3_store_migrates_to_4_keeping_its_data(self):
+        # schema 3 as v0.1.0 shipped it (e9b4eff): no pass steps, no package requests,
+        # and a resend could reuse the outbox name of an earlier send of the same bytes
+        from tests.schema_history import DDL_V3
+        self.assertIn("class_observed_snapshot", DDL_V3)
+        self.assertNotIn("pass_steps", DDL_V3)
+        old = self._released_store(DDL_V3, 3)
+        old.execute("UPDATE renders SET delivered_seq=0 WHERE render_id='r-old'")
+        old.execute("UPDATE deliveries SET status='uncertain'")
+        old.execute("INSERT INTO deliveries(package_id, channel, staged_path, status, created_at)"
+                    " VALUES (1, 'telegram', '/x/out/q3.zip', 'staged', '2026-09-04T00:00:00Z')")
+        old.execute("INSERT INTO counters(name, value) VALUES ('pass_generation', 5)"
+                    " ON CONFLICT(name) DO UPDATE SET value=5")
+        old.execute("INSERT INTO pass_marker(id, generation, live, pass_id, trigger, started_at)"
+                    " VALUES (1, 5, 1, 'p5', 'cron', '2026-09-05T00:00:00Z')")
+        old.execute("INSERT INTO passes(pass_id, generation, trigger, started_at)"
+                    " VALUES ('p5', 5, 'cron', '2026-09-05T00:00:00Z')")
+        old.close()
+        c = db.open_store()
+        self.addCleanup(c.close)
+        self._assert_current_behaviour(c, old_seq=0, deliveries=2, first_sent=True)
+        # the live pass keeps its token; nothing is claimed; its reply defaults
+        m = c.execute("SELECT * FROM pass_marker").fetchone()
+        self.assertEqual((m["generation"], m["live"], m["claimed_step"], m["lease_at"]),
+                         (5, 1, None, None))
+        self.assertEqual(c.execute("SELECT reply FROM passes").fetchone()[0], "telegram")
+        self.assertEqual(c.execute("SELECT count(*) FROM pass_steps").fetchone()[0], 0)
+        self.assertEqual(c.execute("SELECT count(*) FROM package_requests").fetchone()[0], 0)
+        # two sends that shared one outbox name: the newest keeps it, the older is
+        # renamed out of the way, and from now on no two deliveries share a path
+        paths = [r[0] for r in c.execute("SELECT staged_path FROM deliveries"
+                                         " ORDER BY delivery_id")]
+        self.assertEqual(paths, ["/x/out/q3.zip#1", "/x/out/q3.zip"])
+        self.assertIsNone(c.execute("SELECT withdrawn_at FROM deliveries WHERE delivery_id=2")
+                          .fetchone()[0])
+        with self.assertRaises(sqlite3.IntegrityError):
+            c.execute("INSERT INTO deliveries(package_id, channel, staged_path, status,"
+                      " created_at) VALUES (1, 'telegram', '/x/out/q3.zip', 'staged', 'x')")
+
+    def test_a_staged_path_is_unique_in_a_fresh_store(self):
+        c = db.open_store()
+        self.addCleanup(c.close)
+        c.execute("INSERT INTO deliveries(channel, staged_path, status, created_at)"
+                  " VALUES ('telegram', '/o/qa-1.zip', 'staged', 'x')")
+        with self.assertRaises(sqlite3.IntegrityError):
+            c.execute("INSERT INTO deliveries(channel, staged_path, status, created_at)"
+                      " VALUES ('email', '/o/qa-1.zip', 'delivered', 'x')")
 
     def test_a_newer_schema_is_refused(self):
         c = db.open_store()

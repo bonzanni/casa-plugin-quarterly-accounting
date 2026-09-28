@@ -25,15 +25,19 @@ class Base(StoreCase):
         self.pid = self.lineage_for(1)
         self.classify(self.pid, {"software"})
         self.settle(self.pid)
-        self.pkg = package.build_quarterly_package(self.conn, "2026-Q3")
+        self.pkg = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
 
 
 class TestTelegram(Base):
-    def test_staged_atomically_into_the_outbox_under_its_built_name(self):
+    def test_staged_atomically_into_the_outbox_under_a_name_of_its_own(self):
+        # issue #2: the staged file's name is random and never reused; the operator sees
+        # the package's name through send_media's filename argument
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
         self.assertEqual(os.path.dirname(out["path"]), str(self.outbox))
-        self.assertEqual(os.path.basename(out["path"]), self.pkg["filename"])
+        self.assertRegex(os.path.basename(out["path"]), r"^qa-[0-9a-f]{16}\.zip$")
+        self.assertEqual(out["filename"], self.pkg["filename"])
+        self.assertIn("filename=<filename>", out["note"])
         self.assertEqual(pathlib.Path(out["path"]).read_bytes(),
                          pathlib.Path(self.pkg["path"]).read_bytes())
         self.assertFalse([f for f in os.listdir(self.outbox) if ".part" in f])
@@ -119,12 +123,15 @@ class TestTelegram(Base):
         old = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
         delivery.record_delivery(self.conn, delivery_id=old["delivery_id"], outcome="delivered")
-        newer = package.build_quarterly_package(self.conn, "2026-Q3")
+        newer = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
         for outcome in ("uncertain", "failed"):
             d = delivery.stage_for_delivery(self.conn, channel="telegram",
                                             package_id=newer["package_id"])
             delivery.record_delivery(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
-        self.assertEqual(delivery.resendable(self.conn), self.pkg["package_id"])
+        # one predicate (resend_refusal): a package that arrived is never resent; the newer
+        # one, whose latest send failed under the current snapshot, is the one owed
+        self.assertEqual(delivery.resendable(self.conn), newer["package_id"])
+        self.assertIsNotNone(delivery.resend_refusal(self.conn, self.pkg["package_id"]))
 
 
 class TestPassFence(Base):
@@ -183,7 +190,7 @@ class TestCustody(Base):
         del db.custody_lock
         self.addCleanup(setattr, db, "custody_lock", saved)
         with self.assertRaises(AttributeError):
-            package.build_quarterly_package(self.conn, "2026-Q3")
+            package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
 
 
 class TestEmail(Base):
@@ -249,7 +256,8 @@ class TestEmail(Base):
                                            counterparty="Adobe", amount_minor=100,
                                            document_date="2026-07-02")["doc_id"]
         out = delivery.stage_for_delivery(self.conn, channel="telegram", doc_id=doc_id)
-        self.assertEqual(os.path.basename(out["path"]), "2026-07-02_Adobe_1.00.pdf")
+        self.assertEqual(out["filename"], "2026-07-02_Adobe_1.00.pdf")
+        self.assertRegex(os.path.basename(out["path"]), r"^qa-[0-9a-f]{16}\.pdf$")
 
 
 class TestResendTarget(Base):
@@ -267,7 +275,7 @@ class TestResendTarget(Base):
     def test_the_offered_uncertain_package_not_a_newer_delivered_one(self):
         a = self.pkg
         self.send(a["package_id"], "uncertain")
-        b = package.build_quarterly_package(self.conn, "2026-Q3")
+        b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
         self.send(b["package_id"], "delivered")
         text = self.shown()
         self.assertIn(a["filename"], text)
@@ -292,7 +300,7 @@ class TestResendTarget(Base):
 
     def test_two_offered_asks_which_by_the_names(self):
         a = self.pkg
-        b = package.build_quarterly_package(self.conn, "2026-Q3")
+        b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
         self.send(a["package_id"], "uncertain")
         self.send(b["package_id"], "uncertain")
         self.shown()
@@ -343,13 +351,59 @@ class TestOutboxNames(Base):
         paths = [r[0] for r in self.conn.execute("SELECT staged_path FROM deliveries")]
         self.assertEqual(sorted(paths), sorted([o1["path"], o2["path"]]))
 
-    def test_other_bytes_under_a_packages_name_are_refused_and_kept(self):
+    def test_a_file_already_in_the_outbox_is_never_touched(self):
         other = self.outbox / self.pkg["filename"]
         other.write_bytes(b"not this package")
-        with self.assertRaises(db.Refusal):
-            delivery.stage_for_delivery(self.conn, channel="telegram",
-                                        package_id=self.pkg["package_id"])
+        out = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                          package_id=self.pkg["package_id"])
+        self.assertNotEqual(out["path"], str(other))
         self.assertEqual(other.read_bytes(), b"not this package")
+        with mock.patch.object(delivery, "_nonce", side_effect=["taken", "free"]):
+            (self.outbox / "qa-taken.zip").write_bytes(b"waiting")
+            out = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                              package_id=self.pkg["package_id"])
+        self.assertEqual(os.path.basename(out["path"]), "qa-free.zip")
+        self.assertEqual((self.outbox / "qa-taken.zip").read_bytes(), b"waiting")
+
+    def consumed(self):
+        for f in os.listdir(self.outbox):          # Casa consumed the outbox copy on send
+            os.unlink(self.outbox / f)
+
+    def test_a_repeated_name_is_drawn_again_and_never_written(self):
+        # a path any delivery ever named is never staged at again, even once its file
+        # is gone: a superseded holder may still hold that path
+        with mock.patch.object(delivery, "_nonce", side_effect=["aaaa", "aaaa", "bbbb"]):
+            first = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                                package_id=self.pkg["package_id"])
+            self.consumed()
+            written = []
+            real = delivery._to_outbox
+
+            def spy(path, data):
+                written.append(os.path.basename(path))
+                return real(path, data)
+            with mock.patch.object(delivery, "_to_outbox", spy):
+                second = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                                     package_id=self.pkg["package_id"])
+        self.assertEqual(os.path.basename(first["path"]), "qa-aaaa.zip")
+        self.assertEqual(os.path.basename(second["path"]), "qa-bbbb.zip")
+        self.assertEqual(written, ["qa-bbbb.zip"])
+        self.assertFalse(os.path.exists(first["path"]))
+
+    def test_a_collision_the_name_check_misses_is_refused_by_the_store_and_drawn_again(self):
+        # the UNIQUE staged path is the durable guard, not the random draw
+        with mock.patch.object(delivery, "_nonce", side_effect=["aaaa", "aaaa", "bbbb"]):
+            first = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                                package_id=self.pkg["package_id"])
+            self.consumed()
+            with mock.patch.object(delivery, "_path_taken", lambda conn, path: False):
+                second = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                                     package_id=self.pkg["package_id"])
+        self.assertEqual(os.path.basename(second["path"]), "qa-bbbb.zip")
+        self.assertFalse(os.path.exists(first["path"]))      # its copy was removed again
+        paths = [r[0] for r in self.conn.execute("SELECT staged_path FROM deliveries"
+                                                 " ORDER BY delivery_id")]
+        self.assertEqual(paths, [first["path"], second["path"]])
 
     def test_a_refused_log_write_never_removes_a_copy_it_did_not_create(self):
         first = delivery.stage_for_delivery(self.conn, channel="telegram",

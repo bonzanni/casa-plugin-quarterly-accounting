@@ -3,8 +3,9 @@
 bank-feed (tests/bankfeed.py). This is the executable reference for the
 procedure SKILL.md prescribes; the skill must say exactly this, in words:
 
-  list_projections -> for each item (until remaining_in_cycle is 0 or the room runs
-  out; triage then judges only fresh items — sweep_within, run_pass(sweep_budget=...)):
+  list_projections -> for each item (until remaining_in_cycle is 0, `time_up`, or the
+  room runs out; triage then judges only fresh items — sweep_within,
+  run_pass(sweep_budget=...)):
     get_transaction(row_id); "no transaction #N" -> record_observation(not_found)
     else record_observation(observed_tags, observed_notes, observed_first_seen)
     every record_observation carries list_projections' snapshot_id (the import's
@@ -73,14 +74,14 @@ def observe_and_repair(conn, bf, token, item, snapshot_id) -> dict:
     return r
 
 
-def sweep_cycle(conn, bf, token, limit=25) -> int:
+def sweep_cycle(conn, bf, token, limit=25, quarter=None) -> int:
     n = 0
     while True:
-        page = sweep.list_projections(conn, token=token, limit=limit)
+        page = sweep.list_projections(conn, token=token, limit=limit, quarter=quarter)
         for item in page["projections"]:
             observe_and_repair(conn, bf, token, item, page["snapshot_id"])
             n += 1
-        if page["remaining_in_cycle"] == 0:
+        if page["remaining_in_cycle"] == 0 or page["time_up"]:
             return n
 
 
@@ -94,7 +95,7 @@ def sweep_within(conn, bf, token, budget) -> int:
         for item in page["projections"]:
             observe_and_repair(conn, bf, token, item, page["snapshot_id"])
             n += 1
-        if page["remaining_in_cycle"] == 0 or n >= budget:
+        if page["remaining_in_cycle"] == 0 or n >= budget or page["time_up"]:
             return page["remaining_in_cycle"]
 
 
@@ -106,6 +107,12 @@ def sweep_within(conn, bf, token, budget) -> int:
 # replaced: `triage` applies the auto-match bar of SKILL.md step 6 to filed
 # metadata (the real specialist reads the PDFs). Every bank-feed interaction
 # is the real one.
+#
+# Ellen's side is SKILL.md's "a delegation that answers later" (issue #2):
+# continue_pass before begin_pass; record_step(start) before the delegation;
+# the specialist's record_step(finish) as its last action; then continue_pass,
+# whose NEW token is the only one Ellen uses from then on, and end_pass by the
+# outcome rule.
 import re  # noqa: E402
 
 import binding  # noqa: E402
@@ -229,17 +236,66 @@ def triage(conn, bf, token) -> dict:
     return done
 
 
+def outcome(c, remaining=0, not_searched=0) -> str:
+    """SKILL.md's outcome rule for end_pass, from a continuation's fields."""
+    fin = c.get("finish") or {}
+    if fin.get("stopped") or c.get("can_run") is False:
+        return "stopped"
+    unfinished = c.get("ended") in ("expired", "errored") or c.get("step") is None
+    if unfinished and not c.get("imported"):
+        return "failed"
+    work_ = c.get("work") or {}
+    if (unfinished or remaining or not_searched or fin.get("remaining_in_cycle")
+            or fin.get("triage_remaining") or work_.get("truncated") or work_.get("not_fresh")):
+        return "interrupted"
+    return "complete"
+
+
+def continue_earlier(conn) -> list:
+    """SKILL.md: continue_pass before begin_pass. A continuation found first is an
+    unfinished earlier one: do it (here, a pass continuation is ended by the outcome
+    rule — the sim has no Gmail round), then continue_pass again, and only when
+    nothing is due go on with the flow that was asked for. Returns the ended passes."""
+    import steps
+    ended = []
+    while True:
+        c = steps.claim(conn)["continue"]
+        if c is None:
+            return ended
+        if "pass_token" in c:
+            ended.append(passes.end_pass(conn, c["pass_token"], outcome(c), {}))
+        elif c["next"] is not None:
+            raise AssertionError(f"the sim does not model a package request's {c['next']}")
+
+
+def _continue(conn) -> dict:
+    """Ellen's continue_pass after the delegation answered: the continuation."""
+    import steps
+    c = steps.claim(conn)["continue"]
+    assert c is not None, "the finished step is due"
+    return c
+
+
 def run_pass(conn, bf, trigger="cron", sync=None, sweep_budget=None) -> dict:
-    """One specialist delegation, in plan §D5's order. `sync` stands in for
-    bank-feed's sync (run between list_accounts and list_backups). With a
-    `sweep_budget` the sweep may stop short; then, as SKILL.md step 6 says,
-    triage judges only the fresh items and the pass ends `interrupted` (fix E2)."""
+    """One pass: Ellen begins it and starts the sweep step, the specialist's
+    delegation runs in plan §D5's order and finishes the step, and Ellen continues
+    it under the NEW token and ends it. `sync` stands in for bank-feed's sync (run
+    between list_accounts and list_backups). With a `sweep_budget` the sweep may
+    stop short; then, as SKILL.md step 6 says, triage judges only the fresh items
+    and the pass ends `interrupted` (fix E2). `token` is the specialist's."""
+    import steps
+    continue_earlier(conn)
     token = passes.begin_pass(conn, trigger)["pass_token"]
+    steps.start(conn, token, "sweep", {})
     probe(conn, bf, token, sync)
     setup = binding.check_setup(conn)
     gate = setup["bank_writes"]
     if not setup["can_run"] or not gate["allowed"]:
-        end = passes.end_pass(conn, token, "stopped", {"conditions": setup["conditions"]})
+        steps.finish(conn, token, "sweep", counts={},
+                     stopped="; ".join(setup["conditions"]) or gate["reason"])
+        c = _continue(conn)
+        end = passes.end_pass(conn, c["pass_token"], outcome(c),
+                              {"conditions": setup["conditions"]})
         return {"token": token, "import": None, "gate": gate, "triage": None, "end": end,
                 "conditions": setup["conditions"]}
     # tx-classifier drains its own queue on sync's trailer, in this same
@@ -266,22 +322,54 @@ def run_pass(conn, bf, trigger="cron", sync=None, sweep_budget=None) -> dict:
     except db.Refusal as exc:
         return _stopped(conn, token, gate, imp, None, exc)
     tri = triage(conn, bf, token)
+    if not remaining:
+        try:
+            sweep_cycle(conn, bf, token)      # the annotations for what triage just decided
+        except db.Refusal as exc:
+            return _stopped(conn, token, gate, imp, tri, exc)
+    steps.finish(conn, token, "sweep", counts={"remaining_in_cycle": remaining,
+                                               "triage_remaining": 0})
+    # Ellen, the delegation having answered in her turn: her own finish (a no-op here)
+    assert steps.finish(conn, token, "sweep", counts={})["already"]
+    c = _continue(conn)
+    end = passes.end_pass(conn, c["pass_token"], outcome(c, remaining), {})
+    out = {"token": token, "import": imp, "gate": gate, "triage": tri, "end": end}
     if remaining:
-        end = passes.end_pass(conn, token, "interrupted", {})
-        return {"token": token, "import": imp, "gate": gate, "triage": tri, "end": end,
-                "remaining": remaining}
-    try:
-        sweep_cycle(conn, bf, token)      # the annotations for what triage just decided
-    except db.Refusal as exc:
-        return _stopped(conn, token, gate, imp, tri, exc)
-    end = passes.end_pass(conn, token, "complete", {})
-    return {"token": token, "import": imp, "gate": gate, "triage": tri, "end": end}
+        out["remaining"] = remaining
+    return out
 
 
 def _stopped(conn, token, gate, imp, tri, exc) -> dict:
     """A refusal is the server saying stop (the ledger switched or changed under
-    the pass, and its bank writes are poisoned): END the pass, stopped, so its
-    marker does not answer "Already checking" to the operator for hours."""
-    end = passes.end_pass(conn, token, "stopped", {"refused": str(exc)})
+    the pass, and its bank writes are poisoned): the specialist finishes its step
+    stopped, and Ellen ENDS the pass, stopped, so its marker does not answer "A
+    check is running" to the operator for hours."""
+    import steps
+    steps.finish(conn, token, "sweep", counts={}, stopped=str(exc))
+    c = _continue(conn)
+    end = passes.end_pass(conn, c["pass_token"], outcome(c), {"refused": str(exc)})
     return {"token": token, "import": imp, "gate": gate, "triage": tri, "end": end,
             "refused": str(exc)}
+
+
+def package_pass(conn, bf, quarter="2026-Q3", channel="telegram", sweep_budget=None) -> dict:
+    """SKILL.md's Packaging, step 1: continue_pass, begin_pass(package), the
+    snapshot step (probes, import, the quarter's sweep) finished by the
+    specialist, then continue_pass and end_pass — whose answer hands over the
+    package request's package_token."""
+    import steps
+    continue_earlier(conn)
+    token = passes.begin_pass(conn, "package")["pass_token"]
+    steps.start(conn, token, "snapshot", {"quarter": quarter, "channel": channel})
+    probe(conn, bf, token)
+    ledger.import_ledger_export(conn, path=bf.export(), token=token,
+                                ledger_instance=bf.last_export_instance)
+    if sweep_budget is None:
+        sweep_cycle(conn, bf, token, quarter=quarter)
+        remaining = 0
+    else:
+        remaining = sweep_within(conn, bf, token, sweep_budget)
+    steps.finish(conn, token, "snapshot", counts={"remaining_in_cycle": remaining})
+    c = _continue(conn)
+    assert c["next"] == "end-pass-then-build", c
+    return passes.end_pass(conn, c["pass_token"], outcome(c, remaining), {})

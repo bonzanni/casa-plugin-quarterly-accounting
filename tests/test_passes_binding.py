@@ -19,7 +19,8 @@ class TestPassMarker(StoreCase):
         second = passes.begin_pass(self.conn, "operator")
         self.assertEqual(first["status"], "started")
         self.assertEqual(second["status"], "busy")
-        self.assertIn("Already checking", second["text"])
+        self.assertEqual(second["text"], "A check is running — started a minute ago.\n"
+                                         "Ask again in a few minutes.")
 
     def test_a_stale_marker_is_reclaimed_and_the_old_token_refused_everywhere(self):
         old = passes.begin_pass(self.conn, "cron")["pass_token"]
@@ -340,6 +341,21 @@ class TestReset(StoreCase):
         with self.assertRaises(db.Refusal):
             with db.tx(self.conn):
                 passes.check_token(self.conn, t)
+
+    def test_reset_wipes_the_steps_and_the_package_requests(self):
+        # issue #2: a pass's steps and a package request name a quarter and documents
+        import steps
+        self.bind()
+        self.package_token()
+        t = passes.begin_pass(self.conn, "handover")["pass_token"]
+        steps.start(self.conn, t, "handover", {"doc_ids": [1]})
+        for table in ("pass_steps", "package_requests"):
+            self.assertGreater(self.conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0],
+                               0, table)
+        self.assertEqual(binding.reset_store(self.conn)["erasure"], "complete")
+        for table in ("pass_steps", "package_requests"):
+            self.assertEqual(self.conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0],
+                             0, table)
 
     def test_reset_store_clears_a_restored_gate_refusal_but_keeps_a_dirty_ledger_one(self):
         # fix round 1, M5: reset_store's DELETE keeps the dirty-ledger row (the ledger's

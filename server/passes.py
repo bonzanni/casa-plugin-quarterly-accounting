@@ -2,11 +2,15 @@
 
 A pass takes a marker; a second pass finding a live one does not duplicate
 the work. A marker older than STALE_AFTER_S is a dead process and is
-reclaimed. EVERY begin bumps the generation, and check_token refuses any
-write carrying a token that is not the live generation — including the
-writes that are not CAS'd on a match record (spec §"Running the pass on
-demand"). It fences this store only; bank-feed's own writes are fenced by
-bank-feed's workflow/expected_generation (the gate below says which).
+reclaimed: the displaced pass is ended `interrupted` and its package request
+recovered. EVERY begin bumps the generation, and so does every claim that
+continues a pass across turns (steps.claim) and every hand-over of a package
+request (end_pass): the token is one integer drawn from that one monotonic
+counter, so no two holders ever share it. check_token refuses any write
+carrying a token that is not the live one — including the writes that are
+not CAS'd on a match record (spec §"Running the pass on demand"). It fences
+this store only; bank-feed's own writes are fenced by bank-feed's
+workflow/expected_generation (the gate below says which).
 
 Health is observed, never inferred: each probe is what the specialist or
 Ellen actually saw this pass, stored with its time (spec §Setup)."""
@@ -21,6 +25,14 @@ import version
 
 STALE_AFTER_S = 3 * 3600
 OUTCOMES = ("complete", "interrupted", "stopped", "failed")
+REPLIES = ("telegram", "silent")
+LEASE_S = 600         # a claim with no progress may be claimed again (steps.LEASE_S)
+OPEN_REQUEST = ("snapshot-done", "built", "staged")    # a package request a token may act on
+CLOSED_WORD = {"delivered": "sent", "uncertain": "sent, though it may not have arrived",
+               "failed": "tried, and it didn't go out", "stopped": "stopped",
+               "recovery-failed": "not built: the bank couldn't be read",
+               "revoked": "taken back when the bank was re-read"}
+BUSY = "A check is running — started {when}.\nAsk again in a few minutes."
 PROBE_KINDS = ("bank_tools", "bank_accounts", "bank_sync", "ledger", "gmail")
 
 
@@ -41,38 +53,175 @@ def _age_s(started_at: str) -> float:
     return (db._clock() - started).total_seconds()
 
 
-def begin_pass(conn, trigger: str) -> dict:
+def rotate(conn) -> int:
+    """The next token: the one monotonic counter every token is drawn from
+    (begin_pass, a claim, a package hand-over). Inside the caller's write
+    transaction."""
+    if not conn.in_transaction:
+        raise RuntimeError("a token is drawn inside the write transaction")
+    conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
+    return conn.execute("SELECT value FROM counters WHERE name='pass_generation'").fetchone()[0]
+
+
+def begin_pass(conn, trigger: str, reply=None) -> dict:
+    if reply is None:
+        reply = "silent" if trigger == "cron" else "telegram"
+    if reply not in REPLIES:
+        raise db.Refusal("reply is 'telegram' or 'silent'")
     with db.tx(conn):
         m = _marker(conn)
-        reclaimed = False
+        reclaimed, recovered, owed = False, None, []
         if m is not None and m["live"]:
             age = _age_s(m["started_at"])
-            if age < STALE_AFTER_S:
+            # a claim holding a fresh lease is a live holder, however old the pass
+            held = m["lease_at"] is not None and _age_s(m["lease_at"]) < LEASE_S
+            if age < STALE_AFTER_S or held:
                 minutes = int(age // 60)
-                when = "a minute ago" if minutes <= 1 else f"{minutes} minutes ago"
+                when = ("a minute ago" if minutes <= 1 else f"{minutes} minutes ago"
+                        if minutes < 90 else f"{round(minutes / 60)} hours ago")
                 return {"status": "busy", "started_at": m["started_at"],
-                        "text": f"Already checking — started {when}.\n"
-                                "I'll have the answer shortly."}
+                        "text": BUSY.format(when=when)}
             reclaimed = True
-        conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
-        gen = conn.execute("SELECT value FROM counters WHERE name='pass_generation'").fetchone()[0]
+            displaced = m["pass_id"]
+            recovered, notice = _terminalize(conn, displaced)
+            import alerts
+            owed = ([notice] if notice is not None else []) + alerts.pass_notices(conn, displaced)
+        gen = rotate(conn)
         now = db.now()
         pass_id = f"p{gen}"
+        # the claim columns are cleared with every new marker
         conn.execute("INSERT OR REPLACE INTO pass_marker(id, generation, live, pass_id, trigger,"
-                     " started_at) VALUES (1, ?, 1, ?, ?, ?)", (gen, pass_id, trigger, now))
-        conn.execute("INSERT INTO passes(pass_id, generation, trigger, started_at)"
-                     " VALUES (?, ?, ?, ?)", (pass_id, gen, trigger, now))
-        return {"status": "started", "pass_token": gen, "pass_id": pass_id,
-                "reclaimed": reclaimed}
+                     " started_at, claimed_step, lease_at) VALUES (1, ?, 1, ?, ?, ?, NULL, NULL)",
+                     (gen, pass_id, trigger, now))
+        conn.execute("INSERT INTO passes(pass_id, generation, trigger, started_at, reply)"
+                     " VALUES (?, ?, ?, ?, ?)", (pass_id, gen, trigger, now, reply))
+        out = {"status": "started", "pass_token": gen, "pass_id": pass_id,
+               "reclaimed": reclaimed, "recovered": recovered}
+        if reclaimed and owed:
+            # what the reclaim raised is in this call's own message (a notice a call
+            # raises is in that call's returned rendering)
+            import alerts
+            out["speak"] = alerts.pending_in_tx(conn, must=owed)
+        return out
+
+
+def _terminalize(conn, pass_id: str):
+    """A reclaimed pass is over: it is ended `interrupted` (so it no longer looks
+    unended, and check_setup's last_pass shows it), and its package request is
+    settled by snapshot_fate (outcome `interrupted`), buildable or closed with its
+    package notice. Returns (the recovered request's id or None, its notice or None)."""
+    now = db.now()
+    report = {"reclaimed": True, **throughput(conn, pass_id)}
+    conn.execute("UPDATE passes SET ended_at=?, outcome='interrupted', report_json=?"
+                 " WHERE pass_id=? AND ended_at IS NULL", (now, db.canonical(report), pass_id))
+    req = conn.execute("SELECT * FROM package_requests WHERE pass_id=? AND state='snapshot'",
+                       (pass_id,)).fetchone()
+    if req is None:
+        return None, None
+    # recovered with no token and a lapsed lease: the next continue_pass claims it
+    _, notice = settle_snapshot_request(conn, req, "interrupted", token=None)
+    return req["request_id"], notice
+
+
+def snapshot_fate(conn, pass_id: str, outcome: str) -> tuple:
+    """THE rule for a package request leaving `snapshot` (every path that moves it
+    uses this): its fate is decided from the STORED snapshot step, and from the
+    pass outcome only where that is more restrictive. Returns (state, reason).
+
+    - `snapshot-done` (buildable) only when THIS pass imported the bank (a
+      `snapshots` row of its own), neither the stored finish nor the outcome says
+      stopped, and the outcome is not `failed` — a build otherwise ships an older
+      import as this request's. A step's finish never grants a build: a step that
+      expired after its import builds from that import;
+    - `stopped`, with the stored finish's reason (else a default), when the stored
+      finish or the outcome says stopped;
+    - otherwise `recovery-failed`: the bank was not read for it."""
+    step = conn.execute("SELECT finished_at, finish_json FROM pass_steps WHERE pass_id=? AND"
+                        " step='snapshot'", (pass_id,)).fetchone()
+    fin = json.loads(step["finish_json"] or "{}") if step is not None else {}
+    finished = step is not None and step["finished_at"] is not None
+    if (finished and fin.get("stopped")) or outcome == "stopped":
+        return "stopped", (fin.get("stopped") if finished else None) or "the bank check stopped"
+    # the evidence the pass read the bank is its own import, never the step's say-so
+    imported = conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?",
+                            (pass_id,)).fetchone() is not None
+    if imported and outcome != "failed":
+        return "snapshot-done", None
+    return "recovery-failed", None
+
+
+def settle_snapshot_request(conn, req, outcome: str, *, token):
+    """Move `req` out of `snapshot` by snapshot_fate, inside the caller's transaction:
+    buildable (holding `token`, fresh lease when there is one) or closed with its
+    package notice. Returns (state, the notice's alert_id or None)."""
+    state, reason = snapshot_fate(conn, req["pass_id"], outcome)
+    now = db.now()
+    conn.execute("UPDATE package_requests SET token=?, lease_at=?, pass_outcome=?, state=?,"
+                 " updated_at=? WHERE request_id=?",
+                 (token, now if token is not None else None, outcome, "snapshot-done", now,
+                  req["request_id"]))
+    if state == "snapshot-done":
+        return state, None
+    return state, _close(conn, req, state, outcome, reason=reason)
+
+
+def _close(conn, req, state: str, outcome: str, reason=None):
+    """Close a package request whose bank read did not give it a package: `stopped`
+    (with its reason) or `recovery-failed` (the bank was not read), with its package
+    notice raised in the caller's transaction. Returns the notice's alert_id."""
+    import alerts
+    now = db.now()
+    conn.execute("UPDATE package_requests SET state=?, pass_outcome=?, reason=?, lease_at=?,"
+                 " updated_at=? WHERE request_id=?",
+                 (state, outcome, reason, now, now, req["request_id"]))
+    if state == "stopped":
+        return alerts.raise_package(conn, "package-stopped", f"request:{req['request_id']}:stopped",
+                                    quarter=req["quarter"], reason=reason or "")
+    return alerts.raise_package(conn, "package-failed", f"request:{req['request_id']}:failed",
+                                quarter=req["quarter"])
 
 
 def check_token(conn, token) -> None:
+    """A pass-only write's fence. Accepting a token inside a write transaction also
+    renews its holder's lease: a holder that keeps writing is never claimed over."""
     if token is None:
         return
     m = _marker(conn)
     if m is None or not m["live"] or int(token) != m["generation"]:
-        raise db.Refusal("this pass is no longer the current one (a newer pass reclaimed "
-                         "its marker, or the store was reset); stop — nothing was written")
+        raise db.Refusal("this pass is no longer the current one (another turn continued it, "
+                         "a newer pass reclaimed its marker, or the store was reset); stop — "
+                         "nothing was written")
+    if conn.in_transaction:
+        conn.execute("UPDATE pass_marker SET lease_at=? WHERE id=1", (db.now(),))
+
+
+def open_request(conn, request_id):
+    return conn.execute("SELECT * FROM package_requests WHERE request_id=?",
+                        (request_id,)).fetchone()
+
+
+def check_package_token(conn, request_id, token):
+    """A package request's fence: the token end_pass or continue_pass handed over,
+    and the request still open. Accepting it inside a write transaction renews the
+    request's lease. Returns the request row."""
+    req = open_request(conn, request_id)
+    if token is None:
+        raise db.Refusal("this package belongs to a package request: pass the package_token "
+                         "end_pass or continue_pass gave you")
+    if req is None or req["token"] is None or int(token) != req["token"] \
+            or req["state"] in ("superseded", "withdrawn"):
+        raise db.Refusal("this package request has been taken over by a later turn — stop, "
+                         "nothing was written")
+    if req["state"] not in OPEN_REQUEST:
+        # the holder's own request, finished: said plainly, never as "stop in silence"
+        import dates
+        raise db.Refusal(f"the {dates.quarter_label(req['quarter'])} package was already "
+                         f"{CLOSED_WORD.get(req['state'], 'dealt with')} — nothing changed. To "
+                         "have it again, or by email, ask for the package again.")
+    if conn.in_transaction:
+        conn.execute("UPDATE package_requests SET lease_at=? WHERE request_id=?",
+                     (db.now(), request_id))
+    return req
 
 
 def throughput(conn, pass_id: str) -> dict:
@@ -96,13 +245,17 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
     import documents
     if outcome not in OUTCOMES:
         raise db.Refusal(f"outcome is one of {', '.join(OUTCOMES)}")
+    if token is None:
+        raise db.Refusal("ending a pass needs its pass_token")
     with db.tx(conn):
         check_token(conn, token)
         m = _marker(conn)
         full = {**(report or {}), **throughput(conn, m["pass_id"])}
         conn.execute("UPDATE passes SET ended_at=?, outcome=?, report_json=? WHERE pass_id=?",
                      (db.now(), outcome, db.canonical(full), m["pass_id"]))
-        conn.execute("UPDATE pass_marker SET live=0 WHERE id=1")
+        conn.execute("UPDATE pass_marker SET live=0, claimed_step=NULL, lease_at=NULL"
+                     " WHERE id=1")
+        handed = _hand_over(conn, m["pass_id"], outcome)
     # The pass ended in the commit above. The reap is housekeeping: another session
     # holding the documents lock past the bound must not make this answer "NOT
     # applied — ask again" (fix wave F); the next pass's end reaps instead.
@@ -110,7 +263,31 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
         documents.reap_orphans(conn)
     except db.Busy:
         pass
-    return {"ended": m["pass_id"], "outcome": outcome, "speak": alerts.pending_rendering(conn)}
+    notice = handed.pop("_notice") if handed else None
+    out = {"ended": m["pass_id"], "outcome": outcome, **(handed or {})}
+    # the notices this pass raised — its request's, its import's revocations — are
+    # always in this rendering (older alerts may wait)
+    owed = ([notice] if notice is not None else []) + alerts.pass_notices(conn, m["pass_id"])
+    out["speak"] = alerts.pending_rendering(conn, must=owed)
+    return out
+
+
+def _hand_over(conn, pass_id: str, outcome: str):
+    """The package authority transfer, inside end_pass's transaction: the pass's
+    open request gets a token of its own (fresh lease, so it is never claimable
+    in between), and the request is buildable — or, when the pass stopped, closed
+    `stopped` (or, when it failed to read the bank, `recovery-failed`) with its
+    package notice raised in this same transaction."""
+    req = conn.execute("SELECT * FROM package_requests WHERE pass_id=? AND state='snapshot'",
+                       (pass_id,)).fetchone()
+    if req is None:
+        return None
+    token = rotate(conn)
+    state, notice = settle_snapshot_request(conn, req, outcome, token=token)
+    return {"package_token": token, "next": "build" if state == "snapshot-done" else None,
+            "request": {"id": req["request_id"], "quarter": req["quarter"],
+                        "channel": req["channel"], "state": state},
+            "_notice": notice}
 
 
 def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None) -> dict:
@@ -229,13 +406,21 @@ def poison(conn, reason: str) -> None:
     if cur is None:
         return
     pass_id = cur["pass_id"]
+    # the token the caller's transaction checked: the live generation right now
+    checked = _marker(conn)["generation"]
     verdict = db.canonical({"allowed": False, "reason": reason, "expected_generation": None,
                             "expected_ledger": None, "workflow": version.WORKFLOW,
                             "install_backup": None, "older_workflows": []})
     conn.execute("ROLLBACK")
     with db.tx(conn):
-        conn.execute("UPDATE passes SET gate_json=?, snapshot_id=NULL WHERE pass_id=?",
-                     (verdict, pass_id))
+        # A write outside the transaction that checked the token re-validates it: a
+        # caller superseded in between (a claim rotated the token) poisons nothing —
+        # the live holder's pass keeps its import. The caller still raises its Refusal.
+        m = _marker(conn)
+        if m is not None and m["live"] and m["generation"] == checked \
+                and m["pass_id"] == pass_id:
+            conn.execute("UPDATE passes SET gate_json=?, snapshot_id=NULL WHERE pass_id=?",
+                         (verdict, pass_id))
     db._retry_locked(lambda: conn.execute("BEGIN IMMEDIATE"), db.LOCK_BOUND_S)
 
 
