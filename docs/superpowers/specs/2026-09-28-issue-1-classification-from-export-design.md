@@ -67,7 +67,12 @@ New columns: `note_seen_seq`, `note_seen_rev`.
 - `record_observation`, when it RETURNS an `add_note` instruction, stamps
   `note_issued_at := now` (round D1, Astra S2: an `add_note` issued earlier and carried
   out after a later read confirmed the newer note leaves a stale assertion on top; notes
-  do not move `tag_revision`, so no export can show it). A read stamps `note_seen_at`.
+  do not move `tag_revision`, so no export can show it). A confirming read stamps
+  `note_seen_at` := the `imported_at` of the snapshot the read belongs to (the
+  `snapshot_id` it carries) — a server-known time that PRECEDES the read, never the time
+  the read was recorded (round D2, Astra S2: a read held past the window and recorded
+  late certified a note a stale write had since buried). A read of an older snapshot is
+  already refused (`_require_snapshot`).
 - The import treats the note as visible iff `note_seen_seq = note_seq` AND
   `note_seen_rev = export tag_revision` AND (`note_issued_at` is NULL OR `note_seen_at` ≥
   `note_issued_at` + `steps.CEILING_ASSUMED_S`). Any tag change since the confirming read
