@@ -276,6 +276,30 @@ def _paged(items: list, after, limit: int, view) -> dict:
             "next": [shown[-1]["pid"]] if rest and shown else None}
 
 
+def judge_due(conn) -> int:
+    """How many fresh, booked payments still in triage have an unmatched document that
+    meets the necessary part of the auto-match bar: the expected kind, the same
+    currency, the exact amount (C3 refutation defense, Astra). A payment can join
+    triage behind a traversal's cursor (an operator rejecting a pairing mid-pass), so
+    the last page's `remaining` cannot promise triage saw every such payment; this
+    count, taken when the sweep step is continued, schedules the judge step for them.
+    It may also count a payment triage already judged and declined — a judge step
+    too many, never one too few."""
+    docs = {(r["kind"], r["amount_minor"], r["currency"]) for r in conn.execute(
+        "SELECT d.kind, d.amount_minor, d.currency FROM documents d JOIN document_status s"
+        " ON s.doc_id=d.doc_id WHERE s.status='unmatched' AND d.irrelevant=0"
+        " AND d.amount_minor IS NOT NULL")}
+    kinds = {(k, a) for k, a, _ in docs}
+    n = 0
+    for d in triage(conn):
+        if not d["fresh"] or d["pending"]:
+            continue
+        k, a = d["expectation"]["kind"], d["amount_minor"]
+        if (k, a, d["currency"]) in docs or ((k, a) in kinds and (k, a, None) in docs):
+            n += 1
+    return n
+
+
 def work_list(conn) -> dict:
     """The sweep continuation's `work` (issue #2, #3): the first page of
     list_quarter_state(triage=true), in the Gmail round's shape."""
@@ -294,7 +318,11 @@ def list_quarter_state(conn, quarter=None, triage_only=False, fresh_only=True,
         # when the payment has ended
         rpid = lineage.resolve_pid(conn, pid)
         d = describe(conn, rpid)
-        return {"item": None if d["ended"] else listed(d), "notice": NOTICE_TRIAGE}
+        if d["ended"]:
+            return {"item": None, "notice": NOTICE_TRIAGE}
+        # the same guard as every page (C3, Astra): never an answer no agent can read
+        item = budget.page([listed(d)], 1, ident=lambda v: f"payment #{v['pid']}")[0][0]
+        return {"item": item, "notice": NOTICE_TRIAGE}
     after = _after(after)
     if triage_only:
         # fix wave F (throughput): not every open payment of every quarter at once —

@@ -290,3 +290,30 @@ class TestPage(unittest.TestCase):
         self.assertEqual(budget.bounded({"a": ["xxxxx", {"b": "yyyyy"}], "c": "zzzzz", "n": 5},
                                         3, longer={"c": 4}),
                          {"a": ["xx…", {"b": "yy…"}], "c": "zzz…", "n": 5})
+
+
+class TestJudgeDue(Flow):
+    """C3 (refutation defense, Astra): a payment that joined triage behind the
+    cursor, with its document already filed, schedules the judge step."""
+    def test_a_payment_with_a_fitting_filed_document_makes_the_judge_step_due(self):
+        self.seed(3, documents=1)           # the first payment's invoice is filed, unmatched
+        t1 = self.begin()
+        self.start(t1)
+        self.specialist(t1)                 # triage listed, nothing matched
+        c = self.claim()["continue"]
+        self.assertEqual((c["next"], c["judge_due"]), ("gmail-round", 1))
+
+    def test_nothing_fitting_is_not_due(self):
+        self.seed(3, documents=0)
+        self.file(amount_minor=999_999, document_date="2026-07-05")      # no payment's amount
+        t1 = self.begin()
+        self.start(t1)
+        self.specialist(t1)
+        self.assertEqual(self.claim()["continue"]["judge_due"], 0)
+
+    def test_the_single_reread_is_guarded_too(self):
+        self.seed(1)
+        pid = work.triage(self.conn)[0]["pid"]
+        with mock.patch.object(budget, "PAGE_BUDGET", 300):
+            out = self.text("list_quarter_state", pid=pid)
+        self.assertTrue(out.startswith("error: Oversized: payment #"), out)

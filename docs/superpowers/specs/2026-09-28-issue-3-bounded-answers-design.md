@@ -159,6 +159,23 @@ while more follow.
   its pairing is retired (code round C2, Terra). That is the same snapshot-at-listing
   semantics as before issue #3, for all three lists. The next traversal lists it: the
   judge step or the next pass for triage, the next listing for documents.
+- **But it is not free (code round C3, Astra's refutation defense, reproduced against
+  both revisions).** Before #3, a quarter with more than 50 open payments left
+  `triage_remaining` above 0, and that forced a judge step in the same pass. After #3,
+  the last page says 0. Take a payment reopened behind the cursor, say by the operator
+  rejecting a wrong pairing, whose correct invoice is already filed. Before #3 it was
+  matched in that pass. After #3 it stayed open while the pass ended `complete`. So the
+  sweep continuation now carries `judge_due`, taken at the claim. It counts the fresh,
+  booked payments still in triage for which an unmatched document meets the necessary
+  part of the auto-match bar (kind, currency, exact amount). Ellen runs the judge step
+  when it is above 0.
+  - It can over-count: a payment triage already declined, for example on its date
+    window. The cost is at most one extra judge delegation. It never under-counts a
+    payment that could be auto-matched.
+  - A payment that joins with no filed document is the Gmail round's. If that round
+    files something, the judge step runs anyway.
+- The single-payment re-read `pid=` goes through the same page guard (code round C3,
+  Astra: 4,200 candidates returned 21,728 characters there).
 - No schema change.
 
 **A, amended.**

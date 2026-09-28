@@ -350,7 +350,7 @@ def _claim_pass(conn, m, step) -> dict:
          "throughput": passes.throughput(conn, m["pass_id"])}
     if step["step"] == "sweep":
         can_run = binding.check_setup(conn)["can_run"]
-        c.update(can_run=can_run, work=work.work_list(conn))
+        c.update(can_run=can_run, work=work.work_list(conn), judge_due=work.judge_due(conn))
         c["next"] = ("end-pass" if fin.get("stopped") or not can_run or not imported
                      else "gmail-round")
     elif step["step"] == "judge":

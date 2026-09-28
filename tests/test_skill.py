@@ -67,7 +67,7 @@ class TestSkill(TempEnv):
             if n in params:
                 continue
             if n.endswith("_") or n in {"workflow", "expected_generation", "pass_token",
-                                        "render_id", "row_digest", "resolves", "candidate_ids", "not_found",
+                                        "render_id", "row_digest", "resolves", "candidate_ids", "judge_due", "not_found",
                                         "write_error", "observed_tags", "observed_notes",
                                         "instructions", "speak", "reshow", "true", "false",
                                         "bank_writes", "request_id", "labels", "runners_up",
@@ -170,6 +170,12 @@ class TestSkill(TempEnv):
         rnd = self.section("**Gmail round.**", "\n5. If anything was filed")
         self.assertIn("Always make the Gmail probe first", rnd)
         self.assertNotIn("skip it when", rnd)
+
+    def test_a_due_judgment_starts_the_judge_step(self):
+        # issue #3 C3: a payment that joined triage behind the cursor with a fitting
+        # filed document is judged in the same pass
+        flat = " ".join(SKILL.split())
+        self.assertIn("or its `judge_due` is above 0, or the sweep ended unfinished", flat)
 
     def test_row_digest_comes_from_the_listing(self):
         triage = " ".join(self.section("**Triage.**", "7. **Identity").split())

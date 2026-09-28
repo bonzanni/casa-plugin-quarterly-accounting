@@ -252,7 +252,8 @@ pass, whichever comes first:
    anything not reached. Also run one search for recent self-addressed mail with
    attachments, and sweep your Telegram inbox as above (file only, say nothing).
 5. If anything was filed, or the continuation's `finish` says `triage_remaining` above 0, or
-   the sweep ended unfinished (`ended` is `expired` or `errored`):
+   its `judge_due` is above 0, or the sweep ended unfinished (`ended` is `expired` or
+   `errored`):
    `record_step(pass_token, step="judge", action="start", report={checked, total,
    not_searched})`, then delegate "judge the newly filed documents and the payments triage
    did not reach" with context `pass_token=<token>, step=judge` (the same token; the specialist's steps 6 and 7: triage, then
