@@ -274,8 +274,10 @@ class TestSkill(TempEnv):
         self.assertIn("one write per row, then that row read again", sweep)
         self.assertIn("the pass ends `interrupted`", sweep)
         triage = " ".join(self.section("**Triage.**", "7. **Identity").split())
-        self.assertIn("at most 50 at a time", triage)
-        self.assertIn("`truncated`", triage)
+        self.assertIn("a page at a time", triage)
+        self.assertIn("while its `next` is set and there is time, list again with "
+                      "`after=<next>`", triage)
+        self.assertIn("the last page's `remaining` count as `triage_remaining`", triage)
 
     def test_a_post_triage_sweep_mirrors_what_triage_decided(self):
         # aligned to tests/sim.run_pass: triage, then the sweep once more

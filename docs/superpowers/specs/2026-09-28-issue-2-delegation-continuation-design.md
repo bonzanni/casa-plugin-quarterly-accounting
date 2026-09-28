@@ -186,7 +186,7 @@ lease the first one wrote and gets null.
 
 | Claimed | `next` | Inputs returned |
 |---|---|---|
-| `sweep` | `gmail-round`, or `end-pass` when the pass stopped or nothing was imported | `ended` (`finished` / `expired` / `errored`), finish counts, `imported`, `throughput`, `can_run`, `work` = exactly `list_quarter_state(triage=true)`'s answer |
+| `sweep` | `gmail-round`, or `end-pass` when the pass stopped or nothing was imported | `ended` (`finished` / `expired` / `errored`), finish counts, `imported`, `throughput`, `can_run`, `work` = the first page of `list_quarter_state(triage=true)`, in the Gmail round's shape (issue #3) |
 | `judge` | `end-pass` | `ended`, finish counts, the carried `report`, `throughput` |
 | `handover` | `end-pass-then-case` | `ended`, `documents`: for each carried `doc_id`, its **real pairing** from `match_state` (`matched` / `proposed` / `unpaired`, plus `irrelevant`). A paired document also carries its payment's date, amount, currency and payee. Never inferred from absence |
 | `snapshot` | `end-pass-then-build` | `ended`, finish counts, `request` (id, quarter, channel) |

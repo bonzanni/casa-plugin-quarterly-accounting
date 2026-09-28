@@ -307,11 +307,26 @@ def claim(conn) -> dict:
                         out = _claim_request(conn, now_cand[1])
                     notice = out.pop("_notice", None)
                     out["speak"] = alerts.pending_in_tx(conn, must=notice)
+                    _fits(out)
                     return out
         except _Retry:
             continue
     raise db.Busy("the accounting store kept changing under this call; nothing was claimed "
                   "— ask again")
+
+
+class Oversized(RuntimeError):
+    """A claim's answer over budget.RESULT_LIMIT (issue #3). A bug: raised inside the
+    claiming transaction, so it rolls back and nothing is claimed — the rotated token
+    either reaches the agent or was never rotated."""
+
+
+def _fits(out) -> None:
+    import budget
+    n = budget.size(out)
+    if n > budget.RESULT_LIMIT:
+        raise Oversized(f"the continuation's answer is {n} characters, over the "
+                        f"{budget.RESULT_LIMIT} an agent can read; nothing was claimed")
 
 
 def _claim_pass(conn, m, step) -> dict:
@@ -335,7 +350,7 @@ def _claim_pass(conn, m, step) -> dict:
          "throughput": passes.throughput(conn, m["pass_id"])}
     if step["step"] == "sweep":
         can_run = binding.check_setup(conn)["can_run"]
-        c.update(can_run=can_run, work=work.list_quarter_state(conn, None, triage_only=True))
+        c.update(can_run=can_run, work=work.work_list(conn))
         c["next"] = ("end-pass" if fin.get("stopped") or not can_run or not imported
                      else "gmail-round")
     elif step["step"] == "judge":

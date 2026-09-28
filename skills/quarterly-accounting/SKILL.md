@@ -108,8 +108,9 @@ import; `complete` otherwise.
 Pick the view from the ask: "what's the status" → `status`; "what am I missing" / "accounting
 list" → `missing`; "anything I should check?" → `check`; "show the rest" → `rest`; "show
 older" → `older`; "how did Q2 go?" → `quarter`; "did the Adobe invoice arrive?" → find the
-payment in `list_quarter_state` and render `item` with its `pid`. A description that fits two
-payments is a question back, never a pick.
+payment in `list_quarter_state` and render `item` with its `pid` (it answers a page at a
+time: while `next` is set and the payment is not found, call it again with `after=<next>`).
+A description that fits two payments is a question back, never a pick.
 
 "All of them" and "more" continue the view you last sent: call `build_review` again
 with exactly the arguments in its `next` (view, quarter, page, after — the cursor passed
@@ -369,9 +370,10 @@ named in your context. Your one expectation write is in step 6.
    still owed).
    `list_quarter_state(triage=true, pass_token=…)` lists, required first, the payments that
    need a document and have none of the right kind — only those seen in this import
-   (`not_fresh` counts the others), at most 50 at a time. If it says `truncated`, judge
-   what is listed and finish with its `remaining` count as `triage_remaining`; a later
-   pass reaches the rest. For each, compare against
+   (`not_fresh` counts the others), a page at a time. Judge the page; while its `next` is
+   set and there is time, list again with `after=<next>` (passed back unchanged) and judge
+   that page. When you stop, finish with the last page's `remaining` count as
+   `triage_remaining`; a later pass reaches the rest. For each, compare against
    `list_unmatched_documents` and the KB (`get_counterparty`), reading candidate PDFs with
    `Read`. Correct a filed document's reading with `update_document_metadata(doc_id, …,
    pass_token=…)`; a quotation, order confirmation or losing duplicate is
@@ -403,7 +405,7 @@ named in your context. Your one expectation write is in step 6.
    amount, same dates) and that pairing was made by the machine (never one the operator
    confirmed), propose both: `propose_match` for the new payment, and `propose_match`
    again on the paired payment with its own document (its `row_snapshot` and `revision` from
-   `list_quarter_state(quarter=…)` of that payment's quarter), which turns that pairing back
+   `list_quarter_state(quarter=…)` of that payment's quarter, following `next`), which turns that pairing back
    into a proposal the operator is shown.
 
    A vendor whose documents turn out to be a kind the mapping did not predict (its payments
