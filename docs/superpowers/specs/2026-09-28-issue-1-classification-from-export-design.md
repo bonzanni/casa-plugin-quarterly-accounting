@@ -1,6 +1,6 @@
 # Issue #1 — classification from the export (design)
 
-Status: design converged for implementation 2026-09-28 (D1: Terra SWF, Astra SWF; D2: Terra SHIP, Astra SWF — its S2 folded in as a patch, re-checked in the code round). Ruling: issue #1, OPERATOR DECISION
+Status: shipped in 0.3.0, 2026-09-28. Design rounds D1 (Terra SWF, Astra SWF) and D2 (Terra SHIP, Astra SWF; its S2 folded in as a patch). Code round C1 on 7cd8eda: Terra SHIP; Astra SWF, whose one S2 (notes pushed out of view) the operator accepted as a residual, filed upstream as casa-specialist-finance#89. Ruling: issue #1, OPERATOR DECISION
 2026-09-28 ("option A — the best fix"). Upstream: casa-specialist-finance#86 — feature commit cc1a2fb (bank-feed 0.19.0 in-tree),
 released as tag v0.21.0 (commit 3479640) = component 0.21.0 / bank-feed 0.20.0.
 
@@ -85,9 +85,14 @@ New columns: `note_seen_seq`, `note_seen_rev`.
   more at a later pass's import (its confirming read-back is inside the window), then
   settles.
 
-Residual (stated, accepted in this design): an erasure that strips a note from a row
-that carried **no tags at all** does not move the revision, so that note is restated only
-when the lineage's note next changes. Every lineage that has an accounting note carries
+Residuals (stated, accepted): notes change without moving the tag revision, so a
+confirmed note that later drops out of sight is restated only when the lineage's note
+next changes. Two ways are known: (1) an erasure strips a note from a row that carried
+**no tags at all**; (2) round C1 (Astra S2, reproduced): twenty or more newer notes are
+appended to one row, and `get_transaction` shows only the newest 20. Operator ruling
+2026-09-28: accept both, and ask upstream for a per-row note revision in the export
+(casa-specialist-finance#89). When it ships, `note_confirmed` also requires the note
+revision to be unchanged, and both residuals close. Every lineage that has an accounting note carries
 either an owned `acct::` tag or a classification tag, except `optional` with no class tag
 — which arises only from an operator/KB expectation on an unclassified row.
 

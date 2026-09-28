@@ -1400,8 +1400,12 @@ Unconditional enumeration replaces every selection rule:
    accounting note is known visible: a read confirms a note, and the confirmation stands
    while the row's `tag_revision` is unchanged and the read's import came more than a
    delegation's ceiling after the last `add_note` the plugin handed out (rounds D1–D2).
-   Residual: an erasure that strips a note from a row carrying no tags at all does not
-   move the revision; that note is restated when the lineage's note next changes.
+   Residuals (operator ruling 2026-09-28, round C1): a note change moves no tag revision,
+   so (1) an erasure that strips a note from a row carrying no tags at all, and (2) twenty
+   or more newer notes appended to one row (`get_transaction` shows the newest 20), leave
+   the accounting note unseen until the lineage's note next changes. Both close when
+   bank-feed exports a per-row note revision
+   ([casa-specialist-finance#89](https://github.com/bonzanni/casa-specialist-finance/issues/89)).
 4. Remove owned tags outside the desired set; add missing desired tags. The fixed point
    is `actual := (actual − owned_tags) ∪ desired`, reached from any starting state.
 5. Append a current snapshot when the visible accounting note is missing or differs.
