@@ -249,7 +249,8 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
     """Inside an import's transaction, after its snapshot is recorded (round E5,
     Terra S1): every delivery still `staged` that is a package's FIRST send
     (no delivered or uncertain send of it) and was built under another snapshot
-    is revoked — marked failed with revoked_at, so record_delivery refuses it.
+    is revoked — marked failed with revoked_at, so record_delivery refuses it;
+    so is a first send that already FAILED (its offer is taken back).
     Its package request, if any, becomes `revoked`, with its package notice
     raised in the same transaction. Returns the revoked rows; their staged bytes
     are withdrawn before the same commit (withdraw_revoked). A resend of a file
@@ -264,18 +265,35 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
         " AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.package_id=d.package_id"
         "  AND e.status IN ('delivered', 'uncertain'))", (snapshot_id,)).fetchall()
     now = db.now()
-    for r in rows:
-        conn.execute("UPDATE deliveries SET status='failed', settled_at=?, revoked_at=?"
-                     " WHERE delivery_id=?", (now, now, r["delivery_id"]))
+    # A send that FAILED never reached the accountant either: resending that file would
+    # deliver outdated numbers as their first copy, so its offer is taken back too. An
+    # `uncertain` send is never revoked — it may have arrived, and resending that exact
+    # file stays allowed.
+    failed = conn.execute(
+        "SELECT d.delivery_id, d.channel, d.staged_path, d.package_id, p.quarter"
+        " FROM deliveries d JOIN packages p"
+        " ON p.package_id=d.package_id WHERE d.status='failed' AND d.revoked_at IS NULL"
+        " AND (p.snapshot_id IS NULL OR p.snapshot_id<>?)"
+        " AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.package_id=d.package_id"
+        "  AND e.status IN ('delivered', 'uncertain'))", (snapshot_id,)).fetchall()
+    latest = {}
+    for r in list(rows) + list(failed):
+        conn.execute("UPDATE deliveries SET status='failed', settled_at=coalesce(settled_at, ?),"
+                     " revoked_at=? WHERE delivery_id=?", (now, now, r["delivery_id"]))
         req = conn.execute("SELECT request_id FROM package_requests WHERE delivery_id=? AND"
-                           " state='staged'", (r["delivery_id"],)).fetchone()
+                           " state IN ('staged', 'failed')", (r["delivery_id"],)).fetchone()
         if req is not None:
             conn.execute("UPDATE package_requests SET state='revoked', updated_at=? WHERE"
                          " request_id=?", (now, req[0]))
-        # every revoked send is told, linked to a request or not (a resend has none)
+        close_offers(conn, r["package_id"])
+        if r["delivery_id"] > latest.get(r["package_id"], {"delivery_id": 0})["delivery_id"]:
+            latest[r["package_id"]] = r
+    # every revoked send is told, linked to a request or not (a resend has none): once
+    # per package, keyed on its latest revoked delivery
+    for r in latest.values():
         alerts.raise_package(conn, "package-revoked", f"delivery:{r['delivery_id']}:revoked",
                              quarter=r["quarter"], package_id=r["package_id"])
-    return [dict(r) for r in rows]
+    return [dict(r) for r in list(rows) + list(failed)]
 
 
 def withdraw(conn, rows, *, refusal: str) -> None:

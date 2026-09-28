@@ -1309,3 +1309,25 @@ changed" one import late. Accepting such an upgrade stays correct: it did arrive
   delivered status view never rebinds "send it again" away from a package whose send
   failed. A revoked send is rebuilt, never resent, and is not offered.
 - Accepted as residuals: R6 (extended) and R7.
+
+### Round C7
+
+- **A failed first send is revoked by a newer import.** A send that failed never reached
+  the accountant, so resending that file after the bank was re-read would deliver
+  outdated numbers as their first copy; refusing such a resend ("the bank was re-read")
+  is correct. So the import's revocation now also covers a settled `failed` first send of
+  a package that has not arrived and was built under another snapshot: it is marked
+  revoked, its open offers close, and the `package-revoked` notice ("ask for it again")
+  is told — once per package per import, keyed on its latest revoked delivery.
+  `_OFFERABLE` then excludes it through `revoked_at`. An `uncertain` send is never
+  revoked: it may have arrived, and resending that exact file stays allowed.
+- **Every offer is composed through the one rule.** A new rendering that prints an old
+  "may not have arrived" or "didn't go out" notice asks `delivery.offerable()` now: the
+  outcome is told either way, but the "send it again" invitation and the package in
+  `scope.offers` appear only while the package is owed a resend. A structural test pins
+  that every function composing offer wording or an offer scope (`views._compose`,
+  `alerts._units`, `alerts.pending_in_tx`) asks the rule; `views._build_review` only
+  collects what `_compose` built, and `resend_target` queries `_OFFERABLE`.
+- **A lineage is alerted when its own row is read.** Pinned: a kind that changes and
+  changes back outside a lineage's own read raises nothing; reading another lineage
+  never alerts it.

@@ -1108,5 +1108,107 @@ class TestReviewC6(Requests):
         self.assertNotIn(pkg["filename"], view["text"])
 
 
+class TestReviewC7(Requests):
+    def failed_then_a_newer_import(self):
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        return pkg, d, sim.run_pass(self.conn, self.bf)     # a newer snapshot
+
+    def test_a_failed_first_send_is_revoked_by_a_newer_import(self):
+        # L1: a failed send never reached the accountant — resending it would deliver
+        # outdated numbers as their first copy, so the import takes the offer back
+        pkg, d, run = self.failed_then_a_newer_import()
+        row = self.conn.execute("SELECT status, revoked_at FROM deliveries WHERE"
+                                " delivery_id=?", (d["delivery_id"],)).fetchone()
+        self.assertEqual(row["status"], "failed")
+        self.assertIsNotNone(row["revoked_at"])
+        self.assertIn(d["delivery_id"], run["import"]["revoked_deliveries"])
+        self.assertEqual([a[0] for a in self.conn.execute(
+            "SELECT occurrence_key FROM alerts WHERE kind='package-revoked'")],
+            [f"delivery:{d['delivery_id']}:revoked"])
+        self.assertIn("The bank was re-read before I could send the Q3 2026 package",
+                      " ".join(run["end"]["speak"]["text"].split()))
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM alerts WHERE sent_at IS NULL AND kind='package-send-failed'"
+            ).fetchone()[0], 0)
+        self.call("mark_rendering_delivered", render_id=run["end"]["speak"]["render_id"])
+        view = self.call("build_review", view="status", quarter="2026-Q3")
+        self.assertNotIn(pkg["filename"], view["text"])
+        self.call("mark_rendering_delivered", render_id=view["render_id"])
+        self.assertTrue(self.text("stage_for_delivery", channel="telegram",
+                                  resend=True).startswith("refused: "))
+
+    def test_the_revocation_closes_an_offer_not_yet_told(self):
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
+                  package_token=p)                       # its offer is never delivered
+        run = sim.run_pass(self.conn, self.bf)
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM alerts WHERE sent_at IS NULL AND kind='package-send-failed'"
+            ).fetchone()[0], 0)
+        self.assertNotIn("didn't go out", run["end"]["speak"]["text"])
+
+    def test_an_uncertain_send_stays_offered_after_a_newer_import(self):
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        os.unlink(d["path"])
+        sim.run_pass(self.conn, self.bf)
+        self.assertIsNone(self.conn.execute("SELECT revoked_at FROM deliveries WHERE"
+                                            " delivery_id=?", (d["delivery_id"],)).fetchone()[0])
+        view = self.call("build_review", view="status", quarter="2026-Q3")
+        self.assertIn(pkg["filename"], view["text"])
+        self.call("mark_rendering_delivered", render_id=view["render_id"])
+        again = self.call("stage_for_delivery", channel="telegram", resend=True)
+        self.assertEqual(again["filename"], pkg["filename"])
+
+    def test_an_old_offer_is_not_recomposed_once_its_package_is_not_offerable(self):
+        # L2: a new rendering composed with an old offer notice offers only what the one
+        # rule offers now (here: a resend is already staged, so nothing is waiting)
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        self.call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain",
+                  package_token=p)               # its speak is never delivered
+        os.unlink(d["path"])
+        with db.tx(self.conn):                   # the operator's resend is staged meanwhile
+            self.conn.execute("INSERT INTO deliveries(package_id, channel, staged_path, status,"
+                              " created_at, lease_at) VALUES (?, 'telegram', '/o/qa-x.zip',"
+                              " 'staged', ?, ?)", (pkg["package_id"], db.now(), db.now()))
+        self.fill_alerts(1)                      # another pass's alert forces a new rendering
+        speak = self.claim()["speak"]
+        self.assertIn(pkg["filename"], speak["text"])       # the outcome is still told
+        self.assertNotIn("send it again", speak["text"])    # but not offered
+        self.assertNotIn("offers", self.scope(speak))
+
+    def test_every_offer_is_built_from_the_one_rule(self):
+        # structural pin: every function that composes offer wording or an offer scope
+        # asks delivery.offerable() (or its _OFFERABLE query) — none decides on its own
+        import ast
+        from tests._base import ROOT
+        builders = {}
+        for f in (ROOT / "server").glob("*.py"):
+            src = f.read_text()
+            for fn in ast.walk(ast.parse(src)):
+                if not isinstance(fn, ast.FunctionDef):
+                    continue
+                body = ast.get_source_segment(src, fn)
+                makes = ("offer_lines(" in body or 'scope["offers"]' in body
+                         or "offer=" in body.replace("offer=None", ""))
+                if makes and fn.name not in ("offer_lines", "__init__"):
+                    builders[(f.stem, fn.name)] = ("offerable(" in body
+                                                   or "_OFFERABLE" in body)
+        # views._build_review only COLLECTS the offer= of blocks _compose built
+        self.assertEqual(builders.pop(("views", "_build_review")), False)
+        self.assertEqual(set(builders), {("alerts", "_units"), ("alerts", "pending_in_tx"),
+                                         ("views", "_compose")})
+        self.assertTrue(all(builders.values()), builders)
+
+
 if __name__ == "__main__":
     unittest.main()

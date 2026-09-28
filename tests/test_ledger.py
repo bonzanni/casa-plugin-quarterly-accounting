@@ -279,6 +279,27 @@ class TestDeliveredKindHalf(Base):
         self.assertEqual(self.check(a, exp_kind=None), 0)    # unknown is not a change
         self.assertEqual(self.check(a, exp_kind="none", ended="erased"), 0)
 
+    def test_a_lineage_is_alerted_when_its_own_row_is_read(self):
+        # review C7 (L3): reading X never alerts Y; Y is alerted when Y is read, so a
+        # short-lived change of Y's kind that is undone before Y's read raises nothing
+        self.imp([{"row_id": 1}, {"row_id": 2, "amount_minor": 5000}])
+        x, y = sorted(self.live())
+        self.deliver(1, dict(self.conn.execute("SELECT * FROM bank_rows WHERE row_id=1")
+                             .fetchone()), pid=x)
+        self.conn.execute("DELETE FROM delivered_rows")
+        self.kinded(x, 1, "invoice")
+        self.kinded(y, 2, "invoice")
+        self.check(x, exp_kind="invoice")
+        self.check(y, exp_kind="invoice")
+        with db.tx(self.conn):          # Y's kind moves outside Y's own read
+            self.conn.execute("UPDATE projections SET exp_kind='receipt' WHERE pid=?", (y,))
+        self.assertEqual(self.check(x), 0)                  # X's read: nothing about Y
+        with db.tx(self.conn):          # ...and moves back before Y is read
+            self.conn.execute("UPDATE projections SET exp_kind='invoice' WHERE pid=?", (y,))
+        self.assertEqual(self.check(y), 0)
+        self.assertEqual(self.alerts(), [])
+        self.assertEqual(self.check(y, exp_kind="receipt"), 1)   # Y's own read tells it
+
 
 class TestInstance(Base):
     """Ledger identity is bank-feed's instance id (#69; plan §D4)."""
