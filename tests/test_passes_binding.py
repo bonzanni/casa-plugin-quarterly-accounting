@@ -95,7 +95,7 @@ class TestBankWriteGate(StoreCase):
             self.conn.execute("UPDATE passes SET gate_json=NULL")
         g = passes.bank_write_gate(self.conn)
         self.assertFalse(g["allowed"])
-        self.assertIn("0.15.0", g["reason"])
+        self.assertIn("0.20.0", g["reason"])
 
     def test_fresh_store_with_our_workflow_registered_is_refused_naming_the_backup(self):
         self.pass_(generation=1, registered={version.WORKFLOW: "b-20260922-01"})

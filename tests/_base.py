@@ -160,11 +160,12 @@ class StoreCase(TempEnv):
                    "match_confidence", "needs_review", "review_reason", "state_reason",
                    "identity_key", "occurrence", "booking_date", "value_date", "amount_minor",
                    "currency", "direction", "status", "counterparty", "remittance",
-                   "first_seen", "last_seen", "state", "superseded_by")
+                   "first_seen", "last_seen", "state", "superseded_by", "tags", "tag_revision")
 
     def export_csv(self, rows):
-        """A synthetic export with bank-feed 0.18.0's column set (raw_json
-        excluded, as its EXPORT_EXCLUDE says). Used only where a test pins
+        """A synthetic export with bank-feed 0.20.0's column set (raw_json
+        excluded, as its EXPORT_EXCLUDE says; each row's tags comma-joined and its
+        tag_revision appended, casa-specialist-finance#86). Used only where a test pins
         this plugin's resolution logic; bank-feed behaviour is pinned in
         test_ledger_real.py against the real tree. Published straight through
         casa_handoff, as bank-feed's export_history does."""
@@ -180,8 +181,10 @@ class StoreCase(TempEnv):
                     "amount_minor": 10000, "currency": "EUR", "direction": "DBIT",
                     "status": "BOOK", "counterparty": "Adobe", "remittance": "",
                     "first_seen": "2026-07-03T08:00:00Z", "last_seen": "2026-07-03T08:00:00Z",
-                    "state": "active", "superseded_by": ""}
+                    "state": "active", "superseded_by": "", "tags": "", "tag_revision": 0}
             full.update(r)
+            if isinstance(full["tags"], (list, tuple)):
+                full["tags"] = ",".join(sorted(full["tags"]))
             w.writerow({k: ("" if full.get(k) is None else full.get(k, "")) for k in self.EXPORT_COLS})
         return casa_handoff.publish("bank-feed", "ledger-export-test.csv",
                                     data=buf.getvalue().encode())["path"]

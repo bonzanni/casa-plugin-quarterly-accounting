@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 
 import casa_handoff
 import db
@@ -27,7 +28,12 @@ import reducer as R
 REQUIRED_COLUMNS = ("row_id", "account_id", "first_seen", "booking_date", "value_date",
                     "amount_minor", "currency", "direction", "status", "counterparty",
                     "remittance", "state", "superseded_by", "needs_review", "review_reason")
+# bank-feed 0.20.0 (casa-specialist-finance#86) appends each row's current tags and its
+# tag_revision, read in the same snapshot as the rows: the import is the classification
+# observation (issue #1). An export without them is below this plugin's floor.
+TAG_COLUMNS = ("tags", "tag_revision")
 _INT = ("row_id", "amount_minor", "superseded_by", "needs_review")
+TAG_RE = re.compile(r"^(?:[a-z][a-z0-9-]{0,15}::)?[a-z0-9][a-z0-9-]{0,31}$")
 
 
 def parse(name: str, data: bytes) -> list:
@@ -43,6 +49,9 @@ def parse(name: str, data: bytes) -> list:
     if missing:
         raise db.Refusal("this is not a bank-feed ledger export (missing columns: "
                          + ", ".join(missing) + ")")
+    if any(c not in header for c in TAG_COLUMNS):
+        raise db.Refusal("this export carries no tags: bank-feed is below this plugin's floor "
+                         "(0.20.0, casa-specialist-finance component 0.21.0) — nothing imported")
     out = []
     for r in rows:
         clean = {}
@@ -53,8 +62,31 @@ def parse(name: str, data: bytes) -> list:
                 v = int(v)
             clean[k] = v
         clean["needs_review"] = clean["needs_review"] or 0
+        clean["tags"], clean["tag_revision"] = _tags_of(r)
         out.append(clean)
     return out
+
+
+def _tags_of(r: dict) -> tuple:
+    """A row's tags (a list in JSONL, comma-joined in CSV; empty = none) and its
+    tag_revision. Anything malformed refuses the import whole: a classification
+    misread here is acted on as fresh."""
+    raw, rev = r.get("tags"), r.get("tag_revision")
+    if isinstance(raw, list):
+        tags = raw
+    elif isinstance(raw, str):
+        tags = [t for t in raw.split(",")] if raw != "" else []
+    else:
+        tags = None
+    try:
+        rev = int(rev)
+    except (TypeError, ValueError):
+        rev = None
+    if tags is None or rev is None or rev < 0 or not all(
+            isinstance(t, str) and TAG_RE.match(t) for t in tags):
+        raise db.Refusal(f"row #{r.get('row_id')} carries malformed tags or tag_revision in "
+                         "the export — nothing imported")
+    return sorted(set(tags)), rev
 
 
 def end_lineage(conn, pid: int, how: str, snapshot_id=None) -> None:
@@ -355,11 +387,38 @@ def _import(conn, rows, token, ledger_instance) -> dict:
                          (r["row_id"], pid, r["first_seen"]))
             out["admitted"].append(pid)
 
-        # 4. every live lineage re-reduced against this snapshot (fingerprints, eligibility)
+        # 4. the export's tags are this snapshot's classification observation (issue #1):
+        # every live lineage whose row is in it is observed at this import; one whose row
+        # is absent (an erase candidate) stays unobserved, so it is not fresh
+        import sweep
+        stamped = []
+        for pid in lineage.live_pids(conn):
+            p = lineage.projection(conn, pid)
+            r = by_id.get(p["dest_row_id"])
+            if p["ended"] == "erased" or r is None:
+                continue
+            conn.execute("UPDATE projections SET class_tags_json=?, class_observed_at=?,"
+                         " class_observed_snapshot=?, observed_tags_json=?, observed_at=?,"
+                         " export_tag_revision=? WHERE pid=?",
+                         (json.dumps([t for t in r["tags"] if t not in R.OWNED]), db.now(),
+                          sid, json.dumps(r["tags"]), db.now(), r["tag_revision"], pid))
+            stamped.append((pid, r))
+
+        # 5. every live lineage re-reduced against this snapshot (fingerprints, eligibility,
+        # the classification just observed)
         lineage.settle_all(conn)
+        # 6. a stamped lineage that owes bank-feed no write is settled for this cycle; one
+        # that owes a tag or note write, or whose note is not known visible, is due a read
+        for pid, r in stamped:
+            p = lineage.projection(conn, pid)
+            owed = sweep.owed_write(conn, pid, r["tags"],
+                                    sweep.note_confirmed(p, r["tag_revision"]))
+            conn.execute("UPDATE projections SET observed_revision=? WHERE pid=?",
+                         (p["revision"] if owed is None else None, pid))
         passes.remember_ledger(conn, cur_pass["pass_id"])   # identity proved above
         out["delivered_changes"] = check_delivered_bank_half(conn, by_id)
-        # 5. an unsent first send staged under an earlier snapshot is revoked in this
+        out["delivered_changes"] += len(_kind_changes(conn, _latest_delivered(conn)))
+        # 7. an unsent first send staged under an earlier snapshot is revoked in this
         # same commit (round E5, Terra S1): the plugin cannot hold a lock across the
         # external send, so the import takes the send away instead. Its bytes are
         # withdrawn BEFORE the commit, under the custody lock (round E6): no moment has
@@ -378,9 +437,10 @@ def check_delivered_kind_half(conn, pid: int) -> int:
     """The classification half of "a delivered quarter changed underneath":
     the expectation kind a delivered row shipped under, against the one the
     lineage's latest classification observation derives (spec §"What a pass
-    works on"; round 26 — the snapshot carries no tags). Unknown is not a
+    works on"; round 26; since issue #1 the import observes it too, from the
+    export's tags). Unknown is not a
     change (the last known kind stands). A row shipped unclassified — its
-    expectation unknown, or not re-read since the import — is compared against
+    expectation unknown, or not observed at the import — is compared against
     the last kind known when it shipped (delivered_rows.kind); one shipped with
     no kind ever known is skipped: there is nothing to have changed from (fix
     wave F: a row read again unchanged raised "now categorised differently").
@@ -389,10 +449,13 @@ def check_delivered_kind_half(conn, pid: int) -> int:
     belongs to this lineage when its pid RESOLVES to it (as in
     check_delivered_bank_half). An ended lineage derives no kind: an erased
     one is reported once as "erased" by the bank half."""
-    latest = [r[0] for r in conn.execute(
+    return len(_kind_changes(conn, _latest_delivered(conn), pid))
+
+
+def _latest_delivered(conn) -> list:
+    return [r[0] for r in conn.execute(
         "SELECT max(p2.package_id) FROM packages p2 JOIN deliveries d2"
         " ON d2.package_id=p2.package_id AND d2.status='delivered' GROUP BY p2.quarter")]
-    return len(_kind_changes(conn, latest, pid))
 
 
 def _kind_changes(conn, package_ids, pid=None) -> list:

@@ -316,10 +316,11 @@ def latest_import(conn) -> int:
 
 
 def is_fresh(conn, proj) -> bool:
-    """A lineage's classification is FRESH iff the sweep read its row after the
-    latest successful import (fix E2). The export carries no tags, so an import
-    makes every classification stale until the sweep re-reads the row; the one
-    thing that refreshes it is sweep.record_observation. Compared by snapshot id,
+    """A lineage's classification is FRESH iff it was observed at the latest
+    successful import (fix E2; issue #1): the import itself observes every row
+    the export carries (bank-feed 0.20.0 exports each row's tags), and the
+    sweep's read (sweep.record_observation) observes one row. A row absent from
+    the latest export stays unobserved until a read. Compared by snapshot id,
     never by timestamp (a one-second clock cannot order an import and a read)."""
     seen = proj["class_observed_snapshot"]
     return seen is not None and seen >= latest_import(conn)

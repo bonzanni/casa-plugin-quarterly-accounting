@@ -44,7 +44,11 @@ states it (792a5fa). **Converged at round 43: Astra SHIP, Terra SHIP, at 792a5fa
 nothing at S1/S2. The #56 floor stays mandatory: the newest bank-feed is below it.
 Revised 2026-09-22 — re-verified against casa **v0.328.0** and bank-feed **0.10.1**
 after ha-casa-app #486, #1036, #1038, #1040 and casa-specialist-finance #30, #31 landed.
-Required floors: casa **0.326.0**, bank-feed **0.15.0** (casa-specialist-finance component 0.16.0: the ledger instance id and `expected_ledger`, #69, on top of #56's lineage-closed purge in 0.13.0; §Casa baseline). Revised 2026-09-27.
+Required floors: casa **0.326.0**, bank-feed **0.20.0** (casa-specialist-finance component 0.21.0: the export carries each row's tags and `tag_revision`, #86, on top of #69's ledger instance id and `expected_ledger` in 0.15.0 and #56's lineage-closed purge in 0.13.0; §Casa baseline). Revised 2026-09-28.
+Revised 2026-09-28 — **classification from the export** (issue #1, operator ruling "option A"):
+the import is the classification observation, and the sweep reads only what owes bank-feed a
+write, a read-back or an erasure check. Design and its review rounds D1–D2:
+`docs/superpowers/specs/2026-09-28-issue-1-classification-from-export-design.md`.
 Re-verified 2026-09-27 against casa **v0.328.6** and component **0.14.4**: nothing in between
 changes a contract this document relies on.
 Implementation plan: `docs/superpowers/plans/2026-09-27-quarterly-accounting.md`, converged at
@@ -312,8 +316,12 @@ attaches handoff files. bank-feed's `export_history` publishes its ledger export
 Casa's `share_inbound_file` copies a file the operator sent in Telegram there. This
 plugin vendors `casa_handoff.py` verbatim.
 
-**bank-feed floor: 0.15.0** (casa-specialist-finance component 0.16.0, 2026-09-27; revised
-from 0.13.0). It adds [#69](https://github.com/bonzanni/casa-specialist-finance/issues/69):
+**bank-feed floor: 0.20.0** (casa-specialist-finance component 0.21.0, 2026-09-28; revised
+from 0.15.0). It adds [#86](https://github.com/bonzanni/casa-specialist-finance/issues/86):
+`export_history` carries each row's current tags and a `tag_revision` (equal revision ⇒
+equal tag set, for one ledger instance id), read in the same snapshot as the rows, and
+`get_transaction` prints the same revision. The 0.15.0 floor before it added
+[#69](https://github.com/bonzanni/casa-specialist-finance/issues/69):
 a ledger instance id reported by `list_backups` and `export_history`, and `expected_ledger`
 on `tag_transaction`, `untag_transaction` and `add_note`, checked atomically with
 `expected_generation`. The earlier floor, 0.13.0 (component 0.14.0, 2026-09-25), was the
@@ -329,6 +337,7 @@ load-bearing (re-verified 2026-09-24 against component 0.13.2):
 | **0.10.0** | `export_history` publishes into Casa's handoff folder | `import_ledger_export` takes the export only through `casa_handoff.capture` and refuses any other path. On 0.9.x the export lands in bank-feed's private data directory, so **packaging fails closed**. |
 | **0.13.0** | [#56](https://github.com/bonzanni/casa-specialist-finance/issues/56) — `purge` deletes a supersession chain whole or not at all | Ending a lineage on an erased row (§Match records, "A lineage can end") is only sound when an erasure cannot cut a chain. Below it, a date `purge` can delete a superseded predecessor and keep its successor, and the plugin would retire decisions about a payment that still exists (round 41). |
 | **0.15.0** | [#69](https://github.com/bonzanni/casa-specialist-finance/issues/69) — the ledger instance id; `expected_ledger` on the annotation writes | The store binds to the instance id, the import checks the export's id, and every accounting write carries `expected_ledger`: a write can never land on a ledger the store was not built on (implementation plan D4). |
+| **0.20.0** | [#86](https://github.com/bonzanni/casa-specialist-finance/issues/86) — `export_history` carries each row's tags and `tag_revision` | The import is the classification observation (issue #1): every exported row is classified as of the snapshot without a per-row read, so a catch-up quarter converges in a few passes. Below it the export has no tags and the import refuses: "bank-feed is below this plugin's floor". |
 | **0.11.0** | [#39](https://github.com/bonzanni/casa-specialist-finance/issues/39) — backups, a protected restore, and the restore point minted on a workflow's first write; `workflow` and `expected_generation` on `tag_transaction`, `untag_transaction` and `add_note` | Every accounting write carries both (§Setup, "Test install"). Below it the `workflow` argument is refused, and the pass says the ledger is below the floor rather than writing unfenced. |
 
 An earlier revision named 0.9.0 as the floor — correct for the namespace, one version
@@ -877,7 +886,10 @@ against the live row, superseded or not. The classification is the one input tha
 `export_history` does not carry them (round 25, both reviewers) — so it is observed per
 row by the sweep's `get_transaction` read (§"The sweep", step 3) and recorded on the
 projection as its **classification observation**, refreshed every cycle for every managed
-lineage, matched and delivered ones included. A changed material fact **invalidates** the acceptance (reducer step 3, or step 5 for a
+lineage, matched and delivered ones included. **Since bank-feed 0.20.0 (#86; issue #1) the
+export carries each row's tags**, so the import itself records the classification
+observation for every row it carries; the per-row read remains for the rows the plugin
+writes to or must read back. A changed material fact **invalidates** the acceptance (reducer step 3, or step 5 for a
 machine pairing). A changed **expectation kind** (the classifier re-tags a salary payment
 as fuel; a matched purchase gains `internal-transfer`; the operator sets a counterparty to
 `none`) is stronger than an invalidation, because the held document *cannot* satisfy the
@@ -1382,12 +1394,21 @@ Unconditional enumeration replaces every selection rule:
 3. Read the current tags and notes; record the row's **classification observation**
    and re-derive its expectation (§"Document expectation") — for every projection, paired
    or not, since a changed expectation kind invalidates a pairing (§Match records); then
-   take the server's freshly computed desired value.
+   take the server's freshly computed desired value. **Since issue #1 the import does this
+   for every row the export carries** (its tags are in the export), and it settles, without
+   a read, every lineage whose exported tags already equal its desired set and whose
+   accounting note is known visible: a read confirms a note, and the confirmation stands
+   while the row's `tag_revision` is unchanged and the read's import came more than a
+   delegation's ceiling after the last `add_note` the plugin handed out (rounds D1–D2).
+   Residual: an erasure that strips a note from a row carrying no tags at all does not
+   move the revision; that note is restated when the lineage's note next changes.
 4. Remove owned tags outside the desired set; add missing desired tags. The fixed point
    is `actual := (actual − owned_tags) ∪ desired`, reached from any starting state.
 5. Append a current snapshot when the visible accounting note is missing or differs.
 6. Read back and record what was observed. **An observation never exempts a projection
-   from future sweeps** — that exemption is what let a stale writer escape in round 7.
+   from future sweeps** — that exemption is what let a stale writer escape in round 7. (Since
+   issue #1 every import re-judges every exported row from its tags; only the read is
+   skipped where nothing is owed.)
 
 The enumeration is **resumable**: it advances a durable cursor and picks up where the
 last session stopped, so a cycle spans as many passes as it needs. The cursor orders

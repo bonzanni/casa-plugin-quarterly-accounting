@@ -1,6 +1,6 @@
 # Issue #1 — classification from the export (design)
 
-Status: draft for design review, 2026-09-28. Ruling: issue #1, OPERATOR DECISION
+Status: design converged for implementation 2026-09-28 (D1: Terra SWF, Astra SWF; D2: Terra SHIP, Astra SWF — its S2 folded in as a patch, re-checked in the code round). Ruling: issue #1, OPERATOR DECISION
 2026-09-28 ("option A — the best fix"). Upstream: casa-specialist-finance#86 — feature commit cc1a2fb (bank-feed 0.19.0 in-tree),
 released as tag v0.21.0 (commit 3479640) = component 0.21.0 / bank-feed 0.20.0.
 

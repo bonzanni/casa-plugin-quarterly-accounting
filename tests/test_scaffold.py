@@ -62,7 +62,7 @@ class TestScaffold(TempEnv):
         self.assertTrue(b["result"]["content"][0]["text"].startswith("error: KeyError"))
 
     def test_casa_handoff_is_vendored_verbatim(self):
-        up = ROOT / "tests/upstream/component-v0.19.0/plugins/bank-feed/server/casa_handoff.py"
+        up = ROOT / "tests/upstream/component-v0.21.0/plugins/bank-feed/server/casa_handoff.py"
         if not up.exists():
             self.skipTest("upstream tree arrives in Task 2")
         self.assertEqual((ROOT / "server/casa_handoff.py").read_bytes(), up.read_bytes())

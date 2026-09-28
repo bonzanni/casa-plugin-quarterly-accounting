@@ -43,6 +43,7 @@ import json
 
 import backups
 import casa_handoff
+import eb_ais
 import flows
 import httpx
 import money
@@ -156,8 +157,9 @@ def _ensure_sync_row(c, account_id: str, resource: str, incarnation) -> None:
 def _note_failure(c, account_id: str, resource: str, exc, incarnation) -> None:
     """Record the failure per resource, and the provider's own backoff.
 
-    The class name only — never the message, which can carry a provider
-    body. Every write is conditioned on `incarnation` — the token captured
+    `eb_ais.failure_label` — the class name, plus the HTTP status and its
+    fixed kind for an `ApiError` (issue #83: a week of 401s was recorded as
+    `ApiError` alone) — never the message, which can carry a provider body. Every write is conditioned on `incarnation` — the token captured
     by the SAME account read the failed refresh ran under — so a failure
     noted late cannot resurrect sync_state for an erased account, nor stamp
     the OLD run's failure onto a re-linked account's NEW life. The UPDATEs
@@ -167,7 +169,7 @@ def _note_failure(c, account_id: str, resource: str, exc, incarnation) -> None:
     _ensure_sync_row(c, account_id, resource, incarnation)
     guard = (" AND EXISTS (SELECT 1 FROM accounts WHERE account_id=?"
              " AND incarnation=?)")
-    label = type(exc).__name__
+    label = eb_ais.failure_label(exc)
     if _is_rate_limited(exc):
         wait = _retry_after_s(exc)
         label += (" (Retry-After honoured)" if _honoured(exc)
@@ -470,6 +472,7 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
     # under. Never re-read later in the run: a forget-and-relink between two
     # reads is exactly what the fence exists to catch.
     incarnation = account.get("incarnation")
+    started = tools_auth._now_s()        # issue #83: orders health records
     try:
         result = _fetch_resource(c, account_id, resource, account, incarnation,
                                  out=out)
@@ -477,6 +480,12 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
     except Exception as e:  # noqa: BLE001 — recorded (guarded), then finalised
         _note_failure(c, account_id, resource, e, incarnation)
         result, exc = False, e
+    if resource == "transactions":
+        # Issue #83: the routine sync's health, per consent, fenced on the
+        # session this run captured. Only here — a link's or renewal's
+        # backfill is not a routine sync of the bound consent.
+        tools_auth.record_sync_health(c, account_id, account.get("session_id"),
+                                      exc, started)
     # THE ONE TERMINAL LIFE CHECK. Fencing the intermediate reads one at a
     # time does not hold, and each attempt left another gap:
     # `backfill_complete`'s `sync_state` row came back from a backup and read
@@ -841,6 +850,7 @@ def sync(args: dict) -> str:
         return msg
     resources = [requested] if requested else list(RESOURCES)
     lines = []
+    refused = []                    # (name, account_id) whose transactions failed
     batch_new = batch_tagged = batch_needs = 0
     for account in accounts:
         # The same handle the read tools print, through the same fence:
@@ -931,16 +941,19 @@ def sync(args: dict) -> str:
                     "DEFERRED — %s. Nothing was called and the previous cached "
                     "answer is unchanged." % tools_read._neutralized(exc)))
             except Exception as exc:             # noqa: BLE001
-                # The class name only — a provider body must never reach this
+                # `eb_ais.failure_label` only — the class, plus an ApiError's
+                # status (issue #83); a provider body must never reach this
                 # line. `NO_BALANCES_EXIT` is not a message: it is OUR literal,
                 # appended for the one failure that is permanent until the
                 # operator acts, and for no other. See the constant for why it
                 # is not printed beside every failure.
+                if resource == "transactions":
+                    refused.append((name, account_id))
                 lines.append(_account_line(
                     name, resource,
                     "FAILED (%s) — the previous cached answer is unchanged and "
                     "still labelled with its own age%s%s"
-                    % (type(exc).__name__,
+                    % (eb_ais.failure_label(exc),
                        _recorded_wait(c, account_id, resource),
                        NO_BALANCES_EXIT
                        if isinstance(exc, NoBalancesReturned) else "")))
@@ -957,6 +970,18 @@ def sync(args: dict) -> str:
                     batch_new += len(res_out.get("new_row_ids") or [])
                     batch_tagged += res_out.get("auto_tagged") or 0
                     batch_needs += res_out.get("needs_classification") or 0
+    # Issue #83: AFTER the loop, so a later bank's success in this same run
+    # counts as the cross-consent evidence. The one renderer consent_status
+    # uses, reading the record this run just wrote.
+    for name, account_id in refused:
+        session = c.execute(
+            "SELECT s.* FROM sessions s JOIN accounts a"
+            " ON a.session_id = s.session_id WHERE a.account_id=?",
+            (account_id,)).fetchone()
+        hint = (tools_auth.refusal_hint(c, account_id, dict(session))
+                if session is not None else None)
+        if hint:
+            lines.append("%s: %s" % (name, hint))
     if batch_new:
         # needs is the propagated FINAL-STATE workable count, never
         # new-minus-tagged: a parked/terminal insert is neither bucket, so
@@ -1013,6 +1038,14 @@ EXPORT_EXCLUDE = {
 }
 
 
+#: The two columns an export appends after the ledger's own (issue #86):
+#: `tags` (sorted; comma-joined in CSV, a list in JSONL) and `tag_revision`,
+#: which changes whenever the row's tag set does, removals included — for one
+#: ledger instance id, an equal revision means an equal tag set. 0 is "no
+#: change recorded since the revision was installed on this ledger".
+EXPORT_TAG_COLUMNS = ("tags", "tag_revision")
+
+
 def _export_columns(c) -> list:
     columns = [row[1] for row in c.execute("PRAGMA table_info(transactions)")]
     stale = [name for name in EXPORT_EXCLUDE if name not in columns]
@@ -1021,6 +1054,11 @@ def _export_columns(c) -> list:
         # "considered and rejected" while excluding nothing.
         raise RuntimeError("export exclusion names no such column: %s"
                            % ", ".join(sorted(stale)))
+    clash = [name for name in EXPORT_TAG_COLUMNS if name in columns]
+    if clash:
+        # The appended columns would silently overwrite a ledger column.
+        raise RuntimeError("export column clashes with a ledger column: %s"
+                           % ", ".join(clash))
     return [name for name in columns if name not in EXPORT_EXCLUDE]
 
 
@@ -1031,7 +1069,8 @@ _EXPORT_UNLABELLED = ("The export was not written: the ledger could not "
 
 @register("export_history",
           "Write the full local ledger as CSV or JSONL into Casa's handoff "
-          "folder and return the path. Another plugin can take the file from "
+          "folder and return the path. Each row carries its current tags and "
+          "a tag_revision that changes whenever its tags do. Another plugin can take the file from "
           "that path (an accounting import, an email attachment); it is kept "
           "7 days.",
           {"type": "object",
@@ -1060,6 +1099,14 @@ def export_history(args: dict) -> str:
         rows = [dict(r) for r in c.execute(
             "SELECT %s FROM transactions ORDER BY account_id, booking_date, row_id"
             % ", ".join(columns))]
+        # Issue #86: each row's current tags and tag revision, from the same
+        # snapshot, so a consumer learns every classification in one import.
+        tags = {}
+        for rid, tag in c.execute(
+                "SELECT row_id, tag FROM transaction_tags ORDER BY row_id, tag"):
+            tags.setdefault(rid, []).append(tag)
+        revisions = dict(c.execute(
+            "SELECT row_id, revision FROM %s" % store.TAG_REVISIONS_TABLE))
         c.execute("COMMIT")
     except BaseException:
         if c.in_transaction:
@@ -1067,13 +1114,18 @@ def export_history(args: dict) -> str:
         raise
     if ledger is None:
         return _EXPORT_UNLABELLED
+    for row in rows:
+        row["tags"] = tags.get(row["row_id"], [])
+        row["tag_revision"] = revisions.get(row["row_id"], 0)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     buf = io.StringIO(newline="")
     if fmt == "csv":
-        writer = csv.DictWriter(buf, fieldnames=columns)
+        writer = csv.DictWriter(buf, fieldnames=columns + list(EXPORT_TAG_COLUMNS))
         writer.writeheader()
         for row in rows:
-            writer.writerow(row)
+            # The tag grammar admits no comma or whitespace, so the join is
+            # unambiguous; an empty cell is no tags.
+            writer.writerow(dict(row, tags=",".join(row["tags"])))
     else:
         for row in rows:
             buf.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -1085,7 +1137,8 @@ def export_history(args: dict) -> str:
         return "The export could not be written: %s" % exc
     return "\n".join([
         "Exported %d transaction(s) as %s, every column of the ledger except "
-        "%s. The file is written in full — it is a file, not model context, "
+        "%s, then each row's current tags and its tag_revision (it changes "
+        "whenever the row's tags do). The file is written in full — it is a file, not model context, "
         "so nothing is clipped or delimited, and it therefore contains "
         "bank-supplied text exactly as the bank sent it. It is in Casa's "
         "handoff folder for %d days: pass the path to the tool that needs it, "

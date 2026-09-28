@@ -231,8 +231,9 @@ def throughput(conn, pass_id: str) -> dict:
     None when the pass imported nothing. The first test-install pass measures
     throughput with it; check_setup shows the last pass's report."""
     import sweep
+    # a READ, not the import's stamp (issue #1: the import observes every present row)
     swept = conn.execute("SELECT COUNT(*) FROM projections WHERE merged_into IS NULL AND"
-                         " class_observed_snapshot IN (SELECT snapshot_id FROM snapshots"
+                         " read_snapshot IN (SELECT snapshot_id FROM snapshots"
                          " WHERE pass_id=?)", (pass_id,)).fetchone()[0]
     imported = conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?",
                             (pass_id,)).fetchone() is not None
@@ -459,7 +460,7 @@ def _decide_gate(conn) -> dict:
     instance = data.get("instance")
     if not isinstance(instance, str) or not LEDGER_RE.match(instance):
         out["reason"] = ("bank-feed reports no ledger instance id: it is below this plugin's "
-                         "floor (bank-feed 0.15.0)")
+                         "floor (bank-feed 0.20.0)")
         return out
     registered = dict(data.get("registered") or {})
     out["install_backup"] = registered.get(version.WORKFLOW)

@@ -73,11 +73,14 @@ class TestResolution(Base):
         with db.tx(self.conn):
             lineage.append(self.conn, p2, "exempt", "operator")
             lineage.settle(self.conn, p2)
+        # the export carries the tags (issue #1): bank-feed's supersede re-points them
+        # onto the successor, so the merged lineage still reads `software`
         out = self.imp([
             {"row_id": 1, "state": "superseded", "superseded_by": 3},
             {"row_id": 2, "state": "superseded", "superseded_by": 3,
              "first_seen": "2026-07-03T09:00:00Z"},
-            {"row_id": 3, "first_seen": "2026-07-05T08:00:00Z"}])
+            {"row_id": 3, "first_seen": "2026-07-05T08:00:00Z", "tags": ["software"],
+             "tag_revision": 7}])
         self.assertEqual(out["merged"], [[p1, p2]])
         live = self.live()
         self.assertEqual(list(live), [p1])
@@ -100,11 +103,14 @@ class TestResolution(Base):
                            fp=reducer.fingerprint(reducer.facts_of(row), "invoice"))
             lineage.settle(self.conn, p2)
         self.assertEqual(self.live()[p2]["status"], "matched")
+        # the export carries the tags (issue #1): bank-feed's supersede re-points them
+        # onto the successor, so the merged lineage still reads `software`
         out = self.imp([
             {"row_id": 1, "state": "superseded", "superseded_by": 3},
             {"row_id": 2, "state": "superseded", "superseded_by": 3,
              "first_seen": "2026-07-03T09:00:00Z"},
-            {"row_id": 3, "first_seen": "2026-07-05T08:00:00Z"}])
+            {"row_id": 3, "first_seen": "2026-07-05T08:00:00Z", "tags": ["software"],
+             "tag_revision": 7}])
         self.assertEqual(out["merged"], [[p1, p2]])
         ms = self.conn.execute("SELECT pid, state FROM match_state WHERE match_id=?",
                                (mid,)).fetchone()

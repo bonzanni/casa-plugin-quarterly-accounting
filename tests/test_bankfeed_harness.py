@@ -14,10 +14,27 @@ class TestHarness(TempEnv):
         self.addCleanup(self.bf.close)
         self.bf.account()
 
-    def test_floor_tree_is_bank_feed_0_18_0(self):
+    def test_floor_tree_is_bank_feed_0_20_0(self):
         import json
         m = json.loads((bankfeed.plugin_root() / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(m["version"], "0.18.0")
+        self.assertEqual(m["version"], "0.20.0")
+
+    def test_the_floor_export_carries_tags_and_a_tag_revision(self):
+        # issue #1 rests on casa-specialist-finance#86: the export names each row's tags
+        # and a revision that moves on every tag change, removals included
+        import ledger
+        import casa_handoff
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        rid = self.bf.rows()[0]["row_id"]
+        self.bf.call("tag_transaction", row_ids=[rid], tags=["software"])
+        rows = ledger.parse(*casa_handoff.capture(self.bf.export()))
+        self.assertEqual((rows[0]["tags"], rows[0]["tag_revision"] > 0), (["software"], True))
+        r1 = rows[0]["tag_revision"]
+        self.bf.call("untag_transaction", row_ids=[rid], tags=["software"])
+        rows = ledger.parse(*casa_handoff.capture(self.bf.export()))
+        self.assertEqual(rows[0]["tags"], [])
+        self.assertNotEqual(rows[0]["tag_revision"], r1)
+        self.assertEqual(rows[0]["tag_revision"], self.bf.tag_revision(rid))
 
     def test_pending_to_booked_is_a_supersession(self):
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1", status="PDNG")])

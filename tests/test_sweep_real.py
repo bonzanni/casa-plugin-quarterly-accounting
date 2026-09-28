@@ -168,7 +168,8 @@ class TestCapacity(Base):
         again = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=item["pid"], token=self.token,
                                          observed_tags=self.bf.tags(r),
                                          observed_notes=self.bf.notes(r),
-                                         observed_first_seen=self.bf.rows()[0]["first_seen"])
+                                         observed_first_seen=self.bf.rows()[0]["first_seen"],
+                                         observed_tag_revision=self.bf.tag_revision(r))
         self.assertEqual((again["instructions"] or {}).get("tag", []), [])
 
 
@@ -266,7 +267,8 @@ class TestEndsAndErasure(Base):
         with self.assertRaises(db.Refusal):
             sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=item["pid"], token=self.token,
                                      observed_tags=[], observed_notes=[],
-                                     observed_first_seen="2030-01-01T00:00:00Z")
+                                     observed_first_seen="2030-01-01T00:00:00Z",
+                                     observed_tag_revision=0)
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
         with self.assertRaises(db.Refusal):
             sweep.list_projections(self.conn, token=self.token)
@@ -444,7 +446,8 @@ class TestEndsAndErasure(Base):
         before = lineage.projection(self.conn, pid)
         out = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=pid, token=self.token,
                                        observed_tags=["acct::open"], observed_notes=[],
-                                       observed_first_seen="2030-01-01T00:00:00Z")
+                                       observed_first_seen="2030-01-01T00:00:00Z",
+                                       observed_tag_revision=0)
         self.assertEqual(out["instructions"], {})
         self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
         after = lineage.projection(self.conn, pid)
@@ -583,16 +586,19 @@ class TestNoteAsRendered(Base):
         text = self.bf.call("get_transaction", row_id=rid)
         self.assertIn(sweep.FENCE_OPEN + "Accounting revision ", text)   # really fenced
         tags, notes, first_seen = self.parse(text)
+        rev = self.bf.tag_revision(rid)
         self.assertEqual(sorted(tags), sorted(self.bf.tags(rid)))
         r = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=self.pid_of(rid), token=self.token,
                                      observed_tags=tags, observed_notes=notes,
-                                     observed_first_seen=first_seen)
+                                     observed_first_seen=first_seen,
+                                     observed_tag_revision=rev)
         self.assertEqual(r["instructions"], {})
         # markers removed by the reader: also the current note
         bare = [sweep.shown_note(n) for n in notes]
         r = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=self.pid_of(rid), token=self.token,
                                      observed_tags=tags, observed_notes=bare,
-                                     observed_first_seen=first_seen)
+                                     observed_first_seen=first_seen,
+                                     observed_tag_revision=rev)
         self.assertEqual(r["instructions"], {})
         self.assertEqual(len(self.bf.notes(rid)), before)
 
@@ -602,10 +608,12 @@ class TestNoteAsRendered(Base):
         self.cycle()
         rid = self.rid()
         tags, notes, first_seen = self.parse(self.bf.call("get_transaction", row_id=rid))
+        rev = self.bf.tag_revision(rid)
         stale = [n.replace("Accounting revision ", "Accounting revision 0") for n in notes]
         r = sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=self.pid_of(rid), token=self.token,
                                      observed_tags=tags, observed_notes=stale,
-                                     observed_first_seen=first_seen)
+                                     observed_first_seen=first_seen,
+                                     observed_tag_revision=rev)
         self.assertIn("add_note", r["instructions"])
 
 
