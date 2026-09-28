@@ -237,7 +237,37 @@ The flow of a package request:
      stages, and `state` becomes `staged`.
    - `record_delivery(delivery_id, outcome, package_token)` needs the token of the
      request that holds that delivery. It closes the request as `delivered`,
-     `uncertain` or `failed`.
+     `uncertain` or `failed`. When it records `uncertain` or `failed`, **the same
+     transaction** enqueues the package notice (`package-uncertain` or
+     `package-send-failed`, §3.7) and returns its rendering as `speak`. It no longer
+     returns a separate offer rendering. A crash before that `speak` is sent loses
+     nothing: the occurrence is offered again (X4).
+   - **Token checks happen in the committing transaction** (X4 rule, general; §4.3). A
+     check made before a lock wait (the custody lock, the SQLite write lock) is only an
+     early refusal. The binding check is repeated inside the final transaction that
+     registers or links the result. If it refuses there, whatever was prepared outside
+     that transaction and is still unregistered (the built zip, the staged copy) is
+     deleted before the refusal returns. So a holder rotated while it waited can never
+     link a package, stage a delivery or settle one.
+   - **Every new delivery gets a never-reused staged basename** (X4). For Telegram, the
+     outbox file is `qa-<16 random hex>.zip`, or the document's extension, drawn afresh
+     for every new delivery row: first sends, resends ("send it again") and single
+     documents. It is never the package's display name, so a resend never recreates a
+     path a superseded holder may still hold.
+     - The operator-facing name travels as `send_media`'s `filename` argument, with the
+       caption as before. That argument exists at Casa v0.332.0: the `send_media`
+       schema has `path`, `kind`, `caption` and `filename`, and "an explicit arg else
+       the path basename" (`tools.py`, around lines 558–720). The stage answer returns
+       `filename` for Ellen to pass.
+     - *Fallback, if a Casa release drops the argument:* the operator would receive the
+       random name. The display name then goes first in the caption, and the send is
+       otherwise unchanged. Correctness does not depend on the name.
+     - Email is already unique per publish: `casa_handoff` creates a new `<id>/`
+       directory for every publish, and the attachment keeps its human filename.
+     - `_to_outbox`'s "same bytes at the same name are reused" branch becomes
+       unreachable for new deliveries and is removed. Idempotent staging of the **same**
+       delivery (§3.4) returns that delivery's recorded path; it does not look up a
+       name.
 4. **Token-free paths stay token-free.** A resend ("send it again": `resend=true`) and a
    single document (`doc_id`) are not request-bound.
 5. **Reclaim.** `continue_pass` claims a request whose lease has lapsed, rotates its
@@ -344,8 +374,10 @@ stamps `sent_at`. This is the pattern the collection alerts already follow:
 |---|---|---|
 | `package-stopped` | `request:<id>:stopped` | the immediate `stopped` reply of `end_pass` |
 | `package-failed` | `request:<id>:failed` | the stale-pass reclaim |
-| `package-uncertain` | `request:<id>:uncertain` | the staged-request claim |
+| `package-uncertain` | `delivery:<id>:uncertain` | the staged-request claim (it records the delivery `uncertain` itself) |
 | `package-revoked` | `request:<id>:revoked` | the import's revocation |
+| `package-uncertain` | `delivery:<id>:uncertain` | `record_delivery(uncertain)` for any package delivery, including a resend |
+| `package-send-failed` | `delivery:<id>:failed` | `record_delivery(failed)` for any package delivery, including a resend |
 
 The key is UNIQUE, so raising an occurrence twice (a replayed claim, a retried
 `end_pass`) inserts once. `detail` holds `{quarter, reason, package_id}`. The reason is
@@ -360,9 +392,10 @@ package changes, one wrapped line each:
 | `package-failed` | "I couldn't read the bank for the <quarter> package — ask for it again." |
 | `package-revoked` | "The bank was re-read before I could send the <quarter> package — ask for it again and I'll rebuild it." |
 | `package-uncertain` | the existing `delivery.offer_lines(<filename>)` |
+| `package-send-failed` | "The <quarter> package didn't go out. Say "send it again" and I'll send it." |
 
-A rendering that prints a `package-uncertain` occurrence also puts that package in its
-scope's `offers`, beside `alerts`. That way "send it again" binds to it exactly as it
+A rendering that prints a `package-uncertain` or `package-send-failed` occurrence also
+puts that package in its scope's `offers`, beside `alerts`. That way "send it again" binds to it exactly as it
 binds to `record_delivery`'s own offer today (D3).
 
 **Delivery.** The `speak` that `end_pass` already returns is that rendering. So is the
@@ -377,9 +410,10 @@ send it.
 - *Two tells*: the second turn finds it delivered, or finds the same undelivered
   rendering.
 
-What is left is the existing at-least-once window of the alerts pattern: two turns
-holding the same undelivered rendering at the same instant. It is bounded by the
-`speak` gating above.
+What is left is the at-least-once window of the alerts pattern: two turns can hold the
+same undelivered rendering at the same instant, and both can send it before either
+marks it delivered. This is **accepted as design** (X4 ruling, residual R5): a duplicate
+failure notice is preferable to a lost one. There is no send-lease.
 
 `build_review`'s own receipts are unchanged. The skill's step "if it stopped, tell the
 operator why" becomes "send `speak`": Ellen composes no failure line of her own for a
@@ -528,6 +562,26 @@ The new writes join them:
   `record_delivery` on a request go through `check_package_token`. **Fixed here:**
   `build_quarterly_package` had no fence.
 
+**Where the check binds (X4 rule).** Every token check that decides a write is made
+**inside the transaction that commits it**. An earlier check outside it, such as
+`stage_for_delivery`'s pre-check at delivery.py:73 or a check before
+`db.custody_lock()`, is only an early refusal, never the authority. Applied to each
+lock-waiting path:
+
+- **`build_quarterly_package`.** `check_package_token` is repeated in the registering
+  transaction (package.py around lines 357–368, beside the existing `latest_import`
+  re-check), which also links `package_requests.package_id`. The existing
+  `except: path.unlink()` already deletes the unregistered zip.
+- **`stage_for_delivery`.** The check is repeated in the transaction that inserts, or
+  finds, the delivery (delivery.py:120), together with the request's `staged` link. On a
+  refusal, the freshly written outbox copy or handoff entry is removed; its `created`
+  flag says it is this call's.
+- **`record_delivery`.** Its single transaction checks the token, settles, closes the
+  request and enqueues the notice.
+- **`steps.claim` (the staged withdrawal).** Custody lock first, then the transaction.
+  Inside it, it re-reads the request's state and lease before removing anything.
+- **`end_pass`'s authority transfer.** It runs in `end_pass`'s own transaction.
+
 **The gap, and what closes it.** `check_token(None)` passes. That is by design, for
 operator-side calls: filing a Telegram document, a resend, a single-invoice send. So a
 holder that *omits* its token is not fenced. Every write that exists only inside a pass
@@ -554,6 +608,10 @@ so in the spec.
 - **`delivery`** gains:
   - a `package_token` on `stage_for_delivery` and `record_delivery`, per §3.4;
   - idempotent staging for a request that is already staged;
+  - staged basenames that are never reused (`qa-<random>`), with `filename` returned for
+    `send_media` (§3.4);
+  - `record_delivery` enqueueing `package-uncertain` / `package-send-failed`, and
+    returning its rendering as `speak` in place of `_offer_again`;
   - `withdraw(conn, rows)`, the removal of staged bytes (outbox file, or the plugin's
     own handoff entry), extracted from `withdraw_revoked`. Both the import and the
     staged-request claim call it, under the custody lock, and a failed removal refuses
@@ -748,7 +806,12 @@ the pass has moved on and your recorded work is kept."
     it settles the delivery `uncertain`. Casa's send tools check no token of ours, so
     the file itself is what must be gone.
   - A failed removal refuses the claim, as it refuses an import.
-- **What a continuation owes the operator is said exactly once, eventually.** Package
+- **No two deliveries share a staged path.** Every new delivery draws a fresh random
+  basename, so a superseded holder's path never names a later copy.
+- **Token checks bind in the committing transaction.** A holder rotated while it
+  waited for a lock commits nothing and leaves no unregistered bytes behind.
+- **What a continuation owes the operator is said at least once, and never after it
+  was delivered.** Package
   failures and outcomes are `alerts` occurrences (§3.7), offered until
   `mark_rendering_delivered` and never after. A crash loses nothing, and a replay adds
   nothing.
@@ -833,6 +896,26 @@ connections via `db.open_store()`, as in `_procs.py`.
     - The email variant: the handoff entry directory is removed.
     - A removal that fails (a read-only directory) refuses the claim, and nothing
       changes.
+12a. **Token check in the committing transaction (X4 Terra S1).**
+    - `P1` calls `build`. While it waits (simulated by holding `db.custody_lock` in a
+      second process, `_procs.py`), `P1`'s lease lapses and a reclaim rotates the
+      token to `P2`.
+    - `P1`'s build is refused *in the registering transaction*: no `packages` row, and
+      no zip left in `packages/`.
+    - The same shape for `stage_for_delivery`: refused, no delivery row, no outbox file.
+12b. **Never-reused paths (X4 Astra S1).**
+    - A first send is staged at path `X`. After withdrawal, "send it again" stages at
+      `Y ≠ X`, and `X` stays absent.
+    - Two resends of one package get two distinct paths.
+    - The stage answer carries the package's display `filename`.
+    - Idempotent re-staging of the same delivery returns `X` again.
+12c. **`record_delivery` notices (X4 Astra S2).**
+    - `record_delivery(uncertain)` creates one `package-uncertain` occurrence and
+      returns its rendering, whose scope carries `offers`.
+    - A "crash" before `mark_rendering_delivered` → the next `continue_pass` offers the
+      same text.
+    - "Send it again" after delivery binds that package.
+    - `failed` gives `package-send-failed`, with its own wording.
 12. **Revocation.** The next pass's import revokes an unsent first send. The request
     becomes `revoked`, and one `package-revoked` occurrence exists.
 13. **Reclaim terminalizes and recovers.**
@@ -992,6 +1075,11 @@ that dies right after claiming leaves the pass dormant until its lease (600 s) l
 "go and check now", a handover or a package request. There is no self-scheduled wake
 (standing constraint). An operator who asks again within ten minutes gets "A check is
 running …". After that, the ask recovers it. This is the same shape as R3.
+
+**R5 — a package notice can be sent twice (Terra X4, accepted by ruling).** Two turns
+holding the same undelivered rendering can both send it before either marks it
+delivered. Notices are at-least-once, because a duplicate failure notice is preferable
+to a lost one. Once it is marked delivered, it is never offered again.
 
 **Q1 — release number.** Two tools, three new tool arguments and a migration suggest
 v0.2.0. Any bump changes `WORKFLOW` to `acct@<new>`, and `check_setup` then reports
