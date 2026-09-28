@@ -129,7 +129,8 @@ def start(conn, token, step: str, carry: dict) -> dict:
             # the payments this judgment covers (issue #3, C6): end_pass lets the pass
             # be complete only if every payment judge-due at its end was due here
             import work
-            carry = {**carry, "due_at_start": work.judge_due_pids(conn)}
+            carry = {**carry, "due_at_start": {str(p): v for p, v in
+                                               work.judge_due_state(conn).items()}}
         conn.execute("INSERT INTO pass_steps(pass_id, step, started_at, carry_json)"
                      " VALUES (?,?,?,?)", (m["pass_id"], step, _stamp(now), db.canonical(carry)))
         if step == "snapshot":

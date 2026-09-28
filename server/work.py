@@ -277,10 +277,6 @@ def _paged(items: list, after, limit: int, view) -> dict:
 
 
 def judge_due(conn) -> int:
-    return len(judge_due_pids(conn))
-
-
-def judge_due_pids(conn) -> list:
     """How many fresh, booked payments still in triage have an unmatched document that
     meets the necessary part of the auto-match bar: the expected kind, the same
     currency, the exact amount (C3 refutation defense, Astra). A payment can join
@@ -289,18 +285,36 @@ def judge_due_pids(conn) -> list:
     count, taken when the sweep step is continued, schedules the judge step for them.
     It may also count a payment triage already judged and declined — a judge step
     too many, never one too few."""
-    docs = {(r["kind"], r["amount_minor"], r["currency"]) for r in conn.execute(
-        "SELECT d.kind, d.amount_minor, d.currency FROM documents d JOIN document_status s"
-        " ON s.doc_id=d.doc_id WHERE s.status='unmatched' AND d.irrelevant=0"
-        " AND d.amount_minor IS NOT NULL")}
-    out = []
+    return len(judge_due_state(conn))
+
+
+def judge_due_pids(conn) -> list:
+    return sorted(judge_due_state(conn))
+
+
+def judge_due_state(conn) -> dict:
+    """{pid: what a judgment of it saw} for every judge-due payment: the payment's
+    revision (it moves with its status, pairing, candidates, facts and expectation)
+    and the fitting documents with every field the auto-match bar reads. A judgment
+    covers a payment only while this is unchanged (issue #3, code round C7: a
+    pairing made and then rejected, or a document corrected, after the judge step
+    started)."""
+    fits = {}
+    for r in conn.execute(
+            "SELECT d.doc_id, d.kind, d.amount_minor, d.currency, d.document_date, d.issuer,"
+            " d.counterparty, d.recipient, d.document_number FROM documents d JOIN"
+            " document_status s ON s.doc_id=d.doc_id WHERE s.status='unmatched' AND"
+            " d.irrelevant=0 AND d.amount_minor IS NOT NULL ORDER BY d.doc_id"):
+        fits.setdefault((r["kind"], r["amount_minor"]), []).append(dict(r))
+    out = {}
     for d in triage(conn):
         if not d["fresh"] or d["pending"]:
             continue
-        k, a = d["expectation"]["kind"], d["amount_minor"]
-        if (k, a, d["currency"]) in docs or (k, a, None) in docs:
-            out.append(d["pid"])
-    return sorted(out)
+        docs = [x for x in fits.get((d["expectation"]["kind"], d["amount_minor"]), [])
+                if x["currency"] in (None, d["currency"])]
+        if docs:
+            out[d["pid"]] = db.canonical({"revision": d["revision"], "documents": docs})
+    return out
 
 
 def work_list(conn) -> dict:

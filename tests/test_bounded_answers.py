@@ -367,6 +367,49 @@ class TestJudgeDue(Flow):
         self.assertEqual(self.call("end_pass", pass_token=t3, outcome="interrupted")["outcome"],
                          "interrupted")
 
+    def judge_started(self):
+        self.seed(3, documents=1)
+        t1 = self.begin()
+        self.start(t1)
+        self.specialist(t1)
+        t2 = self.claim()["continue"]["pass_token"]
+        self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
+        return t2
+
+    def judge_finished(self, t2):
+        self.specialist(t2, step="judge")                 # finishes without matching
+        return self.claim()["continue"]["pass_token"]
+
+    def test_a_judged_payment_unchanged_is_covered(self):
+        t3 = self.judge_finished(self.judge_started())
+        self.assertEqual(work.judge_due(self.conn), 1)    # judged and declined: covered
+        self.assertEqual(self.call("end_pass", pass_token=t3, outcome="complete")["outcome"],
+                         "complete")
+
+    def test_a_document_corrected_during_the_judge_is_not_covered(self):
+        # C7 (Terra): the judgment saw the document as it was
+        t2 = self.judge_started()
+        doc = self.conn.execute("SELECT doc_id FROM documents").fetchone()[0]
+        self.call("update_document_metadata", doc_id=doc, document_number="CORRECTED",
+                  pass_token=t2)
+        t3 = self.judge_finished(t2)
+        out = self.text("end_pass", pass_token=t3, outcome="complete")
+        self.assertTrue(out.startswith("refused: not ended: 1 payment"), out)
+
+    def test_a_payment_changed_during_the_judge_is_not_covered(self):
+        # C7 (Astra): a pairing made and rejected, or any change of the payment,
+        # moves its revision; the judgment saw the payment as it was
+        t2 = self.judge_started()
+        pid = work.judge_due_pids(self.conn)[0]
+        before = work.describe(self.conn, pid)["revision"]
+        kb.set_expectation(self.conn, scope_type="counterparty", scope="Adobe",
+                           kind="invoice", tier="optional", author="specialist", token=t2)
+        self.assertNotEqual(work.describe(self.conn, pid)["revision"], before)
+        t3 = self.judge_finished(t2)
+        out = self.text("end_pass", pass_token=t3, outcome="complete")
+        self.assertTrue(out.startswith("refused: not ended: 1 payment"), out)
+        self.assertIn("End it interrupted", out)
+
     def test_nothing_fitting_is_not_due(self):
         self.seed(3, documents=0)
         self.file(amount_minor=999_999, document_date="2026-07-05")      # no payment's amount

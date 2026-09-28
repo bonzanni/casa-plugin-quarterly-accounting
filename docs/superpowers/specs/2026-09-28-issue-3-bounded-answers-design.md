@@ -197,6 +197,14 @@ while more follow.
     the pass is `interrupted`.
 
   It never asks for a second judge step, so it cannot loop.
+- **Covered means covered in the same state (code round C7).** Terra found a
+  document corrected during the judge step; Astra found a pairing made during the judge
+  step and then rejected by the operator. So coverage is recorded per payment, as
+  `work.judge_due_state`: the payment's `revision` (it moves with its status, pairing,
+  candidates, facts and expectation, but not with a recorded query) and every fitting
+  document with every field the auto-match bar reads. A payment is covered only if that
+  state is unchanged at the end. A payment judged and declined without any change stays
+  covered, so the check does not turn every declined judgment into `interrupted`.
 - The single-payment re-read `pid=` goes through the same page guard (code round C3,
   Astra: 4,200 candidates returned 21,728 characters there).
 - No schema change.

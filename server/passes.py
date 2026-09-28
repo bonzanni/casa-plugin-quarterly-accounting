@@ -278,10 +278,11 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
 def _judgment_owed(conn, pass_id: str) -> None:
     """A pass that swept is `complete` only if every payment judge-due at its end
     (work.judge_due_pids, checked live in end_pass's own transaction) was covered by a
-    judgment in this pass (issue #3, code rounds C4-C6). An operator can reopen a
+    judgment in this pass (issue #3, code rounds C4-C7). An operator can reopen a
     payment whose document is already filed at any moment — during triage, the Gmail
     round, the judge step — so no count taken earlier can promise it; the pass's end
-    can. Covered = due when a judge step that then FINISHED started. With no judge step
+    can. Covered = due, in the same state (work.judge_due_state: the payment's revision
+    and its fitting documents), when a judge step that then FINISHED started. With no judge step
     yet, Ellen runs it; otherwise (a judge step expired, or the payment reopened after
     it started) the pass is `interrupted` and the next pass judges it. Never asks for a
     second judge step, so it cannot loop."""
@@ -290,10 +291,12 @@ def _judgment_owed(conn, pass_id: str) -> None:
         "SELECT step, finished_at, carry_json FROM pass_steps WHERE pass_id=?", (pass_id,))}
     if "sweep" not in steps:
         return
-    due = set(work.judge_due_pids(conn))
+    due = work.judge_due_state(conn)
     judge = steps.get("judge")
     if judge is not None and judge["finished_at"] is not None:
-        due -= set(json.loads(judge["carry_json"] or "{}").get("due_at_start", []))
+        # covered: due when the judgment started, in exactly the state it saw (C7)
+        seen = json.loads(judge["carry_json"] or "{}").get("due_at_start", {})
+        due = {p: v for p, v in due.items() if seen.get(str(p)) != v}
     if not due:
         return
     n = len(due)
