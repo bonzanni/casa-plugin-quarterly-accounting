@@ -351,6 +351,51 @@ by the tag grammar outright, so the plugin fails closed rather than mis-tagging.
 un-namespaced `acct-matched` would be content classification on every version — which is
 why the whole vocabulary below is namespaced.
 
+### Delegation timing — design assumptions
+
+This plugin is built on the following behaviour of Casa's `delegate_to_agent`, as read
+in Casa v0.331.0–v0.332.0. They are assumptions about another project, and each says
+what this code does if it stops holding.
+
+- **A1 — the 60 s degrade.** A sync delegation still running after about 60 s returns
+  `{"status": "pending", …}`, and its outcome arrives on a later resident turn.
+  - *If false*, the answer is inline. Ellen calls `continue_pass` in the same turn, which
+    is the same path.
+  - *If the degrade is shorter*, nothing changes.
+- **A2 — the 600 s ceiling.** A delegated turn is cancelled about 600 s after launch, and
+  the resident receives an error of kind `timeout` with no result text. The specialist's
+  clock and the step's expiry are measured from a stamp Ellen writes *before* she
+  delegates, so our clock runs ahead of Casa's.
+  - *If the ceiling is longer*, a delegation does less than it could. Once its step has
+    been continued, the rotated token refuses its writes (§"Running the pass on demand").
+  - *If the ceiling is shorter than the budget*, the delegation is cut, and the step
+    expires at `STEP_EXPIRY_S` anyway.
+- **A3 — every outcome produces a resident turn.** This holds for ok, error, restart
+  orphan, and "notice does not carry its answer". This design reads nothing from that
+  turn's content.
+  - *If false* (the notice is lost), the pass continues at the next check, handover or
+    package. The reclaim after 3 h is the backstop.
+- **A4 — a notice can arrive more than once, or late.** Casa re-announces an outcome
+  after a restart until a turn *delivers* a reply. A turn that ends `<silent/>` delivers
+  nothing (`agent.py` `_ack_delivery`), so a cron pass's notices come back at every
+  restart.
+  - Each replay calls `continue_pass`, which can only continue what is due anyway. Each
+    one still costs a resident turn: residual R1 (§"Running the pass on demand").
+- **A5 — a scheduled turn's notice can still deliver.** The scheduled-delivery marker
+  travels with the notice.
+  - *If false*, on a cron pass `speak` stays pending in `alerts` and goes out at the next
+    `end_pass`, which is today's behaviour. A package continuation on such a turn fails
+    its send and records it `uncertain`.
+- **A6 — Ellen's own turn is not bound by A2.** If her continuation dies, its lease
+  lapses after `LEASE_S`. The next `continue_pass` then claims again and rotates the
+  token, and anything the dead holder's turn still attempts is refused.
+
+Casa runs every turn under a per-session write gate keyed by channel, role and chat, and
+a notice is built from the delegation's recorded origin, so it normally lands on the
+delegating turn's own key and waits behind it. This design does not rely on that: the
+step's start is written before `delegate_to_agent`, and concurrent continuers are
+separated by the rotating claim, not by turn order.
+
 ## Data model
 
 All state lives exclusively in `$CLAUDE_PLUGIN_DATA` (survives plugin updates by
@@ -979,12 +1024,21 @@ multi-round delegations stateless-safe (each delegation is a fresh ephemeral ses
 state carries in the store, not in return values alone) and crash-safe: a casa
 restart mid-pass loses only the in-flight turn.
 
-## Tool surface (server, 33 tools)
+## Tool surface (server, 35 tools)
 
 **Erratum (operator, 2026-09-27; implementation plan D1):** the server registers 33 tools.
 The flows below need writes this section never named: `begin_pass` / `end_pass` (the pass
 marker), `record_probe`, `record_search`, `stop_chasing`, `set_watermark`, `relabel_match`,
 `record_delivery`, and `apply_reply` (the executable reply grammar). The plan's §D1 has the full list.
+
+**Erratum (issue #2, v0.2.0):** 35 tools. `record_step` records a pass's delegated steps
+(start, before the delegation; finish, the specialist's last action), and `continue_pass`
+is the one claim that continues a pass or a package request across turns and rotates its
+token (§"Running the pass on demand"). `build_quarterly_package`, `stage_for_delivery` and
+`record_delivery` take the `package_token` that `end_pass` or `continue_pass` handed over
+(required for a request-bound package; a resend and a single document stay token-free).
+`begin_pass` takes `reply` (`silent` for the cron), and `list_quarter_state` takes an
+optional `pass_token` for the clock.
 
 Ingest & curation: `ingest_document(source_path, kind, counterparty, document_date,
 document_number, amount, currency, recipient, source_ref)` — **the server takes `source_path` from
@@ -1881,7 +1935,10 @@ self-mail, and the handoff and outbox copies, which expire on their own.
    fixed. Existing matches are not immune from later evidence — a newly arrived
    competing invoice re-labels an accepted match `guessed` and surfaces it again.
 
-   Returns a structured work order per transaction: `matched` (with label) /
+   (Erratum, issue #2: the reply is a summary for Ellen and may never arrive — a
+   delegation cut at the ceiling returns nothing. The Gmail round's list is the store's
+   triage, handed over by `continue_pass`; a search idea worth keeping is the vendor's KB
+   `search_hint`.) Returns a structured work order per transaction: `matched` (with label) /
    `proposed` (indistinguishable candidates) / `portal` (tagged, link noted) /
    `no-document` (expectation `none`) / `not-yet-classified` / `missing` — tier named —
    with a **search plan carrying discriminators**, not just a query ("want €54.45 within
@@ -1919,8 +1976,11 @@ self-mail, and the handoff and outbox copies, which expire on their own.
    records which queries ran and whether the space was exhausted. An item whose ideas
    are exhausted is `missing`; an item the pass ran out of room for is
    **`search incomplete` and resumes next pass from where it stopped** rather than being
-   abandoned to residue. The only real ceiling is the specialist's `max_turns` (70) and
-   the pass's own wall-clock, and both are facts to report, never silently absorbed.
+   abandoned to residue. The binding ceiling is the delegation's wall clock (A2), not its
+   turns. Each step's start is stamped before it is delegated, and every answer the
+   specialist gets carries the time left. The sweep stops for time by itself, and the
+   specialist finishes its step well inside the ceiling. Ellen's Gmail round is derived
+   from the store, never from the specialist's reply.
 4. **Record, and say nothing.** The pass ends by writing its results — matches,
    labels, coverage, what it searched and what it could not finish. It delivers no
    message (operator ruling, 2026-09-21: the job stays, the announcement goes). Casa's
@@ -2384,19 +2444,93 @@ So a pass takes a **simple in-progress marker** — start time, what triggered i
 second pass that finds a live one does not duplicate the work:
 
 ```
-Already checking — started a minute ago.
-I'll have the answer shortly.
+A check is running — started a minute ago.
+Ask again in a few minutes.
 ```
 
+(It no longer promises an answer "shortly": a pass can span turns, and nothing wakes it
+on its own — residuals R3 and R4 below.)
+
 A marker older than a generous threshold is treated as a dead process and reclaimed —
-**and reclaiming it bumps a generation counter that the marker carries.** A pass whose
-generation is no longer current is refused at every write **into this plugin's own
-store**, including the ones not CAS'd on a match record: `upsert_counterparty`, the search
+**and reclaiming it bumps a generation counter; the marker carries the value it was
+bumped to, which is the pass token.** A pass whose token is no longer current is refused
+at every write **into this plugin's own store**, including the ones not CAS'd on a match record: `upsert_counterparty`, the search
 bookkeeping, the delivery log and the setup/binding state. An earlier draft claimed "every write underneath is already
 CAS'd, so a duplicated pass can only waste effort". **That claim was false** (round-5
 review): match mutations are CAS'd, but vendor, bookkeeping and log writes are not, so a
 revived stale pass could overwrite newer state with older. The generation check is what
 makes the marker sufficient; it is one integer, not a lease protocol.
+
+**A pass spans turns** (issue #2). Its progress is in the store: steps started, finished,
+or expired. Whoever looks next — a notification, a check, a package, a handover —
+continues the due step through one claim, and **every claim rotates the pass token**,
+drawn from the same generation counter that a reclaim bumps. So the existing stale-pass
+fence refuses whatever a superseded holder does. No notification is ever matched to a
+delegation. A package request is its own record with its own rotating token, handed over
+atomically when its bank pass ends. A reclaimed pass is ended `interrupted` and its
+package request recovered.
+
+A holder that omits its token is not fenced. Every pass-only write refuses a missing
+token. The token-optional writes are the operator-shaped ones (filing a document,
+correcting a document's reading, a KB entry, binding the account), and these are
+idempotent or CAS'd.
+
+The mechanics, in the order a pass meets them:
+
+- **Steps.** Ellen stamps each delegated step (`record_step(start)`: `sweep`, `judge`,
+  `handover`, `snapshot`) just before `delegate_to_agent`, with the token she passes on.
+  The specialist's last action records its finish (counts, and `stopped` when it
+  stopped); Ellen records one herself only when the delegation came back in her turn
+  without it (`failed` on an error). A step with neither is expired at `STEP_EXPIRY_S`
+  (600 s) after its stamp.
+- **The claim.** `continue_pass` takes no arguments and runs in one write transaction:
+  the live pass whose latest step is over and not already held by a fresh lease, else an
+  open package request whose lease lapsed. It rotates the token and returns the new one
+  with the step's inputs: for a sweep, the triage listing exactly as `list_quarter_state`
+  gives it; for a handover, each document's recorded pairing, never inferred from the
+  capped list of unmatched documents. Every accepted write renews its holder's lease;
+  a holder quiet for `LEASE_S` (600 s) may be claimed over.
+- **Time.** While a step runs, every answer to its token carries `clock`; the sweep's
+  pages are capped by the time left before `SWEEP_STOP_S` at `ROW_COST_S` a row, and a
+  page with none left is `time_up`: no items, the cursor unmoved.
+- **The package request.** A `snapshot` step opens it. `end_pass` hands it a token of its
+  own in its own transaction (never claimable in between). `build_quarterly_package`,
+  `stage_for_delivery` and `record_delivery` need that token, checked again in the
+  transaction that commits, so a holder rotated while it waited for a lock commits
+  nothing and leaves no zip or staged copy behind. Staging a staged request returns the
+  same send. A claim of a staged request removes its staged bytes under the custody lock
+  first, then settles the send `uncertain` and offers "send it again"; a removal that
+  fails refuses the claim. Recovery never sends.
+- **Staged paths are never reused.** Every delivery's staged path is unique in the store;
+  a Telegram copy gets a random name, drawn again when it is already a file or any
+  delivery's path, and the operator-facing name travels as `send_media`'s `filename`.
+- **What a continuation owes the operator** — a package that stopped, a bank read that
+  failed, a send taken back, revoked, possibly lost or failed — is an `alerts`
+  occurrence, rendered by the pending rendering and closed only by
+  `mark_rendering_delivered`. The rendering that `record_delivery`, a claim or `end_pass`
+  returns always carries the notice that call raised, and an offered package is in its
+  scope's `offers`, so "send it again" binds to it (D3).
+
+**What continuation does not close, stated plainly:**
+
+- **R1 — silent notices replay (A4).** A replay finds nothing due, a held lease, or a
+  running step, and ends in `<silent/>`; but a notice answered in silence is re-announced
+  at every Casa restart, one resident turn each. A Casa-side change (a deliberately
+  silent turn discharges its notice) would end it.
+- **R2 — a notice-less stall.** If a step expires and no notice arrives (A3 false), the
+  pass continues at the next check, handover or package — up to a week for a cron pass,
+  at once on "go and check now".
+- **R3 — an early failure.** A delegation that degrades at 60 s and then fails before
+  its step expires is `running` when its notice arrives, and nothing calls again at
+  expiry. The next check after expiry recovers it; until then `busy` says a check is
+  running.
+- **R4 — a crash right after a claim.** A continuation that dies right after claiming
+  leaves the pass dormant until its lease lapses and something calls `continue_pass`
+  again. There is no self-scheduled wake (no jobs or triggers of our own).
+- **R5 — a package notice can be sent twice.** Two turns holding the same undelivered
+  rendering can both send it before either marks it delivered. Notices are
+  at-least-once: a duplicate failure notice is preferable to a lost one. Once marked
+  delivered, it is never offered again.
 
 **And the CAS discipline stops at this plugin's own store.** bank-feed's
 `tag_transaction` and `add_note` take row ids and content, with **no revision or
@@ -3271,6 +3405,12 @@ an s6 name). If the implementation adds any of those, re-check them.
   three weeks old with one open defect (#1033). The independent design proposed jobs and
   its own comparison round then cut them, on the same workload arithmetic. Revisit if an
   observed pass actually runs out of turns — that is the evidence that would change it.
+  Evidence arrived 2026-09 (#2): the wall-clock ceiling cut two of three catch-up
+  delegations. Fixed within delegations. Jobs stay out unless a budgeted pass still
+  cannot converge.
+- **The pass's time budget** (`SWEEP_STOP_S` 450, `RETURN_BY_S` 510, `STEP_EXPIRY_S` 600,
+  `LEASE_S` 600, `ROW_COST_S` 10, from one measurement) is re-tuned from the first passes
+  after v0.2.0.
 - **Package size: decided — preflight and fail visibly.** The build checks the real zip
   against the 20 MB cap; oversize keeps the canonical package, names the offenders in
   `notes.md`, and tells the operator. No silent splitting, dropping or re-compressing.

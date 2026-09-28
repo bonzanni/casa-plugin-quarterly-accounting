@@ -1,7 +1,7 @@
 # Issue #2 — a pass that outlives its delegation: continuation design
 
-Status: design, not implemented. Revision 3, after design rounds X1 (on `8b055f5`) and
-X2 (on `32a36c9`).
+Status: implemented in v0.2.0. Revision 5, with two last patches: `deliveries.staged_path`
+is durably UNIQUE, and a `record_delivery` notice is always in the rendering it returns.
 
 - Issue: bonzanni/casa-plugin-quarterly-accounting#2 (bug, severity:high).
 - Branch: `fix/issue-2`, base `e9b4eff` (v0.1.0).
@@ -242,6 +242,12 @@ The flow of a package request:
      `package-send-failed`, §3.7) and returns its rendering as `speak`. It no longer
      returns a separate offer rendering. A crash before that `speak` is sent loses
      nothing: the occurrence is offered again (X4).
+     - **That rendering always includes the notice just inserted**, with its package
+       in the scope's `offers`. The batch is composed with that occurrence first; older
+       undelivered alerts follow in print order while the 4096 fit allows, and the rest
+       wait for a later rendering (its closing line says more follows). The staged-request
+       claim and a stopped `end_pass` compose their `speak` the same way, so the notice a
+       call raised is never deferred behind older ones.
    - **Token checks happen in the committing transaction** (X4 rule, general; §4.3). A
      check made before a lock wait (the custody lock, the SQLite write lock) is only an
      early refusal. The binding check is repeated inside the final transaction that
@@ -254,6 +260,12 @@ The flow of a package request:
      for every new delivery row: first sends, resends ("send it again") and single
      documents. It is never the package's display name, so a resend never recreates a
      path a superseded holder may still hold.
+     - **Uniqueness is durable, never left to the random draw.** `deliveries.staged_path`
+       is UNIQUE in the schema. A drawn name that is already a file in the outbox, or
+       any delivery's recorded path, is drawn again before a byte is written (under the
+       custody lock, so no other staging draws at the same time). An insert the UNIQUE
+       index still refuses removes the copy it wrote and draws again, a bounded number
+       of times.
      - The operator-facing name travels as `send_media`'s `filename` argument, with the
        caption as before. That argument exists at Casa v0.332.0: the `send_media`
        schema has `path`, `kind`, `caption` and `filename`, and "an explicit arg else
@@ -471,6 +483,11 @@ CREATE TABLE IF NOT EXISTS package_requests (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state);
 ALTER TABLE deliveries ADD COLUMN withdrawn_at TEXT;   -- staged bytes taken back on a reclaim
+-- a v0.1.0 resend could reuse an earlier send's outbox name: the newest row keeps the
+-- path, older rows sharing it are renamed out of the way, then the index goes on
+UPDATE deliveries SET staged_path = staged_path || '#' || delivery_id WHERE delivery_id
+  NOT IN (SELECT max(delivery_id) FROM deliveries GROUP BY staged_path);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_staged_path ON deliveries(staged_path);
 ```
 
 `alerts` needs no schema change. The four package-notice kinds (§3.7) are new values
@@ -808,8 +825,9 @@ the pass has moved on and your recorded work is kept."
     it settles the delivery `uncertain`. Casa's send tools check no token of ours, so
     the file itself is what must be gone.
   - A failed removal refuses the claim, as it refuses an import.
-- **No two deliveries share a staged path.** Every new delivery draws a fresh random
-  basename, so a superseded holder's path never names a later copy.
+- **No two deliveries share a staged path.** `deliveries.staged_path` is UNIQUE, and
+  every new delivery draws a fresh random basename, drawn again on any collision, so a
+  superseded holder's path never names a later copy.
 - **Token checks bind in the committing transaction.** A holder rotated while it
   waited for a lock commits nothing and leaves no unregistered bytes behind.
 - **What a continuation owes the operator is said at least once, and never after it
@@ -911,6 +929,10 @@ connections via `db.open_store()`, as in `_procs.py`.
     - Two resends of one package get two distinct paths.
     - The stage answer carries the package's display `filename`.
     - Idempotent re-staging of the same delivery returns `X` again.
+    - A forced collision: the random draw repeats a name an earlier delivery used (its
+      file already consumed). The second stage draws again and never writes at that
+      path. With the name check blinded, the UNIQUE index refuses the insert, the copy
+      is removed, and the stage draws again.
 12c. **`record_delivery` notices (X4 Astra S2).**
     - `record_delivery(uncertain)` creates one `package-uncertain` occurrence and
       returns its rendering, whose scope carries `offers`.
@@ -918,6 +940,9 @@ connections via `db.open_store()`, as in `_procs.py`.
       same text.
     - "Send it again" after delivery binds that package.
     - `failed` gives `package-send-failed`, with its own wording.
+    - Older undelivered alerts that fill a whole message on their own: the returned
+      `speak` still carries the new notice and its `offers`, and ends with the
+      more-follows line; the older ones come with the next rendering.
 12. **Revocation.** The next pass's import revokes an unsent first send. The request
     becomes `revoked`, and one `package-revoked` occurrence exists.
 13. **Reclaim terminalizes and recovers.**
