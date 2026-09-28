@@ -108,8 +108,9 @@ import; `complete` otherwise.
 Pick the view from the ask: "what's the status" → `status`; "what am I missing" / "accounting
 list" → `missing`; "anything I should check?" → `check`; "show the rest" → `rest`; "show
 older" → `older`; "how did Q2 go?" → `quarter`; "did the Adobe invoice arrive?" → find the
-payment in `list_quarter_state` and render `item` with its `pid`. A description that fits two
-payments is a question back, never a pick.
+payment in `list_quarter_state` and render `item` with its `pid` (it answers a page at a
+time: while `next` is set and the payment is not found, call it again with `after=<next>`).
+A description that fits two payments is a question back, never a pick.
 
 "All of them" and "more" continue the view you last sent: call `build_review` again
 with exactly the arguments in its `next` (view, quarter, page, after — the cursor passed
@@ -251,13 +252,16 @@ pass, whichever comes first:
    anything not reached. Also run one search for recent self-addressed mail with
    attachments, and sweep your Telegram inbox as above (file only, say nothing).
 5. If anything was filed, or the continuation's `finish` says `triage_remaining` above 0, or
-   the sweep ended unfinished (`ended` is `expired` or `errored`):
+   its `judge_due` is above 0, or the sweep ended unfinished (`ended` is `expired` or
+   `errored`):
    `record_step(pass_token, step="judge", action="start", report={checked, total,
    not_searched})`, then delegate "judge the newly filed documents and the payments triage
    did not reach" with context `pass_token=<token>, step=judge` (the same token; the specialist's steps 6 and 7: triage, then
    the sweep once more). If it answers `status: pending`, output `<silent/>` and end the
    turn. When it answers, continue as above: its `next` is step 6.
-6. `end_pass(pass_token, outcome, report)` by the outcome rule above. Report `{checked,
+6. `end_pass(pass_token, outcome, report)` by the outcome rule above. If it refuses
+   because a payment was not judged in this pass (`not ended: …`), do what it says:
+   start the judge step (step 5) and end the pass after it, or end it `interrupted`. Report `{checked,
    total, not_searched}` — after step 5, the continuation's `report`. If it returns `speak`,
    send its text verbatim — a long alert's remainder comes with the next `speak` — call
    `mark_rendering_delivered` with its `render_id`, then output `<silent/>`. If not: on the
@@ -367,12 +371,14 @@ named in your context. Your one expectation write is in step 6.
    each payment is. If the sweep did not reach `remaining_in_cycle` 0, finish with the
    remaining count: the pass ends `interrupted` (the next pass's sweep makes the writes
    still owed).
-   `list_quarter_state(triage=true, pass_token=…)` lists, required first, the payments that
+   `list_quarter_state(triage=true, pass_token=…)` lists the payments that
    need a document and have none of the right kind — only those seen in this import
-   (`not_fresh` counts the others), at most 50 at a time. If it says `truncated`, judge
-   what is listed and finish with its `remaining` count as `triage_remaining`; a later
-   pass reaches the rest. For each, compare against
-   `list_unmatched_documents` and the KB (`get_counterparty`), reading candidate PDFs with
+   (`not_fresh` counts the others), a page at a time. Judge the page; while its `next` is
+   set and there is time, list again with `after=<next>` (passed back unchanged) and judge
+   that page. When you stop, finish with the last page's `remaining` count as
+   `triage_remaining`; a later pass reaches the rest. For each, compare against
+   `list_unmatched_documents` (it pages the same way: follow its `next`) and the KB
+   (`get_counterparty`), reading candidate PDFs with
    `Read`. Correct a filed document's reading with `update_document_metadata(doc_id, …,
    pass_token=…)`; a quotation, order confirmation or losing duplicate is
    `mark_irrelevant(doc_id, pass_token=…)`. The auto-match bar:
@@ -393,17 +399,18 @@ named in your context. Your one expectation write is in step 6.
      business's own credit note).
 
    Only when two candidates are indistinguishable, `propose_match` instead. Pass the item's
-   `row_snapshot` from `list_quarter_state` verbatim as `row_snapshot` (never rebuild it from
-   `get_transaction`'s text: its amounts and fenced texts are not those facts), and the item's
-   `revision` as `expected_revision`. If the write is refused as changed, list again. If the payment has unresolved candidates,
-   pass them all in `resolves`. `record_match(pid, doc_id, author="auto", …)` otherwise. A
+   `row_digest` from `list_quarter_state` as `row_digest` (never build one yourself: it
+   binds the match to the exact bank facts the item showed), and the item's `revision` as
+   `expected_revision`. If the write is refused as changed, re-read that payment with
+   `list_quarter_state(pid=…, pass_token=…)` and judge it again from its `item`. If the
+   payment has unresolved candidates, pass all its `candidate_ids` in `resolves`. `record_match(pid, doc_id, author="auto", …)` otherwise. A
    document that later competes with an accepted pairing: `relabel_match(…, labels=["guessed"],
    runners_up=[…])` — never replace the pairing yourself. When a new payment and its document
    cannot be told apart from an already-paired payment and its document (same vendor, same
    amount, same dates) and that pairing was made by the machine (never one the operator
    confirmed), propose both: `propose_match` for the new payment, and `propose_match`
-   again on the paired payment with its own document (its `row_snapshot` and `revision` from
-   `list_quarter_state(quarter=…)` of that payment's quarter), which turns that pairing back
+   again on the paired payment with its own document (its `row_digest` and `revision` from
+   `list_quarter_state(pid=…)`), which turns that pairing back
    into a proposal the operator is shown.
 
    A vendor whose documents turn out to be a kind the mapping did not predict (its payments

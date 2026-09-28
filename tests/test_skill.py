@@ -67,7 +67,7 @@ class TestSkill(TempEnv):
             if n in params:
                 continue
             if n.endswith("_") or n in {"workflow", "expected_generation", "pass_token",
-                                        "render_id", "row_snapshot", "resolves", "not_found",
+                                        "render_id", "row_digest", "resolves", "candidate_ids", "judge_due", "not_found",
                                         "write_error", "observed_tags", "observed_notes",
                                         "instructions", "speak", "reshow", "true", "false",
                                         "bank_writes", "request_id", "labels", "runners_up",
@@ -171,10 +171,18 @@ class TestSkill(TempEnv):
         self.assertIn("Always make the Gmail probe first", rnd)
         self.assertNotIn("skip it when", rnd)
 
-    def test_row_snapshot_comes_from_the_listing(self):
-        triage = self.section("**Triage.**", "7. **Identity")
-        self.assertIn("`row_snapshot` from `list_quarter_state` verbatim", triage)
-        self.assertNotIn("pass its facts as `row_snapshot`", SKILL)
+    def test_a_due_judgment_starts_the_judge_step(self):
+        # issue #3 C3: a payment that joined triage behind the cursor with a fitting
+        # filed document is judged in the same pass
+        flat = " ".join(SKILL.split())
+        self.assertIn("or its `judge_due` is above 0, or the sweep ended unfinished", flat)
+
+    def test_row_digest_comes_from_the_listing(self):
+        triage = " ".join(self.section("**Triage.**", "7. **Identity").split())
+        self.assertIn("`row_digest` from `list_quarter_state` as `row_digest`", triage)
+        self.assertIn("re-read that payment with `list_quarter_state(pid=…, pass_token=…)`", triage)
+        self.assertIn("pass all its `candidate_ids` in `resolves`", triage)
+        self.assertNotIn("row_snapshot", SKILL)
 
     def test_the_specialist_never_binds_and_sets_only_a_vendor_kind(self):
         spec = " ".join(self.section("## The specialist's pass", "1. **Probes.**").split())
@@ -274,8 +282,10 @@ class TestSkill(TempEnv):
         self.assertIn("one write per row, then that row read again", sweep)
         self.assertIn("the pass ends `interrupted`", sweep)
         triage = " ".join(self.section("**Triage.**", "7. **Identity").split())
-        self.assertIn("at most 50 at a time", triage)
-        self.assertIn("`truncated`", triage)
+        self.assertIn("a page at a time", triage)
+        self.assertIn("while its `next` is set and there is time, list again with "
+                      "`after=<next>`", triage)
+        self.assertIn("the last page's `remaining` count as `triage_remaining`", triage)
 
     def test_a_post_triage_sweep_mirrors_what_triage_decided(self):
         # aligned to tests/sim.run_pass: triage, then the sweep once more

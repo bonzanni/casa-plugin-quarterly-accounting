@@ -93,7 +93,10 @@ class Base(StoreCase):
         self.settle(pid)
         if link:
             kb.upsert_counterparty(self.conn, cp, patterns=[cp], source="portal",
-                                   document_link=link)
+                                   document_link=link[:kb.LINK_MAX])
+            with db.tx(self.conn):   # a longer link only as an earlier version stored it
+                self.conn.execute("UPDATE counterparties SET document_link=? WHERE name=?",
+                                  (link, cp))
         if paired:
             d = self.doc(counterparty=cp, issuer=cp, amount_minor=amount,
                          document_date="2026-09-%02d" % (1 + self.n % 28),

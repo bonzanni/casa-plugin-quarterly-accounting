@@ -2186,7 +2186,8 @@ answered by **calling the plugin's read tools**, never from recollection:
 
 - `check_setup()` — can it reach bank-feed and Gmail, is an account bound, how stale is
   the data;
-- `list_quarter_state(quarter)` — every transaction's state, the repair queue, coverage;
+- `list_quarter_state(quarter)` — every transaction's state, the repair queue, coverage,
+  a page at a time (`next` / `after`; issue #3);
 - `build_review(scope)` — renders the current view and records what was shown.
 
 The store is the single source of truth, and the answer is computed at the moment of
@@ -2515,8 +2516,10 @@ The mechanics, in the order a pass meets them:
   open package request whose lease lapsed — at any age: a finished step is continued even
   after a long restart, and a reclaim never takes a pass whose claim holds a fresh lease.
   It rotates the token and returns the new one
-  with the step's inputs: for a sweep, the triage listing exactly as `list_quarter_state`
-  gives it; for a handover, each document's recorded pairing, never inferred from the
+  with the step's inputs: for a sweep, the first page of the triage listing
+  `list_quarter_state` gives, in the Gmail round's shape (issue #3: every list answer is
+  paged by a character budget, so the answer that carries the token is always readable);
+  for a handover, each document's recorded pairing, never inferred from the
   capped list of unmatched documents. Every accepted write renews its holder's lease;
   a holder quiet for `LEASE_S` (600 s) may be claimed over.
 - **Time.** While a step runs, every answer to its token carries `clock`; the sweep's

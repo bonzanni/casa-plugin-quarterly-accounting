@@ -338,7 +338,10 @@ class TestSheet(Base):
 
     def test_an_oversized_item_never_breaks_the_limit(self):
         kb.upsert_counterparty(self.conn, "Adobe", source="portal",
-                               document_link="https://adobe.example/" + "x" * 5000)
+                               document_link="https://adobe.example/")
+        with db.tx(self.conn):   # as an earlier version stored it: upsert now refuses it
+            self.conn.execute("UPDATE counterparties SET document_link=? WHERE name=?",
+                              ("https://adobe.example/" + "x" * 5000, "Adobe"))
         pid = self.add()
         # fix wave D round 2: the unbounded link is clipped with its mark, so the
         # item prints whole and is bound (before, the whole text was cut and bound nothing)
@@ -353,7 +356,10 @@ class TestSheet(Base):
         # fix wave D round 2/3: with the link field clip disabled, the final fit alone
         # keeps the text deliverable, and a cut text binds nothing (D3).
         kb.upsert_counterparty(self.conn, "Adobe", source="portal",
-                               document_link="https://adobe.example/" + "x" * 5000)
+                               document_link="https://adobe.example/")
+        with db.tx(self.conn):   # as an earlier version stored it: upsert now refuses it
+            self.conn.execute("UPDATE counterparties SET document_link=? WHERE name=?",
+                              ("https://adobe.example/" + "x" * 5000, "Adobe"))
         pid = self.add()
         with mock.patch.object(views, "LINK_MAX", 10 ** 6):
             for r in (self.render(), self.render("item", pid=pid), self.render("all")):
@@ -437,7 +443,10 @@ class TestSheet(Base):
 
     def test_a_cut_page_keeps_its_continuation_phrase(self):
         kb.upsert_counterparty(self.conn, "Big", source="portal",
-                               document_link="https://big.example/" + "x" * 5000)
+                               document_link="https://big.example/")
+        with db.tx(self.conn):   # as an earlier version stored it: upsert now refuses it
+            self.conn.execute("UPDATE counterparties SET document_link=? WHERE name=?",
+                              ("https://big.example/" + "x" * 5000, "Big"))
         self.add(counterparty="Big", amount_minor=100, booking_date="2026-07-01")
         for i in range(10):
             self.add(counterparty=f"Small{i}", amount_minor=200 + i)

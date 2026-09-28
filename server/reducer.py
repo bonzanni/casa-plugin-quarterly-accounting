@@ -30,6 +30,14 @@ def facts_of(row: dict) -> dict:
     return out
 
 
+def digest(facts: dict) -> str:
+    """The full sha256 of a row's canonical facts: what a listing hands out in place
+    of the facts themselves (issue #3), compared exactly by record_match/propose_match."""
+    import hashlib
+    return hashlib.sha256(json.dumps(facts, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=False).encode()).hexdigest()
+
+
 def fingerprint(facts: dict, kind: str | None) -> str:
     return json.dumps({"facts": facts, "kind": kind}, sort_keys=True, separators=(",", ":"))
 

@@ -34,9 +34,8 @@ def _error(id_, code, message):
 
 
 def _render(out) -> str:
-    if isinstance(out, str):
-        return out
-    return json.dumps(out, ensure_ascii=False, sort_keys=True, indent=1)
+    import budget
+    return budget.render(out)
 
 
 def handle(req: dict) -> dict | None:

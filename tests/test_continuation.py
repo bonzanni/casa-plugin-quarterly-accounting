@@ -117,7 +117,16 @@ class TestPendingThenTheNotice(Flow):
                          ("sweep", "gmail-round", "finished", "telegram", "operator"))
         self.assertTrue(c["imported"] and c["can_run"])
         self.assertEqual(c["finish"]["remaining_in_cycle"], 0)
-        self.assertEqual(c["work"], self.call("list_quarter_state", triage=True))
+        # issue #3: the same items, in the same order, in the Gmail round's shape
+        listed = self.call("list_quarter_state", triage=True)
+        self.assertEqual([d["pid"] for d in c["work"]["triage"]],
+                         [d["pid"] for d in listed["triage"]])
+        self.assertEqual({k: c["work"][k] for k in ("total", "truncated", "remaining", "not_fresh")},
+                         {k: listed[k] for k in ("total", "truncated", "remaining", "not_fresh")})
+        self.assertEqual(set(c["work"]["triage"][0]),
+                         {"pid", "date", "amount_minor", "currency", "direction", "pending",
+                          "counterparty", "expectation", "search_hint", "window_days",
+                          "portal", "fresh"})
         self.assertEqual(len(c["work"]["triage"]), 3)
         pid = c["work"]["triage"][0]["pid"]
         # the specialist's token, and every earlier holder's, is refused from now on
