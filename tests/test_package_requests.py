@@ -23,14 +23,15 @@ TAKEN = "refused: this package request has been taken over by a later turn"
 
 
 class Requests(Flow):
-    def snapshot(self, channel="telegram", finish=True, stopped=None):
+    def snapshot(self, channel="telegram", finish=True, stopped=None, do_import=True):
         """Packaging step 1 up to the claim: begin_pass(package), the snapshot step,
         the specialist's probes, import and quarter sweep, its finish."""
         self.assertIsNone(self.claim()["continue"])
         t = self.begin("package")
         self.start(t, step="snapshot", quarter="2026-Q3", channel=channel)
-        self.probe_import(t)
-        self.sweep(t, quarter="2026-Q3")
+        if do_import:
+            self.probe_import(t)
+            self.sweep(t, quarter="2026-Q3")
         if finish:
             self.call("record_step", pass_token=t, step="snapshot", action="finish",
                       remaining_in_cycle=0, **({"stopped": stopped} if stopped else {}))
@@ -424,9 +425,9 @@ class TestReclaimRecovers(Requests):
         self.assertEqual(self.request()["package_id"], pkg["package_id"])
 
     def test_an_unfinished_snapshot_fails_with_one_notice_until_delivered(self):
-        # (13, variant) and (14, lost crash)
+        # (13, variant) and (14, lost crash): the pass died before it read the bank
         self.seed(1)
-        self.snapshot(finish=False)
+        self.snapshot(finish=False, do_import=False)
         self.clock.advance(passes.STALE_AFTER_S)
         out = self.call("begin_pass", trigger="operator")
         self.assertEqual(self.request()["state"], "recovery-failed")
@@ -481,9 +482,6 @@ class TestHandoverPairing(Requests):
         self.assertEqual(got[irrelevant]["pairing"], "irrelevant")
         self.call("end_pass", pass_token=c["pass_token"], outcome="complete")
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestReviewC1(Requests):
@@ -585,24 +583,26 @@ def _no_lock(*a, **kw):
 
 STEP_STATES = ("none", "started", "finished", "failed", "stopped")
 OUTCOMES = ("complete", "interrupted", "stopped", "failed")
+IMPORTS = ("none", "this pass")          # "none": only an older pass's import exists
 
 
-def expected_fate(step_state, outcome):
-    """The one rule for a snapshot request's fate: buildable only from a finished,
-    neither failed nor stopped snapshot step, under an outcome that is neither
-    stopped nor failed; stopped when the stored finish or the outcome says so;
-    otherwise the bank was not read."""
+def expected_fate(imported, step_state, outcome):
+    """The one rule for a snapshot request's fate. Buildable only from this pass's own
+    import (a `snapshots` row of this pass: the evidence it read the bank — never the
+    step's say-so), and only when neither the stored finish nor the outcome says
+    stopped, and the outcome is not failed. Stopped when either says so. Otherwise the
+    bank was not read for it."""
     if step_state == "stopped" or outcome == "stopped":
         return "stopped"
-    if step_state == "finished" and outcome != "failed":
+    if imported == "this pass" and outcome != "failed":
         return "snapshot-done"
     return "recovery-failed"
 
 
 class TestSnapshotFate(Requests):
-    """Review C2 (F1): every path that moves a request out of `snapshot` decides its
-    fate by one function, from the STORED snapshot step and the outcome."""
-    def pass_in(self, step_state):
+    """Every path that moves a request out of `snapshot` decides its fate by one
+    function, from the evidence in the store and the outcome."""
+    def pass_in(self, step_state, imported):
         self.assertIsNone(self.claim()["continue"])
         t = self.begin("package")
         if step_state == "none":             # a request whose step row never landed
@@ -612,9 +612,11 @@ class TestSnapshotFate(Requests):
                     " updated_at) VALUES ('2026-Q3', 'telegram', ?, 'snapshot', ?, ?)",
                     (self.conn.execute("SELECT pass_id FROM pass_marker").fetchone()[0],
                      db.now(), db.now()))
-            return t
-        self.start(t, step="snapshot", quarter="2026-Q3", channel="telegram")
-        if step_state != "started":
+        else:
+            self.start(t, step="snapshot", quarter="2026-Q3", channel="telegram")
+        if imported == "this pass":
+            self.probe_import(t)
+        if step_state not in ("none", "started"):
             extra = {"failed": {"failed": True},
                      "stopped": {"stopped": "the bound account is gone from bank-feed"}}
             self.call("record_step", pass_token=t, step="snapshot", action="finish",
@@ -636,52 +638,71 @@ class TestSnapshotFate(Requests):
 
     def test_every_combination_through_end_pass(self):
         self.seed(1)
-        for step_state in STEP_STATES:
-            for outcome in OUTCOMES:
-                where = (step_state, outcome, "end_pass")
-                t = self.pass_in(step_state)
-                end = self.call("end_pass", pass_token=t, outcome=outcome)
-                want = expected_fate(step_state, outcome)
-                self.check(want, where)
-                self.assertEqual(end["next"], "build" if want == "snapshot-done" else None,
-                                 where)
-                if want == "snapshot-done":        # built, so the next case starts clean
-                    self.call("build_quarterly_package", quarter="2026-Q3",
-                              package_token=end["package_token"])
-                if end["speak"]:
-                    self.call("mark_rendering_delivered", render_id=end["speak"]["render_id"])
+        for imported in IMPORTS:
+            for step_state in STEP_STATES:
+                for outcome in OUTCOMES:
+                    where = (imported, step_state, outcome, "end_pass")
+                    t = self.pass_in(step_state, imported)
+                    end = self.call("end_pass", pass_token=t, outcome=outcome)
+                    want = expected_fate(imported, step_state, outcome)
+                    self.check(want, where)
+                    self.assertEqual(end["next"], "build" if want == "snapshot-done" else None,
+                                     where)
+                    if want == "snapshot-done":        # built, so the next case starts clean
+                        self.call("build_quarterly_package", quarter="2026-Q3",
+                                  package_token=end["package_token"])
+                    if end["speak"]:
+                        self.call("mark_rendering_delivered",
+                                  render_id=end["speak"]["render_id"])
 
     def test_every_combination_through_the_reclaim(self):
         # a reclaim ends the displaced pass `interrupted`, whatever it was about to say
         self.seed(1)
-        for step_state in STEP_STATES:
-            where = (step_state, "interrupted", "reclaim")
-            self.pass_in(step_state)
-            self.clock.advance(passes.STALE_AFTER_S)
-            out = self.call("begin_pass", trigger="operator")
-            self.assertTrue(out["reclaimed"], where)
-            want = expected_fate(step_state, "interrupted")
-            self.check(want, where)
-            self.call("end_pass", pass_token=out["pass_token"], outcome="failed")
-            c = self.claim()
-            if want == "snapshot-done":
-                self.assertEqual(c["continue"]["next"], "build", where)
-                self.call("build_quarterly_package", quarter="2026-Q3",
-                          package_token=c["continue"]["package_token"])
-            else:
-                self.assertIsNone(c["continue"], where)
-            if c.get("speak"):
-                self.call("mark_rendering_delivered", render_id=c["speak"]["render_id"])
+        for imported in IMPORTS:
+            for step_state in STEP_STATES:
+                where = (imported, step_state, "interrupted", "reclaim")
+                self.pass_in(step_state, imported)
+                self.clock.advance(passes.STALE_AFTER_S)
+                out = self.call("begin_pass", trigger="operator")
+                self.assertTrue(out["reclaimed"], where)
+                want = expected_fate(imported, step_state, "interrupted")
+                self.check(want, where)
+                if want != "snapshot-done":    # its own notice is in its own answer
+                    self.assertIsNotNone(out.get("speak"), where)
+                    self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+                self.call("end_pass", pass_token=out["pass_token"], outcome="failed")
+                c = self.claim()
+                if want == "snapshot-done":
+                    self.assertEqual(c["continue"]["next"], "build", where)
+                    self.call("build_quarterly_package", quarter="2026-Q3",
+                              package_token=c["continue"]["package_token"])
+                else:
+                    self.assertIsNone(c["continue"], where)
+                if c.get("speak"):
+                    self.call("mark_rendering_delivered", render_id=c["speak"]["render_id"])
 
     def test_the_rule_itself(self):
         self.seed(1)
-        for step_state in STEP_STATES:
-            for outcome in OUTCOMES + ("interrupted",):
-                t = self.pass_in(step_state)
-                pass_id = self.conn.execute("SELECT pass_id FROM pass_marker").fetchone()[0]
-                self.assertEqual(passes.snapshot_fate(self.conn, pass_id, outcome)[0],
-                                 expected_fate(step_state, outcome), (step_state, outcome))
-                self.call("end_pass", pass_token=t, outcome="stopped")
+        for imported in IMPORTS:
+            for step_state in STEP_STATES:
+                for outcome in OUTCOMES + ("interrupted",):
+                    t = self.pass_in(step_state, imported)
+                    pass_id = self.conn.execute("SELECT pass_id FROM pass_marker").fetchone()[0]
+                    self.assertEqual(passes.snapshot_fate(self.conn, pass_id, outcome)[0],
+                                     expected_fate(imported, step_state, outcome),
+                                     (imported, step_state, outcome))
+                    self.call("end_pass", pass_token=t, outcome="stopped")
+
+    def test_an_expired_step_after_its_import_builds_from_that_import(self):
+        # the step never recorded a finish, but the pass did read the bank
+        self.seed(1, documents=1)
+        t = self.pass_in("started", "this pass")
+        self.clock.advance(steps.STEP_EXPIRY_S)
+        c = self.claim()["continue"]
+        self.assertEqual(c["ended"], "expired")
+        end = self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted")
+        self.assertEqual(end["next"], "build")
+        self.assertIsNone(end["speak"])
 
 
 class TestEveryUnsentDeliveryIsTold(Requests):
@@ -734,3 +755,140 @@ class TestEveryUnsentDeliveryIsTold(Requests):
                 "SELECT occurrence_key FROM alerts WHERE kind=?", (kind,))]
             self.assertIn(f"delivery:{again['delivery_id']}:{outcome}", keys, outcome)
             self.call("mark_rendering_delivered", render_id=r["speak"]["render_id"])
+
+
+class TestAStagedSendIsRecoveredByItsDelivery(Requests):
+    """Review C3 (G3): a staged package send nobody settles — linked to a request or
+    not — is recovered on the DELIVERY once its lease lapses: taken back, settled
+    uncertain, and told."""
+    def stalled_resend(self, channel):
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged(channel)
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        if channel == "telegram":
+            os.unlink(d["path"])                       # Casa consumed the first copy
+        again = self.call("stage_for_delivery", channel=channel, resend=True)
+        return pkg, again
+
+    def recovered(self, channel):
+        pkg, again = self.stalled_resend(channel)
+        staged = pathlib.Path(again["path"])
+        target = staged.parent if channel == "email" else staged
+        self.assertTrue(target.exists())
+        other = db.open_store()                         # a restart: a new session
+        self.addCleanup(other.close)
+        self.clock.advance(24 * 3600)
+        first = steps.claim(other)
+        self.assertEqual(first["continue"], {"delivery_id": again["delivery_id"],
+                                             "next": None})
+        self.assertIn("\n".join(delivery.offer_lines(pkg["filename"])), first["speak"]["text"])
+        row = self.conn.execute("SELECT status, withdrawn_at FROM deliveries WHERE"
+                                " delivery_id=?", (again["delivery_id"],)).fetchone()
+        self.assertEqual(row["status"], "uncertain")
+        self.assertIsNotNone(row["withdrawn_at"])
+        self.assertFalse(target.exists())
+        keys = [a[0] for a in self.conn.execute(
+            "SELECT occurrence_key FROM alerts WHERE kind='package-uncertain'")]
+        self.assertIn(f"delivery:{again['delivery_id']}:uncertain", keys)
+        # nothing further is recovered, and the offer stays until delivered
+        self.assertIsNone(steps.claim(other)["continue"])
+        out = sim.run_pass(self.conn, self.bf)
+        self.assertEqual(out["import"]["revoked_deliveries"], [])
+        self.assertIn(pkg["filename"], out["end"]["speak"]["text"])
+
+    def test_a_stalled_resend_is_taken_back_and_told_on_telegram(self):
+        self.recovered("telegram")
+
+    def test_a_stalled_resend_is_taken_back_and_told_on_email(self):
+        self.recovered("email")
+
+    def test_a_resend_inside_its_lease_is_left_alone(self):
+        _, again = self.stalled_resend("telegram")
+        self.clock.advance(steps.LEASE_S - 1)
+        self.assertIsNone(self.claim()["continue"])
+        self.assertEqual(self.conn.execute("SELECT status FROM deliveries WHERE delivery_id=?",
+                                           (again["delivery_id"],)).fetchone()[0], "staged")
+
+
+    def test_staging_the_same_send_again_renews_its_lease(self):
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        self.clock.advance(steps.LEASE_S - 10)
+        self.call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
+                  package_token=p)
+        self.clock.advance(20)
+        self.assertIsNone(self.claim()["continue"])
+        self.assertTrue(pathlib.Path(d["path"]).exists())
+
+
+class TestEveryCallTellsItsOwnNotice(Requests):
+    """Review C3 (G2): a tool call that raises an operator notice in its transaction
+    returns that notice in its own `speak`, however many older alerts wait. The audit
+    of every place a notice is raised is pinned so a new one cannot go unlisted."""
+    RAISERS = {("passes", "_close"), ("delivery", "revoke_superseded_first_sends"),
+               ("delivery", "record_delivery"), ("delivery", "recover_staged")}
+
+    def test_every_notice_raising_site_is_audited(self):
+        import ast
+        from tests._base import ROOT
+        found = set()
+        for f in (ROOT / "server").glob("*.py"):
+            tree = ast.parse(f.read_text())
+            for fn in ast.walk(tree):
+                if isinstance(fn, ast.FunctionDef):
+                    for node in ast.walk(fn):
+                        if isinstance(node, ast.Call) and getattr(node.func, "attr", None) \
+                                == "raise_package":
+                            found.add((f.stem, fn.name))
+        self.assertEqual(found, self.RAISERS)
+
+    def assert_told(self, speak, line, where):
+        self.assertIsNotNone(speak, where)
+        self.assertIn(line, speak["text"], where)
+        self.assertTrue(speak["text"].endswith(alerts.MORE_CLOSING), where)   # others wait
+        self.call("mark_rendering_delivered", render_id=speak["render_id"])
+
+    def test_begin_pass_on_a_reclaim(self):
+        self.seed(1)
+        self.snapshot(stopped="the bound account is gone from bank-feed")
+        self.fill_alerts()
+        self.clock.advance(passes.STALE_AFTER_S)
+        out = self.call("begin_pass", trigger="operator")
+        self.assert_told(out["speak"], "I couldn't build the Q3 2026 package", "begin_pass")
+
+    def test_end_pass_tells_its_pass_s_own_revocations(self):
+        self.seed(1, documents=1)
+        _, pkg, d = self.staged()
+        self.fill_alerts()
+        end = sim.run_pass(self.conn, self.bf)["end"]         # its import revokes the send
+        self.assert_told(end["speak"], "The bank was re-read before I could send the Q3 2026",
+                         "end_pass")
+
+    def test_continue_pass_on_a_staged_send(self):
+        self.seed(1, documents=1)
+        _, pkg, _ = self.staged()
+        self.fill_alerts()
+        self.clock.advance(steps.LEASE_S)
+        self.assert_told(self.claim()["speak"], pkg["filename"], "continue_pass")
+
+    def test_record_delivery(self):
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        self.fill_alerts()
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
+                        package_token=p)
+        self.assert_told(out["speak"], "didn't go out", "record_delivery")
+
+    def test_end_pass_on_a_hand_over(self):
+        self.seed(1)
+        self.snapshot(stopped="the bound account is gone from bank-feed")
+        self.fill_alerts()
+        c = self.claim()["continue"]
+        end = self.call("end_pass", pass_token=c["pass_token"], outcome="stopped")
+        self.assert_told(end["speak"], "I couldn't build the Q3 2026 package", "end_pass")
+
+
+if __name__ == "__main__":
+    unittest.main()

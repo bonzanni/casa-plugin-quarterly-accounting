@@ -220,10 +220,11 @@ The flow of a package request:
    - bumps the counter;
    - sets `request.token = <new>`, `lease_at = now` and `pass_outcome = <outcome>`;
    - sets `state` by **the one snapshot-fate rule** (`passes.snapshot_fate`, shared with
-     the reclaim of §3.5), decided from the STORED snapshot step and from the outcome
-     only where that is more restrictive: `snapshot-done` only when the step exists,
-     finished, and is neither failed nor stopped, and the outcome is neither `stopped`
-     nor `failed`; `stopped` (the stored finish's reason, else a default) when the
+     the reclaim of §3.5), decided from the evidence in the store and from the outcome
+     only where that is more restrictive: `snapshot-done` only when THIS pass has its
+     own import (a `snapshots` row of its pass — the step's finish never grants a
+     build), neither the stored finish nor the outcome says stopped, and the outcome
+     is not `failed`; `stopped` (the stored finish's reason, else a default) when the
      stored finish or the outcome says stopped; otherwise `recovery-failed` (a build
      would ship an older import as this request's);
    - when that rule closes the request, raises its **package notice**
@@ -353,7 +354,7 @@ new pass:
 - **Recovers its package request**, if it has an open one:
   - by the same snapshot-fate rule as `end_pass` (§3.4), with outcome `interrupted`:
     buildable (no token, a lapsed lease, so the next `continue_pass` claims `build`)
-    only from a finished snapshot step that neither failed nor stopped;
+    only when the displaced pass imported the bank itself and did not stop;
   - a stored `stopped` finish closes it `stopped` with its `package-stopped` notice;
   - otherwise it becomes `recovery-failed` and raises its package notice
     (`package-failed`: "I couldn't read the bank for the <quarter> package — ask for it
@@ -1191,3 +1192,34 @@ them from the first passes after the fix.
   ahead of the operator's own request answers `pending` or is taken over, Ellen says
   "A check is running — ask again in a few minutes." — never `<silent/>`.
 - The busy line names hours for a pass older than 90 minutes.
+
+### Round C3
+
+The three findings of this round had one shape: an assumption stood in for the evidence.
+Each is fixed by replacing the assumption.
+
+- **A request builds from its own pass's import, never from a step's say-so.**
+  `snapshot_fate` makes a request buildable only when the pass has a `snapshots` row of
+  its own, neither the stored finish nor the outcome says stopped, and the outcome is
+  not `failed`. A snapshot step that "finished" without importing no longer builds from
+  an older import. A step that expired after its import now builds from that import
+  (it had read the bank; "I couldn't read the bank" was false). The fate matrix gains
+  the import as an axis, {none (an older pass's import only), this pass}.
+- **A call's own notices are in its own message.** Every place that raises a package
+  notice is audited, and a test pins the set of them (`passes._close`,
+  `delivery.revoke_superseded_first_sends`, `delivery.record_delivery`,
+  `delivery.recover_staged`), so a new one cannot go unlisted. Each tool that raises
+  one returns it in its `speak` (`must=`, now a list): `begin_pass` when its reclaim
+  closes a request (with any notice the displaced pass raised), `end_pass` (its
+  request's notice and every notice raised during its pass — a notice remembers its
+  pass, so an import's revocations reach that pass's end), `continue_pass`, and
+  `record_delivery`. The import itself is the specialist's call, which never speaks:
+  its notices reach the operator in that pass's `end_pass` (or the reclaiming
+  `begin_pass`). The skill's rule 7 names every tool that returns `speak`.
+- **A stalled staged send is recovered on the delivery, not through a request.**
+  `deliveries.lease_at` (set at staging, renewed by an idempotent re-stage) makes a
+  staged package send that nobody settles within `LEASE_S` recoverable by
+  `continue_pass`, linked to a request or not (a resend has none): its bytes are taken
+  back under the custody lock, it is settled `uncertain`, and its per-delivery notice
+  offers "send it again". A linked request is withdrawn on top, under a rotated token —
+  one mechanism, not two. (Schema 4 gains the column; schema 4 has not been released.)

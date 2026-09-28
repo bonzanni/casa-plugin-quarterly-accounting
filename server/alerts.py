@@ -54,17 +54,39 @@ OFFERING = ("package-uncertain", "package-send-failed")
 
 
 def raise_package(conn, kind: str, key: str, *, quarter: str, reason: str = "",
-                  package_id=None) -> int:
+                  package_id=None, pass_id=None) -> int:
     """Raise a package notice inside the caller's transaction. The key is UNIQUE,
     so raising one twice (a replayed claim, a retried end_pass) inserts once.
-    Returns the occurrence's alert_id."""
-    assert conn.in_transaction
-    assert kind in PACKAGE or kind == "package-uncertain", kind
+    The notice remembers the pass it was raised in (the live one, unless named):
+    a pass's own notices are in that pass's end_pass message. Returns the
+    occurrence's alert_id."""
+    if not conn.in_transaction:
+        raise RuntimeError("a package notice is raised inside the write transaction")
+    if not (kind in PACKAGE or kind == "package-uncertain"):
+        raise ValueError(kind)
+    if pass_id is None:
+        m = conn.execute("SELECT pass_id, live FROM pass_marker WHERE id=1").fetchone()
+        pass_id = m["pass_id"] if m is not None and m["live"] else None
     detail = {"quarter": quarter, "reason": views.clip(reason or "", DETAIL_MAX),
-              "package_id": package_id}
+              "package_id": package_id, "pass_id": pass_id}
     conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
                  " VALUES (?,?,?,?)", (kind, key, db.canonical(detail), db.now()))
     return conn.execute("SELECT alert_id FROM alerts WHERE occurrence_key=?", (key,)).fetchone()[0]
+
+
+def pass_notices(conn, pass_id) -> list:
+    """The undelivered package notices raised during `pass_id` (by its import's
+    revocations, say): the ones its end_pass, or the begin_pass that reclaims it,
+    must carry."""
+    return [r[0] for r in conn.execute(
+        "SELECT alert_id FROM alerts WHERE sent_at IS NULL AND kind LIKE 'package-%' AND"
+        " json_extract(detail, '$.pass_id')=? ORDER BY alert_id", (pass_id,))]
+
+
+def _musts(must) -> set:
+    if must is None:
+        return set()
+    return {must} if isinstance(must, int) else set(must)
 
 
 CHANGE_WORD = {"corrected": "corrected by the bank", "superseded": "replaced by the bank",
@@ -155,12 +177,12 @@ def _render(units, partial: bool) -> tuple:
 def _batch(units, must=None) -> tuple:
     """The first rendering: whole occurrences, in print order, while the fit
     cuts nothing (with the closing line when some are left over). The first is
-    always taken; clipping makes it fit on its own. `must` (an alert_id) is
-    taken first instead, so the occurrence a caller just raised is always in
-    this rendering; the others follow in print order while they fit, and what
+    always taken; clipping makes it fit on its own. `must` (an alert_id, or a
+    list of them) is taken first instead, so the occurrences a call raised are
+    always in its rendering; the others follow in print order while they fit, and what
     does not fit waits for a later rendering."""
     order = {u[0]: i for i, u in enumerate(units)}
-    first = [u for u in units if u[0] == must] or units[:1]
+    first = [u for u in units if u[0] in _musts(must)] or units[:1]
     chosen = list(first)
     for u in units:
         if u in chosen:

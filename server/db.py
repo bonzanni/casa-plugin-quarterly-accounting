@@ -232,7 +232,8 @@ CREATE TABLE IF NOT EXISTS deliveries (
   status TEXT NOT NULL CHECK (status IN ('staged', 'delivered', 'uncertain', 'failed')),
   message_id TEXT, created_at TEXT NOT NULL, settled_at TEXT,
   revoked_at TEXT,               -- an unsent first send an import superseded (fix E5)
-  withdrawn_at TEXT);            -- staged bytes taken back when a stalled request was reclaimed
+  withdrawn_at TEXT,             -- staged bytes taken back when a stalled send was recovered
+  lease_at TEXT);                -- a staged send's lease: past LEASE_S it is recovered
 -- every delivery has a path of its own: a holder that was superseded can never hold
 -- the path of a later copy
 CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_staged_path ON deliveries(staged_path);
@@ -292,6 +293,7 @@ MIGRATIONS: dict[int, list[str]] = {
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state)",
         "ALTER TABLE deliveries ADD COLUMN withdrawn_at TEXT",
+        "ALTER TABLE deliveries ADD COLUMN lease_at TEXT",
         "UPDATE deliveries SET staged_path = staged_path || '#' || delivery_id WHERE delivery_id"
         " NOT IN (SELECT max(delivery_id) FROM deliveries GROUP BY staged_path)",
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_staged_path ON deliveries(staged_path)"],

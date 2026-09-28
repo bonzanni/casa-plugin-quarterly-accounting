@@ -85,13 +85,18 @@ class StoreCase(TempEnv):
 
     def package_token(self, quarter="2026-Q3", channel="telegram"):
         """A package request as the skill makes one — begin_pass(package), the snapshot
-        step, end_pass — with no import of its own. Returns the package_token end_pass
-        hands over."""
+        step with this pass's own import (a bare snapshots row here), end_pass. Returns
+        the package_token end_pass hands over."""
         import passes
         import steps
         self.end_live_pass()
         token = passes.begin_pass(self.conn, "package")["pass_token"]
         steps.start(self.conn, token, "snapshot", {"quarter": quarter, "channel": channel})
+        import db
+        with db.tx(self.conn):          # this pass's own import: what makes a request buildable
+            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
+                              " VALUES ((SELECT pass_id FROM pass_marker), ?, 0, 0)",
+                              (db.now(),))
         steps.finish(self.conn, token, "snapshot", counts={})
         return passes.end_pass(self.conn, token, "complete", {})["package_token"]
 

@@ -107,9 +107,11 @@ class ToolPass(test_e2e.Base):
         return out
 
     def request(self, channel="telegram"):
-        """A package request with no import of its own: begin_pass(package), the
-        snapshot step, end_pass. Returns the package_token end_pass hands over."""
-        token = self.begin("package", do_import=False, channel=channel)
+        """A package request: begin_pass(package), the snapshot step and this pass's
+        own import (a request builds only from its own pass's import), end_pass.
+        Returns the package_token end_pass hands over."""
+        token = self.begin("package", channel=channel)
+        self.sweep(token)
         out = self.end(token, "complete")["package_token"]
         self.package_token = None
         return out
@@ -515,11 +517,12 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
         pkg = self.built()
         tg = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
                   package_token=pkg["package_token"])
-        # one staged send per request: the emailed copy is a second request's, built under
-        # the same import
-        pkg2 = self.zip_of(channel="email")[0]
-        em = call("stage_for_delivery", channel="email", package_id=pkg2["package_id"],
-                  package_token=pkg2["package_token"])
+        # one staged send per request, and a second request would import again: the emailed
+        # copy is a package built outside any request under the same import (its first send
+        # is revoked all the same, with its notice)
+        import package
+        pkg2 = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        em = call("stage_for_delivery", channel="email", package_id=pkg2["package_id"])
         self.assertEqual(os.listdir(self.outbox), [os.path.basename(tg["path"])])
         self.assertEqual(len(self.handoff_entries()), 1)
         token = self.begin("cron")                                  # import N+1

@@ -221,8 +221,8 @@ def _lease_fresh(lease_at) -> bool:
 
 
 def _choose(conn):
-    """What a claim would take now: ("pass", marker, step), ("request", row),
-    or ("none", answer)."""
+    """What a claim would take now: ("pass", marker, step), ("delivery", a stalled
+    staged send), ("request", row), or ("none", answer)."""
     m = _live_pass(conn)
     fresh = m is not None and _lease_fresh(m["lease_at"])
     running = None
@@ -242,8 +242,12 @@ def _choose(conn):
                 return ("pass", m, None)
             running = {"step": None, "trigger": m["trigger"], "started_at": m["started_at"],
                        "due_in_s": max(0, int(STEP_EXPIRY_S - _age(m["started_at"])))}
+    import delivery
+    stalled = delivery.stalled_sends(conn, LEASE_S)
+    if stalled:
+        return ("delivery", stalled[0])
     for req in conn.execute("SELECT * FROM package_requests WHERE state IN ('snapshot-done',"
-                            " 'built', 'staged') ORDER BY request_id").fetchall():
+                            " 'built') ORDER BY request_id").fetchall():
         if not _lease_fresh(req["lease_at"]):
             return ("request", req)
     if running is not None:
@@ -261,6 +265,8 @@ def _same(a, b) -> bool:
     if a[0] == "pass":
         return (a[1]["generation"], a[2]["step"] if a[2] else None) == \
             (b[1]["generation"], b[2]["step"] if b[2] else None)
+    if a[0] == "delivery":
+        return (a[1]["delivery_id"], a[1]["status"]) == (b[1]["delivery_id"], b[1]["status"])
     if a[0] == "request":
         return (a[1]["request_id"], a[1]["state"], a[1]["token"]) == \
             (b[1]["request_id"], b[1]["state"], b[1]["token"])
@@ -279,7 +285,7 @@ def claim(conn) -> dict:
         raise RuntimeError("continue_pass opens its own transactions")
     for _ in range(5):
         cand = _choose(conn)
-        custody = cand[0] == "request" and cand[1]["state"] == "staged"
+        custody = cand[0] == "delivery"
         try:
             with (db.custody_lock() if custody else contextlib.nullcontext()):
                 with db.tx(conn):
@@ -295,6 +301,8 @@ def claim(conn) -> dict:
                         return out
                     if kind == "pass":
                         out = _claim_pass(conn, now_cand[1], now_cand[2])
+                    elif kind == "delivery":
+                        out = _claim_delivery(conn, now_cand[1])
                     else:
                         out = _claim_request(conn, now_cand[1])
                     notice = out.pop("_notice", None)
@@ -369,33 +377,24 @@ def _claim_request(conn, req) -> dict:
                  " request_id=?", (token, now, now, req["request_id"]))
     info = {"id": req["request_id"], "quarter": req["quarter"], "channel": req["channel"],
             "package_id": req["package_id"]}
-    if req["state"] != "staged":
-        return {"continue": {"package_token": token, "request": info,
-                             "next": "build" if req["state"] == "snapshot-done" else "stage"}}
+    return {"continue": {"package_token": token, "request": info,
+                         "next": "build" if req["state"] == "snapshot-done" else "stage"}}
+
+
+def _claim_delivery(conn, d) -> dict:
+    """A stalled staged send: recovered on the delivery (delivery.recover_staged), with
+    its package request's own change on top when one is linked — the request is
+    `withdrawn` under a rotated token, so its stalled holder is refused everywhere."""
+    notice = __import__("delivery").recover_staged(conn, d)
+    req = conn.execute("SELECT * FROM package_requests WHERE delivery_id=? AND state='staged'",
+                       (d["delivery_id"],)).fetchone()
+    if req is None:
+        return {"continue": {"delivery_id": d["delivery_id"], "next": None},
+                "_notice": notice}
+    token, now = passes.rotate(conn), db.now()
+    conn.execute("UPDATE package_requests SET token=?, lease_at=?, state='withdrawn',"
+                 " updated_at=? WHERE request_id=?", (token, now, now, req["request_id"]))
+    info = {"id": req["request_id"], "quarter": req["quarter"], "channel": req["channel"],
+            "package_id": req["package_id"]}
     return {"continue": {"package_token": token, "request": info, "next": None},
-            "_notice": _withdraw_staged(conn, req)}
-
-
-def _withdraw_staged(conn, req):
-    """The stalled holder of a staged request may still have its path in hand, so
-    its staged bytes are removed first (under the custody lock the caller holds);
-    the send is then settled `uncertain` — it may already have gone — and the
-    operator is offered "send it again". A removal that fails refuses the whole
-    claim: nothing changes."""
-    import alerts
-    import delivery
-    d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?",
-                     (req["delivery_id"],)).fetchone()
-    now = db.now()
-    notice = None
-    if d is not None and d["status"] == "staged":
-        delivery.withdraw(conn, [dict(d)], refusal="could not take back a staged package — "
-                                                   "nothing changed")
-        conn.execute("UPDATE deliveries SET status='uncertain', settled_at=?, withdrawn_at=?"
-                     " WHERE delivery_id=?", (now, now, d["delivery_id"]))
-        notice = alerts.raise_package(conn, "package-uncertain",
-                                      f"delivery:{d['delivery_id']}:uncertain",
-                                      quarter=req["quarter"], package_id=d["package_id"])
-    conn.execute("UPDATE package_requests SET state='withdrawn', updated_at=? WHERE"
-                 " request_id=?", (now, req["request_id"]))
-    return notice
+            "_notice": notice}

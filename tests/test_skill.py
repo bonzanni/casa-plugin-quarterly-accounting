@@ -352,11 +352,12 @@ class TestSkill(TempEnv):
 
     def test_every_speak_is_sent_by_one_rule_beside_the_null_rule(self):
         later = self.later()
-        self.assertIn("7. Every `speak` that `end_pass` or `continue_pass` returns is sent "
-                      "verbatim and marked delivered", later)
+        self.assertIn("7. Every `speak` a tool returns — `begin_pass`, `end_pass`, "
+                      "`continue_pass`, `record_delivery` — is sent verbatim and marked "
+                      "delivered", later)
         self.assertIn("`continue` is null: write nothing (a `speak` is still sent — rule 7)",
                       later)
-        self.assertEqual(" ".join(SKILL.split()).count("Every `speak` that"), 1)
+        self.assertEqual(" ".join(SKILL.split()).count("Every `speak` a tool returns"), 1)
 
     def test_every_delegation_names_its_step_and_ellen_always_finishes_it(self):
         flat = " ".join(SKILL.split())
@@ -405,6 +406,21 @@ class TestReviewC2(TempEnv):
         for rule in (rule4, rule6):
             self.assertIn('"A check is running — ask again in a few minutes." — never '
                           "`<silent/>`", rule)
+
+
+class TestReviewC3(TempEnv):
+    def test_a_continuation_with_nothing_next_is_told_whatever_it_carries(self):
+        pack = " ".join(SKILL[SKILL.index("## Packaging"):SKILL.index("## Install")].split())
+        self.assertIn("A continuation whose `next` is null (a package request's, or a staged "
+                      "send's `delivery_id`) carries a `speak`: send it verbatim, then "
+                      "`mark_rendering_delivered`", pack)
+
+    def test_begin_pass_speaks_too(self):
+        flat = " ".join(SKILL.split())
+        self.assertIn("If it answers `busy`: on the cron, output `<silent/>`; for the "
+                      "operator, send its text", flat)
+        self.assertIn("A `begin_pass` that reclaimed an abandoned pass may return `speak` "
+                      "too (rule 7)", flat)
 
 
 if __name__ == "__main__":

@@ -2504,12 +2504,17 @@ The mechanics, in the order a pass meets them:
   nothing and leaves no zip or staged copy behind. One request builds one package and is
   staged on the channel it was asked for; staging a staged request returns the same send.
   One rule decides a request's fate when its pass ends or is reclaimed, from the stored
-  snapshot step and the outcome where that is stricter: buildable only from a finished
-  snapshot that neither failed nor stopped; otherwise it closes with a package notice
-  (stopped, or the bank was not read) instead of handing over a build. A closed request is refused in words Ellen relays ("the Q3 2026
-  package was already sent … ask for the package again"). A claim of a staged request removes its staged bytes under the custody lock
-  first, then settles the send `uncertain` and offers "send it again"; a removal that
-  fails refuses the claim. Recovery never sends.
+  snapshot step, the pass's own import and the outcome where that is stricter: buildable
+  only when that pass imported the bank itself (its own snapshot — a step's finish is
+  not evidence it read the bank) and did not stop or fail; otherwise it closes with a
+  package notice (stopped, or the bank was not read) instead of handing over a build. A closed request is refused in words Ellen relays ("the Q3 2026
+  package was already sent … ask for the package again"). A staged package send nobody
+  settles within its lease — a first send or a resend, linked to a request or not — is
+  recovered on the delivery by the next claim: its staged bytes are removed under the
+  custody lock first, then the send is settled `uncertain` and "send it again" is
+  offered; a removal that fails refuses the claim. Recovery never sends. Every tool call
+  that raises a notice returns it in its own `speak` (`begin_pass` on a reclaim
+  included), and a pass's end carries every notice raised during that pass.
 - **Staged paths are never reused.** Every delivery's staged path is unique in the store;
   a Telegram copy gets a random name, drawn again when it is already a file or any
   delivery's path, and the operator-facing name travels as `send_media`'s `filename`.

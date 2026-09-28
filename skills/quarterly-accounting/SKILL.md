@@ -80,9 +80,10 @@ token: the old one is refused from then on.
    unless it was an earlier continuation you were doing ahead of the operator's own
    request (rule 1): then say "A check is running — ask again in a few minutes." — never
    `<silent/>`.
-7. Every `speak` that `end_pass` or `continue_pass` returns is sent verbatim and marked
-   delivered (`mark_rendering_delivered`), including on a cron turn and alongside
-   `<silent/>`. It is how anything owed about a package reaches the operator exactly once.
+7. Every `speak` a tool returns — `begin_pass`, `end_pass`, `continue_pass`,
+   `record_delivery` — is sent verbatim and marked delivered (`mark_rendering_delivered`),
+   including on a cron turn and alongside `<silent/>`. It is how anything owed about a
+   package reaches the operator exactly once.
 
 The outcome for `end_pass`: `stopped` when `can_run` is false or the step's finish says
 `stopped`; `failed` when the step ended unfinished and nothing was imported this pass;
@@ -217,6 +218,7 @@ pass, whichever comes first:
    reply="silent"|"telegram")`. If it answers `busy`: on the cron, output `<silent/>`; for
    the operator, send its text:
    "A check is running — started N minutes ago." and "Ask again in a few minutes."
+   A `begin_pass` that reclaimed an abandoned pass may return `speak` too (rule 7).
 2. `check_setup()`. For an operator-triggered pass that will be long (first run, a
    catch-up), say one line first.
 3. `record_step(pass_token, step="sweep", action="start")`, then delegate to the finance
@@ -484,9 +486,10 @@ named in your context. Your one expectation write is in step 6.
    stopped, or taken back) is said to the operator as it is, never stopped on in silence.
 
 A continuation of a package request (`continue_pass` returned a `package_token`): `build`
-and `stage` resume step 2 at that point, with ITS token. `next: null` with a `speak`: send
-it verbatim, then `mark_rendering_delivered` — a stopped package, a failed recovery, a
-withdrawn or revoked send. Never send the file again yourself, and never write a failure
+and `stage` resume step 2 at that point, with ITS token. A continuation whose `next` is
+null (a package request's, or a staged send's `delivery_id`) carries a `speak`: send it
+verbatim, then `mark_rendering_delivered` — a stopped package, a failed recovery, a send
+taken back because nobody finished sending it, a revoked send. Never send the file again yourself, and never write a failure
 line of your own.
 
 ## Install (once)

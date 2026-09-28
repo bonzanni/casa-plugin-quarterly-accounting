@@ -70,7 +70,7 @@ def begin_pass(conn, trigger: str, reply=None) -> dict:
         raise db.Refusal("reply is 'telegram' or 'silent'")
     with db.tx(conn):
         m = _marker(conn)
-        reclaimed, recovered = False, None
+        reclaimed, recovered, owed = False, None, []
         if m is not None and m["live"]:
             age = _age_s(m["started_at"])
             # a claim holding a fresh lease is a live holder, however old the pass
@@ -82,7 +82,10 @@ def begin_pass(conn, trigger: str, reply=None) -> dict:
                 return {"status": "busy", "started_at": m["started_at"],
                         "text": BUSY.format(when=when)}
             reclaimed = True
-            recovered = _terminalize(conn, m["pass_id"])
+            displaced = m["pass_id"]
+            recovered, notice = _terminalize(conn, displaced)
+            import alerts
+            owed = ([notice] if notice is not None else []) + alerts.pass_notices(conn, displaced)
         gen = rotate(conn)
         now = db.now()
         pass_id = f"p{gen}"
@@ -92,15 +95,21 @@ def begin_pass(conn, trigger: str, reply=None) -> dict:
                      (gen, pass_id, trigger, now))
         conn.execute("INSERT INTO passes(pass_id, generation, trigger, started_at, reply)"
                      " VALUES (?, ?, ?, ?, ?)", (pass_id, gen, trigger, now, reply))
-        return {"status": "started", "pass_token": gen, "pass_id": pass_id,
-                "reclaimed": reclaimed, "recovered": recovered}
+        out = {"status": "started", "pass_token": gen, "pass_id": pass_id,
+               "reclaimed": reclaimed, "recovered": recovered}
+        if reclaimed and owed:
+            # what the reclaim raised is in this call's own message (a notice a call
+            # raises is in that call's returned rendering)
+            import alerts
+            out["speak"] = alerts.pending_in_tx(conn, must=owed)
+        return out
 
 
 def _terminalize(conn, pass_id: str):
     """A reclaimed pass is over: it is ended `interrupted` (so it no longer looks
     unended, and check_setup's last_pass shows it), and its package request is
     settled by snapshot_fate (outcome `interrupted`), buildable or closed with its
-    package notice. Returns the recovered request's id, or None."""
+    package notice. Returns (the recovered request's id or None, its notice or None)."""
     now = db.now()
     report = {"reclaimed": True, **throughput(conn, pass_id)}
     conn.execute("UPDATE passes SET ended_at=?, outcome='interrupted', report_json=?"
@@ -108,10 +117,10 @@ def _terminalize(conn, pass_id: str):
     req = conn.execute("SELECT * FROM package_requests WHERE pass_id=? AND state='snapshot'",
                        (pass_id,)).fetchone()
     if req is None:
-        return None
+        return None, None
     # recovered with no token and a lapsed lease: the next continue_pass claims it
-    settle_snapshot_request(conn, req, "interrupted", token=None)
-    return req["request_id"]
+    _, notice = settle_snapshot_request(conn, req, "interrupted", token=None)
+    return req["request_id"], notice
 
 
 def snapshot_fate(conn, pass_id: str, outcome: str) -> tuple:
@@ -119,9 +128,11 @@ def snapshot_fate(conn, pass_id: str, outcome: str) -> tuple:
     uses this): its fate is decided from the STORED snapshot step, and from the
     pass outcome only where that is more restrictive. Returns (state, reason).
 
-    - `snapshot-done` (buildable) only when the snapshot step exists, finished, and
-      is neither failed nor stopped, and the outcome is neither `stopped` nor
-      `failed` — a build otherwise ships an older import as this request's;
+    - `snapshot-done` (buildable) only when THIS pass imported the bank (a
+      `snapshots` row of its own), neither the stored finish nor the outcome says
+      stopped, and the outcome is not `failed` — a build otherwise ships an older
+      import as this request's. A step's finish never grants a build: a step that
+      expired after its import builds from that import;
     - `stopped`, with the stored finish's reason (else a default), when the stored
       finish or the outcome says stopped;
     - otherwise `recovery-failed`: the bank was not read for it."""
@@ -131,7 +142,10 @@ def snapshot_fate(conn, pass_id: str, outcome: str) -> tuple:
     finished = step is not None and step["finished_at"] is not None
     if (finished and fin.get("stopped")) or outcome == "stopped":
         return "stopped", (fin.get("stopped") if finished else None) or "the bank check stopped"
-    if finished and not fin.get("failed") and outcome != "failed":
+    # the evidence the pass read the bank is its own import, never the step's say-so
+    imported = conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?",
+                            (pass_id,)).fetchone() is not None
+    if imported and outcome != "failed":
         return "snapshot-done", None
     return "recovery-failed", None
 
@@ -251,8 +265,10 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
         pass
     notice = handed.pop("_notice") if handed else None
     out = {"ended": m["pass_id"], "outcome": outcome, **(handed or {})}
-    # a stopped package's notice is always in this rendering (older alerts may wait)
-    out["speak"] = alerts.pending_rendering(conn, must=notice)
+    # the notices this pass raised — its request's, its import's revocations — are
+    # always in this rendering (older alerts may wait)
+    owed = ([notice] if notice is not None else []) + alerts.pass_notices(conn, m["pass_id"])
+    out["speak"] = alerts.pending_rendering(conn, must=owed)
     return out
 
 

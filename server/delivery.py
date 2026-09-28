@@ -180,8 +180,9 @@ def _stage(conn, channel, package_id, doc_id, pass_token, request_id, package_to
                     _require_current_snapshot(conn, package_id)
                 did = conn.execute(
                     "INSERT INTO deliveries(package_id, doc_id, channel, staged_path,"
-                    " request_id, status, created_at) VALUES (?,?,?,?,?, 'staged', ?)",
-                    (package_id, doc_id, channel, str(path), request, db.now())).lastrowid
+                    " request_id, status, created_at, lease_at) VALUES (?,?,?,?,?, 'staged', ?, ?)",
+                    (package_id, doc_id, channel, str(path), request, db.now(),
+                     db.now())).lastrowid
                 if request_id is not None:
                     conn.execute("UPDATE package_requests SET delivery_id=?, state='staged',"
                                  " updated_at=? WHERE request_id=?", (did, db.now(), request_id))
@@ -213,6 +214,8 @@ def _staged_again(conn, request_id, package_token, pass_token):
         d = conn.execute("SELECT d.*, p.filename FROM deliveries d JOIN packages p ON"
                          " p.package_id=d.package_id WHERE d.delivery_id=?",
                          (req["delivery_id"],)).fetchone()
+        conn.execute("UPDATE deliveries SET lease_at=? WHERE delivery_id=?",
+                     (db.now(), req["delivery_id"]))
     out = {"delivery_id": d["delivery_id"], "channel": d["channel"], "path": d["staged_path"],
            "filename": d["filename"], "already": True,
            "note": "already staged: send this one, then record_delivery"}
@@ -310,6 +313,36 @@ def withdraw_revoked(conn) -> None:
     rows = conn.execute("SELECT delivery_id, channel, staged_path FROM deliveries"
                         " WHERE revoked_at IS NOT NULL ORDER BY delivery_id").fetchall()
     withdraw(conn, [dict(r) for r in rows], refusal=WITHDRAW_REFUSED)
+
+
+def stalled_sends(conn, lease_s: float) -> list:
+    """Staged package sends nobody settled within their lease (a turn that died
+    between staging and record_delivery) — keyed on the DELIVERY, whether or not a
+    package request is linked (a resend has none)."""
+    import steps
+    return [r for r in conn.execute(
+        "SELECT d.*, p.quarter FROM deliveries d JOIN packages p ON p.package_id=d.package_id"
+        " WHERE d.status='staged' AND d.revoked_at IS NULL AND d.withdrawn_at IS NULL"
+        " ORDER BY d.delivery_id").fetchall()
+        if steps._age(r["lease_at"] or r["created_at"]) >= lease_s]
+
+
+def recover_staged(conn, d) -> int:
+    """Recover one stalled staged package send, inside the caller's transaction and
+    under the custody lock the caller holds: its staged bytes are taken back first
+    (whoever staged it may still hold the path, and Casa's send tools check no
+    token of ours), the send is settled `uncertain` — it may already have gone —
+    and its per-delivery notice offers "send it again". A removal that fails
+    refuses the whole call: nothing changes. Returns the notice's alert_id."""
+    import alerts
+    withdraw(conn, [dict(d)], refusal="could not take back a staged package — nothing changed")
+    now = db.now()
+    conn.execute("UPDATE deliveries SET status='uncertain', settled_at=?, withdrawn_at=?"
+                 " WHERE delivery_id=?", (now, now, d["delivery_id"]))
+    quarter = conn.execute("SELECT quarter FROM packages WHERE package_id=?",
+                           (d["package_id"],)).fetchone()[0]
+    return alerts.raise_package(conn, "package-uncertain", f"delivery:{d['delivery_id']}:uncertain",
+                                quarter=quarter, package_id=d["package_id"])
 
 
 def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=None,
