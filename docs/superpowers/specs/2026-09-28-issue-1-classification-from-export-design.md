@@ -1,8 +1,8 @@
 # Issue #1 — classification from the export (design)
 
 Status: draft for design review, 2026-09-28. Ruling: issue #1, OPERATOR DECISION
-2026-09-28 ("option A — the best fix"). Upstream: casa-specialist-finance#86, shipped in
-component v0.21.0 / bank-feed 0.20.0 (commit cc1a2fb).
+2026-09-28 ("option A — the best fix"). Upstream: casa-specialist-finance#86 — feature commit cc1a2fb (bank-feed 0.19.0 in-tree),
+released as tag v0.21.0 (commit 3479640) = component 0.21.0 / bank-feed 0.20.0.
 
 ## The asset, and the failure that must stay impossible
 
@@ -64,9 +64,21 @@ New columns: `note_seen_seq`, `note_seen_rev`.
 - `record_observation` (a read): when the lineage's current note is visible (the check
   it makes today), `note_seen_seq := note_seq`, `note_seen_rev := observed_tag_revision`
   (new required argument: the `Tag revision:` line); otherwise both NULL.
+- `record_observation`, when it RETURNS an `add_note` instruction, stamps
+  `note_issued_at := now` (round D1, Astra S2: an `add_note` issued earlier and carried
+  out after a later read confirmed the newer note leaves a stale assertion on top; notes
+  do not move `tag_revision`, so no export can show it). A read stamps `note_seen_at`.
 - The import treats the note as visible iff `note_seen_seq = note_seq` AND
-  `note_seen_rev = export tag_revision`. Any tag change since the confirming read
-  (erasure included — it strips tags too) therefore re-checks the note.
+  `note_seen_rev = export tag_revision` AND (`note_issued_at` is NULL OR `note_seen_at` ≥
+  `note_issued_at` + `steps.CEILING_ASSUMED_S`). Any tag change since the confirming read
+  (erasure included — it strips tags too) therefore re-checks the note, and so does a
+  confirmation taken while an issued note write could still be in flight.
+- Why the ceiling bounds it: an instruction lives only inside the delegation it was
+  returned to, and Casa ends a delegation at its 600 s ceiling (spec assumption A2, the
+  same bound issue #2's step expiry and claim lease rest on). A write carried out later
+  than that has no carrier. Cost: a lineage whose note was written in a pass is read once
+  more at a later pass's import (its confirming read-back is inside the window), then
+  settles.
 
 Residual (stated, accepted in this design): an erasure that strips a note from a row
 that carried **no tags at all** does not move the revision, so that note is restated only
@@ -108,7 +120,7 @@ import instead of after a read.
 - bank-feed floor 0.15.0 → **0.20.0** (component v0.21.0). The test harness vendors
   component v0.21.0 as the floor tree; v0.13.2 stays the below-floor tree.
 - Schema 4 → 5: `projections` gains `export_tag_revision`, `note_seen_seq`,
-  `note_seen_rev`, `read_snapshot`. Existing lineages: all NULL → note unconfirmed → due
+  `note_seen_rev`, `note_seen_at`, `note_issued_at`, `read_snapshot`. Existing lineages: all NULL → note unconfirmed → due
   once after the first import (one catch-up read per note-bearing row, then settled).
 - Plugin 0.2.0 → 0.3.0. Skill: record `observed_tag_revision`; triage text drops "wait
   for the sweep's read"; spec §"The sweep", §"classification observation", floor table.
