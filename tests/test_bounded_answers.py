@@ -386,15 +386,16 @@ class TestJudgeDue(Flow):
         self.assertEqual(self.call("end_pass", pass_token=t3, outcome="complete")["outcome"],
                          "complete")
 
-    def test_a_document_corrected_during_the_judge_is_not_covered(self):
-        # C7 (Terra): the judgment saw the document as it was
+    def test_a_document_corrected_during_a_finished_judge_is_that_judges(self):
+        # C8 ruling: edits to documents and the KB during a judgment are that
+        # judgment's to see, or the next pass's — as before issue #3 (a stated residual)
         t2 = self.judge_started()
         doc = self.conn.execute("SELECT doc_id FROM documents").fetchone()[0]
         self.call("update_document_metadata", doc_id=doc, document_number="CORRECTED",
                   pass_token=t2)
         t3 = self.judge_finished(t2)
-        out = self.text("end_pass", pass_token=t3, outcome="complete")
-        self.assertTrue(out.startswith("refused: not ended: 1 payment"), out)
+        self.assertEqual(self.call("end_pass", pass_token=t3, outcome="complete")["outcome"],
+                         "complete")
 
     def test_a_payment_changed_during_the_judge_is_not_covered(self):
         # C7 (Astra): a pairing made and rejected, or any change of the payment,

@@ -293,27 +293,24 @@ def judge_due_pids(conn) -> list:
 
 
 def judge_due_state(conn) -> dict:
-    """{pid: what a judgment of it saw} for every judge-due payment: the payment's
-    revision (it moves with its status, pairing, candidates, facts and expectation)
-    and the fitting documents with every field the auto-match bar reads. A judgment
-    covers a payment only while this is unchanged (issue #3, code round C7: a
-    pairing made and then rejected, or a document corrected, after the judge step
-    started)."""
-    fits = {}
-    for r in conn.execute(
-            "SELECT d.doc_id, d.kind, d.amount_minor, d.currency, d.document_date, d.issuer,"
-            " d.counterparty, d.recipient, d.document_number FROM documents d JOIN"
-            " document_status s ON s.doc_id=d.doc_id WHERE s.status='unmatched' AND"
-            " d.irrelevant=0 AND d.amount_minor IS NOT NULL ORDER BY d.doc_id"):
-        fits.setdefault((r["kind"], r["amount_minor"]), []).append(dict(r))
+    """{pid: revision} for every judge-due payment. The revision moves with the
+    payment's status, pairing, candidates, facts and expectation, so a payment
+    reopened, paired or unpaired after a judgment started is not covered by it
+    (issue #3, code rounds C6-C7). Changes to documents and to the KB during a
+    judgment are that judgment's to see, or the next pass's — as before issue #3
+    (code round C8: the bar issue #3 must meet is no regression, not a guarantee
+    against every concurrent edit)."""
+    docs = {(r["kind"], r["amount_minor"], r["currency"]) for r in conn.execute(
+        "SELECT d.kind, d.amount_minor, d.currency FROM documents d JOIN document_status s"
+        " ON s.doc_id=d.doc_id WHERE s.status='unmatched' AND d.irrelevant=0"
+        " AND d.amount_minor IS NOT NULL")}
     out = {}
     for d in triage(conn):
         if not d["fresh"] or d["pending"]:
             continue
-        docs = [x for x in fits.get((d["expectation"]["kind"], d["amount_minor"]), [])
-                if x["currency"] in (None, d["currency"])]
-        if docs:
-            out[d["pid"]] = db.canonical({"revision": d["revision"], "documents": docs})
+        k, a = d["expectation"]["kind"], d["amount_minor"]
+        if (k, a, d["currency"]) in docs or (k, a, None) in docs:
+            out[d["pid"]] = d["revision"]
     return out
 
 

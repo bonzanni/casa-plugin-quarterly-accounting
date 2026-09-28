@@ -197,14 +197,26 @@ while more follow.
     the pass is `interrupted`.
 
   It never asks for a second judge step, so it cannot loop.
-- **Covered means covered in the same state (code round C7).** Terra found a
-  document corrected during the judge step; Astra found a pairing made during the judge
-  step and then rejected by the operator. So coverage is recorded per payment, as
-  `work.judge_due_state`: the payment's `revision` (it moves with its status, pairing,
-  candidates, facts and expectation, but not with a recorded query) and every fitting
-  document with every field the auto-match bar reads. A payment is covered only if that
-  state is unchanged at the end. A payment judged and declined without any change stays
+- **Covered means covered in the same payment state (code rounds C7, C8).** Astra found
+  a pairing made during the judge step and then rejected by the operator. So coverage
+  is recorded per payment as its `revision`, in `work.judge_due_state`. The revision
+  moves with the payment's status, pairing, candidates, facts and expectation, but not
+  with a recorded query. A payment judged and declined without any change stays
   covered, so the check does not turn every declined judgment into `interrupted`.
+- **The bar is no regression (ruling at code round C8).** Round C7 (Terra: a document
+  corrected during the judge step) and round C8 (Terra: the vendor's window changed;
+  Astra: a collision cleared, a document changed and then restored) each found one more
+  input of the auto-match bar that a fingerprint had left out. That is the same shape
+  three times, so it is stopped by changing the assumption, not by adding one more
+  field. The assumption was that issue #3 owes a pass that is `complete` against every
+  concurrent edit. It does not. Before #3 a finished judge step ended its pass
+  `complete` whatever changed during it. The one thing #3 made worse was scheduling:
+  cursors can hide a payment reopened behind them, where the capped count used to force
+  a judgment. Payment state (the revision) covers that class exactly, because a reopen,
+  a pairing and a rejection each move it.
+  - **Residual:** edits to documents or the KB during a finished judge step are that
+    judgment's to see, or the next pass's, exactly as before #3. This is pinned by a
+    test.
 - The single-payment re-read `pid=` goes through the same page guard (code round C3,
   Astra: 4,200 candidates returned 21,728 characters there).
 - No schema change.
