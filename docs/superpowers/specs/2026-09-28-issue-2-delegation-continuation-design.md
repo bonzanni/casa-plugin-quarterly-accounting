@@ -151,7 +151,9 @@ alongside Ellen.
 
 `check_token` refreshes `lease_at` whenever it accepts a token inside a write
 transaction. So a holder that keeps writing keeps its lease, and a holder that has gone
-quiet for `LEASE_S` (1800 s) loses it.
+quiet for `LEASE_S` (600 s) loses it. That is short on purpose (X3): a continuation that
+crashes right after claiming is recovered by the next notice or "go and check now"
+within ten minutes (R4).
 
 **A live pass is due** when either:
 
@@ -217,8 +219,11 @@ The flow of a package request:
    - bumps the counter;
    - sets `request.token = <new>`, `lease_at = now` and `pass_outcome = <outcome>`;
    - sets `state` to `snapshot-done`, or to `stopped` when the outcome is `stopped`;
-   - returns `{"package_token": <new>, "request": {…}, "next": "build" | "tell-stopped"}`
-     to the caller of `end_pass`.
+   - when the outcome is `stopped`, raises the request's **package notice**
+     (`package-stopped`, §3.7) in the same transaction, instead of asking Ellen to tell
+     it;
+   - returns `{"package_token": <new>, "request": {…}, "next": "build" | null}` to the
+     caller of `end_pass`, with `speak` as always.
 
    There is no window in which the request is claimable: its lease is fresh from the
    instant the pass ends.
@@ -242,18 +247,42 @@ The flow of a package request:
    |---|---|
    | `snapshot-done` | `build` |
    | `built` | `stage` |
-   | `staged` (unsettled) | `record-uncertain` |
-   | `stopped` or `recovery-failed` | `tell` (the line in `request.reason`) |
-   | `revoked` | `tell` (the line in `request.reason`) |
+   | `staged` (unsettled) | none: the claim itself settles it (below) |
 
-   - **`stopped` or `recovery-failed`.** The first `tell` claim closes the request
-     (`state='told'`) in the same transaction, so the operator is told once.
-   - **`revoked`.** An import withdrew the staged send (fix E5, `revoke_unsent`, which
-     now also moves the request to `revoked`). The line is the existing "The bank was
-     re-read before I could send it — ask for it again and I'll rebuild it."
+   Terminal states are never claimed: `stopped`, `recovery-failed`, `revoked`,
+   `withdrawn`, `delivered`, `uncertain`, `failed` and `superseded`. Whatever the
+   operator is owed about them is a package notice (§3.7), not a step.
+
+   - **A staged request is withdrawn before it is settled** (X3 ruling). A superseded
+     holder may still have the staged path in hand, and `send_media` or `send_email`
+     checks no token of ours. So a claim that finds `state='staged'` does all of the
+     following:
+     1. It takes `db.custody_lock()` **first**, then the write transaction (the store's
+        lock order).
+     2. It removes the unconsumed staged bytes: the Telegram outbox file, or this
+        plugin's own handoff entry for email. This is the same removal the import's
+        `withdraw_revoked` does, refactored into one helper,
+        `delivery.withdraw(conn, rows)`, which both call.
+     3. It stamps `deliveries.withdrawn_at` and settles the delivery `uncertain`: the
+        stalled holder may already have sent it.
+     4. It moves the request to `withdrawn` and raises its package notice
+        (`package-uncertain`), whose text is the existing offer ("may not have arrived …
+        say 'send it again'").
+     5. It returns `next: null` with that `speak`.
+
+     If the removal fails (an OSError other than "already gone"), the whole claim rolls
+     back and is refused, with "could not take back a staged package — nothing
+     changed", exactly as the import refuses. A superseded holder's later `send_media`
+     fails because the file is gone, and its `record_delivery` is refused by the token.
+     A later explicit "send it again" stages afresh from the package retained in
+     `packages/` (`resend_target` → `stage_for_delivery(resend=true)`): a new copy and a
+     new delivery row.
+   - **`revoked`.** An import withdrew the staged send (fix E5). `revoke_superseded_first_sends`
+     now also moves the request to `revoked` and raises `package-revoked`, whose line is
+     the existing "The bank was re-read before I could send it — ask for it again and
+     I'll rebuild it."
    - **Recovery never sends.** A file that may already have gone out is never sent twice
-     by recovery. The `record-uncertain` step leads to the existing `speak`, and "send
-     it again" is the operator's.
+     by recovery, and "send it again" stays the operator's.
 
 ### 3.5 Reclaiming a stale pass
 
@@ -266,8 +295,9 @@ in its existing transaction, before it bumps the generation for the new pass:
 - **Recovers its package request**, if it has an open one:
   - if its `snapshot` step finished, the request becomes `snapshot-done` with no token
     and a lapsed lease, so the next `continue_pass` claims `build`;
-  - otherwise it becomes `recovery-failed`, with the reason "I couldn't read the bank
-    for the <quarter> package — ask for it again." That is told once (§3.4).
+  - otherwise it becomes `recovery-failed` and raises its package notice
+    (`package-failed`: "I couldn't read the bank for the <quarter> package — ask for it
+    again."), which is delivered once through §3.7.
 - **Returns** `"reclaimed": true` as today, plus `"recovered": <request id or null>`.
 
 ### 3.6 Who calls it, what Ellen says, where
@@ -297,6 +327,63 @@ A continuation she gets that way is done *instead of* beginning a new pass.
   - This replaces "Already checking … I'll have the answer shortly." That answer
     promised a report the design cannot guarantee (residual R3).
   - An expired step never reaches `busy`, because `continue_pass` already claimed it.
+
+### 3.7 What a continuation owes the operator: package notices in the render log
+
+X3 ruling. Every failure or outcome message a continuation owes the operator becomes
+an occurrence in the existing `alerts` table, and is rendered through the existing
+`alerts.pending_rendering`. It is closed only by `mark_rendering_delivered`, which
+stamps `sent_at`. This is the pattern the collection alerts already follow:
+
+- an undelivered rendering is offered again;
+- a delivered one never is.
+
+**Kinds and keys.**
+
+| Kind | `occurrence_key` | Raised by |
+|---|---|---|
+| `package-stopped` | `request:<id>:stopped` | the immediate `stopped` reply of `end_pass` |
+| `package-failed` | `request:<id>:failed` | the stale-pass reclaim |
+| `package-uncertain` | `request:<id>:uncertain` | the staged-request claim |
+| `package-revoked` | `request:<id>:revoked` | the import's revocation |
+
+The key is UNIQUE, so raising an occurrence twice (a replayed claim, a retried
+`end_pass`) inserts once. `detail` holds `{quarter, reason, package_id}`. The reason is
+the refusal text, clipped at `DETAIL_MAX` (300).
+
+**Rendering.** `alerts._units` renders them after the collection alerts and before
+package changes, one wrapped line each:
+
+| Kind | Line |
+|---|---|
+| `package-stopped` | "I couldn't build the <quarter> package: <reason>." |
+| `package-failed` | "I couldn't read the bank for the <quarter> package — ask for it again." |
+| `package-revoked` | "The bank was re-read before I could send the <quarter> package — ask for it again and I'll rebuild it." |
+| `package-uncertain` | the existing `delivery.offer_lines(<filename>)` |
+
+A rendering that prints a `package-uncertain` occurrence also puts that package in its
+scope's `offers`, beside `alerts`. That way "send it again" binds to it exactly as it
+binds to `record_delivery`'s own offer today (D3).
+
+**Delivery.** The `speak` that `end_pass` already returns is that rendering. So is the
+new `speak` on every `continue_pass` answer, but only when the caller claimed something
+or nothing is live, held or running, so that a turn racing a live holder does not also
+send it.
+
+**Losing it and double-telling are both closed.**
+
+- *Crash after the claim* (the X3 case "recovery-failed → told, 0 messages"): the
+  occurrence stays unsent, and the next `end_pass` or `continue_pass` offers it again.
+- *Two tells*: the second turn finds it delivered, or finds the same undelivered
+  rendering.
+
+What is left is the existing at-least-once window of the alerts pattern: two turns
+holding the same undelivered rendering at the same instant. It is bounded by the
+`speak` gating above.
+
+`build_review`'s own receipts are unchanged. The skill's step "if it stopped, tell the
+operator why" becomes "send `speak`": Ellen composes no failure line of her own for a
+package.
 
 ## 4. Server changes
 
@@ -346,14 +433,18 @@ CREATE TABLE IF NOT EXISTS package_requests (
   token INTEGER, lease_at TEXT,
   state TEXT NOT NULL CHECK (state IN ('snapshot', 'snapshot-done', 'built', 'staged',
         'delivered', 'uncertain', 'failed', 'stopped', 'recovery-failed', 'revoked',
-        'told', 'superseded')),
+        'withdrawn', 'superseded')),
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state);
+ALTER TABLE deliveries ADD COLUMN withdrawn_at TEXT;   -- staged bytes taken back on a reclaim
 ```
+
+`alerts` needs no schema change. The four package-notice kinds (§3.7) are new values
+of `alerts.kind`, which has no CHECK. The `occurrence_key` is already UNIQUE.
 
 Two notes on the schema:
 
-- The fresh-store `DDL` gets the three columns inline, not as `ALTER`s.
+- The fresh-store `DDL` gets the four added columns inline, not as `ALTER`s.
 - The `pass_marker` columns are cleared whenever `begin_pass` rewrites the marker.
 
 ### 4.2 `server/passes.py`, with a new `server/steps.py`
@@ -366,7 +457,7 @@ Two notes on the schema:
 | `SWEEP_STOP_S` | 450 | the sweep stops |
 | `RETURN_BY_S` | 510 | `wrap_up`: 90 s to the ceiling |
 | `STEP_EXPIRY_S` | 600 | an unfinished step is ended; the stamp precedes Casa's launch, so the ceiling's own `timeout` notice already finds the step expired |
-| `LEASE_S` | 1800 | a claim with no progress may be claimed again |
+| `LEASE_S` | 600 | a claim with no progress may be claimed again. Every accepted write refreshes it; a Gmail round that goes 10 min without one loses the claim, its next write is refused, and the new claimant redoes the idempotent step |
 | `ROW_COST_S` | 10 | measured; sizes a sweep page |
 
 **`passes.py` changes:**
@@ -463,7 +554,20 @@ so in the spec.
 - **`delivery`** gains:
   - a `package_token` on `stage_for_delivery` and `record_delivery`, per §3.4;
   - idempotent staging for a request that is already staged;
-  - `revoke_unsent` moving that request to `revoked`.
+  - `withdraw(conn, rows)`, the removal of staged bytes (outbox file, or the plugin's
+    own handoff entry), extracted from `withdraw_revoked`. Both the import and the
+    staged-request claim call it, under the custody lock, and a failed removal refuses
+    the whole call;
+  - `revoke_superseded_first_sends` moving that request to `revoked` and raising
+    `package-revoked`;
+  - `resendable` / `resend_target` treating a withdrawn `uncertain` delivery like any
+    uncertain one: "send it again" re-stages a fresh copy.
+- **`alerts`** gains the four package-notice kinds in `_units`, and an `offers` scope for
+  `package-uncertain` in `pending_rendering`. `views.mark_rendering_delivered` already
+  stamps `sent_at` for every alert in scope.
+- **`steps.claim`** takes `db.custody_lock()` before its transaction whenever the
+  candidate it will claim is a staged request. The candidate is chosen by a read first,
+  and re-checked inside the transaction.
 - **`package.build_quarterly_package(conn, quarter, package_token)`** checks the token
   before its custody lock, and links the request inside its freeze transaction.
 
@@ -604,9 +708,13 @@ the pass has moved on and your recorded work is kept."
   The resend and single-document paths are unchanged and token-free.
 - **Continuation nexts**:
   - `build` and `stage` resume step 2 at that point;
-  - `record-uncertain` is `record_delivery(delivery_id, outcome="uncertain",
-    package_token=…)`, then send its `speak`. Never send the file again yourself;
-  - `tell` says `request.reason` once and builds nothing.
+  - `next: null` with a `speak`: send it verbatim, then `mark_rendering_delivered`.
+    That covers a stopped package, a failed recovery, a withdrawn or revoked send.
+    Never send the file again yourself, and never write a failure line of your own.
+
+  Every `speak` that `end_pass` or `continue_pass` returns is sent and marked
+  delivered, including on a cron turn. It is how anything owed about a package reaches
+  the operator exactly once.
 
 **Pinned tests (`tests/test_skill.py`).**
 
@@ -633,8 +741,17 @@ the pass has moved on and your recorded work is kept."
   call returns one. An ended pass never releases a pass token.
 - **No window between a pass and its package.** The authority transfer happens in
   `end_pass`'s own transaction, and the request's lease is fresh from that instant.
-- **At most one staged send per request.** Staging is idempotent, recovery never sends,
-  and a stale holder's stage is refused.
+- **At most one staged send per request, and no sendable file in a superseded
+  holder's hands.**
+  - Staging is idempotent, recovery never sends, and a stale holder's stage is refused.
+  - A reclaim of a staged request removes its staged bytes under the custody lock before
+    it settles the delivery `uncertain`. Casa's send tools check no token of ours, so
+    the file itself is what must be gone.
+  - A failed removal refuses the claim, as it refuses an import.
+- **What a continuation owes the operator is said exactly once, eventually.** Package
+  failures and outcomes are `alerts` occurrences (§3.7), offered until
+  `mark_rendering_delivered` and never after. A crash loses nothing, and a replay adds
+  nothing.
 - **Idempotent continuation.** A step can run again after a lease lapses (A6), under a
   new token. That is safe:
   - ingest is idempotent by hash;
@@ -700,28 +817,50 @@ connections via `db.open_store()`, as in `_procs.py`.
      fresh).
    - `build_quarterly_package(P)` builds. `build` without a token, or with `T`, is
      refused.
-10. **Stale package holder, plus idempotent staging.**
-    - `P1` builds and stages, then its lease lapses. A reclaim gives `P2` and
-      `record-uncertain`.
-    - `stage_for_delivery` with `P1` is refused. With `P2`, on the staged request, it
-      returns the **same** `delivery_id`, and the `deliveries` row count is unchanged.
-    - `record_delivery(uncertain, P2)` closes the request and returns `speak`.
-    - A variant: the next pass's import revokes the staged send. The request becomes
-      `revoked`, and the claim gives `tell` once.
-11. **Reclaim terminalizes and recovers.**
+10. **Idempotent staging.** With the current token, `stage_for_delivery` on a request
+    that is already staged returns the **same** `delivery_id` and path, and the
+    `deliveries` row count is unchanged.
+11. **A stale holder cannot send (X3 S1).**
+    - `P1` builds and stages. The staged outbox file exists. `P1`'s lease lapses.
+    - The reclaim `continue_pass` gives `P2`, `next: null`, and `speak` with the offer.
+      The staged file is **gone**. The delivery is `uncertain` with `withdrawn_at` set,
+      and the request is `withdrawn`.
+    - `stage_for_delivery(P1)` and `record_delivery(P1)` are refused. The staged path P1
+      holds does not exist, so the send fails.
+    - An import that lands next revokes nothing new, and still no file exists.
+    - "Send it again" (`resend=true`) stages a new copy from `packages/` under a new
+      delivery.
+    - The email variant: the handoff entry directory is removed.
+    - A removal that fails (a read-only directory) refuses the claim, and nothing
+      changes.
+12. **Revocation.** The next pass's import revokes an unsent first send. The request
+    becomes `revoked`, and one `package-revoked` occurrence exists.
+13. **Reclaim terminalizes and recovers.**
     - A snapshot pass with its step finished is left live for `STALE_AFTER_S`. Then
       `begin_pass` gives `reclaimed` and `recovered`, and the displaced pass has
       `ended_at` set and `outcome == "interrupted"`.
     - The next `continue_pass` gives `build` for its request, with a package token.
-    - The variant with the snapshot unfinished gives `tell` once, with "I couldn't read
-      the bank for the 2026-Q3 package — ask for it again.", and then null.
-12. **`busy` wording.** While a step runs, `begin_pass` gives "A check is running —
+    - The variant with the snapshot unfinished raises one `package-failed` occurrence.
+14. **Package notices: lost crash and double tell (X3 S2).**
+    - **Lost crash.** A reclaim raises `package-failed`. The first turn gets `speak`
+      and "crashes" before `mark_rendering_delivered`. The next `continue_pass` (or
+      `end_pass`) offers the **same** text again. After `mark_rendering_delivered`, no
+      later call offers it: `sent_at` is set, and there are 0 undelivered occurrences.
+    - **Double tell.** A stopped snapshot: `end_pass` raises `package-stopped` and
+      returns `speak`. A replayed `end_pass` (refused) and two later `continue_pass`
+      calls insert no second occurrence (UNIQUE key). After delivery the notice is
+      never offered again.
+    - The `package-uncertain` rendering's scope carries `offers`, so "send it again"
+      after it binds that package.
+15. **`busy` wording.** While a step runs, `begin_pass` gives "A check is running —
     started N minutes ago.\nAsk again in a few minutes." It fits 4096, and names no
     machinery.
-13. **Handover pairing.** `documents` shows `matched` with its payment, `proposed`,
+16. **Handover pairing.** `documents` shows `matched` with its payment, `proposed`,
     `unpaired` and `irrelevant` from the records. A handed-over document is reported
     correctly even with more than 50 unmatched documents.
-14. **Cron, contract, clock, back-compatibility, schema and surface.**
+17. **Lease of 600 s.** A claim is `held` at 599 s with no write, and reclaimable
+    at 600 s. A write at 590 s refreshes it (still `held` at 900 s).
+18. **Cron, contract, clock, back-compatibility, schema and surface.**
     - **Cron:** `reply == "silent"`.
     - **`record_step` refusals:** a stale or missing token, the wrong step for the
       trigger, a second start, carry arguments on `finish`.
@@ -846,6 +985,13 @@ at 60 s and then crashes at 90 s. Its error notice arrives while the step is sti
 unexpired, so `continue_pass` answers `running`. Nothing calls again at 600 s. The pass
 recovers at the next check after expiry (the cron, or "go and check now"). Until then
 `busy` tells the operator a check is running and to ask again in a few minutes.
+
+**R4 — a crash right after a claim (Terra X3, accepted by ruling).** A continuation
+that dies right after claiming leaves the pass dormant until its lease (600 s) lapses
+*and* something calls `continue_pass` again. That caller can be a notice, a check,
+"go and check now", a handover or a package request. There is no self-scheduled wake
+(standing constraint). An operator who asks again within ten minutes gets "A check is
+running …". After that, the ask recovers it. This is the same shape as R3.
 
 **Q1 — release number.** Two tools, three new tool arguments and a migration suggest
 v0.2.0. Any bump changes `WORKFLOW` to `acct@<new>`, and `check_setup` then reports
