@@ -166,7 +166,8 @@ within ten minutes (R4).
 
 `continue_pass()` takes no arguments and runs in one write transaction:
 
-1. **The live pass**, if it is younger than `STALE_AFTER_S`, and due: bump the counter,
+1. **The live pass**, if it is due (whatever its age: a finished step is continued even
+   after a restart longer than `STALE_AFTER_S`): bump the counter,
    then set `generation = <new>`, `claimed_step = <latest step or 'none'>` and
    `lease_at = now`, and return the continuation below.
 2. **Otherwise, an open package request** whose lease has lapsed: bump the counter,
@@ -218,10 +219,12 @@ The flow of a package request:
    open request, in the same transaction that ends the pass it:
    - bumps the counter;
    - sets `request.token = <new>`, `lease_at = now` and `pass_outcome = <outcome>`;
-   - sets `state` to `snapshot-done`, or to `stopped` when the outcome is `stopped`;
-   - when the outcome is `stopped`, raises the request's **package notice**
-     (`package-stopped`, §3.7) in the same transaction, instead of asking Ellen to tell
-     it;
+   - sets `state` to `snapshot-done`; to `stopped` when the outcome is `stopped`; to
+     `recovery-failed` when the outcome is `failed` (the pass read no bank, and a build
+     would ship an older import as this request's);
+   - when the outcome is `stopped` or `failed`, raises the request's **package notice**
+     (`package-stopped` or `package-failed`, §3.7) in the same transaction, instead of
+     asking Ellen to tell it;
    - returns `{"package_token": <new>, "request": {…}, "next": "build" | null}` to the
      caller of `end_pass`, with `speak` as always.
 
@@ -229,7 +232,14 @@ The flow of a package request:
    instant the pass ends.
 3. **Token-bound writes.** Each accepted write refreshes the request's `lease_at`:
    - `build_quarterly_package(quarter, package_token)` needs the current token of the
-     open request for that quarter. It links `package_id`, and `state` becomes `built`.
+     open request for that quarter, in state `snapshot-done`. It links `package_id`,
+     and `state` becomes `built`. **One request builds one package:** a second build
+     under the same token is refused, early and again in the registering transaction,
+     so no package is ever unlinked from its request and sent outside the send-once
+     rule. A new package is a new request.
+   - A request is staged on the channel it was asked for; another channel is refused
+     ("ask for the package again by email"), and a new request is how the operator gets
+     the other channel.
    - `stage_for_delivery(channel, package_id, package_token)` needs the token of the
      request that holds `package_id`. **It is idempotent:** if the request already has
      a staged, unsettled, unrevoked delivery, it returns that delivery (same
@@ -328,8 +338,10 @@ The flow of a package request:
 
 ### 3.5 Reclaiming a stale pass
 
-`begin_pass`, finding a live marker older than `STALE_AFTER_S`, does all of the following
-in its existing transaction, before it bumps the generation for the new pass:
+`begin_pass`, finding a live marker older than `STALE_AFTER_S` whose claim holds no fresh
+lease (a fresh lease is a live holder, however old the pass; code review C1), does
+all of the following in its existing transaction, before it bumps the generation for the
+new pass:
 
 - **Terminalizes the displaced pass**: `ended_at = now`, `outcome = 'interrupted'`,
   `report_json` stamped `{"reclaimed": true}` plus `throughput`. The pass no longer looks
@@ -337,6 +349,8 @@ in its existing transaction, before it bumps the generation for the new pass:
 - **Recovers its package request**, if it has an open one:
   - if its `snapshot` step finished, the request becomes `snapshot-done` with no token
     and a lapsed lease, so the next `continue_pass` claims `build`;
+  - if that finish says `stopped`, the request becomes `stopped` with its
+    `package-stopped` notice, exactly as `end_pass(stopped)` closes it;
   - otherwise it becomes `recovery-failed` and raises its package notice
     (`package-failed`: "I couldn't read the bank for the <quarter> package — ask for it
     again."), which is delivered once through §3.7.
@@ -520,9 +534,13 @@ Two notes on the schema:
   non-None token inside an open transaction, it also runs
   `UPDATE pass_marker SET lease_at=now`.
 - **`check_package_token(conn, request_id, token)`** refuses unless
-  `token == request.token` and the state is open. The wording: "this package request
-  has been taken over by a later turn — stop, nothing was written". When it accepts, it
-  refreshes `lease_at`.
+  `token == request.token` and the state is open. A token that is not the request's, or
+  a request `superseded` or `withdrawn`, gets "this package request has been taken over
+  by a later turn — stop, nothing was written". The holder's own request once it is
+  closed (sent, stopped, not built, taken back) gets a plain sentence to relay instead —
+  "the <quarter> package was already sent — nothing changed. To have it again, or by
+  email, ask for the package again." — because "taken over" makes Ellen stop in
+  silence. When it accepts, it refreshes `lease_at`.
 - **`begin_pass(conn, trigger, reply)`** gains the reclaim terminalization and request
   recovery of §3.5, and the new `busy` text. For a live, not-stale marker with a
   running step, the text is
@@ -681,14 +699,17 @@ A pass's progress is in the store, never in a message, and every continuation ge
 token: the old one is refused from then on.
 
 1. Before `begin_pass` in any flow (the cron, "go and check now", a handed-over document,
-   a package), call `continue_pass()`. If it returns a continuation, do that instead — it
-   is an unfinished earlier one.
+   a package), call `continue_pass()`. If it returns a continuation, it is an unfinished
+   earlier one: do it first, to its end. Then return to what was asked — `continue_pass()`
+   again, and when it has nothing, `begin_pass` and the requested flow (the check, the
+   handed-over document, the package). The operator's request is never dropped.
 2. Just before `delegate_to_agent`, `record_step(pass_token, step=…, action="start")`
-   with what the flow names, and pass that same token to the specialist.
-3. When the delegation answers in this turn: if it failed, or it came back without
-   finishing (its reply does not start `quarterly-accounting:`),
-   `record_step(pass_token, step=…, action="finish")` — with `failed=true` for an
-   error. Then `continue_pass()`, and do what it returns with the token it returns.
+   with what the flow names, and pass that same token AND the step's name to the
+   specialist: the context says `pass_token=<token>, step=<the step>`.
+3. When the delegation answers in this turn — whatever it answered, failed or not —
+   `record_step(pass_token, step=…, action="finish")`, with `failed=true` for an error
+   (when the specialist already finished its step, this changes nothing). Then
+   `continue_pass()`, and do what it returns with the token it returns.
 4. When it answers `status: pending`: say the flow's one line (on the cron, output
    `<silent/>`) and end the turn. The pass is not over.
 5. On ANY system notification about a delegation to finance — returned, failed, timed
@@ -1115,3 +1136,30 @@ The test-install reset loop then asks which backup to restore.
 
 **Q2 — budget numbers.** 450 / 510 / 600 / 1800 / 10 come from one measurement. Re-tune
 them from the first passes after the fix.
+
+## 11. Changes after code review C1 (implemented)
+
+- **One request, one package** (§3.4): a second build under one token is refused, early
+  and in the registering transaction.
+- **A due pass is continued at any age** (§3.3), and `begin_pass` does not reclaim a pass
+  whose claim holds a fresh lease (§3.5). Otherwise a finished sweep was invisible after a
+  restart longer than `STALE_AFTER_S`: the pass stayed live and its Gmail round never ran.
+- **Every delegation names its step** in its context, and Ellen always records her own
+  finish when a delegation answers in her turn (a no-op after the specialist's). An inline
+  answer that carried no finish no longer leaves the step `running` with no notice to
+  come. The specialist never calls `continue_pass` or starts a step.
+- **A reclaimed `stopped` snapshot** closes `stopped` with its notice, and
+  **`end_pass(failed)` on a snapshot pass** closes `recovery-failed` with its notice: neither
+  hands over a build from an older import.
+- **A continuation found first never drops the operator's request**: Ellen finishes it,
+  calls `continue_pass` again, then begins the flow that was asked for.
+- **A closed request is refused in words to relay**, not as "taken over"; a request is
+  staged only on its own channel, and "email it to me" after a Telegram delivery is a new
+  request.
+- **The `speak` rule** is one rule in the skill's answers-later section, beside the
+  null-continuation rule it used to seem to contradict.
+- **A handed-over document judged irrelevant, or not found**, has its own line.
+- The clock accepts a token given as digits; `rotate` outside a transaction is a
+  `RuntimeError`, not an assertion.
+- Accepted as design: another session can deliver a just-raised notice before the raising
+  call renders it; the notice still reaches the operator once.

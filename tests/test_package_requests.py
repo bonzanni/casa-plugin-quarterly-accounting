@@ -138,7 +138,8 @@ class TestHandOver(Requests):
         self.assertEqual(second["speak"], end["speak"])
         self.assertEqual(len(self.alerts_of("package-stopped")), 1)
         self.assertTrue(self.text("build_quarterly_package", quarter="2026-Q3",
-                                  package_token=end["package_token"]).startswith(TAKEN))
+                                  package_token=end["package_token"]).startswith(
+                                      "refused: the Q3 2026 package was already stopped"))
         self.call("mark_rendering_delivered", render_id=end["speak"]["render_id"])
         self.assertEqual(self.claim(), {"continue": None, "speak": None})
 
@@ -483,3 +484,100 @@ class TestHandoverPairing(Requests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewC1(Requests):
+    """Code review round C1 on the package request."""
+    def test_one_request_builds_one_package(self):
+        # A1: a second build under the same token would unlink the first package from
+        # its request, and that package could then be sent outside the send-once rule
+        self.seed(1, documents=1)
+        p, pkg = self.built()
+        self.assertTrue(self.text("build_quarterly_package", quarter="2026-Q3",
+                                  package_token=p).startswith(
+                                      "refused: this package request already built its package"))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 1)
+        self.assertEqual(self.request()["package_id"], pkg["package_id"])
+
+    def test_the_second_build_is_refused_in_the_registering_transaction_too(self):
+        self.seed(1, documents=1)
+        end, _ = self.handed_over()
+        p = end["package_token"]
+        real = package._freeze
+
+        def freeze_after_another_build(conn, quarter):
+            frozen = real(conn, quarter)
+            other = db.open_store()
+            try:            # another turn holding the same token registers first
+                with mock.patch.object(package, "_freeze", real):
+                    package.build_quarterly_package(other, "2026-Q3", p)
+            finally:
+                other.close()
+            return frozen
+        with mock.patch.object(package, "_freeze", freeze_after_another_build), \
+                mock.patch.object(db, "custody_lock", _no_lock):
+            self.assertTrue(self.text("build_quarterly_package", quarter="2026-Q3",
+                                      package_token=p).startswith(
+                                          "refused: this package request already built"))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 1)
+        self.assertEqual(len(os.listdir(db.data_dir() / "packages")), 1)
+
+    def test_a_reclaimed_stopped_snapshot_is_told_not_built(self):
+        # I4
+        self.seed(1)
+        self.snapshot(stopped="the bound account is gone from bank-feed")
+        self.clock.advance(passes.STALE_AFTER_S)
+        out = self.call("begin_pass", trigger="operator")
+        self.assertEqual(out["recovered"], self.request()["request_id"])
+        self.assertEqual(self.request()["state"], "stopped")
+        self.assertEqual(len(self.alerts_of("package-stopped")), 1)
+        self.assertEqual(self.alerts_of("package-failed"), [])
+        self.assertNotIn("continue", {k for k, v in self.claim().items() if v})
+        self.call("end_pass", pass_token=out["pass_token"], outcome="failed")
+        self.assertIn("the bound account is gone", self.claim()["speak"]["text"])
+
+    def test_a_failed_snapshot_pass_hands_over_nothing_to_build(self):
+        # I5: a pass that read no bank must not build from an older import
+        self.seed(1)
+        t = self.begin("package")
+        self.start(t, step="snapshot", quarter="2026-Q3", channel="telegram")
+        self.call("record_step", pass_token=t, step="snapshot", action="finish", failed=True)
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "end-pass-then-build")
+        end = self.call("end_pass", pass_token=c["pass_token"], outcome="failed")
+        self.assertIsNone(end["next"])
+        self.assertEqual(end["request"]["state"], "recovery-failed")
+        self.assertEqual(end["speak"]["text"], "I couldn't read the bank for the Q3 2026 "
+                                               "package — ask for it\nagain.")
+        self.assertTrue(self.text("build_quarterly_package", quarter="2026-Q3",
+                                  package_token=end["package_token"]).startswith("refused: "))
+
+    def test_a_closed_request_is_refused_in_words_not_as_taken_over(self):
+        # I7: "taken over" makes Ellen stop in silence; a finished request is said plainly
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        self.call("record_delivery", delivery_id=d["delivery_id"], outcome="delivered",
+                  package_token=p)
+        text = self.text("stage_for_delivery", channel="email", package_id=pkg["package_id"],
+                         package_token=p)
+        self.assertEqual(text, "refused: the Q3 2026 package was already sent — nothing "
+                               "changed. To have it again, or by email, ask for the package "
+                               "again.")
+        import views
+        for word in views.FORBIDDEN:
+            self.assertNotIn(word, text)
+
+    def test_a_request_is_staged_on_its_own_channel(self):
+        # M4
+        self.seed(1, documents=1)
+        p, pkg = self.built()
+        self.assertEqual(self.text("stage_for_delivery", channel="email",
+                                   package_id=pkg["package_id"], package_token=p),
+                         "refused: this package was asked for by telegram — stage it by "
+                         "telegram, or ask for the package again by email")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0], 0)
+
+
+@__import__("contextlib").contextmanager
+def _no_lock(*a, **kw):
+    yield

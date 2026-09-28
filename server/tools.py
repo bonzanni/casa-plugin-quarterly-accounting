@@ -40,6 +40,8 @@ def register(name, description, schema):
         def with_clock(args):
             out = fn(args)
             token = args.get("pass_token")
+            if isinstance(token, str) and token.strip().isdigit():
+                token = int(token)
             if isinstance(out, dict) and isinstance(token, int) and not isinstance(token, bool):
                 c = steps.clock(conn(), token)
                 if c is not None:

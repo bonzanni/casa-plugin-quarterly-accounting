@@ -30,7 +30,7 @@ CEILING_ASSUMED_S = 600     # Casa's delegated-turn ceiling, as read (spec: assu
 SWEEP_STOP_S = 450          # the sweep lists no row after this
 RETURN_BY_S = 510           # wrap_up: the specialist finishes and returns
 STEP_EXPIRY_S = 600         # an unfinished step is over (its stamp precedes Casa's launch)
-LEASE_S = 600               # a claim with no progress may be claimed again
+LEASE_S = passes.LEASE_S    # a claim with no progress may be claimed again
 ROW_COST_S = 10             # one row's read, record and repair, measured
 STEPS = ("sweep", "judge", "handover", "snapshot")
 FOR_TRIGGER = {"cron": ("sweep", "judge"), "operator": ("sweep", "judge"),
@@ -224,8 +224,6 @@ def _choose(conn):
     """What a claim would take now: ("pass", marker, step), ("request", row),
     or ("none", answer)."""
     m = _live_pass(conn)
-    if m is not None and passes._age_s(m["started_at"]) >= passes.STALE_AFTER_S:
-        m = None                       # a stale pass is begin_pass's to reclaim, not ours
     fresh = m is not None and _lease_fresh(m["lease_at"])
     running = None
     if m is not None:

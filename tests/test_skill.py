@@ -41,6 +41,8 @@ OPERATOR_LINES = (
     "Ask again in a few minutes.",
     "Filed. It could fit more than one payment — it's in 'anything I should check?'.",
     "Filed. I'll match it at the next check.",
+    "Filed. It doesn't look like an invoice for any payment — say if it is one.",
+    "I can't find that document in what I've filed — send it again?",
 )
 OUTCOME_RULE = ("The outcome for `end_pass`: `stopped` when `can_run` is false or the step's "
                 "finish says `stopped`; `failed` when the step ended unfinished and nothing was "
@@ -341,8 +343,47 @@ class TestSkill(TempEnv):
         self.assertIn("never write a failure line of your own", pack)
         self.assertIn('`send_media(path, kind="zip", filename=<the returned filename>',
                       pack)
-        self.assertIn("Every `speak` that `end_pass` or `continue_pass` returns is sent and "
-                      "marked delivered, including on a cron turn.", pack)
+        self.assertNotIn("Every `speak`", pack)          # said once, in the answers-later rules
+
+    # --- code review round C1 ---------------------------------------------------------------
+    def later(self):
+        return " ".join(self.section("## Ellen: a delegation that answers later",
+                                     "## Ellen: answering anything").split())
+
+    def test_every_speak_is_sent_by_one_rule_beside_the_null_rule(self):
+        later = self.later()
+        self.assertIn("7. Every `speak` that `end_pass` or `continue_pass` returns is sent "
+                      "verbatim and marked delivered", later)
+        self.assertIn("`continue` is null: write nothing (a `speak` is still sent — rule 7)",
+                      later)
+        self.assertEqual(" ".join(SKILL.split()).count("Every `speak` that"), 1)
+
+    def test_every_delegation_names_its_step_and_ellen_always_finishes_it(self):
+        flat = " ".join(SKILL.split())
+        for step in ("sweep", "judge", "handover", "snapshot"):
+            self.assertIn(f"`pass_token=<token>, step={step}`", flat, step)
+        later = self.later()
+        self.assertIn("pass that same token AND the step's name to the specialist", later)
+        self.assertIn("When the delegation answers in this turn — whatever it answered, failed "
+                      "or not — `record_step(pass_token, step=…, action=\"finish\")`", later)
+        self.assertNotIn("its reply does not start", later)
+
+    def test_the_specialist_never_claims_or_starts(self):
+        spec = " ".join(self.section("## The specialist's pass", "1. **Probes.**").split())
+        self.assertIn("never call `continue_pass`, and never `record_step(…, "
+                      "action=\"start\")`", spec)
+
+    def test_a_continuation_found_first_never_drops_the_request(self):
+        later = self.later()
+        self.assertIn("Then return to what was asked — `continue_pass()` again, and when it "
+                      "has nothing, `begin_pass` and the requested flow", later)
+        self.assertIn("The operator's request is never dropped.", later)
+
+    def test_a_closed_request_is_said_and_email_after_telegram_is_a_new_request(self):
+        pack = " ".join(self.section("## Packaging", "## Install").split())
+        self.assertIn("\"email it to me\" after a Telegram delivery is a new request — step 1 "
+                      "again with `channel=\"email\"`", pack)
+        self.assertIn("never stopped on in silence", pack)
 
     def test_the_quarter_format_and_the_uncertain_offer(self):
         self.assertIn('("give me Q3" is `quarter="Q3"`)', " ".join(SKILL.split()))

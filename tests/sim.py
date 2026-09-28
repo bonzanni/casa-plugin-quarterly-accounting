@@ -251,6 +251,23 @@ def outcome(c, remaining=0, not_searched=0) -> str:
     return "complete"
 
 
+def continue_earlier(conn) -> list:
+    """SKILL.md: continue_pass before begin_pass. A continuation found first is an
+    unfinished earlier one: do it (here, a pass continuation is ended by the outcome
+    rule — the sim has no Gmail round), then continue_pass again, and only when
+    nothing is due go on with the flow that was asked for. Returns the ended passes."""
+    import steps
+    ended = []
+    while True:
+        c = steps.claim(conn)["continue"]
+        if c is None:
+            return ended
+        if "pass_token" in c:
+            ended.append(passes.end_pass(conn, c["pass_token"], outcome(c), {}))
+        elif c["next"] is not None:
+            raise AssertionError(f"the sim does not model a package request's {c['next']}")
+
+
 def _continue(conn) -> dict:
     """Ellen's continue_pass after the delegation answered: the continuation."""
     import steps
@@ -267,7 +284,7 @@ def run_pass(conn, bf, trigger="cron", sync=None, sweep_budget=None) -> dict:
     stop short; then, as SKILL.md step 6 says, triage judges only the fresh items
     and the pass ends `interrupted` (fix E2). `token` is the specialist's."""
     import steps
-    assert steps.claim(conn)["continue"] is None, "nothing unfinished to continue"
+    continue_earlier(conn)
     token = passes.begin_pass(conn, trigger)["pass_token"]
     steps.start(conn, token, "sweep", {})
     probe(conn, bf, token, sync)
@@ -312,6 +329,8 @@ def run_pass(conn, bf, trigger="cron", sync=None, sweep_budget=None) -> dict:
             return _stopped(conn, token, gate, imp, tri, exc)
     steps.finish(conn, token, "sweep", counts={"remaining_in_cycle": remaining,
                                                "triage_remaining": 0})
+    # Ellen, the delegation having answered in her turn: her own finish (a no-op here)
+    assert steps.finish(conn, token, "sweep", counts={})["already"]
     c = _continue(conn)
     end = passes.end_pass(conn, c["pass_token"], outcome(c, remaining), {})
     out = {"token": token, "import": imp, "gate": gate, "triage": tri, "end": end}
@@ -339,7 +358,7 @@ def package_pass(conn, bf, quarter="2026-Q3", channel="telegram", sweep_budget=N
     specialist, then continue_pass and end_pass — whose answer hands over the
     package request's package_token."""
     import steps
-    assert steps.claim(conn)["continue"] is None, "nothing unfinished to continue"
+    continue_earlier(conn)
     token = passes.begin_pass(conn, "package")["pass_token"]
     steps.start(conn, token, "snapshot", {"quarter": quarter, "channel": channel})
     probe(conn, bf, token)

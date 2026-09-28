@@ -106,12 +106,14 @@ class ToolPass(test_e2e.Base):
         """A package request with no import of its own: begin_pass(package), the
         snapshot step, end_pass. Returns the package_token end_pass hands over."""
         token = self.begin("package", do_import=False, channel=channel)
-        return self.end(token, "complete")["package_token"]
+        out = self.end(token, "complete")["package_token"]
+        self.package_token = None
+        return out
 
-    def zip_of(self, quarter="2026-Q3"):
+    def zip_of(self, quarter="2026-Q3", channel="telegram"):
         token, self.package_token = self.package_token, None
         if token is None:
-            token = self.request()
+            token = self.request(channel)
         pkg = call("build_quarterly_package", quarter=quarter, package_token=token)
         pkg["package_token"] = token
         z = zipfile.ZipFile(pkg["path"])
@@ -449,11 +451,16 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
     def test_the_first_send_of_a_superseded_package_is_refused(self):
         pkg = self.built_then_superseded()
         handoff_before = self.handoff_files()
-        for channel in ("telegram", "email"):
-            out = _raw("stage_for_delivery", channel=channel, package_id=pkg["package_id"],
-                       package_token=pkg["package_token"])
-            self.assertEqual(out, "refused: the bank was re-read since this package was built "
-                                  "— build it again")
+        # a request is staged by the channel it was asked for (its email variant is a
+        # request of its own, and meets the same snapshot check)
+        out = _raw("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
+                   package_token=pkg["package_token"])
+        self.assertEqual(out, "refused: the bank was re-read since this package was built "
+                              "— build it again")
+        self.assertTrue(_raw("stage_for_delivery", channel="email",
+                             package_id=pkg["package_id"],
+                             package_token=pkg["package_token"]).startswith(
+                                 "refused: this package was asked for by telegram"))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0], 0)
         self.assertEqual(self.outbox_files(), [])
         self.assertEqual(self.handoff_files(), handoff_before)
@@ -506,7 +513,7 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
                   package_token=pkg["package_token"])
         # one staged send per request: the emailed copy is a second request's, built under
         # the same import
-        pkg2 = self.zip_of()[0]
+        pkg2 = self.zip_of(channel="email")[0]
         em = call("stage_for_delivery", channel="email", package_id=pkg2["package_id"],
                   package_token=pkg2["package_token"])
         self.assertEqual(os.listdir(self.outbox), [os.path.basename(tg["path"])])
@@ -623,7 +630,7 @@ class TestWithdrawalUnderTheCustodyLock(ToolPass):
         # superseded package sendable under a committed newer snapshot
         for channel in ("telegram", "email"):
             with self.subTest(channel=channel):
-                pkg = self.built() if channel == "telegram" else self.rebuilt()
+                pkg = self.built() if channel == "telegram" else self.rebuilt(channel)
                 d = call("stage_for_delivery", channel=channel, package_id=pkg["package_id"],
                          package_token=pkg["package_token"])
                 staged = pathlib.Path(d["path"])
@@ -648,9 +655,9 @@ class TestWithdrawalUnderTheCustodyLock(ToolPass):
                 self.assertEqual(self.state(d["delivery_id"]), ("failed", True))
                 self.end(token, "interrupted")
 
-    def rebuilt(self):
+    def rebuilt(self, channel="telegram"):
         """A fresh package built after a complete sweep, under the latest import."""
-        token = self.begin("package")
+        token = self.begin("package", channel=channel)
         self.assertEqual(self.sweep(token), 0)
         self.end(token, "complete")
         return self.zip_of()[0]

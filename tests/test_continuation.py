@@ -448,3 +448,68 @@ class TestContractAndSurface(Flow):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewC1(Flow):
+    """Code review round C1 on the continuation."""
+    def test_a_finished_sweep_is_continued_after_a_long_restart(self):
+        # A2: a finished step older than the reclaim threshold is still continued, and
+        # begin_pass does not reclaim a pass whose claim holds a fresh lease
+        self.seed(1)
+        t1 = self.begin()
+        self.start(t1)
+        self.specialist(t1)
+        self.clock.advance(passes.STALE_AFTER_S + 60)
+        c = self.claim()["continue"]
+        self.assertEqual((c["step"], c["next"]), ("sweep", "gmail-round"))
+        busy = self.call("begin_pass", trigger="operator")
+        self.assertEqual(busy["status"], "busy")
+        self.call("record_probe", pass_token=c["pass_token"], kind="gmail", ok=True)
+        self.assertEqual(self.call("end_pass", pass_token=c["pass_token"],
+                                   outcome="complete")["outcome"], "complete")
+
+    def test_an_inline_answer_without_a_finish_is_closed_by_ellens_finish(self):
+        # I2: the specialist returned (even with its prefix) but recorded no finish: Ellen
+        # always finishes the step herself, so the pass is due at once, never `running`
+        self.seed(1)
+        t1 = self.begin()
+        self.start(t1)
+        self.probe_import(t1)
+        self.assertEqual(self.claim()["running"]["step"], "sweep")
+        out = self.call("record_step", pass_token=t1, step="sweep", action="finish")
+        self.assertFalse(out["already"])
+        self.assertEqual(self.claim()["continue"]["ended"], "finished")
+
+    def test_ellens_finish_after_the_specialists_is_a_no_op(self):
+        self.seed(1)
+        t1 = self.begin()
+        self.start(t1)
+        self.specialist(t1)
+        out = self.call("record_step", pass_token=t1, step="sweep", action="finish")
+        self.assertTrue(out["already"])
+        c = self.claim()["continue"]
+        self.assertEqual(c["finish"]["remaining_in_cycle"], 0)
+
+    def test_the_clock_answers_a_token_passed_as_text(self):
+        # M4: _int's rule — an integer, or its digits as text — for the clock as well
+        self.seed(1)
+        t1 = self.begin()
+        self.start(t1)
+        self.assertIn("clock", self.call("list_quarter_state", triage=True,
+                                         pass_token=str(t1)))
+
+    def test_rotate_outside_a_transaction_is_an_error_not_an_assert(self):
+        with self.assertRaises(RuntimeError):
+            passes.rotate(self.conn)
+
+    def test_the_sim_finishes_an_earlier_continuation_then_runs_its_own_pass(self):
+        # I6: a continuation found first is done, then the requested flow still runs
+        self.seed(1)
+        t1 = self.begin()
+        self.start(t1)
+        self.clock.advance(steps.STEP_EXPIRY_S)
+        out = sim.run_pass(self.conn, self.bf)
+        earlier = self.conn.execute("SELECT outcome FROM passes WHERE generation=?",
+                                    (t1,)).fetchone()[0]
+        self.assertEqual(earlier, "failed")
+        self.assertEqual(out["end"]["outcome"], "complete")

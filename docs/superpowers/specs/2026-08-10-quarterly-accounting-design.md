@@ -2480,12 +2480,16 @@ The mechanics, in the order a pass meets them:
 - **Steps.** Ellen stamps each delegated step (`record_step(start)`: `sweep`, `judge`,
   `handover`, `snapshot`) just before `delegate_to_agent`, with the token she passes on.
   The specialist's last action records its finish (counts, and `stopped` when it
-  stopped); Ellen records one herself only when the delegation came back in her turn
-  without it (`failed` on an error). A step with neither is expired at `STEP_EXPIRY_S`
+  stopped); every delegation's context names its step. When a delegation answers in
+  Ellen's turn she records the finish herself as well (`failed` on an error) — a no-op
+  after the specialist's. A continuation found before a request is done first; then the
+  request itself runs. A step with neither is expired at `STEP_EXPIRY_S`
   (600 s) after its stamp.
 - **The claim.** `continue_pass` takes no arguments and runs in one write transaction:
   the live pass whose latest step is over and not already held by a fresh lease, else an
-  open package request whose lease lapsed. It rotates the token and returns the new one
+  open package request whose lease lapsed — at any age: a finished step is continued even
+  after a long restart, and a reclaim never takes a pass whose claim holds a fresh lease.
+  It rotates the token and returns the new one
   with the step's inputs: for a sweep, the triage listing exactly as `list_quarter_state`
   gives it; for a handover, each document's recorded pairing, never inferred from the
   capped list of unmatched documents. Every accepted write renews its holder's lease;
@@ -2497,8 +2501,11 @@ The mechanics, in the order a pass meets them:
   own in its own transaction (never claimable in between). `build_quarterly_package`,
   `stage_for_delivery` and `record_delivery` need that token, checked again in the
   transaction that commits, so a holder rotated while it waited for a lock commits
-  nothing and leaves no zip or staged copy behind. Staging a staged request returns the
-  same send. A claim of a staged request removes its staged bytes under the custody lock
+  nothing and leaves no zip or staged copy behind. One request builds one package and is
+  staged on the channel it was asked for; staging a staged request returns the same send.
+  A pass that stopped, or read no bank, closes its request with a package notice instead
+  of handing over a build. A closed request is refused in words Ellen relays ("the Q3 2026
+  package was already sent … ask for the package again"). A claim of a staged request removes its staged bytes under the custody lock
   first, then settles the send `uncertain` and offers "send it again"; a removal that
   fails refuses the claim. Recovery never sends.
 - **Staged paths are never reused.** Every delivery's staged path is unique in the store;

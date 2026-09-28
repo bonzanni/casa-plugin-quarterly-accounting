@@ -121,6 +121,9 @@ def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_toke
     req = None if resend or package_id is None else request_of_package(conn, package_id)
     if req is not None:
         passes.check_package_token(conn, req["request_id"], package_token)
+        if req["channel"] != channel:
+            raise db.Refusal(f"this package was asked for by {req['channel']} — stage it by "
+                             f"{req['channel']}, or ask for the package again by {channel}")
     with db.custody_lock():
         return _stage(conn, channel, package_id, doc_id, pass_token,
                       req["request_id"] if req is not None else None, package_token)

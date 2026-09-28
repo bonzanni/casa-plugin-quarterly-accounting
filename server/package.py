@@ -335,8 +335,11 @@ def _request_for_build(conn, quarter: str, package_token) -> int:
     if req["quarter"] != quarter:
         raise db.Refusal(f"this package_token is for the {dates.quarter_label(req['quarter'])} "
                          "package")
-    if req["state"] not in ("snapshot-done", "built"):
-        raise db.Refusal("this package request already staged its send — stage it, or stop")
+    # one request builds one package: a second build would unlink the first from its
+    # request, and that package could then be sent outside the send-once rule
+    if req["state"] != "snapshot-done":
+        raise db.Refusal("this package request already built its package — stage it, or ask "
+                         "for the package again for a new one")
     return req["request_id"]
 
 

@@ -26,7 +26,12 @@ import version
 STALE_AFTER_S = 3 * 3600
 OUTCOMES = ("complete", "interrupted", "stopped", "failed")
 REPLIES = ("telegram", "silent")
+LEASE_S = 600         # a claim with no progress may be claimed again (steps.LEASE_S)
 OPEN_REQUEST = ("snapshot-done", "built", "staged")    # a package request a token may act on
+CLOSED_WORD = {"delivered": "sent", "uncertain": "sent, though it may not have arrived",
+               "failed": "tried, and it didn't go out", "stopped": "stopped",
+               "recovery-failed": "not built: the bank couldn't be read",
+               "revoked": "taken back when the bank was re-read"}
 BUSY = "A check is running — started {when}.\nAsk again in a few minutes."
 PROBE_KINDS = ("bank_tools", "bank_accounts", "bank_sync", "ledger", "gmail")
 
@@ -52,7 +57,8 @@ def rotate(conn) -> int:
     """The next token: the one monotonic counter every token is drawn from
     (begin_pass, a claim, a package hand-over). Inside the caller's write
     transaction."""
-    assert conn.in_transaction, "a token is drawn inside the write transaction"
+    if not conn.in_transaction:
+        raise RuntimeError("a token is drawn inside the write transaction")
     conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
     return conn.execute("SELECT value FROM counters WHERE name='pass_generation'").fetchone()[0]
 
@@ -67,7 +73,9 @@ def begin_pass(conn, trigger: str, reply=None) -> dict:
         reclaimed, recovered = False, None
         if m is not None and m["live"]:
             age = _age_s(m["started_at"])
-            if age < STALE_AFTER_S:
+            # a claim holding a fresh lease is a live holder, however old the pass
+            held = m["lease_at"] is not None and _age_s(m["lease_at"]) < LEASE_S
+            if age < STALE_AFTER_S or held:
                 minutes = int(age // 60)
                 when = "a minute ago" if minutes <= 1 else f"{minutes} minutes ago"
                 return {"status": "busy", "started_at": m["started_at"],
@@ -103,19 +111,33 @@ def _terminalize(conn, pass_id: str):
         return None
     step = conn.execute("SELECT finished_at, finish_json FROM pass_steps WHERE pass_id=? AND"
                         " step='snapshot'", (pass_id,)).fetchone()
-    ok = step is not None and step["finished_at"] is not None and \
-        not json.loads(step["finish_json"] or "{}").get("failed")
-    if ok:
+    fin = json.loads(step["finish_json"] or "{}") if step is not None else {}
+    finished = step is not None and step["finished_at"] is not None
+    if finished and fin.get("stopped"):
+        _close(conn, req, "stopped", "interrupted", reason=fin["stopped"])
+    elif finished and not fin.get("failed"):
         conn.execute("UPDATE package_requests SET state='snapshot-done', token=NULL,"
                      " lease_at=NULL, pass_outcome='interrupted', updated_at=? WHERE request_id=?",
                      (now, req["request_id"]))
     else:
-        conn.execute("UPDATE package_requests SET state='recovery-failed', token=NULL,"
-                     " pass_outcome='interrupted', updated_at=? WHERE request_id=?",
-                     (now, req["request_id"]))
-        alerts.raise_package(conn, "package-failed", f"request:{req['request_id']}:failed",
-                             quarter=req["quarter"])
+        _close(conn, req, "recovery-failed", "interrupted")
     return req["request_id"]
+
+
+def _close(conn, req, state: str, outcome: str, reason=None):
+    """Close a package request whose bank read did not give it a package: `stopped`
+    (with its reason) or `recovery-failed` (the bank was not read), with its package
+    notice raised in the caller's transaction. Returns the notice's alert_id."""
+    import alerts
+    now = db.now()
+    conn.execute("UPDATE package_requests SET state=?, pass_outcome=?, reason=?, lease_at=?,"
+                 " updated_at=? WHERE request_id=?",
+                 (state, outcome, reason, now, now, req["request_id"]))
+    if state == "stopped":
+        return alerts.raise_package(conn, "package-stopped", f"request:{req['request_id']}:stopped",
+                                    quarter=req["quarter"], reason=reason or "")
+    return alerts.raise_package(conn, "package-failed", f"request:{req['request_id']}:failed",
+                                quarter=req["quarter"])
 
 
 def check_token(conn, token) -> None:
@@ -146,9 +168,15 @@ def check_package_token(conn, request_id, token):
         raise db.Refusal("this package belongs to a package request: pass the package_token "
                          "end_pass or continue_pass gave you")
     if req is None or req["token"] is None or int(token) != req["token"] \
-            or req["state"] not in OPEN_REQUEST:
+            or req["state"] in ("superseded", "withdrawn"):
         raise db.Refusal("this package request has been taken over by a later turn — stop, "
                          "nothing was written")
+    if req["state"] not in OPEN_REQUEST:
+        # the holder's own request, finished: said plainly, never as "stop in silence"
+        import dates
+        raise db.Refusal(f"the {dates.quarter_label(req['quarter'])} package was already "
+                         f"{CLOSED_WORD.get(req['state'], 'dealt with')} — nothing changed. To "
+                         "have it again, or by email, ask for the package again.")
     if conn.in_transaction:
         conn.execute("UPDATE package_requests SET lease_at=? WHERE request_id=?",
                      (db.now(), request_id))
@@ -205,30 +233,26 @@ def _hand_over(conn, pass_id: str, outcome: str):
     """The package authority transfer, inside end_pass's transaction: the pass's
     open request gets a token of its own (fresh lease, so it is never claimable
     in between), and the request is buildable — or, when the pass stopped, closed
-    `stopped` with its package notice raised in this same transaction."""
-    import alerts
+    `stopped` (or, when it failed to read the bank, `recovery-failed`) with its
+    package notice raised in this same transaction."""
     req = conn.execute("SELECT * FROM package_requests WHERE pass_id=? AND state='snapshot'",
                        (pass_id,)).fetchone()
     if req is None:
         return None
     token, now = rotate(conn), db.now()
-    notice = None
+    conn.execute("UPDATE package_requests SET token=?, lease_at=?, pass_outcome=?, state=?,"
+                 " updated_at=? WHERE request_id=?",
+                 (token, now, outcome, "snapshot-done", now, req["request_id"]))
+    notice, state = None, "snapshot-done"
     if outcome == "stopped":
-        state = "stopped"
         step = conn.execute("SELECT finish_json FROM pass_steps WHERE pass_id=? AND"
                             " step='snapshot'", (pass_id,)).fetchone()
         reason = (json.loads(step["finish_json"] or "{}").get("stopped") if step else None) \
             or "the bank check stopped"
-        conn.execute("UPDATE package_requests SET reason=? WHERE request_id=?",
-                     (reason, req["request_id"]))
-        notice = alerts.raise_package(conn, "package-stopped",
-                                      f"request:{req['request_id']}:stopped",
-                                      quarter=req["quarter"], reason=reason)
-    else:
-        state = "snapshot-done"
-    conn.execute("UPDATE package_requests SET token=?, lease_at=?, pass_outcome=?, state=?,"
-                 " updated_at=? WHERE request_id=?",
-                 (token, now, outcome, state, now, req["request_id"]))
+        state, notice = "stopped", _close(conn, req, "stopped", outcome, reason=reason)
+    elif outcome == "failed":
+        # the pass read no bank: a build would ship an older import as this request's
+        state, notice = "recovery-failed", _close(conn, req, "recovery-failed", outcome)
     return {"package_token": token, "next": "build" if state == "snapshot-done" else None,
             "request": {"id": req["request_id"], "quarter": req["quarter"],
                         "channel": req["channel"], "state": state},
