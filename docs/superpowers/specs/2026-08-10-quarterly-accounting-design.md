@@ -2503,8 +2503,10 @@ The mechanics, in the order a pass meets them:
   transaction that commits, so a holder rotated while it waited for a lock commits
   nothing and leaves no zip or staged copy behind. One request builds one package and is
   staged on the channel it was asked for; staging a staged request returns the same send.
-  A pass that stopped, or read no bank, closes its request with a package notice instead
-  of handing over a build. A closed request is refused in words Ellen relays ("the Q3 2026
+  One rule decides a request's fate when its pass ends or is reclaimed, from the stored
+  snapshot step and the outcome where that is stricter: buildable only from a finished
+  snapshot that neither failed nor stopped; otherwise it closes with a package notice
+  (stopped, or the bank was not read) instead of handing over a build. A closed request is refused in words Ellen relays ("the Q3 2026
   package was already sent … ask for the package again"). A claim of a staged request removes its staged bytes under the custody lock
   first, then settles the send `uncertain` and offers "send it again"; a removal that
   fails refuses the claim. Recovery never sends.
@@ -2512,7 +2514,8 @@ The mechanics, in the order a pass meets them:
   a Telegram copy gets a random name, drawn again when it is already a file or any
   delivery's path, and the operator-facing name travels as `send_media`'s `filename`.
 - **What a continuation owes the operator** — a package that stopped, a bank read that
-  failed, a send taken back, revoked, possibly lost or failed — is an `alerts`
+  failed, a send taken back, revoked, possibly lost or failed (every such send, a resend
+  included, whether or not a request is linked) — is an `alerts`
   occurrence, rendered by the pending rendering and closed only by
   `mark_rendering_delivered`. The rendering that `record_delivery`, a claim or `end_pass`
   returns always carries the notice that call raised, and an offered package is in its

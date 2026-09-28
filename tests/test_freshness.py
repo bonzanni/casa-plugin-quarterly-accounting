@@ -96,7 +96,11 @@ class ToolPass(test_e2e.Base):
                 return page["remaining_in_cycle"]
 
     def end(self, token, outcome):
-        """end_pass; a package pass's answer hands over its request's package_token."""
+        """end_pass; a package pass's answer hands over its request's package_token. The
+        specialist's snapshot finish comes first (a request builds only from a finished
+        snapshot step)."""
+        if self.conn.execute("SELECT trigger FROM pass_marker").fetchone()[0] == "package":
+            call("record_step", pass_token=token, step="snapshot", action="finish")
         out = call("end_pass", pass_token=token, outcome=outcome)
         if "package_token" in out:
             self.package_token = out["package_token"]

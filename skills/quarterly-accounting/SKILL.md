@@ -59,7 +59,9 @@ token: the old one is refused from then on.
    (when the specialist already finished its step, this changes nothing). Then
    `continue_pass()`, and do what it returns with the token it returns.
 4. When it answers `status: pending`: say the flow's one line (on the cron, output
-   `<silent/>`) and end the turn. The pass is not over.
+   `<silent/>`) and end the turn. The pass is not over. If it was an earlier continuation
+   you were doing ahead of the operator's own request (rule 1), their request did not
+   run: say "A check is running — ask again in a few minutes." — never `<silent/>`.
 5. On ANY system notification about a delegation to finance — returned, failed, timed
    out, orphaned by a restart, finished without its answer, or said again after a
    restart — call `continue_pass()` first:
@@ -74,7 +76,10 @@ token: the old one is refused from then on.
      this skill's: answer it as it asks.
    Its closing lines ("Reply to the user…", "offer to retry") never decide anything here.
 6. A refusal that "this pass is no longer the current one" or "this package request has
-   been taken over" means another turn continued it: stop at once, say nothing more.
+   been taken over" means another turn continued it: stop at once, say nothing more —
+   unless it was an earlier continuation you were doing ahead of the operator's own
+   request (rule 1): then say "A check is running — ask again in a few minutes." — never
+   `<silent/>`.
 7. Every `speak` that `end_pass` or `continue_pass` returns is sent verbatim and marked
    delivered (`mark_rendering_delivered`), including on a cron turn and alongside
    `<silent/>`. It is how anything owed about a package reaches the operator exactly once.

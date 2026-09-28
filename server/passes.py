@@ -77,7 +77,8 @@ def begin_pass(conn, trigger: str, reply=None) -> dict:
             held = m["lease_at"] is not None and _age_s(m["lease_at"]) < LEASE_S
             if age < STALE_AFTER_S or held:
                 minutes = int(age // 60)
-                when = "a minute ago" if minutes <= 1 else f"{minutes} minutes ago"
+                when = ("a minute ago" if minutes <= 1 else f"{minutes} minutes ago"
+                        if minutes < 90 else f"{round(minutes / 60)} hours ago")
                 return {"status": "busy", "started_at": m["started_at"],
                         "text": BUSY.format(when=when)}
             reclaimed = True
@@ -98,9 +99,8 @@ def begin_pass(conn, trigger: str, reply=None) -> dict:
 def _terminalize(conn, pass_id: str):
     """A reclaimed pass is over: it is ended `interrupted` (so it no longer looks
     unended, and check_setup's last_pass shows it), and its package request is
-    recovered — buildable when its snapshot step finished, else failed with a
+    settled by snapshot_fate (outcome `interrupted`), buildable or closed with its
     package notice. Returns the recovered request's id, or None."""
-    import alerts
     now = db.now()
     report = {"reclaimed": True, **throughput(conn, pass_id)}
     conn.execute("UPDATE passes SET ended_at=?, outcome='interrupted', report_json=?"
@@ -109,19 +109,46 @@ def _terminalize(conn, pass_id: str):
                        (pass_id,)).fetchone()
     if req is None:
         return None
+    # recovered with no token and a lapsed lease: the next continue_pass claims it
+    settle_snapshot_request(conn, req, "interrupted", token=None)
+    return req["request_id"]
+
+
+def snapshot_fate(conn, pass_id: str, outcome: str) -> tuple:
+    """THE rule for a package request leaving `snapshot` (every path that moves it
+    uses this): its fate is decided from the STORED snapshot step, and from the
+    pass outcome only where that is more restrictive. Returns (state, reason).
+
+    - `snapshot-done` (buildable) only when the snapshot step exists, finished, and
+      is neither failed nor stopped, and the outcome is neither `stopped` nor
+      `failed` — a build otherwise ships an older import as this request's;
+    - `stopped`, with the stored finish's reason (else a default), when the stored
+      finish or the outcome says stopped;
+    - otherwise `recovery-failed`: the bank was not read for it."""
     step = conn.execute("SELECT finished_at, finish_json FROM pass_steps WHERE pass_id=? AND"
                         " step='snapshot'", (pass_id,)).fetchone()
     fin = json.loads(step["finish_json"] or "{}") if step is not None else {}
     finished = step is not None and step["finished_at"] is not None
-    if finished and fin.get("stopped"):
-        _close(conn, req, "stopped", "interrupted", reason=fin["stopped"])
-    elif finished and not fin.get("failed"):
-        conn.execute("UPDATE package_requests SET state='snapshot-done', token=NULL,"
-                     " lease_at=NULL, pass_outcome='interrupted', updated_at=? WHERE request_id=?",
-                     (now, req["request_id"]))
-    else:
-        _close(conn, req, "recovery-failed", "interrupted")
-    return req["request_id"]
+    if (finished and fin.get("stopped")) or outcome == "stopped":
+        return "stopped", (fin.get("stopped") if finished else None) or "the bank check stopped"
+    if finished and not fin.get("failed") and outcome != "failed":
+        return "snapshot-done", None
+    return "recovery-failed", None
+
+
+def settle_snapshot_request(conn, req, outcome: str, *, token):
+    """Move `req` out of `snapshot` by snapshot_fate, inside the caller's transaction:
+    buildable (holding `token`, fresh lease when there is one) or closed with its
+    package notice. Returns (state, the notice's alert_id or None)."""
+    state, reason = snapshot_fate(conn, req["pass_id"], outcome)
+    now = db.now()
+    conn.execute("UPDATE package_requests SET token=?, lease_at=?, pass_outcome=?, state=?,"
+                 " updated_at=? WHERE request_id=?",
+                 (token, now if token is not None else None, outcome, "snapshot-done", now,
+                  req["request_id"]))
+    if state == "snapshot-done":
+        return state, None
+    return state, _close(conn, req, state, outcome, reason=reason)
 
 
 def _close(conn, req, state: str, outcome: str, reason=None):
@@ -239,20 +266,8 @@ def _hand_over(conn, pass_id: str, outcome: str):
                        (pass_id,)).fetchone()
     if req is None:
         return None
-    token, now = rotate(conn), db.now()
-    conn.execute("UPDATE package_requests SET token=?, lease_at=?, pass_outcome=?, state=?,"
-                 " updated_at=? WHERE request_id=?",
-                 (token, now, outcome, "snapshot-done", now, req["request_id"]))
-    notice, state = None, "snapshot-done"
-    if outcome == "stopped":
-        step = conn.execute("SELECT finish_json FROM pass_steps WHERE pass_id=? AND"
-                            " step='snapshot'", (pass_id,)).fetchone()
-        reason = (json.loads(step["finish_json"] or "{}").get("stopped") if step else None) \
-            or "the bank check stopped"
-        state, notice = "stopped", _close(conn, req, "stopped", outcome, reason=reason)
-    elif outcome == "failed":
-        # the pass read no bank: a build would ship an older import as this request's
-        state, notice = "recovery-failed", _close(conn, req, "recovery-failed", outcome)
+    token = rotate(conn)
+    state, notice = settle_snapshot_request(conn, req, outcome, token=token)
     return {"package_token": token, "next": "build" if state == "snapshot-done" else None,
             "request": {"id": req["request_id"], "quarter": req["quarter"],
                         "channel": req["channel"], "state": state},

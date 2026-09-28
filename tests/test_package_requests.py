@@ -581,3 +581,156 @@ class TestReviewC1(Requests):
 @__import__("contextlib").contextmanager
 def _no_lock(*a, **kw):
     yield
+
+
+STEP_STATES = ("none", "started", "finished", "failed", "stopped")
+OUTCOMES = ("complete", "interrupted", "stopped", "failed")
+
+
+def expected_fate(step_state, outcome):
+    """The one rule for a snapshot request's fate: buildable only from a finished,
+    neither failed nor stopped snapshot step, under an outcome that is neither
+    stopped nor failed; stopped when the stored finish or the outcome says so;
+    otherwise the bank was not read."""
+    if step_state == "stopped" or outcome == "stopped":
+        return "stopped"
+    if step_state == "finished" and outcome != "failed":
+        return "snapshot-done"
+    return "recovery-failed"
+
+
+class TestSnapshotFate(Requests):
+    """Review C2 (F1): every path that moves a request out of `snapshot` decides its
+    fate by one function, from the STORED snapshot step and the outcome."""
+    def pass_in(self, step_state):
+        self.assertIsNone(self.claim()["continue"])
+        t = self.begin("package")
+        if step_state == "none":             # a request whose step row never landed
+            with db.tx(self.conn):
+                self.conn.execute(
+                    "INSERT INTO package_requests(quarter, channel, pass_id, state, created_at,"
+                    " updated_at) VALUES ('2026-Q3', 'telegram', ?, 'snapshot', ?, ?)",
+                    (self.conn.execute("SELECT pass_id FROM pass_marker").fetchone()[0],
+                     db.now(), db.now()))
+            return t
+        self.start(t, step="snapshot", quarter="2026-Q3", channel="telegram")
+        if step_state != "started":
+            extra = {"failed": {"failed": True},
+                     "stopped": {"stopped": "the bound account is gone from bank-feed"}}
+            self.call("record_step", pass_token=t, step="snapshot", action="finish",
+                      **extra.get(step_state, {}))
+        return t
+
+    def check(self, want, where):
+        r = self.request()
+        self.assertEqual(r["state"], want, where)
+        kinds = [a["kind"] for a in self.conn.execute(
+            "SELECT kind FROM alerts WHERE occurrence_key LIKE ?",
+            (f"request:{r['request_id']}:%",))]
+        self.assertEqual(kinds, {"stopped": ["package-stopped"],
+                                 "recovery-failed": ["package-failed"],
+                                 "snapshot-done": []}[want], where)
+        if want == "stopped":
+            self.assertTrue(r["reason"], where)
+        return r
+
+    def test_every_combination_through_end_pass(self):
+        self.seed(1)
+        for step_state in STEP_STATES:
+            for outcome in OUTCOMES:
+                where = (step_state, outcome, "end_pass")
+                t = self.pass_in(step_state)
+                end = self.call("end_pass", pass_token=t, outcome=outcome)
+                want = expected_fate(step_state, outcome)
+                self.check(want, where)
+                self.assertEqual(end["next"], "build" if want == "snapshot-done" else None,
+                                 where)
+                if want == "snapshot-done":        # built, so the next case starts clean
+                    self.call("build_quarterly_package", quarter="2026-Q3",
+                              package_token=end["package_token"])
+                if end["speak"]:
+                    self.call("mark_rendering_delivered", render_id=end["speak"]["render_id"])
+
+    def test_every_combination_through_the_reclaim(self):
+        # a reclaim ends the displaced pass `interrupted`, whatever it was about to say
+        self.seed(1)
+        for step_state in STEP_STATES:
+            where = (step_state, "interrupted", "reclaim")
+            self.pass_in(step_state)
+            self.clock.advance(passes.STALE_AFTER_S)
+            out = self.call("begin_pass", trigger="operator")
+            self.assertTrue(out["reclaimed"], where)
+            want = expected_fate(step_state, "interrupted")
+            self.check(want, where)
+            self.call("end_pass", pass_token=out["pass_token"], outcome="failed")
+            c = self.claim()
+            if want == "snapshot-done":
+                self.assertEqual(c["continue"]["next"], "build", where)
+                self.call("build_quarterly_package", quarter="2026-Q3",
+                          package_token=c["continue"]["package_token"])
+            else:
+                self.assertIsNone(c["continue"], where)
+            if c.get("speak"):
+                self.call("mark_rendering_delivered", render_id=c["speak"]["render_id"])
+
+    def test_the_rule_itself(self):
+        self.seed(1)
+        for step_state in STEP_STATES:
+            for outcome in OUTCOMES + ("interrupted",):
+                t = self.pass_in(step_state)
+                pass_id = self.conn.execute("SELECT pass_id FROM pass_marker").fetchone()[0]
+                self.assertEqual(passes.snapshot_fate(self.conn, pass_id, outcome)[0],
+                                 expected_fate(step_state, outcome), (step_state, outcome))
+                self.call("end_pass", pass_token=t, outcome="stopped")
+
+
+class TestEveryUnsentDeliveryIsTold(Requests):
+    """Review C2 (F2): a revoked, failed or uncertain send raises its notice whether or
+    not a package request is linked — a resend has none."""
+    def resend_revoked(self, channel):
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged(channel)
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        again = self.call("stage_for_delivery", channel=channel, resend=True)
+        self.assertEqual(again["filename"], pkg["filename"])
+        end = sim.run_pass(self.conn, self.bf)["end"]         # a newer snapshot lands
+        revoked = self.conn.execute("SELECT status, revoked_at FROM deliveries WHERE"
+                                    " delivery_id=?", (again["delivery_id"],)).fetchone()
+        self.assertEqual(revoked["status"], "failed")
+        self.assertIsNotNone(revoked["revoked_at"])
+        notices = self.conn.execute("SELECT * FROM alerts WHERE kind='package-revoked'"
+                                    ).fetchall()
+        self.assertEqual([a["occurrence_key"] for a in notices],
+                         [f"delivery:{again['delivery_id']}:revoked"])
+        line = ("The bank was re-read before I could send the Q3 2026 package —\n"
+                "ask for it again and I'll rebuild it.")
+        self.assertIn(line, end["speak"]["text"])
+        # a crash before it was marked: another session, reopened, offers it again
+        other = db.open_store()
+        self.addCleanup(other.close)
+        self.assertIn(line, steps.claim(other)["speak"]["text"])
+
+    def test_a_revoked_resend_is_told_on_telegram(self):
+        self.resend_revoked("telegram")
+
+    def test_a_revoked_resend_is_told_on_email(self):
+        self.resend_revoked("email")
+
+    def test_a_failed_or_uncertain_resend_is_told(self):
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="uncertain",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        for outcome, kind in (("failed", "package-send-failed"),
+                              ("uncertain", "package-uncertain")):
+            for f in os.listdir(self.outbox):
+                os.unlink(self.outbox / f)
+            again = self.call("stage_for_delivery", channel="telegram", resend=True)
+            r = self.call("record_delivery", delivery_id=again["delivery_id"], outcome=outcome)
+            keys = [a[0] for a in self.conn.execute(
+                "SELECT occurrence_key FROM alerts WHERE kind=?", (kind,))]
+            self.assertIn(f"delivery:{again['delivery_id']}:{outcome}", keys, outcome)
+            self.call("mark_rendering_delivered", render_id=r["speak"]["render_id"])

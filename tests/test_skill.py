@@ -392,5 +392,20 @@ class TestSkill(TempEnv):
         self.assertIn("that is what \"send it again\" binds to", pack)
 
 
+class TestReviewC2(TempEnv):
+    def test_an_earlier_continuation_never_silences_the_operators_request(self):
+        later = " ".join(SKILL[SKILL.index("## Ellen: a delegation that answers later"):
+                               SKILL.index("## Ellen: answering anything")].split())
+        rule4 = later[later.index("4. When it answers `status: pending`"):later.index("5. On ANY")]
+        rule6 = later[later.index("6. A refusal that"):later.index("7. Every `speak`")]
+        self.assertIn("If it was an earlier continuation you were doing ahead of the "
+                      "operator's own request (rule 1), their request did not run", rule4)
+        self.assertIn("unless it was an earlier continuation you were doing ahead of the "
+                      "operator's own request (rule 1)", rule6)
+        for rule in (rule4, rule6):
+            self.assertIn('"A check is running — ask again in a few minutes." — never '
+                          "`<silent/>`", rule)
+
+
 if __name__ == "__main__":
     unittest.main()

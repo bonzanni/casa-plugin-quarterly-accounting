@@ -92,6 +92,7 @@ class StoreCase(TempEnv):
         self.end_live_pass()
         token = passes.begin_pass(self.conn, "package")["pass_token"]
         steps.start(self.conn, token, "snapshot", {"quarter": quarter, "channel": channel})
+        steps.finish(self.conn, token, "snapshot", counts={})
         return passes.end_pass(self.conn, token, "complete", {})["package_token"]
 
     _doc_n = 0

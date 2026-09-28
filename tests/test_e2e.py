@@ -472,12 +472,18 @@ class ToolFlow(Base):
         self.assertEqual(imp["erase_candidates"], [])
         return token
 
+    def end_package(self, token, outcome):
+        """The specialist's last action (its snapshot finish), then Ellen's end_pass: the
+        request is buildable only from a finished snapshot step."""
+        self.call("record_step", pass_token=token, step="snapshot", action="finish")
+        return self.call("end_pass", pass_token=token, outcome=outcome)
+
     def package(self, sweep):
         """SKILL.md's Packaging, step 1 (the specialist's package snapshot), then step 2."""
         token = self.snapshot_pass()
         if sweep:
             self.sweep(token)
-        end = self.call("end_pass", pass_token=token, outcome="complete")
+        end = self.end_package(token, "complete")
         pkg = self.call("build_quarterly_package", quarter="2026-Q3",
                         package_token=end["package_token"])
         z = zipfile.ZipFile(pkg["path"])
@@ -553,7 +559,7 @@ class TestWaveF(ToolFlow):
         self.two_matched()
         token = self.snapshot_pass()
         self.assertEqual(self.sweep(token, budget=1), 1)
-        pkg = self.build(self.call("end_pass", pass_token=token, outcome="interrupted"))
+        pkg = self.build(self.end_package(token, "interrupted"))
         z = zipfile.ZipFile(pkg["path"])
         rows = list(csv.DictReader(io.StringIO(z.read("ledger.csv").decode())))
         self.assertEqual(sorted(r["status"] for r in rows), ["MATCHED", "UNCLASSIFIED"])
@@ -572,7 +578,7 @@ class TestWaveF(ToolFlow):
         self.two_matched()
         token = self.snapshot_pass()
         self.sweep(token, budget=1)
-        end = self.call("end_pass", pass_token=token, outcome="interrupted")
+        end = self.end_package(token, "interrupted")
         stale = [r[0] for r in self.conn.execute(
             "SELECT pid FROM projections WHERE class_observed_snapshot <"
             " (SELECT max(snapshot_id) FROM snapshots)")]
@@ -610,7 +616,7 @@ class TestWaveF(ToolFlow):
         rest = self.call("list_projections", pass_token=token)
         self.assertEqual([i["pid"] for i in rest["projections"]],
                          work.quarter_pids(self.conn, "2026-Q2"))
-        end = self.call("end_pass", pass_token=token, outcome="complete", report={})
+        end = self.end_package(token, "complete")
         report = json.loads(self.conn.execute("SELECT report_json FROM passes WHERE pass_id=?",
                                               (end["ended"],)).fetchone()[0])
         # (2d) the pass records its throughput
@@ -626,7 +632,7 @@ class TestWaveF(ToolFlow):
         self.two_matched()
         token = self.snapshot_pass()
         self.sweep(token, quarter="Q3")
-        end = self.call("end_pass", pass_token=token, outcome="complete")
+        end = self.end_package(token, "complete")
         autumn = _dt.datetime(2026, 10, 5, 9, 0, tzinfo=_dt.timezone.utc)
         with mock.patch.object(db, "_clock", lambda: autumn):
             pkg = self.call("build_quarterly_package", quarter="Q3",

@@ -266,8 +266,9 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
         if req is not None:
             conn.execute("UPDATE package_requests SET state='revoked', updated_at=? WHERE"
                          " request_id=?", (now, req[0]))
-            alerts.raise_package(conn, "package-revoked", f"request:{req[0]}:revoked",
-                                 quarter=r["quarter"], package_id=r["package_id"])
+        # every revoked send is told, linked to a request or not (a resend has none)
+        alerts.raise_package(conn, "package-revoked", f"delivery:{r['delivery_id']}:revoked",
+                             quarter=r["quarter"], package_id=r["package_id"])
     return [dict(r) for r in rows]
 
 

@@ -513,3 +513,14 @@ class TestReviewC1(Flow):
                                     (t1,)).fetchone()[0]
         self.assertEqual(earlier, "failed")
         self.assertEqual(out["end"]["outcome"], "complete")
+
+    def test_busy_names_hours_for_an_old_pass(self):
+        self.seed(1)
+        t1 = self.begin()
+        self.start(t1)
+        self.specialist(t1)
+        self.clock.advance(passes.STALE_AFTER_S + 60)
+        self.claim()                                   # a held, old pass
+        busy = self.call("begin_pass", trigger="operator")
+        self.assertEqual(busy["text"], "A check is running — started 3 hours ago.\n"
+                                       "Ask again in a few minutes.")

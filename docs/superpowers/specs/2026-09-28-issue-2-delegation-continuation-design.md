@@ -219,10 +219,14 @@ The flow of a package request:
    open request, in the same transaction that ends the pass it:
    - bumps the counter;
    - sets `request.token = <new>`, `lease_at = now` and `pass_outcome = <outcome>`;
-   - sets `state` to `snapshot-done`; to `stopped` when the outcome is `stopped`; to
-     `recovery-failed` when the outcome is `failed` (the pass read no bank, and a build
+   - sets `state` by **the one snapshot-fate rule** (`passes.snapshot_fate`, shared with
+     the reclaim of §3.5), decided from the STORED snapshot step and from the outcome
+     only where that is more restrictive: `snapshot-done` only when the step exists,
+     finished, and is neither failed nor stopped, and the outcome is neither `stopped`
+     nor `failed`; `stopped` (the stored finish's reason, else a default) when the
+     stored finish or the outcome says stopped; otherwise `recovery-failed` (a build
      would ship an older import as this request's);
-   - when the outcome is `stopped` or `failed`, raises the request's **package notice**
+   - when that rule closes the request, raises its **package notice**
      (`package-stopped` or `package-failed`, §3.7) in the same transaction, instead of
      asking Ellen to tell it;
    - returns `{"package_token": <new>, "request": {…}, "next": "build" | null}` to the
@@ -347,10 +351,10 @@ new pass:
   `report_json` stamped `{"reclaimed": true}` plus `throughput`. The pass no longer looks
   unended, and `last_pass` shows it.
 - **Recovers its package request**, if it has an open one:
-  - if its `snapshot` step finished, the request becomes `snapshot-done` with no token
-    and a lapsed lease, so the next `continue_pass` claims `build`;
-  - if that finish says `stopped`, the request becomes `stopped` with its
-    `package-stopped` notice, exactly as `end_pass(stopped)` closes it;
+  - by the same snapshot-fate rule as `end_pass` (§3.4), with outcome `interrupted`:
+    buildable (no token, a lapsed lease, so the next `continue_pass` claims `build`)
+    only from a finished snapshot step that neither failed nor stopped;
+  - a stored `stopped` finish closes it `stopped` with its `package-stopped` notice;
   - otherwise it becomes `recovery-failed` and raises its package notice
     (`package-failed`: "I couldn't read the bank for the <quarter> package — ask for it
     again."), which is delivered once through §3.7.
@@ -401,7 +405,7 @@ stamps `sent_at`. This is the pattern the collection alerts already follow:
 | `package-stopped` | `request:<id>:stopped` | the immediate `stopped` reply of `end_pass` |
 | `package-failed` | `request:<id>:failed` | the stale-pass reclaim |
 | `package-uncertain` | `delivery:<id>:uncertain` | the staged-request claim (it records the delivery `uncertain` itself) |
-| `package-revoked` | `request:<id>:revoked` | the import's revocation |
+| `package-revoked` | `delivery:<id>:revoked` | the import's revocation of any unsent send — a first send or a resend, linked to a request or not |
 | `package-uncertain` | `delivery:<id>:uncertain` | `record_delivery(uncertain)` for any package delivery, including a resend |
 | `package-send-failed` | `delivery:<id>:failed` | `record_delivery(failed)` for any package delivery, including a resend |
 
@@ -1137,7 +1141,9 @@ The test-install reset loop then asks which backup to restore.
 **Q2 — budget numbers.** 450 / 510 / 600 / 1800 / 10 come from one measurement. Re-tune
 them from the first passes after the fix.
 
-## 11. Changes after code review C1 (implemented)
+## 11. Changes after code review (implemented)
+
+### Round C1
 
 - **One request, one package** (§3.4): a second build under one token is refused, early
   and in the registering transaction.
@@ -1163,3 +1169,25 @@ them from the first passes after the fix.
   `RuntimeError`, not an assertion.
 - Accepted as design: another session can deliver a just-raised notice before the raising
   call renders it; the notice still reaches the operator once.
+
+### Round C2
+
+- **One rule decides a snapshot request's fate.** The same shape of finding came back
+  three times (a reclaimed stopped snapshot, `end_pass(failed)`, then a stored `stopped`
+  finish ended `complete`), because each closing path decided the fate its own way. So
+  the rule is now one function, `passes.snapshot_fate`: from the STORED snapshot step,
+  and from the pass outcome only where it is more restrictive (§3.4). `end_pass`'s hand-over
+  and the reclaim both settle through it (`settle_snapshot_request`); no other path moves
+  a request out of `snapshot` (a new request supersedes only requests of passes that
+  already ended, and those have left `snapshot`). A table test pins all of
+  {no step, started, finished, failed, stopped} × {complete, interrupted, stopped,
+  failed} through `end_pass`, every step state through the reclaim, and the rule itself.
+- **Every unsent send is told, linked to a request or not.** A resend has no package
+  request, so its revocation raised nothing. The import now raises `package-revoked` keyed
+  per delivery for every send it revokes; `record_delivery(uncertain | failed)` and the
+  staged-request claim already raised theirs per delivery for any package send. A
+  single-document send raises none: it is not offered for "send it again".
+- **An earlier continuation never silences the operator.** When a continuation done
+  ahead of the operator's own request answers `pending` or is taken over, Ellen says
+  "A check is running — ask again in a few minutes." — never `<silent/>`.
+- The busy line names hours for a pass older than 90 minutes.
