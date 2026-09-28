@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -157,9 +157,15 @@ CREATE TABLE IF NOT EXISTS projections (
   reasons_json TEXT NOT NULL DEFAULT '[]',
   exp_kind TEXT, exp_tier TEXT, exp_row INTEGER,
   class_tags_json TEXT, class_observed_at TEXT, last_known_kind TEXT,
-  class_observed_snapshot INTEGER,  -- the latest snapshot_id when the sweep last read it (fix E2)
+  class_observed_snapshot INTEGER,  -- the snapshot_id it was last observed at: import or read (E2, #1)
   observed_revision INTEGER,     -- the projection's revision that read left it at (fix E2)
   observed_tags_json TEXT, observed_at TEXT,
+  export_tag_revision INTEGER,   -- the row's tag_revision in the latest import (issue #1)
+  note_seen_seq INTEGER,         -- the note_seq a read last saw visible (issue #1)
+  note_seen_rev INTEGER,         -- that read's `Tag revision:` (issue #1)
+  note_seen_at TEXT,             -- the import time of the snapshot that read belongs to
+  note_issued_at TEXT,           -- when an add_note was last returned to the specialist
+  read_snapshot INTEGER,         -- the snapshot the sweep's latest READ belongs to
   last_facts_json TEXT,          -- the destination row's facts when last seen (names an erased row)
   note_seq INTEGER, note_body TEXT,
   unprojectable TEXT, last_error TEXT,
@@ -297,6 +303,14 @@ MIGRATIONS: dict[int, list[str]] = {
         "UPDATE deliveries SET staged_path = staged_path || '#' || delivery_id WHERE delivery_id"
         " NOT IN (SELECT max(delivery_id) FROM deliveries GROUP BY staged_path)",
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_staged_path ON deliveries(staged_path)"],
+    # 4 -> 5 (issue #1): the import is the classification observation. A migrated
+    # lineage has no note confirmation, so it is read once after the first import.
+    4: ["ALTER TABLE projections ADD COLUMN export_tag_revision INTEGER",
+        "ALTER TABLE projections ADD COLUMN note_seen_seq INTEGER",
+        "ALTER TABLE projections ADD COLUMN note_seen_rev INTEGER",
+        "ALTER TABLE projections ADD COLUMN note_seen_at TEXT",
+        "ALTER TABLE projections ADD COLUMN note_issued_at TEXT",
+        "ALTER TABLE projections ADD COLUMN read_snapshot INTEGER"],
 }
 
 

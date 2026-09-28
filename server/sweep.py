@@ -11,6 +11,7 @@ from later sweeps. A write bank-feed refuses (a full tag budget) is recorded
 and reported, never retried into a loop."""
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import re
 
@@ -66,14 +67,70 @@ def _cursor(conn):
     return conn.execute("SELECT * FROM cursor WHERE id=1").fetchone()
 
 
+def _parse_ts(ts: str) -> _dt.datetime:
+    return _dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+
+
+def note_confirmed(proj, tag_revision) -> bool:
+    """Whether the lineage's current accounting note is known visible on its row
+    without reading it (issue #1: notes are not in the export). Only a read can
+    confirm a note; the confirmation stands while (1) the note is the one that
+    read saw, (2) the row's tag revision is still the one that read saw — an
+    erasure strips tags and notes together — and (3) the read was taken more than
+    a delegation's ceiling after the last add_note the plugin handed out, dated by
+    the import its snapshot belongs to, never by when it was recorded (rounds D1,
+    D2: an issued write carried out after the read would bury the note unseen;
+    Casa ends every delegation at its ceiling, steps.CEILING_ASSUMED_S)."""
+    import steps
+    if proj["note_body"] is None:
+        return True
+    if proj["note_seen_seq"] is None or proj["note_seen_seq"] != proj["note_seq"]:
+        return False
+    if proj["note_seen_rev"] is None or proj["note_seen_rev"] != tag_revision:
+        return False
+    if proj["note_issued_at"] is not None:
+        if proj["note_seen_at"] is None or (_parse_ts(proj["note_seen_at"])
+                < _parse_ts(proj["note_issued_at"])
+                + _dt.timedelta(seconds=steps.CEILING_ASSUMED_S)):
+            return False
+    return True
+
+
+def owed_write(conn, pid: int, actual_tags, note_visible: bool):
+    """The ONE write the lineage owes bank-feed, given its row's tags and whether
+    its current note is visible: owned tags outside the desired set removed first,
+    then missing desired tags added (a tag bank-feed refused, with the row's tags
+    unchanged since, stays blocked), then the note (spec §The sweep, steps 4–5).
+    None when nothing is owed. Pure: both a read (record_observation) and an
+    import (the export's tags) decide with it."""
+    proj = lineage.projection(conn, pid)
+    if proj["ended"] == "erased":
+        return None
+    observed = sorted(set(actual_tags))
+    desired = set(json.loads(proj["desired_json"]))
+    to_remove = sorted((set(observed) & set(R.OWNED)) - desired)
+    if to_remove:
+        return {"untag": to_remove}
+    to_add = sorted(desired - set(observed))
+    if proj["unprojectable"] and json.loads(proj["unprojectable"]).get("tags") == observed:
+        to_add = []
+    if to_add:
+        return {"tag": to_add}
+    note = lineage.note_text(conn, pid)
+    if note is not None and not note_visible:
+        return {"add_note": note}
+    return None
+
+
 def _due(conn) -> list:
-    """The lineages this import's cycle still owes a read (fix E2): every
-    enumerable one — all but the merged and the erased — whose classification
-    is not fresh (lineage.is_fresh: not read since the latest import), plus every
-    fresh one that changed since that read (a decision moved its desired tags or
-    note, so it wants mirroring). An import makes every lineage due again, so an
-    observation exempts a lineage only until the next import, and only while it
-    stays unchanged (spec §The sweep: never from later sweeps)."""
+    """The lineages this import's cycle still owes a read (fix E2; issue #1):
+    every enumerable one — all but the merged and the erased — not observed at
+    the latest import (its row absent from the export: an erase candidate), or
+    left with no settled revision: the import found it owing a write (owed_write
+    on the export's tags) or a later decision moved it since it was settled. The
+    import settles a lineage that owes nothing, so a read is spent only where a
+    write, a read-back or an erasure check is owed; an observation exempts a
+    lineage only until it changes (spec §The sweep: never from later sweeps)."""
     return [r[0] for r in conn.execute(
         "SELECT pid FROM projections WHERE merged_into IS NULL"
         " AND (ended IS NULL OR ended='vanished')"
@@ -221,7 +278,7 @@ def _confirm_erased(conn, pid: int) -> dict:
 
 def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None,
                        observed_notes=None, not_found=False, write_error=None,
-                       observed_first_seen=None) -> dict:
+                       observed_first_seen=None, observed_tag_revision=None) -> dict:
     """What get_transaction showed for one projection's row. Returns at most ONE
     write (untag, tag or add_note) with workflow, expected_generation and
     expected_ledger; the specialist makes it, reads the row again and records
@@ -252,9 +309,15 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
             return {"pid": pid, "status": proj["status"], "desired": json.loads(proj["desired_json"]),
                     "instructions": {}, "bank_writes": None, "read_back": False,
                     "recorded": "the write was refused; reported, not retried"}
-        if observed_tags is None or observed_notes is None or not observed_first_seen:
-            raise db.Refusal("record what get_transaction showed: observed_tags, observed_notes "
-                             "and the row's first_seen")
+        if observed_tags is None or observed_notes is None or not observed_first_seen \
+                or observed_tag_revision is None:
+            raise db.Refusal("record what get_transaction showed: observed_tags, observed_notes, "
+                             "the row's first_seen and its Tag revision")
+        try:
+            observed_tag_revision = int(observed_tag_revision)
+        except (TypeError, ValueError):
+            raise db.Refusal("observed_tag_revision is the number on get_transaction's "
+                             "`Tag revision:` line")
         alias = conn.execute("SELECT first_seen FROM aliases WHERE row_id=?",
                              (proj["dest_row_id"],)).fetchone()
         if alias is None or alias["first_seen"] != observed_first_seen:
@@ -267,25 +330,21 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
         observed = sorted(set(observed_tags))
         class_tags = [t for t in observed if t not in R.OWNED]
         conn.execute("UPDATE projections SET class_tags_json=?, class_observed_at=?,"
-                     " class_observed_snapshot=?, observed_tags_json=?, observed_at=?"
-                     " WHERE pid=?",
+                     " class_observed_snapshot=?, observed_tags_json=?, observed_at=?,"
+                     " read_snapshot=? WHERE pid=?",
                      (json.dumps(class_tags), db.now(), lineage.latest_import(conn),
-                      json.dumps(observed), db.now(), pid))
+                      json.dumps(observed), db.now(), lineage.latest_import(conn), pid))
         red = lineage.settle(conn, pid)
         ledger.check_delivered_kind_half(conn, pid)
         proj = lineage.projection(conn, pid)
         # the revision this read left the lineage at: a later change makes it due again
         conn.execute("UPDATE projections SET observed_revision=? WHERE pid=?",
                      (proj["revision"], pid))
-        actual = set(observed)
-        to_remove = sorted((actual & set(R.OWNED)) - red.desired)
-        to_add = sorted(red.desired - actual)
         blocked = None
         if proj["unprojectable"]:
             failed = json.loads(proj["unprojectable"])
             if failed.get("tags") == observed:
                 blocked = failed.get("error")
-                to_add = []
             else:
                 conn.execute("UPDATE projections SET unprojectable=NULL WHERE pid=?", (pid,))
         note = lineage.note_text(conn, pid)
@@ -294,17 +353,30 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
         # (spec §"Notes are versioned assertions"; round p6, Astra S2).
         visible = [n for n in (shown_note(n) for n in (observed_notes or []))
                    if n.startswith("Accounting revision ")]
-        note_needed = note is not None and (not visible or visible[-1] not in
-                                            (note, as_rendered(note)))
+        note_visible = note is None or (bool(visible) and visible[-1] in
+                                        (note, as_rendered(note)))
+        # A note seen visible is remembered with the read's tag revision and the import
+        # its snapshot belongs to (issue #1; rounds D1, D2): an import re-checks it only
+        # when the tags moved or an issued note write may have landed after this read.
+        seen_at = conn.execute("SELECT imported_at FROM snapshots WHERE snapshot_id=?",
+                               (lineage.latest_import(conn),)).fetchone()[0]
+        if note is not None and note_visible:
+            conn.execute("UPDATE projections SET note_seen_seq=?, note_seen_rev=?, note_seen_at=?"
+                         " WHERE pid=?", (proj["note_seq"], observed_tag_revision, seen_at, pid))
+        else:
+            conn.execute("UPDATE projections SET note_seen_seq=NULL, note_seen_rev=NULL,"
+                         " note_seen_at=NULL WHERE pid=?", (pid,))
         gate = passes.bank_write_gate(conn)
         # ONE write per observation (round p5, Terra S1): the specialist makes it,
         # re-reads the row and records it before the next, so a ledger that changes
         # under the pass can take at most the one write D4 states as residual.
         instructions = {}
         if proj["ended"] != "erased" and gate["allowed"]:
-            step = ({"untag": to_remove} if to_remove else {"tag": to_add} if to_add
-                    else {"add_note": note} if note_needed else None)
+            step = owed_write(conn, pid, observed, note_visible)
             if step is not None:
+                if "add_note" in step:
+                    conn.execute("UPDATE projections SET note_issued_at=? WHERE pid=?",
+                                 (db.now(), pid))
                 instructions = {**step, "workflow": gate["workflow"],
                                 "expected_generation": gate["expected_generation"],
                                 "expected_ledger": gate["expected_ledger"]}

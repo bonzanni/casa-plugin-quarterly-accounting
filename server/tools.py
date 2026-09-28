@@ -377,13 +377,15 @@ def t_list_proj(args):
 
 @register("record_observation",
           "Record what get_transaction showed for one payment (observed_tags: all its tags; "
-          "observed_notes: the notes shown; observed_first_seen: the row's first_seen — all "
-          "three required), or not_found=true when it answered 'no transaction #N', or write_error with bank-feed's "
+          "observed_notes: the notes shown; observed_first_seen: the row's first_seen; "
+          "observed_tag_revision: the number on its `Tag revision:` line — all four "
+          "required), or not_found=true when it answered 'no transaction #N', or write_error with bank-feed's "
           "reply when a write did not take. Returns the exact writes to make; apply them, then "
           "read the row again and record it. snapshot_id: the one list_projections returned "
           "(the import's `snapshot` for an erase candidate).",
           obj({"pid": I, "pass_token": TOKEN, "snapshot_id": I, "observed_tags": A,
-               "observed_notes": A, "observed_first_seen": S, "not_found": B, "write_error": S},
+               "observed_notes": A, "observed_first_seen": S, "observed_tag_revision": I,
+               "not_found": B, "write_error": S},
               ("pid", "pass_token", "snapshot_id")))
 def t_observe(args):
     _need(args, "pid", "pass_token", "snapshot_id")
@@ -394,7 +396,8 @@ def t_observe(args):
                                     observed_notes=args.get("observed_notes"),
                                     not_found=_bool(args, "not_found", False),
                                     write_error=args.get("write_error"),
-                                    observed_first_seen=args.get("observed_first_seen"))
+                                    observed_first_seen=args.get("observed_first_seen"),
+                                    observed_tag_revision=args.get("observed_tag_revision"))
 
 
 # --- passes and setup ------------------------------------------------------------

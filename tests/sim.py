@@ -7,7 +7,8 @@ procedure SKILL.md prescribes; the skill must say exactly this, in words:
   room runs out; triage then judges only fresh items — sweep_within,
   run_pass(sweep_budget=...)):
     get_transaction(row_id); "no transaction #N" -> record_observation(not_found)
-    else record_observation(observed_tags, observed_notes, observed_first_seen)
+    else record_observation(observed_tags, observed_notes, observed_first_seen,
+                            observed_tag_revision=<the `Tag revision:` line's number>)
     every record_observation carries list_projections' snapshot_id (the import's
       `snapshot` for an erase candidate); a newer import refuses it
     make the ONE returned write (untag, tag or add_note) with workflow,
@@ -19,7 +20,11 @@ procedure SKILL.md prescribes; the skill must say exactly this, in words:
 """
 from __future__ import annotations
 
+import re
+
 import sweep
+
+_TAG_REVISION = re.compile(r"^Tag revision: (\d+) ", re.M)
 
 
 def _read(bf, row_id):
@@ -28,7 +33,8 @@ def _read(bf, row_id):
         return None
     first_seen = bf.conn.execute("SELECT first_seen FROM transactions WHERE row_id=?",
                                  (row_id,)).fetchone()[0]
-    return bf.tags(row_id), bf.notes(row_id), first_seen
+    # the revision as the specialist sees it: from get_transaction's rendered text
+    return bf.tags(row_id), bf.notes(row_id), first_seen, int(_TAG_REVISION.search(out)[1])
 
 
 def observe_and_repair(conn, bf, token, item, snapshot_id) -> dict:
@@ -48,8 +54,9 @@ def observe_and_repair(conn, bf, token, item, snapshot_id) -> dict:
         return rec(not_found=True)
     r = {}
     for _ in range(4):
-        tags, notes, first_seen = got
-        r = rec(observed_tags=tags, observed_notes=notes, observed_first_seen=first_seen)
+        tags, notes, first_seen, revision = got
+        r = rec(observed_tags=tags, observed_notes=notes, observed_first_seen=first_seen,
+                observed_tag_revision=revision)
         ins = r.get("instructions") or {}
         if not ins:
             return r

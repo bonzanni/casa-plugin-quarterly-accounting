@@ -409,7 +409,8 @@ class ToolFlow(Base):
             elif in_notes and line.startswith("  ["):
                 notes.append(line[2:])
         first_seen = re.search(r"first seen (\S+), last seen", text).group(1)
-        return tags, notes, first_seen
+        revision = int(re.search(r"^Tag revision: (\d+) ", text, re.M).group(1))
+        return tags, notes, first_seen, revision
 
     def sweep(self, token, budget=None, **scope):
         """SKILL.md's sweep (the specialist's pass, step 5), through the tools: until
@@ -430,11 +431,12 @@ class ToolFlow(Base):
                                   snapshot_id=page["snapshot_id"],
                                   not_found=True)
                         break
-                    tags, notes, first_seen = self.read(text)
+                    tags, notes, first_seen, revision = self.read(text)
                     r = self.call("record_observation", pid=item["pid"], pass_token=token,
                                   snapshot_id=page["snapshot_id"],
                                   observed_tags=tags, observed_notes=notes,
-                                  observed_first_seen=first_seen)
+                                  observed_first_seen=first_seen,
+                                  observed_tag_revision=revision)
                     ins = r["instructions"]
                     if not ins:
                         break
@@ -493,10 +495,11 @@ class ToolFlow(Base):
 
 
 class TestPackagingSeesTheClassification(ToolFlow):
-    """Round E1 (Astra S1): the CSV import carries no classification tags; only the
-    sweep's per-row read refreshes the classification the expectation and the kind
-    guard use. Packaging, driven through the tool layer against the real bank-feed
-    and its RENDERED get_transaction text, must sweep between import and build."""
+    """Round E1 (Astra S1): a package must never ship on a classification older than
+    its import. Since issue #1 the export carries each row's tags (bank-feed 0.20.0),
+    so the import alone refreshes the classification the expectation and the kind
+    guard use; the sweep's per-row read is only for the writes. Driven through the
+    tool layer against the real bank-feed."""
     def matched_then_reclassified(self):
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="A1", amount=1000, counterparty="Adobe")])
@@ -516,15 +519,16 @@ class TestPackagingSeesTheClassification(ToolFlow):
         self.assertEqual([(r["status"], r["expectation_kind"]) for r in rows],
                          [("MISSING", "credit-note")])
 
-    def test_without_the_sweep_the_invoice_is_withheld(self):
-        # the reproduction: Packaging without its sweep step shipped a stale picture
-        # (MATCHED, invoices/). Since fix E2 the build itself withholds a row not re-read
-        # since the import: unclassified, its document under unresolved/.
+    def test_without_the_sweep_the_import_alone_sees_the_new_classification(self):
+        # the reproduction (round E1): Packaging without its sweep step shipped a stale
+        # picture (MATCHED, invoices/). Since issue #1 the import reads the refund tag
+        # from the export: the invoice does not ship and the credit note is missing,
+        # with no read of the row at all.
         self.matched_then_reclassified()
         files, rows = self.package(sweep=False)
-        self.assertEqual(files, ["unresolved/2026-07-05_Adobe_10.00.pdf"])
+        self.assertEqual(files, [])
         self.assertEqual([(r["status"], r["expectation_kind"]) for r in rows],
-                         [("UNCLASSIFIED", "")])
+                         [("MISSING", "credit-note")])
 
 
 class TestWaveF(ToolFlow):
@@ -552,43 +556,39 @@ class TestWaveF(ToolFlow):
         return self.call("record_delivery", delivery_id=staged["delivery_id"],
                          outcome="delivered", package_token=pkg["package_token"])
 
-    def test_a_row_shipped_unread_raises_no_false_changed_alert(self):
-        # (1) the package pass's sweep has room for one of the two payments: the other
-        # ships unclassified (not re-read since the import). The next pass reads it and
-        # nothing changed — the accountant's copy is not "categorised differently".
+    def test_a_sweep_out_of_room_still_ships_every_row_classified(self):
+        # (1), since issue #1: the package pass's sweep has room for one of the two
+        # payments, and both still ship classified — the import observed both from the
+        # export. The next pass raises nothing: nothing changed underneath.
         self.two_matched()
         token = self.snapshot_pass()
-        self.assertEqual(self.sweep(token, budget=1), 1)
+        self.sweep(token, budget=1)
         pkg = self.build(self.end_package(token, "interrupted"))
         z = zipfile.ZipFile(pkg["path"])
         rows = list(csv.DictReader(io.StringIO(z.read("ledger.csv").decode())))
-        self.assertEqual(sorted(r["status"] for r in rows), ["MATCHED", "UNCLASSIFIED"])
-        notes = z.read("notes.md").decode()
-        unread = notes.split("## Not re-read since the last bank check")[1].split("\n## ")[0]
-        self.assertIn("unresolved/", unread)                 # its set-aside invoice, named there
-        unresolved = notes.split("## Unresolved candidates")[1].split("\n## ")[0]
-        self.assertEqual(unresolved.strip(), "- none")        # it is no unresolved candidate
+        self.assertEqual(sorted(r["status"] for r in rows), ["MATCHED", "MATCHED"])
+        self.assertNotIn("## Not seen in the last bank check", z.read("notes.md").decode())
+        self.assertNotIn("not seen in the last bank check", pkg["caption"])
         self.deliver(pkg)
         end = sim.run_pass(self.conn, self.bf)["end"]
         self.assertIsNone(end["speak"], end)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 0)
 
-    def test_a_reclassified_row_shipped_unread_is_still_alerted(self):
-        # the kind check stays: against the last known kind, a real change is reported
+    def test_a_delivered_row_reclassified_is_alerted_by_the_import_alone(self):
+        # the kind half of "a delivered quarter changed underneath" runs at the import
+        # (issue #1): no read of the row is needed to report it
         self.two_matched()
         token = self.snapshot_pass()
-        self.sweep(token, budget=1)
-        end = self.end_package(token, "interrupted")
-        stale = [r[0] for r in self.conn.execute(
-            "SELECT pid FROM projections WHERE class_observed_snapshot <"
-            " (SELECT max(snapshot_id) FROM snapshots)")]
-        self.assertEqual(len(stale), 1)
-        pkg = self.build(end)
+        self.sweep(token)
+        pkg = self.build(self.end_package(token, "complete"))
         self.deliver(pkg)
-        rid = sim.lineage_row(self.conn, stale[0])
+        rid = self.active()[0]["row_id"]
         self.bf.call("untag_transaction", row_ids=[rid], tags=["software"])
         self.classify(rid, "refund")
-        sim.run_pass(self.conn, self.bf)
+        self.snapshot_pass(trigger="operator")          # the import, and no read at all
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM projections WHERE"
+                                           " read_snapshot=(SELECT max(snapshot_id) FROM"
+                                           " snapshots)").fetchone()[0], 0)
         changes = [json.loads(a[0])["change"] for a in self.conn.execute(
             "SELECT detail FROM alerts WHERE kind='delivered-changed'")]
         self.assertEqual(changes, ["reclassified"])
@@ -623,7 +623,7 @@ class TestWaveF(ToolFlow):
         self.assertEqual((report["swept_this_pass"], report["remaining_in_cycle"]), (1, 1))
         self.assertEqual(self.call("check_setup")["last_pass"]["report"]["swept_this_pass"], 1)
         pkg = self.build(end)
-        self.assertNotIn("not re-read", pkg["caption"])
+        self.assertNotIn("not seen in the last bank check", pkg["caption"])
 
     def test_give_me_q3(self):
         # (3) the skill's literal wording: "give me Q3" -> build_quarterly_package(quarter="Q3")

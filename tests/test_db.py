@@ -56,7 +56,7 @@ class TestSchema(TempEnv):
     def _assert_current_behaviour(self, c, old_seq: int, deliveries=1, first_sent=False):
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
-        self.assertEqual(db.SCHEMA_VERSION, 4)
+        self.assertEqual(db.SCHEMA_VERSION, 5)
         # the migrated store has every column and index a fresh store has
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
@@ -93,6 +93,11 @@ class TestSchema(TempEnv):
         p = lineage.projection(c, 1)
         self.assertEqual(p["class_tags_json"], '["software"]')
         self.assertEqual((p["class_observed_snapshot"], p["observed_revision"]), (None, None))
+        # issue #1: a migrated lineage has no note confirmation, so it is read once
+        self.assertEqual(tuple(p[k] for k in ("export_tag_revision", "note_seen_seq",
+                                              "note_seen_rev", "note_seen_at",
+                                              "note_issued_at", "read_snapshot")),
+                         (None,) * 6)
         self.assertFalse(lineage.is_fresh(c, p))
         # fix E4/E5: a package built before the migration names no import, so its
         # first send is refused (build it again); the unsent send is not revoked yet
@@ -117,7 +122,7 @@ class TestSchema(TempEnv):
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)
         self.assertEqual(c2.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "4")
+                         .fetchone()[0], "5")
 
     def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
         # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
@@ -135,7 +140,7 @@ class TestSchema(TempEnv):
         self.assertGreater(c.execute("SELECT delivered_seq FROM renders WHERE render_id='r-new'")
                            .fetchone()[0], 7)
 
-    def test_a_v0_1_0_schema_3_store_migrates_to_4_keeping_its_data(self):
+    def test_a_v0_1_0_schema_3_store_migrates_to_current_keeping_its_data(self):
         # schema 3 as v0.1.0 shipped it (e9b4eff): no pass steps, no package requests,
         # and a resend could reuse the outbox name of an earlier send of the same bytes
         from tests.schema_history import DDL_V3
@@ -173,6 +178,18 @@ class TestSchema(TempEnv):
         with self.assertRaises(sqlite3.IntegrityError):
             c.execute("INSERT INTO deliveries(package_id, channel, staged_path, status,"
                       " created_at) VALUES (1, 'telegram', '/x/out/q3.zip', 'staged', 'x')")
+
+    def test_a_v0_2_0_schema_4_store_migrates_to_current_keeping_its_data(self):
+        # schema 4 as v0.2.0 shipped it (e79f77d): the import did not observe tags
+        from tests.schema_history import DDL_V4
+        self.assertIn("pass_steps", DDL_V4)
+        self.assertNotIn("note_seen_seq", DDL_V4)
+        old = self._released_store(DDL_V4, 4)
+        old.execute("UPDATE renders SET delivered_seq=0 WHERE render_id='r-old'")
+        old.close()
+        c = db.open_store()
+        self.addCleanup(c.close)
+        self._assert_current_behaviour(c, old_seq=0)
 
     def test_a_staged_path_is_unique_in_a_fresh_store(self):
         c = db.open_store()

@@ -138,7 +138,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
             and d["status"] in ("open", "matched", "proposed")
         if unknown:
             status = "UNCLASSIFIED"
-        # fix E2: a row not re-read since the latest import ships no classification and
+        # fix E2: a row not observed at the latest import ships no classification and
         # no document as its own — its kind may have changed (spec §Error handling:
         # packaging ships rather than blocking; the caption says how many)
         stale = d is not None and not d["fresh"] and d["status"] not in ("ineligible", "exempt")
@@ -161,7 +161,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 name = _place("unresolved", doc, used, named, dates.effective_date(r))
                 files[name] = documents_bytes(doc)
                 set_aside.append(name)
-                # a row not re-read ships its documents set aside, named in its own
+                # a row not observed ships its documents set aside, named in its own
                 # section: they are not candidates that failed to match (fix wave F)
                 if not stale:
                     unresolved_lines.append((d, name))
@@ -206,9 +206,9 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     notes += [f"- {_head(d)}" + (f" — holds {name}" if name else "")
               for d, name in unclassified] or ["- none"]
     if unread:
-        notes += ["", "## Not re-read since the last bank check", ""]
+        notes += ["", "## Not seen in the last bank check", ""]
         notes += [f"- {_head(d)}" + (f" — holds {', '.join(names)}, set aside until it is "
-                                     "re-read" if names else "") for d, names in unread]
+                                     "seen again" if names else "") for d, names in unread]
     notes += ["", "## Nice to have, not found", ""]
     notes += [f"- {_head(d)} — {d['expectation']['kind']}" for d in nice] or ["- none"]
     notes += ["", "## Unresolved candidates", ""]
@@ -307,7 +307,7 @@ def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, si
     if tail:
         out.append(", ".join(tail) + " — listed in notes.md.")
     if c.get("unread"):
-        out.append(f"{c['unread']} not re-read since the last bank check, so shipped unclassified "
+        out.append(f"{c['unread']} not seen in the last bank check, so shipped unclassified "
                    "— say \"go and check now\", then rebuild.")
     if partial:
         out.append("The quarter isn't over yet.")

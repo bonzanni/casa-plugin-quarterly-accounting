@@ -179,10 +179,10 @@ pass, whichever comes first:
      here. It runs:
      - the probes of its pass, step 1 (bank-feed tools, accounts, `sync`, the sync's probe,
        one `list_backups` answer, the ledger probe, `check_setup`) — stop if `can_run` is false;
-     - the snapshot of step 3, the ends of step 4 and the sweep of step 5 (its reads refresh
-       each payment's classification, which decides the document kind it wants);
+     - the snapshot of step 3 (the import tells the store every payment's classification,
+       which decides the document kind it wants), the ends of step 4 and the sweep of step 5;
      - judge ONLY that document, by the auto-match bar of step 6, and only against payments
-       whose item says `fresh: true` (read since this import). A payment it may fit that is
+       whose item says `fresh: true` (seen in this import). A payment it may fit that is
        not fresh waits: the next pass's triage judges it. If the sweep did not reach
        `remaining_in_cycle` 0, it says so, and you end the pass `interrupted`;
      - if nothing fits, suspect the data before the document: `sync` again, record its probe,
@@ -315,20 +315,22 @@ named in your context. Your one expectation write is in step 6.
    snapshot>, not_found=true)`. Do this before any matching, so freed documents are free for
    this pass.
 5. **Sweep.** Repeat `list_projections(pass_token)` until `remaining_in_cycle` is 0 or
-   `time_up`. It lists the payments not read since this pass's import
-   (the import carries no classification, so what a payment wants is known only from a read
-   made after it) — `remaining_in_cycle` 0 means every one was. A payment not read since the
-   import is never matched: the server refuses it. Every `record_observation` of the sweep
+   `time_up`. The import already told the store every payment's tags, so the sweep lists
+   only the payments that owe the bank ledger a write or a check — a tag or note to put
+   right, a note to confirm, a row the export no longer carries — and `remaining_in_cycle`
+   0 means none is left. A payment the export did not carry is never matched: the server
+   refuses it. Every `record_observation` of the sweep
    passes the `snapshot_id` that `list_projections` returned. For each item, read the row with
    `get_transaction(row_id)`. If it answers `no transaction #N`, record `not_found=true` as
    in step 4 and go on. Otherwise
    `record_observation(pid, pass_token, snapshot_id, observed_tags=<every tag>, observed_notes=<every note
-   shown>, observed_first_seen=<the row's first seen>)`, all three every time, read from this
+   shown>, observed_first_seen=<the row's first seen>, observed_tag_revision=<the tag
+   revision>)`, all four every time, read from this
    read: the tags are every tag on the `Tags:` line and on the `Other workflows' tags` line
    (the `acct::` tags are there); the notes are each note line shown, oldest first, as
    shown (the `[author, date]` prefix and the bank-provided-text markers may stay or go —
    the server reads both); first seen is the timestamp on the row's `first seen …,
-   last seen …` line. If it refuses because the bank ledger changed during this pass, stop the
+   last seen …` line; the tag revision is the number on its `Tag revision:` line. If it refuses because the bank ledger changed during this pass, stop the
    pass at once. If it refuses because the bank was re-read meanwhile (another import landed
    after your read), nothing was recorded: call `list_projections` again and read the payment
    again with its new `snapshot_id`.
@@ -348,8 +350,8 @@ named in your context. Your one expectation write is in step 6.
    removed is still there, a tag it added is missing, or the note is not among the notes —
    `record_observation(pid, pass_token, snapshot_id, write_error=<bank-feed's reply>)` and go
    on to the next item: it is reported, never retried. If the row is gone, record
-   `not_found=true`. Otherwise record it again with what that read shows (tags, notes and
-   first seen, as above); repeat until nothing is returned (at most an untag, a tag and a
+   `not_found=true`. Otherwise record it again with what that read shows (tags, notes,
+   first seen and tag revision, as above); repeat until nothing is returned (at most an untag, a tag and a
    note). Never make two writes without a read between them. A refusal that this pass is no
    longer the current one stops the pass.
 
@@ -359,13 +361,14 @@ named in your context. Your one expectation write is in step 6.
    row, then that row read again. When time is up (`time_up`, or `wrap_up`), stop where you
    are and finish with `remaining_in_cycle`: the pass ends `interrupted`, and the next pass
    resumes where this one stopped.
-6. **Triage.** Only the items that say `fresh: true` — read by the sweep since this pass's
-   import. An item with `fresh: false` was not read yet: leave it (the server refuses to match
-   it); a later pass handles it. If the sweep did not reach `remaining_in_cycle` 0, finish
-   with the remaining count: the pass ends `interrupted` (the next pass's sweep resumes
-   where this one stopped).
+6. **Triage.** Only the items that say `fresh: true` — seen in this pass's import. An item
+   with `fresh: false` was not in the export: leave it (the server refuses to match it); a
+   later pass handles it. Triage does not wait for the sweep: the import already knows what
+   each payment is. If the sweep did not reach `remaining_in_cycle` 0, finish with the
+   remaining count: the pass ends `interrupted` (the next pass's sweep makes the writes
+   still owed).
    `list_quarter_state(triage=true, pass_token=…)` lists, required first, the payments that
-   need a document and have none of the right kind — only those read since this import
+   need a document and have none of the right kind — only those seen in this import
    (`not_fresh` counts the others), at most 50 at a time. If it says `truncated`, judge
    what is listed and finish with its `remaining` count as `triage_remaining`; a later
    pass reaches the rest. For each, compare against
@@ -438,9 +441,8 @@ named in your context. Your one expectation write is in step 6.
    `pass_token=<token>, step=snapshot` and the quarter: the probes of its pass, step 1 (stop if `can_run` is
    false), the snapshot of step 3, the ends of step 4, then the sweep of step 5 for that
    quarter only — `list_projections(pass_token, quarter=<the quarter>)`, every row it lists
-   read and recorded, exactly as in the pass (the export carries no classification tags:
-   only the sweep's reads tell the store what each payment is now, so a package built
-   without it can ship a document the payment no longer wants). It never calls `begin_pass`
+   read and recorded, exactly as in the pass (the import tells the store what each payment
+   is now; the sweep puts the quarter's tags and notes right on the bank ledger). It never calls `begin_pass`
    or `end_pass` here; it finishes its step and returns whether it stopped and whether the
    sweep reached `remaining_in_cycle` 0. If it answers `status: pending`, say
    "Reading the bank first — the <quarter> package follows in a few minutes."
@@ -451,9 +453,10 @@ named in your context. Your one expectation write is in step 6.
    (`build` is step 2). Send any `speak` it returns and mark it delivered: a package that
    stopped is told there (`next` is null) — build nothing, and write no line of your own.
    Build only after the sweep. If the sweep ran out of room before 0,
-   the package still ships (the operator asked), but every payment not read since the
-   import ships unclassified with its documents set aside, and the caption says how many —
-   send it as it is; the operator can say "go and check now", then rebuild.
+   the package still ships (the operator asked) with every payment classified as the import
+   saw it; a payment the export no longer carried ships unclassified with its documents set
+   aside, and the caption says how many — send it as it is; the operator can say "go and
+   check now", then rebuild.
 2. `build_quarterly_package(quarter, package_token)`. For Telegram:
    `stage_for_delivery(channel="telegram", package_id=…, package_token=…)`, then
    `send_media(path, kind="zip", filename=<the returned filename>, caption=…)` with the
@@ -466,7 +469,7 @@ named in your context. Your one expectation write is in step 6.
    to. The same holds for a resend that times out, and for an email recorded `uncertain`.
    If the build, or the first `stage_for_delivery` of a package, is refused because the bank
    was re-read (while building, or since it was built), nothing was kept or staged: run
-   step 1 again (the re-read made every payment unread), then build again, once. A resend
+   step 1 again (the package must follow the newest bank check), then build again, once. A resend
    ("send it again") is the exact file already sent and is never refused for this.
    A bank check that lands after a package's first send was staged but before it went out
    takes that send back: the staged file is removed, so `send_media` or `send_email` fails

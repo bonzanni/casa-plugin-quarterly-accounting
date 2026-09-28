@@ -10,7 +10,7 @@ request. The server registers 35 tools. Design: `docs/superpowers/specs/2026-08-
 - Casa **0.326.0** or newer. Casa **0.329.0** or newer additionally lets uninstall offer
   "Erase everything" (see "Uninstall" below); on an older Casa the plugin still installs and
   runs, it just uninstalls without that choice.
-- bank-feed **0.15.0** or newer (casa-specialist-finance component 0.16.0), installed on the
+- bank-feed **0.20.0** or newer (casa-specialist-finance component 0.21.0), installed on the
   finance specialist with the business account linked, labelled `company`, and synced.
 - The gmail plugin (0.9.0 or newer) on Ellen; the finance specialist is Ellen's delegate.
 
@@ -35,7 +35,7 @@ already written into bank-feed's ledger, nor Home Assistant backups.
 
 ## Development
 - `python3 -m unittest discover -s tests -t .` — the whole suite, standard library only.
-- `tests/upstream/` holds test-only copies of bank-feed (component v0.19.0, and v0.13.2 for the
+- `tests/upstream/` holds test-only copies of bank-feed (component v0.21.0, and v0.13.2 for the
   below-floor case) and gmail's sent log. Refresh with `scripts/vendor-bankfeed.sh <tag>`.
 - `git config core.hooksPath .githooks` — tool-list agreement and the identifier scan.
 - `scripts/check_tool_agreement.py` — the server's registry, `casa.provides_tools` and

@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-FLOOR = "component-v0.19.0"
+FLOOR = "component-v0.21.0"
 BELOW_FLOOR = "component-v0.13.2"
 CAP_STABLE = {"ref_stable": True, "ref_scope": "account", "observed_n": 200}
 CAP_UNKNOWN = {"ref_stable": False, "ref_scope": "unknown", "observed_n": 0}
@@ -149,6 +149,11 @@ class Ledger:
     def tags(self, row_id: int) -> list:
         return [r[0] for r in self.conn.execute(
             "SELECT tag FROM transaction_tags WHERE row_id=? ORDER BY tag", (row_id,))]
+
+    def tag_revision(self, row_id: int) -> int:
+        """The `Tag revision:` number as get_transaction renders it (issue #1)."""
+        out = self.call("get_transaction", row_id=row_id)
+        return int(re.search(r"^Tag revision: (\d+) ", out, re.M).group(1))
 
     def notes(self, row_id: int) -> list:
         return [r[0] for r in self.conn.execute(

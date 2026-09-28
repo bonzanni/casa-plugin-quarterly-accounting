@@ -124,7 +124,7 @@ class TestSkill(TempEnv):
     def test_sweep_transcribes_the_sim(self):
         section = SKILL[SKILL.index("## The specialist's pass"):SKILL.index("## Packaging")]
         for phrase in ("observed_tags", "observed_notes", "observed_first_seen",
-                       "Other workflows' tags", "first seen", "write_error",
+                       "observed_tag_revision", "`Tag revision:` line", "Other workflows' tags", "first seen", "write_error",
                        "Never make two writes without a read between them",
                        "the bank ledger changed during this pass"):
             self.assertIn(phrase, section, phrase)
@@ -197,7 +197,8 @@ class TestSkill(TempEnv):
         self.assertNotIn("under\n   `bank_writes`", section)
 
     def test_packaging_sweeps_between_import_and_build(self):
-        # round E1 (Astra S1): only the sweep's reads refresh the classification
+        # round E1 (Astra S1); since issue #1 the import refreshes the classification and
+        # the sweep puts the quarter's tags and notes right before the build
         pack = " ".join(self.section("## Packaging", "## Install").split())
         order = ["the snapshot of step 3", "the ends of step 4", "the sweep of step 5",
                  "`end_pass`", "`build_quarterly_package(quarter, package_token)`"]
@@ -218,6 +219,9 @@ class TestSkill(TempEnv):
         self.assertIn("end the pass `interrupted`", doc)
         pack = " ".join(self.section("## Packaging", "## Install").split())
         self.assertIn("ships unclassified with its documents set aside", pack)
+        # issue #1: the import, not the sweep, tells the store what each payment is
+        self.assertIn("Triage does not wait for the sweep", triage)
+        self.assertIn("the import tells the store every payment's classification", doc)
 
     def test_a_refused_import_stops_the_pass_including_a_failed_withdrawal(self):
         # round E7: a withdrawal that fails refuses the whole import

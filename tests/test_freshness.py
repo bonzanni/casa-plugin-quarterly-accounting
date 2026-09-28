@@ -40,7 +40,7 @@ class ToolPass(test_e2e.Base):
 
     package_token = None
 
-    def begin(self, trigger, do_import=True, channel="telegram"):
+    def begin(self, trigger, do_import=True, channel="telegram", candidates=0):
         bf = self.bf
         token = call("begin_pass", trigger=trigger)["pass_token"]
         if trigger == "package":        # the skill: the snapshot step names the quarter
@@ -59,17 +59,23 @@ class ToolPass(test_e2e.Base):
             return token
         imp = call("import_ledger_export", path=bf.export(), pass_token=token,
                    ledger_instance=bf.last_export_instance)
-        self.assertEqual(imp["erase_candidates"], [])
+        self.assertEqual(len(imp["erase_candidates"]), candidates)
         return token
 
     def observe(self, token, item, snapshot_id):
         """The skill's step 5 for ONE item, from the rendered text."""
         bf, row_id = self.bf, item["row_id"]
         for _ in range(4):
-            tags, notes, first_seen = read(bf.call("get_transaction", row_id=row_id))
+            text = bf.call("get_transaction", row_id=row_id)
+            if text.startswith("no transaction #"):
+                call("record_observation", pid=item["pid"], pass_token=token,
+                     snapshot_id=snapshot_id, not_found=True)
+                return
+            tags, notes, first_seen, rev = read(text)
             r = call("record_observation", pid=item["pid"], pass_token=token,
                      snapshot_id=snapshot_id,
-                     observed_tags=tags, observed_notes=notes, observed_first_seen=first_seen)
+                     observed_tags=tags, observed_notes=notes, observed_first_seen=first_seen,
+                     observed_tag_revision=rev)
             ins = r["instructions"]
             if not ins:
                 return
@@ -170,10 +176,12 @@ class TestAstraInterruptedCycle(ToolPass):
 
 
 class TestTerraPartialSweepThenTriage(ToolPass):
-    """Round E2 (Terra): the sweep stops with remaining > 0 and triage then judges from
-    an unswept, stale classification: an invoice auto-matched where a credit note is
-    required. The machine write refuses a lineage not re-read since the import."""
-    def test_an_auto_match_on_a_row_not_reread_is_refused(self):
+    """Round E2 (Terra): the sweep stopped with remaining > 0 and triage then judged
+    from an unswept, stale classification: an invoice auto-matched where a credit note
+    is required. Since issue #1 the import itself observes the reclassification: with
+    no read of the row, triage already sees a credit note and the invoice is refused
+    by kind."""
+    def test_a_reclassification_is_known_at_the_import_without_a_read(self):
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="Z1", amount=2000, counterparty="Zapier"),
                   bf.row("2026-07-06", ref="A1", amount=1000, counterparty="Adobe")])
@@ -181,48 +189,54 @@ class TestTerraPartialSweepThenTriage(ToolPass):
         self.classify(ids["Z1"], "software")
         self.classify(ids["A1"], "software")
         self.first_pass()
-        self.assertLess(self.pid_of(ids["Z1"]), self.pid_of(ids["A1"]))
         bf.call("untag_transaction", row_ids=[ids["A1"]], tags=["software"])
         self.classify(ids["A1"], "refund")                           # wants a credit note now
         doc = self.file(amount_minor=1000, document_date="2026-07-06")   # an invoice
-        token = self.begin("cron")
-        self.assertEqual(self.sweep(token, budget=1), 1)             # Zapier read, Adobe not
-        # fix wave F: the triage listing leaves out what was not re-read (not_fresh counts
-        # it); the server guard below still refuses a caller that judges it anyway
-        default = call("list_quarter_state", triage=True)
-        self.assertNotIn(self.pid_of(ids["A1"]), [d["pid"] for d in default["triage"]])
-        self.assertEqual(default["not_fresh"], 1)
-        tri = {d["pid"]: d for d in call("list_quarter_state", triage=True,
-                                         fresh_only=False)["triage"]}
-        stale = tri[self.pid_of(ids["A1"])]
-        self.assertEqual(stale["expectation"]["kind"], "invoice")    # the stale picture
-        self.assertFalse(stale["fresh"])
+        token = self.begin("cron")                                   # the import; no read
+        tri = {d["pid"]: d for d in call("list_quarter_state", triage=True)["triage"]}
+        cur = tri[self.pid_of(ids["A1"])]
+        self.assertTrue(cur["fresh"])
+        self.assertEqual(cur["expectation"]["kind"], "credit-note")
         for tool in ("record_match", "propose_match"):
-            args = dict(pid=stale["pid"], doc_id=doc, expected_revision=stale["revision"],
-                        row_snapshot=stale["row_snapshot"], pass_token=token)
+            args = dict(pid=cur["pid"], doc_id=doc, expected_revision=cur["revision"],
+                        row_snapshot=cur["row_snapshot"], pass_token=token)
             if tool == "record_match":
                 args["author"] = "auto"
             out = _raw(tool, **args)
             self.assertTrue(out.startswith("refused: "), out)
-            self.assertIn("not been re-read since the latest bank import", out)
+            self.assertIn("credit-note", out)                        # refused by kind
         self.assertIsNone(self.conn.execute("SELECT current_match FROM projections WHERE pid=?",
-                                            (stale["pid"],)).fetchone()[0])
-        # once read, the payment wants a credit note and the invoice is refused by kind
-        self.assertEqual(self.sweep(token), 0)
-        cur = work.describe(self.conn, stale["pid"])
-        self.assertTrue(cur["fresh"])
-        self.assertEqual(cur["expectation"]["kind"], "credit-note")
+                                            (cur["pid"],)).fetchone()[0])
+
+    def test_the_machine_write_still_refuses_a_lineage_not_observed_at_the_import(self):
+        # defense in depth: the guard stays for a lineage the latest import did not
+        # observe (mutation check: without it this match would be recorded)
+        bf = self.bf
+        bf.fetch([bf.row("2026-07-05", ref="A1", amount=1000, counterparty="Adobe")])
+        rid = self.active()[0]["row_id"]
+        self.classify(rid, "software")
+        self.first_pass()
+        doc = self.file(amount_minor=1000, document_date="2026-07-05")
+        token = self.begin("cron")
+        d = next(x for x in call("list_quarter_state", triage=True)["triage"]
+                 if x["pid"] == self.pid_of(rid))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET class_observed_snapshot=NULL WHERE pid=?",
+                              (d["pid"],))
+        out = _raw("record_match", pid=d["pid"], doc_id=doc, expected_revision=d["revision"],
+                   row_snapshot=d["row_snapshot"], pass_token=token, author="auto")
+        self.assertIn("was not in the latest bank import", out)
 
 
 class TestPassWithAnUnfinishedSweep(ToolPass):
-    """SKILL.md step 6 (fix E2, controller ruling): a sweep cut short leaves triage
-    judging the fresh items only; the pass ends `interrupted`; the next pass's sweep
-    resumes at the cursor and its triage handles the rest."""
+    """SKILL.md step 6 (fix E2; issue #1): a sweep cut short no longer holds triage
+    back — the import observed every payment — so triage matches both in the pass
+    whose sweep had room for one; the writes it owes are made by the next sweep."""
     def outcome(self, out):
         return self.conn.execute("SELECT outcome FROM passes WHERE pass_id=?",
                                  (out["end"]["ended"],)).fetchone()[0]
 
-    def test_triage_matches_the_fresh_item_and_leaves_the_rest_for_the_next_pass(self):
+    def test_triage_matches_every_fresh_item_whatever_the_sweep_reached(self):
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="Z1", amount=2000, counterparty="Zapier"),
                   bf.row("2026-07-06", ref="A1", amount=1000, counterparty="Adobe")])
@@ -231,24 +245,18 @@ class TestPassWithAnUnfinishedSweep(ToolPass):
             self.classify(rid, "software")
         self.first_pass()
         z, a = self.pid_of(ids["Z1"]), self.pid_of(ids["A1"])
-        self.assertLess(z, a)
         self.file(counterparty="Zapier", issuer="Zapier", amount_minor=2000,
                   document_date="2026-07-05")
         self.file(amount_minor=1000, document_date="2026-07-06")
-        out = sim.run_pass(self.conn, bf, sweep_budget=1)            # Zapier read, Adobe not
-        self.assertEqual(out["remaining"], 1)
-        self.assertEqual((out["triage"]["matched"], out["triage"]["not_fresh"]), ([z], [a]))
-        self.assertEqual(self.outcome(out), "interrupted")
-        status = {p: lineage.projection(self.conn, p)["status"] for p in (z, a)}
-        self.assertEqual(status, {z: "matched", a: "open"})
-        out = sim.run_pass(self.conn, bf, sweep_budget=1)            # resumes at Adobe
-        self.assertEqual(out["triage"]["matched"], [a])
-        self.assertEqual(self.outcome(out), "interrupted")          # Zapier not re-read yet
-        out = sim.run_pass(self.conn, bf, sweep_budget=2)            # room for both
-        self.assertNotIn("remaining", out)
-        self.assertEqual(self.outcome(out), "complete")
+        out = sim.run_pass(self.conn, bf, sweep_budget=1)
+        self.assertEqual((sorted(out["triage"]["matched"]), out["triage"]["not_fresh"]),
+                         (sorted([z, a]), []))
         self.assertEqual({p: lineage.projection(self.conn, p)["status"] for p in (z, a)},
                          {z: "matched", a: "matched"})
+        out = sim.run_pass(self.conn, bf)                            # the owed writes
+        self.assertEqual(self.outcome(out), "complete")
+        self.assertEqual(self.owned(ids["Z1"]), ["acct::matched"])
+        self.assertEqual(self.owned(ids["A1"]), ["acct::matched"])
 
 
 class TestSnapshotBoundCommits(ToolPass):
@@ -273,16 +281,21 @@ class TestSnapshotBoundCommits(ToolPass):
         page = call("list_projections", pass_token=token)
         n = page["snapshot_id"]
         item = next(i for i in page["projections"] if i["row_id"] == a)
-        tags, notes, first_seen = read(bf.call("get_transaction", row_id=a))
+        tags, notes, first_seen, rev = read(bf.call("get_transaction", row_id=a))
         self.assertIn("software", tags)                              # the read, rendered
         bf.call("untag_transaction", row_ids=[a], tags=["software"])
         self.classify(a, "refund")                                   # reclassified after it
         self.assertEqual(self.import_in_another_process(token), n + 1)
         out = _raw("record_observation", pid=item["pid"], pass_token=token, snapshot_id=n,
-                   observed_tags=tags, observed_notes=notes, observed_first_seen=first_seen)
+                   observed_tags=tags, observed_notes=notes, observed_first_seen=first_seen,
+                   observed_tag_revision=rev)
         self.assertEqual(out, "refused: the bank was re-read meanwhile — list the sweep again "
                               "and read this payment again; nothing was recorded")
-        self.assertFalse(work.describe(self.conn, item["pid"])["fresh"])
+        # nothing recorded from the read; import N+1 itself observed the refund (issue #1)
+        p = lineage.projection(self.conn, item["pid"])
+        self.assertEqual((p["class_observed_snapshot"], p["read_snapshot"] == n + 1), (n + 1, False))
+        self.assertEqual(work.describe(self.conn, item["pid"])["expectation"]["kind"],
+                         "credit-note")
         self.assertEqual(self.sweep(token), 0)                       # read again, under N+1
         self.end(token, "complete")
         _, files, rows, _ = self.zip_of()
@@ -374,13 +387,14 @@ class TestSnapshotBoundCommits(ToolPass):
             finally:
                 package._render = real
             self.assertEqual(list((db.data_dir() / "packages").iterdir()), [])
-            for item, (tags, notes, first_seen) in reads:
+            for item, (tags, notes, first_seen, rev) in reads:
                 out = _raw("record_observation", pid=item["pid"], pass_token=token,
                            snapshot_id=n, observed_tags=tags, observed_notes=notes,
-                           observed_first_seen=first_seen)
+                           observed_first_seen=first_seen, observed_tag_revision=rev)
                 self.assertTrue(out.startswith("refused: the bank was re-read"), out)
                 refused += 1
-                self.assertFalse(work.describe(self.conn, item["pid"])["fresh"])
+                self.assertNotEqual(lineage.projection(self.conn, item["pid"])["read_snapshot"],
+                                    n + 1)                        # nothing recorded under N+1
             self.assertEqual(call("list_projections", pass_token=token)["snapshot_id"], n + 1)
             self.end(token, "interrupted")
         self.assertGreater(refused, 0)
@@ -701,8 +715,10 @@ def _raw(name, **args):
 class TestPackageWithANonFreshMember(ToolPass):
     """A build never ships a non-fresh row's documents as MATCHED: the row ships as
     UNCLASSIFIED, its documents under unresolved/, and the caption counts it (spec
-    §Error handling: packaging ships rather than blocking)."""
-    def test_the_matched_row_not_reread_does_not_ship_its_invoice(self):
+    §Error handling: packaging ships rather than blocking). Since issue #1 every row
+    the export carries is observed at the import, so this is defense in depth: the
+    lineage is made unobserved by hand (mutation check of the build's guard)."""
+    def test_a_matched_row_not_observed_at_the_import_does_not_ship_its_invoice(self):
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="Z1", amount=2000, counterparty="Zapier"),
                   bf.row("2026-07-06", ref="A1", amount=1000, counterparty="Adobe")])
@@ -712,56 +728,64 @@ class TestPackageWithANonFreshMember(ToolPass):
         self.first_pass()
         self.file(amount_minor=1000, document_date="2026-07-06")
         self.assertEqual(len(sim.run_pass(self.conn, bf)["triage"]["matched"]), 1)
-        bf.call("untag_transaction", row_ids=[ids["A1"]], tags=["software"])
-        self.classify(ids["A1"], "refund")
         token = self.begin("package")
-        self.assertEqual(self.sweep(token, budget=1), 1)             # Zapier read, Adobe not
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET class_observed_snapshot=NULL WHERE pid=?",
+                              (self.pid_of(ids["A1"]),))
         self.end(token, "interrupted")
         pkg, files, rows, z = self.zip_of()
         self.assertEqual(files, ["unresolved/2026-07-06_Adobe_10.00.pdf"])
         st = {r["counterparty"]: (r["status"], r["expectation_kind"], r["document"]) for r in rows}
         self.assertEqual(st["Adobe"], ("UNCLASSIFIED", "", ""))
         self.assertEqual(st["Zapier"], ("MISSING", "invoice", ""))
-        self.assertIn("1 not re-read since the last bank check", pkg["caption"])
-        notes = z.read("notes.md").decode()
-        self.assertIn("## Not re-read since the last bank check", notes)
-        # after a complete sweep the same build ships the truth
-        token = self.begin("package")
-        self.assertEqual(self.sweep(token), 0)
-        self.end(token, "complete")
-        pkg, files, rows, _ = self.zip_of()
-        self.assertEqual(files, [])
-        st = {r["counterparty"]: (r["status"], r["expectation_kind"]) for r in rows}
-        self.assertEqual(st["Adobe"], ("MISSING", "credit-note"))
-        self.assertNotIn("not re-read", pkg["caption"])
+        self.assertIn("1 not seen in the last bank check", pkg["caption"])
+        self.assertIn("## Not seen in the last bank check", z.read("notes.md").decode())
 
 
 class TestFreshnessProperty(ToolPass):
-    """After any import, a machine match or a build over a non-fresh lineage never
-    succeeds; over a fresh one it does. Random subsets of rows read, fixed seeds."""
-    def test_no_machine_match_and_no_shipped_document_on_a_non_fresh_lineage(self):
+    """Issue #1's invariant, over random reclassifications, sweep budgets and purges
+    (fixed seeds): after ANY import, every lineage whose row the export carries is
+    fresh with the kind bank-feed's live tags derive — whatever the sweep read — and
+    the package ships that kind's truth; a lineage whose row the export dropped is
+    not fresh, never machine-matched, and ships UNCLASSIFIED with no document."""
+    KIND = {"software": "invoice", "refund": "credit-note"}
+
+    def test_every_exported_row_is_fresh_with_its_live_kind_after_any_import(self):
         bf = self.bf
         refs = ["R%d" % i for i in range(6)]
         bf.fetch([bf.row("2026-07-%02d" % (i + 1), ref=r, amount=1000 + i,
                          counterparty="Vendor%d" % i) for i, r in enumerate(refs)])
         ids = {r["provider_ref"]: r["row_id"] for r in self.active()}
-        for rid in ids.values():
+        live = {}
+        for ref, rid in ids.items():
             self.classify(rid, "software")
+            live[ref] = "software"
         self.first_pass()
         docs = {r: self.file(counterparty="Vendor%d" % i, issuer="Vendor%d" % i,
                              amount_minor=1000 + i, document_date="2026-07-%02d" % (i + 1))
                 for i, r in enumerate(refs)}
-        rng = random.Random(20260927)
-        for trial in range(4):
-            token = self.begin("cron")
+        rng = random.Random(20260928)
+        purged = set()
+        for trial in range(5):
+            for ref in rng.sample(sorted(set(refs) - purged), 2):     # reclassify two
+                new = "refund" if live[ref] == "software" else "software"
+                bf.call("untag_transaction", row_ids=[ids[ref]], tags=[live[ref]])
+                self.classify(ids[ref], new)
+                live[ref] = new
+            if trial == 2:                                             # drop the earliest row
+                bf.purge_before("2026-07-02")
+                purged.add("R0")
+            token = self.begin("cron", candidates=1 if trial == 2 else 0)
             budget = rng.randint(0, len(refs))
             if budget:
                 self.sweep(token, budget=budget)
             for d in work.list_quarter_state(self.conn, "2026-Q3")["items"]:
-                fresh = lineage.is_fresh(self.conn, lineage.projection(self.conn, d["pid"]))
-                self.assertEqual(d["fresh"], fresh)
-                ref = next(k for k, v in ids.items() if v == lineage.projection(
-                    self.conn, d["pid"])["dest_row_id"])
+                p = lineage.projection(self.conn, d["pid"])
+                ref = next(k for k, v in ids.items() if v == p["dest_row_id"])
+                self.assertEqual(d["fresh"], ref not in purged, (trial, ref))
+                if ref in purged:
+                    continue
+                self.assertEqual(d["expectation"]["kind"], self.KIND[live[ref]], (trial, ref))
                 if d["status"] != "open":
                     continue
                 try:
@@ -769,21 +793,19 @@ class TestFreshnessProperty(ToolPass):
                                          expected_revision=d["revision"],
                                          row_snapshot=d["row_snapshot"], token=token)
                     ok = True
-                except db.Refusal as exc:
+                except db.Refusal:
                     ok = False
-                    self.assertIn("not been re-read", str(exc))
-                self.assertEqual(ok, fresh, (trial, ref))
+                self.assertEqual(ok, live[ref] == "software", (trial, ref))   # an invoice fits
             self.end(token, "interrupted")
             _, files, rows, _ = self.zip_of()
-            for d in work.list_quarter_state(self.conn, "2026-Q3")["items"]:
-                r = next(x for x in rows if x["counterparty"] == d["counterparty"])
-                if not d["fresh"]:
+            for r in rows:
+                ref = next(k for k in refs if r["counterparty"] == "Vendor%s" % k[1:])
+                if ref in purged:
                     self.assertEqual((r["status"], r["document"]), ("UNCLASSIFIED", ""))
-            # the next pass imports again: every lineage is non-fresh after it
-            token = self.begin("cron")
-            self.assertFalse(any(lineage.is_fresh(self.conn, lineage.projection(self.conn, p))
-                                 for p in lineage.live_pids(self.conn)))
-            self.end(token, "interrupted")
+                else:
+                    self.assertEqual(r["expectation_kind"], self.KIND[live[ref]], (trial, ref))
+                    if live[ref] == "refund":
+                        self.assertEqual(r["document"], "", (trial, ref))    # no invoice
 
 
 if __name__ == "__main__":

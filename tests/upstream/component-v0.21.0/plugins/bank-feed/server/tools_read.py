@@ -48,6 +48,7 @@ import sqlite3
 import backups
 import apply
 import bank_feed_server
+import eb_ais
 import flows
 import money
 import rules
@@ -539,8 +540,9 @@ def _freshness(c, account_ids, resource: str) -> list:
                 # actual success in its RETURN VALUE. Both are read below.
                 returned = REFRESHER(c, account_id, resource, out=res_out)
             except Exception as exc:            # noqa: BLE001 — class only
-                # Never the message: it can carry a provider body.
-                error = type(exc).__name__
+                # Never the message: it can carry a provider body. The status
+                # of an `ApiError` is ours to print (issue #83).
+                error = eb_ais.failure_label(exc)
                 # A class name is not a remedy. An exception whose class
                 # declares `operator_exit` is stating that the state it creates
                 # has a named way OUT, and that text is OURS (a constant in the
@@ -609,8 +611,13 @@ def _freshness_note(accounts, fresh) -> str:
         # one goes through `_clause_safe` and this does not.
         life = (" (the account's ledger life changed during this refresh — "
                 "restored or erased; run sync)" if f.get("life_changed") else "")
+        # The inline refresh's failure is said on BOTH branches: on the
+        # never-synced one it is the only explanation there is (issue #83).
+        failed = (" (inline refresh FAILED: %s%s)"
+                  % (f["error"], f.get("exit_hint") or "")
+                  if f["error"] else "")
         if f["age_s"] is None:
-            parts.append("%s: never synced%s" % (name, life))
+            parts.append("%s: never synced%s%s" % (name, life, failed))
             continue
         state = "fresh" if f["age_s"] <= STALENESS_S else "STALE"
         note = "%s: %s, cache age %s" % (name, state, _fmt_age(f["age_s"]))
@@ -620,9 +627,7 @@ def _freshness_note(accounts, fresh) -> str:
         if f["refreshed"] and not life:
             note += " (refreshed inline just now)"
         note += life
-        if f["error"]:
-            note += " (inline refresh FAILED: %s%s)" % (f["error"],
-                                                        f.get("exit_hint") or "")
+        note += failed
         if (f["completeness"] or "complete") != "complete":
             note += " (completeness=%s — this range is incomplete)" % f["completeness"]
         parts.append(note)
@@ -1266,7 +1271,7 @@ def get_transaction(args: dict) -> str:
         row = c.execute("SELECT * FROM transactions WHERE row_id=?",
                         (rid,)).fetchone()
         if row is None:
-            acct, tags, total, notes = None, [], 0, []
+            acct, tags, revision, total, notes = None, [], 0, 0, []
         else:
             acct = c.execute(
                 "SELECT included FROM accounts WHERE account_id=?",
@@ -1274,6 +1279,10 @@ def get_transaction(args: dict) -> str:
             tags = [t[0] for t in c.execute(
                 "SELECT tag FROM transaction_tags WHERE row_id=? ORDER BY tag",
                 (rid,))]
+            # Issue #86: the value `export_history` carries for this row.
+            rev = c.execute("SELECT revision FROM tag_revisions WHERE row_id=?",
+                            (rid,)).fetchone()
+            revision = rev[0] if rev is not None else 0
             total = c.execute(
                 "SELECT COUNT(*) FROM transaction_notes WHERE row_id=?",
                 (rid,)).fetchone()[0]
@@ -1339,6 +1348,8 @@ def get_transaction(args: dict) -> str:
     if foreign:
         lines.append("Other workflows' tags (not classifications): "
                      + ", ".join(_neutralized(t) for t in foreign))
+    lines.append("Tag revision: %d (export_history's tag_revision for this "
+                 "row; it changes whenever the row's tags do)" % revision)
     if total:
         # The journal is append-only, so a correction coexists with what it
         # corrects; the header says which one wins, for a skimming reader.
