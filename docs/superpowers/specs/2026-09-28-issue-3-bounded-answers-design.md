@@ -2,6 +2,22 @@
 
 Issue: bonzanni/casa-plugin-quarterly-accounting#3 (bug, severity:high). Plugin 0.3.0 → 0.3.1.
 
+Status: converged 2026-09-28 at code round C9 on 963b9ce, with Astra SHIP and Terra SHIP
+(both `medium`). Earlier rounds:
+- C1 (3ea4edc): both DNS, which led to revision 2.
+- D2 (967b75c): both DNS, which led to revision 3.
+- D3 (47c6ee3): both SHIP.
+- C2: Astra SWF, Terra DNS.
+- C3: Terra SHIP, Astra DNS. Its refutation defense came back FINDING STANDS, which led
+  to `judge_due`.
+- C4: Terra SWF, Astra DNS.
+- C5: Astra SHIP, Terra DNS.
+- C6: Terra SWF, Astra DNS. The rule was generalized to a pass's completeness at its end.
+- C7: Terra SWF, Astra DNS.
+- C8: Terra SWF, Astra DNS. The bar was reset to "no regression".
+
+Each round's findings and fixes are in its commit message.
+
 ## What went wrong
 
 On a real quarter `continue_pass`'s sweep continuation answered 62,8xx characters. Claude
