@@ -189,12 +189,15 @@ class TestAStaleHolderCannotSend(Requests):
         self.assertIsNotNone(row["withdrawn_at"])
         self.assertEqual(self.request()["state"], "withdrawn")
         # the stalled holder: refused at staging and at settling, with or without a token
+        # (only a report that it WAS delivered is taken, as evidence: TestAnEmailWaitsForItsTap)
         self.assertTrue(self.text("stage_for_delivery", channel="telegram",
                                   package_id=pkg["package_id"], package_token=p1)
                         .startswith(TAKEN))
         for tok in ({"package_token": p1}, {}):
-            self.assertTrue(self.text("record_delivery", delivery_id=d["delivery_id"],
-                                      outcome="delivered", **tok).startswith("refused: "), tok)
+            for outcome in ("uncertain", "failed"):
+                self.assertTrue(self.text("record_delivery", delivery_id=d["delivery_id"],
+                                          outcome=outcome, **tok).startswith("refused: "),
+                                (tok, outcome))
         self.assertEqual(self.conn.execute("SELECT status FROM deliveries").fetchone()[0],
                          "uncertain")
         # an import that lands next revokes nothing new
@@ -224,7 +227,7 @@ class TestAStaleHolderCannotSend(Requests):
         _, _, d = self.staged(channel="email")
         entry = pathlib.Path(d["path"]).parent
         self.assertTrue(entry.exists())
-        self.clock.advance(steps.LEASE_S)
+        self.clock.advance(delivery.EMAIL_RECOVERY_LEASE_S)        # an email waits for its tap
         self.assertIsNone(self.claim()["continue"]["next"])
         self.assertFalse(entry.exists())
 
@@ -888,6 +891,64 @@ class TestEveryCallTellsItsOwnNotice(Requests):
         c = self.claim()["continue"]
         end = self.call("end_pass", pass_token=c["pass_token"], outcome="stopped")
         self.assert_told(end["speak"], "I couldn't build the Q3 2026 package", "end_pass")
+
+
+class TestAnEmailWaitsForItsTap(Requests):
+    """Review C4 (H2): an email waits for the operator's approval tap, so its staged
+    send is not recovered for a day; and a send recovery settled `uncertain` that
+    turns out delivered is upgraded by that evidence."""
+    def test_an_email_send_has_a_day_before_it_is_recovered(self):
+        self.seed(1, documents=1)
+        _, _, d = self.staged("email")
+        self.clock.advance(steps.LEASE_S + 60)
+        self.assertIsNone(self.claim()["continue"])
+        self.assertTrue(pathlib.Path(d["path"]).exists())
+        self.clock.advance(delivery.EMAIL_RECOVERY_LEASE_S)
+        self.assertIsNone(self.claim()["continue"]["next"])
+        self.assertFalse(pathlib.Path(d["path"]).exists())
+
+    def recovered(self, channel):
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged(channel)
+        self.clock.advance(delivery.EMAIL_RECOVERY_LEASE_S + 1)
+        r = self.claim()
+        self.assertIsNone(r["continue"]["next"])
+        self.assertIn("may not have arrived", r["speak"]["text"])
+        return p, pkg, d
+
+    def test_a_delivery_recorded_after_recovery_upgrades_it(self):
+        p, pkg, d = self.recovered("email")
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="delivered",
+                        message_id="m-1", package_token=p)
+        self.assertEqual(out["status"], "delivered")
+        row = self.conn.execute("SELECT status, message_id FROM deliveries WHERE delivery_id=?",
+                                (d["delivery_id"],)).fetchone()
+        self.assertEqual(tuple(row), ("delivered", "m-1"))
+        self.assertGreater(self.conn.execute("SELECT count(*) FROM delivered_rows WHERE"
+                                             " package_id=?", (pkg["package_id"],)).fetchone()[0], 0)
+        self.assertEqual(self.request()["state"], "delivered")
+        stale = self.conn.execute("SELECT sent_at FROM alerts WHERE occurrence_key=?",
+                                  (f"delivery:{d['delivery_id']}:uncertain",)).fetchone()
+        self.assertIsNotNone(stale["sent_at"])                     # no stale offer remains
+        self.assertIsNone(self.claim()["speak"])
+        self.assertEqual(self.text("stage_for_delivery", channel="email", resend=True),
+                         "refused: nothing is waiting to be sent again")
+
+    def test_a_delivery_recorded_after_recovery_upgrades_it_without_the_token(self):
+        _, _, d = self.recovered("telegram")
+        self.assertEqual(self.call("record_delivery", delivery_id=d["delivery_id"],
+                                   outcome="delivered")["status"], "delivered")
+
+    def test_any_other_late_outcome_for_a_recovered_send_is_refused(self):
+        p, _, d = self.recovered("telegram")
+        for outcome in ("uncertain", "failed"):
+            self.assertTrue(self.text("record_delivery", delivery_id=d["delivery_id"],
+                                      outcome=outcome, package_token=p).startswith("refused: "),
+                            outcome)
+        self.assertEqual(self.conn.execute("SELECT status FROM deliveries WHERE delivery_id=?",
+                                           (d["delivery_id"],)).fetchone()[0], "uncertain")
+        self.assertTrue(self.text("record_delivery", delivery_id=d["delivery_id"],
+                                  outcome="delivered").startswith('{'))
 
 
 if __name__ == "__main__":

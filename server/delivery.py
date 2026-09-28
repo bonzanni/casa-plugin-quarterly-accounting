@@ -37,6 +37,9 @@ import passes
 
 GMAIL_ATTACHMENT_LIMIT = casa_handoff.MAX_FILE_BYTES      # the handoff folder's 25 MB per file
 STAGE_ATTEMPTS = 8
+# An email waits for the operator's one-tap approval, which can take far longer than a
+# Telegram send: its staged copy is not recovered for a day. Telegram keeps LEASE_S.
+EMAIL_RECOVERY_LEASE_S = 24 * 3600
 WITHDRAW_REFUSED = ("could not withdraw a staged package — nothing was imported ({why}); fix "
                     "that and import again")
 
@@ -324,7 +327,8 @@ def stalled_sends(conn, lease_s: float) -> list:
         "SELECT d.*, p.quarter FROM deliveries d JOIN packages p ON p.package_id=d.package_id"
         " WHERE d.status='staged' AND d.revoked_at IS NULL AND d.withdrawn_at IS NULL"
         " ORDER BY d.delivery_id").fetchall()
-        if steps._age(r["lease_at"] or r["created_at"]) >= lease_s]
+        if steps._age(r["lease_at"] or r["created_at"])
+        >= (EMAIL_RECOVERY_LEASE_S if r["channel"] == "email" else lease_s)]
 
 
 def recover_staged(conn, d) -> int:
@@ -366,9 +370,15 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
             return {"delivery_id": delivery_id, "status": "delivered", "already": True}
         req = conn.execute("SELECT * FROM package_requests WHERE delivery_id=?",
                            (delivery_id,)).fetchone()
-        if req is not None:
+        # Evidence wins over the recovery's guess: a send recovery settled `uncertain`
+        # (withdrawn) that is reported delivered was delivered — Casa had taken the
+        # bytes. Only that upgrade is accepted for a recovered send, by its evidence
+        # alone (the recovery rotated the request's token).
+        upgrade = d["withdrawn_at"] is not None and outcome == "delivered" \
+            and d["status"] == "uncertain"
+        if req is not None and not upgrade:
             passes.check_package_token(conn, req["request_id"], package_token)
-        if d["withdrawn_at"] is not None:
+        if d["withdrawn_at"] is not None and not upgrade:
             raise db.Refusal("this send was taken back before it was recorded — nothing was "
                              "written")
         if outcome == "delivered" and d["channel"] == "email" and not message_id:
@@ -379,6 +389,10 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
         if req is not None:
             conn.execute("UPDATE package_requests SET state=?, updated_at=? WHERE request_id=?",
                          (outcome, db.now(), req["request_id"]))
+        if upgrade:
+            # the recovery's "may not have arrived" is answered: it is never offered again
+            conn.execute("UPDATE alerts SET sent_at=? WHERE occurrence_key=? AND sent_at IS"
+                         " NULL", (db.now(), f"delivery:{delivery_id}:uncertain"))
         if outcome == "delivered" and d["package_id"] is not None:
             # the rows exactly as the package froze them: facts_fp is
             # db.canonical(reducer.facts_of(row)), what ledger's delivered checks compare;

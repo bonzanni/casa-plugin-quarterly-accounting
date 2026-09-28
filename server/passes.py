@@ -406,13 +406,21 @@ def poison(conn, reason: str) -> None:
     if cur is None:
         return
     pass_id = cur["pass_id"]
+    # the token the caller's transaction checked: the live generation right now
+    checked = _marker(conn)["generation"]
     verdict = db.canonical({"allowed": False, "reason": reason, "expected_generation": None,
                             "expected_ledger": None, "workflow": version.WORKFLOW,
                             "install_backup": None, "older_workflows": []})
     conn.execute("ROLLBACK")
     with db.tx(conn):
-        conn.execute("UPDATE passes SET gate_json=?, snapshot_id=NULL WHERE pass_id=?",
-                     (verdict, pass_id))
+        # A write outside the transaction that checked the token re-validates it: a
+        # caller superseded in between (a claim rotated the token) poisons nothing —
+        # the live holder's pass keeps its import. The caller still raises its Refusal.
+        m = _marker(conn)
+        if m is not None and m["live"] and m["generation"] == checked \
+                and m["pass_id"] == pass_id:
+            conn.execute("UPDATE passes SET gate_json=?, snapshot_id=NULL WHERE pass_id=?",
+                         (verdict, pass_id))
     db._retry_locked(lambda: conn.execute("BEGIN IMMEDIATE"), db.LOCK_BOUND_S)
 
 

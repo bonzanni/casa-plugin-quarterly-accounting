@@ -446,10 +446,6 @@ class TestContractAndSurface(Flow):
                          ("from:adobe.com subject:invoice", 14))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestReviewC1(Flow):
     """Code review round C1 on the continuation."""
     def test_a_finished_sweep_is_continued_after_a_long_restart(self):
@@ -524,3 +520,39 @@ class TestReviewC1(Flow):
         busy = self.call("begin_pass", trigger="operator")
         self.assertEqual(busy["text"], "A check is running — started 3 hours ago.\n"
                                        "Ask again in a few minutes.")
+
+
+class TestReviewC4(Flow):
+    """Review C4 (H1): a write made outside the transaction that checked the token
+    re-validates it: a superseded caller's poison() writes nothing."""
+    def test_a_superseded_import_cannot_poison_the_continued_pass(self):
+        self.seed(1)
+        t1 = self.begin()
+        self.start(t1)
+        self.probe_import(t1)
+        self.call("record_step", pass_token=t1, step="sweep", action="finish")
+        ctx = multiprocessing.get_context("spawn")
+        rolled_back, resume, out = ctx.Event(), ctx.Event(), ctx.Queue()
+        proc = ctx.Process(target=_procs.import_poison_paused,
+                           args=(self.bf.export(), t1, "b" * 32, rolled_back, resume, out))
+        proc.start()
+        self.addCleanup(proc.join, 30)
+        self.addCleanup(resume.set)
+        self.assertTrue(rolled_back.wait(60), "the import never reached poison")
+        t2 = self.claim()["continue"]["pass_token"]              # B continues the pass
+        resume.set()
+        proc.join(60)
+        got = out.get(timeout=10)
+        self.assertEqual(got[0], "error", got)
+        self.assertIn("nothing was imported", got[1])            # A still refused
+        cur = self.conn.execute("SELECT snapshot_id, gate_json FROM passes WHERE"
+                                " generation=?", (t1,)).fetchone()
+        self.assertIsNotNone(cur["snapshot_id"])                 # not poisoned
+        self.assertNotIn("another bank ledger", cur["gate_json"] or "")
+        page = self.call("list_projections", pass_token=t2)      # B's sweep proceeds
+        self.assertIn("projections", page)
+        self.assertTrue(page["bank_writes"]["allowed"])
+
+
+if __name__ == "__main__":
+    unittest.main()

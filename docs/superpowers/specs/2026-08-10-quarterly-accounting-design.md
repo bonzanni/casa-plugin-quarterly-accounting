@@ -2512,9 +2512,14 @@ The mechanics, in the order a pass meets them:
   settles within its lease — a first send or a resend, linked to a request or not — is
   recovered on the delivery by the next claim: its staged bytes are removed under the
   custody lock first, then the send is settled `uncertain` and "send it again" is
-  offered; a removal that fails refuses the claim. Recovery never sends. Every tool call
+  offered; a removal that fails refuses the claim. Recovery never sends. An email send
+  waits a day before it is recovered (the operator's approval tap can take that long),
+  and a send recovered `uncertain` that is then reported delivered is upgraded by that
+  evidence, its offer closed. Every tool call
   that raises a notice returns it in its own `speak` (`begin_pass` on a reclaim
-  included), and a pass's end carries every notice raised during that pass.
+  included), and a pass's end carries every notice raised during that pass. A write
+  made outside the transaction that checked a token (a pass's poisoned verdict)
+  re-validates the token first, so a superseded holder writes nothing.
 - **Staged paths are never reused.** Every delivery's staged path is unique in the store;
   a Telegram copy gets a random name, drawn again when it is already a file or any
   delivery's path, and the operator-facing name travels as `send_media`'s `filename`.

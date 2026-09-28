@@ -1134,6 +1134,11 @@ holding the same undelivered rendering can both send it before either marks it
 delivered. Notices are at-least-once, because a duplicate failure notice is preferable
 to a lost one. Once it is marked delivered, it is never offered again.
 
+**R6 — mandatory notices beyond one message (accepted, code review C4).** The notices a
+call must carry (`must=`) are printed first, but when they alone exceed one Telegram
+message the fit cuts them: those that do not fit are deferred to the next rendering,
+never lost. It was reproduced only with 50 packages staged across 50 quarters at once.
+
 **Q1 — release number.** Two tools, three new tool arguments and a migration suggest
 v0.2.0. Any bump changes `WORKFLOW` to `acct@<new>`, and `check_setup` then reports
 `acct@0.1.0`'s writes as an older workflow still present. That is a report, not a stop.
@@ -1223,3 +1228,26 @@ Each is fixed by replacing the assumption.
   back under the custody lock, it is settled `uncertain`, and its per-delivery notice
   offers "send it again". A linked request is withdrawn on top, under a rotated token —
   one mechanism, not two. (Schema 4 gains the column; schema 4 has not been released.)
+
+### Round C4
+
+- **A write outside the checked transaction re-validates the token.** `poison()` rolls
+  back its caller's checked transaction and writes the verdict in a transaction of its
+  own; it now captures the generation that transaction checked and writes nothing if
+  the live generation moved (a claim rotated it) in between. A superseded importer can
+  no longer strip the live holder's import. Audit of every write in a transaction other
+  than the one that checked the token: `poison` (fenced now); `end_pass`'s reap and
+  pending rendering after its commit (not pass-scoped: custody housekeeping and the
+  render log); `bank_write_gate`'s verdict persistence from `check_setup` or before the
+  import (takes no token; the verdict is computed from the live pass's own ledger probe,
+  never from caller data). Every other token check is inside its committing transaction.
+- **An email send waits for its tap.** A staged email send is recovered after
+  `EMAIL_RECOVERY_LEASE_S` (24 h), not `LEASE_S`: the operator's approval tap can take
+  far longer than ten minutes.
+- **Evidence wins over the recovery's guess.** A `record_delivery(delivered)` for a send
+  recovery settled `uncertain` (withdrawn) upgrades it — by that evidence alone, since
+  the recovery rotated the request's token: the send is `delivered`, its delivered rows
+  are written (so a later change to that quarter is alerted), its request is
+  `delivered`, and the recovery's "may not have arrived" notice is closed so no stale
+  offer remains. Every other late outcome for a recovered send stays refused.
+- Accepted as a residual: R6.

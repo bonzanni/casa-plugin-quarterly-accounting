@@ -242,3 +242,30 @@ def continue_pass(path, barrier, out):
         out.put(steps.claim(conn))
     finally:
         conn.close()
+
+
+def import_poison_paused(export_path, token, instance, rolled_back, resume, out):
+    """import_ledger_export with a mismatched ledger instance, paused inside poison()
+    right after it rolled back the checked transaction and before its own verdict
+    transaction (review C4: a superseded caller must not poison the live pass)."""
+    import contextlib
+    import inspect
+
+    import db
+    import ledger
+    real = db.tx
+
+    @contextlib.contextmanager
+    def tx(conn, *a, **kw):
+        if any(f.function == "poison" for f in inspect.stack()):
+            rolled_back.set()
+            resume.wait(60)
+        with real(conn, *a, **kw):
+            yield conn
+    db.tx = tx
+    conn = db.open_store()
+    try:
+        _report(out, lambda: ledger.import_ledger_export(conn, path=export_path, token=token,
+                                                          ledger_instance=instance))
+    finally:
+        conn.close()
