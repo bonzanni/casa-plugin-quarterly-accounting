@@ -199,7 +199,7 @@ class TestTerraPartialSweepThenTriage(ToolPass):
         self.assertEqual(cur["expectation"]["kind"], "credit-note")
         for tool in ("record_match", "propose_match"):
             args = dict(pid=cur["pid"], doc_id=doc, expected_revision=cur["revision"],
-                        row_snapshot=cur["row_snapshot"], pass_token=token)
+                        row_digest=cur["row_digest"], pass_token=token)
             if tool == "record_match":
                 args["author"] = "auto"
             out = _raw(tool, **args)
@@ -224,7 +224,7 @@ class TestTerraPartialSweepThenTriage(ToolPass):
             self.conn.execute("UPDATE projections SET class_observed_snapshot=NULL WHERE pid=?",
                               (d["pid"],))
         out = _raw("record_match", pid=d["pid"], doc_id=doc, expected_revision=d["revision"],
-                   row_snapshot=d["row_snapshot"], pass_token=token, author="auto")
+                   row_digest=d["row_digest"], pass_token=token, author="auto")
         self.assertIn("was not in the latest bank import", out)
 
 
@@ -791,7 +791,7 @@ class TestFreshnessProperty(ToolPass):
                 try:
                     matches.record_match(self.conn, pid=d["pid"], doc_id=docs[ref], author="auto",
                                          expected_revision=d["revision"],
-                                         row_snapshot=d["row_snapshot"], token=token)
+                                         row_digest=d["row_digest"], token=token)
                     ok = True
                 except db.Refusal:
                     ok = False

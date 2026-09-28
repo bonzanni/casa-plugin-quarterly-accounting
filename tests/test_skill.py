@@ -67,7 +67,7 @@ class TestSkill(TempEnv):
             if n in params:
                 continue
             if n.endswith("_") or n in {"workflow", "expected_generation", "pass_token",
-                                        "render_id", "row_snapshot", "resolves", "not_found",
+                                        "render_id", "row_digest", "resolves", "candidate_ids", "not_found",
                                         "write_error", "observed_tags", "observed_notes",
                                         "instructions", "speak", "reshow", "true", "false",
                                         "bank_writes", "request_id", "labels", "runners_up",
@@ -171,10 +171,12 @@ class TestSkill(TempEnv):
         self.assertIn("Always make the Gmail probe first", rnd)
         self.assertNotIn("skip it when", rnd)
 
-    def test_row_snapshot_comes_from_the_listing(self):
-        triage = self.section("**Triage.**", "7. **Identity")
-        self.assertIn("`row_snapshot` from `list_quarter_state` verbatim", triage)
-        self.assertNotIn("pass its facts as `row_snapshot`", SKILL)
+    def test_row_digest_comes_from_the_listing(self):
+        triage = " ".join(self.section("**Triage.**", "7. **Identity").split())
+        self.assertIn("`row_digest` from `list_quarter_state` as `row_digest`", triage)
+        self.assertIn("re-read that payment with `list_quarter_state(pid=…, pass_token=…)`", triage)
+        self.assertIn("pass all its `candidate_ids` in `resolves`", triage)
+        self.assertNotIn("row_snapshot", SKILL)
 
     def test_the_specialist_never_binds_and_sets_only_a_vendor_kind(self):
         spec = " ".join(self.section("## The specialist's pass", "1. **Probes.**").split())

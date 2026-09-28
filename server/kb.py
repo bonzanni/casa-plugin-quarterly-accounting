@@ -72,6 +72,9 @@ def get_counterparty(conn, text):
     return out
 
 
+LINK_MAX = 500              # issue #3: every stored field a listing carries is bounded
+
+
 def upsert_counterparty(conn, name, *, patterns=(), source=None, document_link=None,
                         link_note=None, search_hint=None, notes=None, window_days=None,
                         token=None) -> dict:
@@ -92,6 +95,8 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
         raise db.Refusal("a counterparty needs a name")
     if source not in (None, "email", "portal"):
         raise db.Refusal("source is 'email' or 'portal'")
+    if document_link is not None and len(document_link) > LINK_MAX:
+        raise db.Refusal(f"a document link is at most {LINK_MAX} characters")
     if window_days is not None and not (1 <= int(window_days) <= 60):
         raise db.Refusal("window_days is between 1 and 60")
     existing = _entry(conn, name)

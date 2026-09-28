@@ -19,7 +19,7 @@ LABELS = ("clean", "guessed", "no-ref", "partial-search", "recipient?")
 
 
 def _labels(labels) -> str:
-    labels = tuple(labels or ("clean",))
+    labels = tuple(dict.fromkeys(labels or ("clean",)))       # issue #3: each label once
     bad = [lbl for lbl in labels if lbl not in LABELS]
     if bad:
         raise db.Refusal(f"labels are {', '.join(LABELS)}")
@@ -85,7 +85,7 @@ def _why_not_kind(conn, proj, row, exp, doc) -> str:
 
 
 def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runners_up,
-             resolves, row_snapshot, token):
+             resolves, row_snapshot, token, row_digest=None):
     import passes
     if token is None:
         raise db.Refusal("a machine pairing is written during a pass: pass the pass_token")
@@ -130,11 +130,17 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
                                                  "that turned up for it is shown as residue"}
         if row["status"] != "BOOK":
             raise db.Refusal("a pending payment is not matched automatically")
-        if row_snapshot is None or R.facts_of(row_snapshot) != R.facts_of(row) \
-                or (row_snapshot.get("state") or "active") != "active":
-            raise db.Refusal("the row changed since this pass's snapshot (or row_snapshot is not the item's value "
-                             "from list_quarter_state): pass the item's row_snapshot from list_quarter_state, "
-                             "verbatim, or re-import before matching")
+        if (row_snapshot is None) == (row_digest is None):
+            raise db.Refusal("pass the item's row_digest from list_quarter_state")
+        if row_digest is not None:
+            same = row_digest == R.digest(R.facts_of(row))
+        else:
+            same = (R.facts_of(row_snapshot) == R.facts_of(row)
+                    and (row_snapshot.get("state") or "active") == "active")
+        if not same:
+            raise db.Refusal("the row changed since this pass's snapshot (or row_digest is not the item's value "
+                             "from list_quarter_state): re-read the item with list_quarter_state(pid=…) and "
+                             "pass its row_digest, or re-import before matching")
         if kind == "pair" and documents.collisions(conn, doc_id):
             raise db.Refusal("another document carries the same issuer and number: propose it "
                              "instead, or resolve the duplicate first")
@@ -194,10 +200,10 @@ def _operator_pid(conn, pid) -> int:
 
 def record_match(conn, *, pid, doc_id, author, expected_revision, render_id=None,
                  labels=("clean",), rationale="", runners_up=(), resolves=(), row_snapshot=None,
-                 token=None) -> dict:
+                 token=None, row_digest=None) -> dict:
     if author == "auto":
         return _machine(conn, "pair", pid, doc_id, expected_revision, labels, rationale,
-                        runners_up, resolves, row_snapshot, token)
+                        runners_up, resolves, row_snapshot, token, row_digest)
     if author != "operator":
         raise db.Refusal("author is 'auto' or 'operator'")
     with db.tx(conn):
@@ -207,9 +213,10 @@ def record_match(conn, *, pid, doc_id, author, expected_revision, render_id=None
 
 
 def propose_match(conn, *, pid, doc_id, expected_revision, labels=("clean",), rationale="",
-                  runners_up=(), resolves=(), row_snapshot=None, token=None) -> dict:
+                  runners_up=(), resolves=(), row_snapshot=None, token=None,
+                  row_digest=None) -> dict:
     return _machine(conn, "propose", pid, doc_id, expected_revision, labels, rationale,
-                    runners_up, resolves, row_snapshot, token)
+                    runners_up, resolves, row_snapshot, token, row_digest)
 
 
 def confirm_match(conn, *, match_id, expected_revision, render_id) -> dict:

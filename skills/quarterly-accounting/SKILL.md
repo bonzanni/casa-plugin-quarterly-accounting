@@ -368,13 +368,14 @@ named in your context. Your one expectation write is in step 6.
    each payment is. If the sweep did not reach `remaining_in_cycle` 0, finish with the
    remaining count: the pass ends `interrupted` (the next pass's sweep makes the writes
    still owed).
-   `list_quarter_state(triage=true, pass_token=…)` lists, required first, the payments that
+   `list_quarter_state(triage=true, pass_token=…)` lists the payments that
    need a document and have none of the right kind — only those seen in this import
    (`not_fresh` counts the others), a page at a time. Judge the page; while its `next` is
    set and there is time, list again with `after=<next>` (passed back unchanged) and judge
    that page. When you stop, finish with the last page's `remaining` count as
    `triage_remaining`; a later pass reaches the rest. For each, compare against
-   `list_unmatched_documents` and the KB (`get_counterparty`), reading candidate PDFs with
+   `list_unmatched_documents` (it pages the same way: follow its `next`) and the KB
+   (`get_counterparty`), reading candidate PDFs with
    `Read`. Correct a filed document's reading with `update_document_metadata(doc_id, …,
    pass_token=…)`; a quotation, order confirmation or losing duplicate is
    `mark_irrelevant(doc_id, pass_token=…)`. The auto-match bar:
@@ -395,17 +396,18 @@ named in your context. Your one expectation write is in step 6.
      business's own credit note).
 
    Only when two candidates are indistinguishable, `propose_match` instead. Pass the item's
-   `row_snapshot` from `list_quarter_state` verbatim as `row_snapshot` (never rebuild it from
-   `get_transaction`'s text: its amounts and fenced texts are not those facts), and the item's
-   `revision` as `expected_revision`. If the write is refused as changed, list again. If the payment has unresolved candidates,
-   pass them all in `resolves`. `record_match(pid, doc_id, author="auto", …)` otherwise. A
+   `row_digest` from `list_quarter_state` as `row_digest` (never build one yourself: it
+   binds the match to the exact bank facts the item showed), and the item's `revision` as
+   `expected_revision`. If the write is refused as changed, re-read that payment with
+   `list_quarter_state(pid=…, pass_token=…)` and judge it again from its `item`. If the
+   payment has unresolved candidates, pass all its `candidate_ids` in `resolves`. `record_match(pid, doc_id, author="auto", …)` otherwise. A
    document that later competes with an accepted pairing: `relabel_match(…, labels=["guessed"],
    runners_up=[…])` — never replace the pairing yourself. When a new payment and its document
    cannot be told apart from an already-paired payment and its document (same vendor, same
    amount, same dates) and that pairing was made by the machine (never one the operator
    confirmed), propose both: `propose_match` for the new payment, and `propose_match`
-   again on the paired payment with its own document (its `row_snapshot` and `revision` from
-   `list_quarter_state(quarter=…)` of that payment's quarter, following `next`), which turns that pairing back
+   again on the paired payment with its own document (its `row_digest` and `revision` from
+   `list_quarter_state(pid=…)`), which turns that pairing back
    into a proposal the operator is shown.
 
    A vendor whose documents turn out to be a kind the mapping did not predict (its payments
