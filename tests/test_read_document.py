@@ -63,7 +63,10 @@ class TestReadDocument(StoreCase):
 
     def test_held_bytes_that_no_longer_match_their_hash_are_an_error_never_served(self):
         doc = ingest(self.conn, self.publish("a.pdf", PDF))
-        documents.path_of(self.conn, doc["doc_id"]).write_bytes(b"%PDF tampered")
+        # the same length: a size check would serve it (round C1, Astra)
+        altered = PDF.replace(b"1.4", b"1.7")
+        self.assertEqual(len(altered), len(PDF))
+        documents.path_of(self.conn, doc["doc_id"]).write_bytes(altered)
         with self.assertRaises(documents.CustodyError):
             documents.read_document(self.conn, doc["doc_id"])
 
@@ -93,6 +96,16 @@ class TestReadDocumentOverMcp(StoreCase):
         self.assertEqual(hashlib.sha256(base64.b64decode(blob)).hexdigest(), doc["sha256"])
         # the text block alone is what counts against Claude Code's answer cap
         self.assertLess(len(out["content"][0]["text"]), budget.RESULT_LIMIT)
+
+    def test_a_plain_list_answer_is_still_rendered_as_one_json_text_block(self):
+        # only a Blocks answer is sent as content blocks (round C1, Astra)
+        import tools  # noqa: F401
+        qa_server.TOOLS["_probe_list"] = {"description": "", "schema": {},
+                                          "fn": lambda args: [{"invoice": 42}]}
+        self.addCleanup(qa_server.TOOLS.pop, "_probe_list")
+        out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": "_probe_list", "arguments": {}}})["result"]
+        self.assertEqual(out["content"], [{"type": "text", "text": '[{"invoice":42}]'}])
 
     def test_a_missing_doc_id_is_a_refusal_not_a_crash(self):
         out = self._call()["result"]
