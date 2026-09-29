@@ -84,6 +84,14 @@ class TestReadDocument(StoreCase):
         self.assertEqual(path.read_bytes(), held)
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), doc["sha256"])
 
+    def test_a_prefixed_pdf_whose_held_bytes_changed_is_an_error_never_served(self):
+        # the hash is checked before the slice, whatever the prefix (round R1, Astra)
+        held = b"\xef\xbb\xbf" + PDF
+        doc = ingest(self.conn, self.publish("rail.pdf", held))
+        documents.path_of(self.conn, doc["doc_id"]).write_bytes(held.replace(b"1.4", b"1.7"))
+        with self.assertRaises(documents.CustodyError):
+            documents.read_document(self.conn, doc["doc_id"])
+
     def test_a_pdf_that_starts_with_its_header_says_nothing_was_dropped(self):
         doc = ingest(self.conn, self.publish("a.pdf", PDF))
         text, _ = documents.read_document(self.conn, doc["doc_id"])
