@@ -12,6 +12,11 @@ RESULT_LIMIT = 20_000      # a whole answer: about 8 K tokens of this JSON
 PAGE_BUDGET = 16_000       # one page's items, leaving room for the answer's own fields
 
 
+class Blocks(list):
+    """An answer that is already MCP content blocks (read_document's text and
+    resource, issue #6): sent as it is, never rendered as JSON text."""
+
+
 def render(out) -> str:
     """The one rendering of a tool answer: compact JSON."""
     if isinstance(out, str):

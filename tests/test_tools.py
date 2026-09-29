@@ -24,7 +24,7 @@ EXPECTED = {
     "record_search", "stop_chasing",
     "list_quarter_state", "build_review", "mark_rendering_delivered", "apply_reply",
     "build_quarterly_package", "stage_for_delivery", "record_delivery",
-    "record_step", "continue_pass",
+    "record_step", "continue_pass", "read_document",
 }
 
 
@@ -81,14 +81,14 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 35)
+        self.assertEqual(len(EXPECTED), 36)
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 35)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 36)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])

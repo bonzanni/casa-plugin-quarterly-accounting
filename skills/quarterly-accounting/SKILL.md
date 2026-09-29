@@ -15,7 +15,7 @@ Two agents share one store:
 | Work | Who |
 |---|---|
 | Reading state, rendering a view, applying a reply, filing a document, Gmail, sending anything to the operator | **Ellen**, directly — never delegate a lookup |
-| Anything with bank-feed; deciding whether a document explains a payment (reading the PDF with `Read`); researching a portal link | **The finance specialist**, through `delegate_to_agent(agent="finance", mode="sync")` |
+| Anything with bank-feed; deciding whether a document explains a payment (reading it with `read_document`); researching a portal link | **The finance specialist**, through `delegate_to_agent(agent="finance", mode="sync")` |
 
 The test: if answering needs a PDF opened and an opinion formed, it is the specialist's; if
 it needs a row read, it is Ellen's.
@@ -378,8 +378,9 @@ named in your context. Your one expectation write is in step 6.
    that page. When you stop, finish with the last page's `remaining` count as
    `triage_remaining`; a later pass reaches the rest. For each, compare against
    `list_unmatched_documents` (it pages the same way: follow its `next`) and the KB
-   (`get_counterparty`), reading candidate PDFs with
-   `Read`. Correct a filed document's reading with `update_document_metadata(doc_id, …,
+   (`get_counterparty`), reading each candidate with `read_document(doc_id)`: it names the
+   path where the file was saved for you — open that path with `Read` (the store itself is
+   not readable to you). Never match a document you could not read. Correct a filed document's reading with `update_document_metadata(doc_id, …,
    pass_token=…)`; a quotation, order confirmation or losing duplicate is
    `mark_irrelevant(doc_id, pass_token=…)`. The auto-match bar:
    - the payment is booked, on the bound account, and expects a document kind;
