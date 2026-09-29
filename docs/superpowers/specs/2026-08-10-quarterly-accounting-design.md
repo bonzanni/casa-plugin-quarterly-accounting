@@ -173,6 +173,14 @@ marked as data) and the bytes as an MCP `resource` blob. Claude Code (2.1.273) s
 image blob inline and saves any other blob under the calling session's own
 `tool-results/`, naming the path in the answer; Casa lets a session `Read` its own tool
 results (ha-casa-app#1082), and `Read` opens the PDF. The server still parses nothing.
+`Read` refuses a PDF whose first bytes are not `%PDF-`, and a vendor's file can carry a
+prefix (a UTF-8 BOM, seen in a real quarter; issue #8). So when a held PDF does not start
+with `%PDF-` but the header lies wholly within its first 1024 bytes, the reading copy
+starts at the header and the text block says how many bytes were dropped; the hash is
+checked on the held bytes first, and the held file and the package copy keep the filed
+bytes. With no header in that window, `read_document` refuses, naming the document as
+unreadable, rather than send a file `Read` would reject. Finding the header is the only
+look inside a file the server takes.
 An XML invoice goes as `text/plain` (saved as `.txt`); HEIC and TIFF are saved as `.bin`,
 which `Read` cannot show — the residual. A blob never counts against Claude Code's
 answer cap: only the text block does. When ha-casa-app#1101 lands, a declared read grant
@@ -1057,6 +1065,8 @@ restart mid-pass loses only the in-flight turn.
 The flows below need writes this section never named: `begin_pass` / `end_pass` (the pass
 marker), `record_probe`, `record_search`, `stop_chasing`, `set_watermark`, `relabel_match`,
 `record_delivery`, and `apply_reply` (the executable reply grammar). The plan's §D1 has the full list.
+
+**Erratum (issue #8, v0.3.3):** `read_document` sends a PDF with a short prefix before its header from the header, and refuses a PDF with no header in its first 1024 bytes (§Placement, "Which files an agent may `Read`").
 
 **Erratum (issue #6, v0.3.2):** 36 tools. `read_document(doc_id)` hands an agent a filed document to read (§Placement, "Which files an agent may `Read`").
 

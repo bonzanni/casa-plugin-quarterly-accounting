@@ -70,6 +70,43 @@ class TestReadDocument(StoreCase):
         with self.assertRaises(documents.CustodyError):
             documents.read_document(self.conn, doc["doc_id"])
 
+    def test_a_pdf_with_bytes_before_its_header_is_sent_from_the_header(self):
+        # issue #8: a railway operator's invoice began with a UTF-8 BOM, and Read
+        # rejects any PDF whose first bytes are not %PDF-
+        held = b"\xef\xbb\xbf" + PDF
+        doc = ingest(self.conn, self.publish("rail.pdf", held))
+        text, res = documents.read_document(self.conn, doc["doc_id"])
+        self.assertEqual(base64.b64decode(res["resource"]["blob"]), PDF)
+        self.assertEqual(res["resource"]["mimeType"], "application/pdf")
+        self.assertIn("3 bytes", json.loads(text["text"])["how"])
+        # custody is untouched: the held file is the filed bytes
+        path = documents.path_of(self.conn, doc["doc_id"])
+        self.assertEqual(path.read_bytes(), held)
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), doc["sha256"])
+
+    def test_a_pdf_that_starts_with_its_header_says_nothing_was_dropped(self):
+        doc = ingest(self.conn, self.publish("a.pdf", PDF))
+        text, _ = documents.read_document(self.conn, doc["doc_id"])
+        self.assertNotIn("dropped", json.loads(text["text"])["how"])
+
+    def test_a_header_within_the_first_1024_bytes_is_found_and_no_further(self):
+        doc = ingest(self.conn, self.publish("a.pdf", b"x" * 1019 + PDF))
+        _, res = documents.read_document(self.conn, doc["doc_id"])
+        self.assertEqual(base64.b64decode(res["resource"]["blob"]), PDF)
+        doc = ingest(self.conn, self.publish("b.pdf", b"x" * 1020 + PDF))
+        import db
+        with self.assertRaises(db.Refusal) as cm:
+            documents.read_document(self.conn, doc["doc_id"])
+        self.assertIn(f"#{doc['doc_id']}", str(cm.exception))
+
+    def test_a_pdf_with_no_header_is_a_refusal_naming_the_document(self):
+        import db
+        doc = ingest(self.conn, self.publish("a.pdf", b"<html>not a pdf</html>"))
+        with self.assertRaises(db.Refusal) as cm:
+            documents.read_document(self.conn, doc["doc_id"])
+        self.assertIn(f"#{doc['doc_id']}", str(cm.exception))
+        self.assertIn("unreadable", str(cm.exception))
+
     def test_missing_held_bytes_are_an_error(self):
         doc = ingest(self.conn, self.publish("a.pdf", PDF))
         documents.path_of(self.conn, doc["doc_id"]).unlink()
