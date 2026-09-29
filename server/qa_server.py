@@ -57,13 +57,17 @@ def handle(req: dict) -> dict | None:
         tool = TOOLS.get(params.get("name"))
         if tool is None:
             return _error(id_, -32601, f"unknown tool {params.get('name')!r}")
+        import budget
         try:
-            text, is_error = _render(tool["fn"](params.get("arguments") or {})), False
+            out, is_error = tool["fn"](params.get("arguments") or {}), False
+            content = (list(out) if isinstance(out, budget.Blocks)
+                       else [{"type": "text", "text": _render(out)}])
         except db.Refusal as exc:
-            text, is_error = f"refused: {exc}", False
+            content, is_error = [{"type": "text", "text": f"refused: {exc}"}], False
         except Exception as exc:                       # surfaced, never swallowed
-            text, is_error = f"error: {type(exc).__name__}: {exc}", True
-        payload = {"content": [{"type": "text", "text": text}]}
+            content = [{"type": "text", "text": f"error: {type(exc).__name__}: {exc}"}]
+            is_error = True
+        payload = {"content": content}
         if is_error:
             payload["isError"] = True
         return _result(id_, payload)

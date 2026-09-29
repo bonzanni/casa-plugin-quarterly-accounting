@@ -163,13 +163,28 @@ assembly, outbox staging. **No LLM judgment, no PDF parsing, no network access i
 server.** All document reading and all matching judgment happen in agents via `Read`
 (both roles have it; `Read` handles PDFs natively).
 
+**Which files an agent may `Read` (issue #6).** Having `Read` is not reaching the store:
+Casa gates every `Read` with its `path_scope` hook, and neither role's readable prefixes
+cover `$CLAUDE_PLUGIN_DATA` (a delegated specialist's list is empty; Casa 0.332.10), nor
+can a plugin declare one (asked for as ha-casa-app#1101). So an agent reads a filed
+document through `read_document(doc_id)`: the server checks the held bytes against the
+hash custody is by and answers with a short, bounded text block (the filed reading,
+marked as data) and the bytes as an MCP `resource` blob. Claude Code (2.1.273) shows an
+image blob inline and saves any other blob under the calling session's own
+`tool-results/`, naming the path in the answer; Casa lets a session `Read` its own tool
+results (ha-casa-app#1082), and `Read` opens the PDF. The server still parses nothing.
+An XML invoice goes as `text/plain` (saved as `.txt`); HEIC and TIFF are saved as `.bin`,
+which `Read` cannot show — the residual. A blob never counts against Claude Code's
+answer cap: only the text block does. When ha-casa-app#1101 lands, a declared read grant
+over `documents/` makes this hop optional; `read_document` stays correct either way.
+
 ### Division of labor
 
 | Actor | Responsibilities |
 |---|---|
 | Casa core | Fires the weekly trigger at the resident; enforces tool gates. |
 | Resident (Ellen) | Orchestrates passes; all Gmail work (targeted searches, attachment download, ingest); **all** operator conversation (the review sheet, its free-text replies, the occasional one-line question folded into the sheet); sends the zip. |
-| Finance specialist | All matching judgment, grounded in its own `Read` of the actual PDFs; all bank-feed tagging/notes; portal-link research (WebSearch); returns structured work orders. Never talks to the operator (structurally cannot: `ask_user` requires direct execution). |
+| Finance specialist | All matching judgment, grounded in its own reading of the actual PDFs (`read_document`, then `Read`); all bank-feed tagging/notes; portal-link research (WebSearch); returns structured work orders. Never talks to the operator (structurally cannot: `ask_user` requires direct execution). |
 | Plugin MCP server | Document store, counterparty KB and expectation mapping, match records, quarter workbook, filename normalization, package/zip build, outbox staging. |
 | Operator | Reads a short weekly message; corrects a line in free text when they disagree; pulls the collection list when they sit down to do it; supplies invoices if they feel like it; receives one zip per quarter. Every one of those is optional. |
 
@@ -1036,12 +1051,14 @@ multi-round delegations stateless-safe (each delegation is a fresh ephemeral ses
 state carries in the store, not in return values alone) and crash-safe: a casa
 restart mid-pass loses only the in-flight turn.
 
-## Tool surface (server, 35 tools)
+## Tool surface (server, 36 tools)
 
 **Erratum (operator, 2026-09-27; implementation plan D1):** the server registers 33 tools.
 The flows below need writes this section never named: `begin_pass` / `end_pass` (the pass
 marker), `record_probe`, `record_search`, `stop_chasing`, `set_watermark`, `relabel_match`,
 `record_delivery`, and `apply_reply` (the executable reply grammar). The plan's §D1 has the full list.
+
+**Erratum (issue #6, v0.3.2):** 36 tools. `read_document(doc_id)` hands an agent a filed document to read (§Placement, "Which files an agent may `Read`").
 
 **Erratum (issue #2, v0.2.0):** 35 tools. `record_step` records a pass's delegated steps
 (start, before the delegation; finish, the specialist's last action), and `continue_pass`
@@ -1064,7 +1081,7 @@ custody in name only. The metadata
 arguments are the agent's provisional reading, for filing; the bytes are the fact.
 `update_document_metadata` (the specialist corrects the provisional `kind` here when it
 judges the document), `mark_irrelevant`.
-Query: `list_unmatched_documents`, `list_quarter_state`, `get_counterparty`.
+Query: `list_unmatched_documents`, `read_document`, `list_quarter_state`, `get_counterparty`.
 Expectation: `set_expectation(scope, kind, tier)` — `scope` is a counterparty or a
 classification chain; the operator's "no invoices ever for X" and "payslips don't matter"
 land here, with the render binding when the operator is the author (§"Document
