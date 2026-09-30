@@ -141,12 +141,28 @@ class TestGrammar(Base):
                 for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
         self.deliver()
         for text in ("Confirm all three,\nexcept the Zapier one.", "All good,\nexcept the Zapier one",
-                     "All three guesses are right.\nBut not the Zapier one."):
+                     "All three guesses are right.\nBut not the Zapier one.",
+                     # R4 Astra: any clause the grammar does not understand may qualify it
+                     "Confirm all three,\nwith the exception of the Zapier one.",
+                     "Confirm all three,\nexcluding the Zapier one.",
+                     "Confirm all three.\n— except the Zapier one",
+                     "All good.\nZapier not so sure.", "All good. 1 wrong."):
             with self.subTest(text=text):
                 out = reply.apply_reply(self.conn, text)
                 self.assertEqual(out["applied"], [])
                 self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
-                self.assertIn("an exception in the same message", out["receipt"])
+                self.assertIn("something else in the same message", out["receipt"])
+                self.assertEqual(self.operator_entries(), 0)
+
+    def test_an_approval_beside_understood_clauses_still_applies(self):
+        # the form the receipts recommend: the approval and the correction, two sentences
+        z = self.item("Zapier", 9900, "2026-09-17")
+        v = self.item("Vercel", 1210, "2026-09-18")
+        self.deliver()
+        out = reply.apply_reply(self.conn, "All good. The Zapier one is wrong. Is Vercel right?")
+        # (what the second sentence then does to Zapier is as on 0.3.3; not this test's)
+        self.assertEqual((self.author(z)[0], self.author(v)[0]), ("operator", "operator"))
+        self.assertNotIn("something else in the same message", out["receipt"])
 
     def test_a_collective_confirmation_binds_like_all_good(self):
         a = self.item("Adobe", 5445, "2026-09-14")

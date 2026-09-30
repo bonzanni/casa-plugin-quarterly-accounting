@@ -448,7 +448,20 @@ def _bind_match(conn, d, match_id):
     return s["render_id"], rev
 
 
-_EXCEPTION = re.compile(r"(?:except|but|apart from|other than|besides|save for)\b")
+_EXCEPTION = re.compile(r"(?:except|but|apart from|other than|besides|save for|excluding|"
+                        r"with the exception|not\b)")
+
+
+_NUMBERED = re.compile(r"\d{1,2}(?:\s+\w+)?")
+
+
+def _parse(clause: str):
+    """(verb, match) for the one pattern that consumes the clause whole, or (None, None)."""
+    for name, rx in PATTERNS:
+        m = rx.fullmatch(clause)
+        if m:
+            return name, m
+    return None, None
 
 
 def apply_reply(conn, text: str) -> dict:
@@ -460,25 +473,24 @@ def apply_reply(conn, text: str) -> dict:
     if not clauses or all(c.endswith("?") for c in clauses):
         return run.result(not_a_reply=True)
     items = _open_items(conn)
-    # R3 (Astra): a line break splits "all good,\nexcept the Zapier one" into two
-    # clauses, and the exception would no longer qualify the approval. A reply with a
-    # clause that opens with an exception approves no sheet as a whole
-    run.excepted = any(_EXCEPTION.match(c) for c in clauses)
-    for clause in clauses:
+    parsed = [(c, *_parse(c)) for c in clauses]
+    # R3/R4 (Astra): a reply is split into clauses, so a qualification of a sheet-wide
+    # approval ("all good,\nexcept the Zapier one"; "…\nwith the exception of …";
+    # "…\nexcluding …") stands in a clause of its own. A sheet as a whole is approved
+    # only by a reply understood whole: any clause not understood (a question aside),
+    # or one opening with an exception, and no sheet-wide approval applies
+    run.excepted = any(not c.endswith("?") and (verb is None or _NUMBERED.fullmatch(c) or
+                                                _EXCEPTION.match(c.lstrip(" -\u2013\u2014,:")))
+                       for c, verb, _ in parsed)
+    for clause, verb, m in parsed:
         if clause.endswith("?"):
             run.lines.append(f"“{clause}” is a question — nothing changed for it.")
             continue
-        if re.fullmatch(r"\d{1,2}(?:\s+\w+)?", clause):
+        if _NUMBERED.fullmatch(clause):
             run.lines.append(f"“{clause}”: there are no numbered lines — name the payee, "
                              "e.g. \"the Zapier one is wrong\".")
             run.unresolved += 1
             continue
-        verb, m = None, None
-        for name, rx in PATTERNS:
-            m = rx.fullmatch(clause)
-            if m:
-                verb = name
-                break
         if verb is None:
             names = _targets(clause)
             if names and all(_resolve(conn, n, items)[0] is not None for n in names):
@@ -495,8 +507,8 @@ def apply_reply(conn, text: str) -> dict:
 
 def _apply(conn, run, verb, m, items):
     if verb == "all_good" and run.excepted:
-        run.lines.append("Nothing applied for that: an exception in the same message leaves "
-                         "unclear what is approved. Say \"all good\" and \"the Zapier one is "
+        run.lines.append("Nothing applied for that: something else in the same message "
+                         "leaves unclear what is approved. Say \"all good\" and \"the Zapier one is "
                          "wrong\" as two sentences, or only the one that is wrong.")
         run.unresolved += 1
         return

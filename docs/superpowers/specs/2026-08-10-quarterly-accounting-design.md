@@ -2102,6 +2102,10 @@ catch, because it launders a guess into a human decision. So:
   bare "the guesses" is not, since it may mean the pairings just named. Every count
   stated must be the number of pairings waiting on that sheet, or nothing applies and
   the receipt says how many there are.
+  A sheet as a whole ("all good" or a collective) is approved only by a reply understood
+  whole: when any other clause is not understood (a question aside), or opens with an
+  exception, no sheet-wide approval applies — the reply is split into clauses, so a
+  qualification ("…\nexcept the Zapier one") may stand in a clause of its own.
 - **Facts are distinct from verdicts.** "3 is my accountant" records an identity; it
   does **not** mean "no invoice expected" (that is "3 needs no invoice", a per-payment
   exemption through `set_exemption`), and it certainly does not mean "never for this
