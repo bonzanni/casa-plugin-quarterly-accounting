@@ -155,7 +155,7 @@ def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_toke
                          "continue_pass: the package you asked for follows its check")
     if req is not None and req["state"] == "built":
         import package as _package
-        if _package.stale_check(conn, req["request_id"]):     # the check predates an import
+        if _package.stale_check(conn, req["request_id"], package_token):   # before an import
             raise db.Refusal(_package.RECHECK)
     try:
         with db.custody_lock():
@@ -165,7 +165,7 @@ def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_toke
     except db.Refusal:
         if req is not None and req["state"] == "built":
             import package as _package
-            if _package.stale_check(conn, req["request_id"]):   # an import landed meanwhile
+            if _package.stale_check(conn, req["request_id"], package_token):   # meanwhile
                 raise db.Refusal(_package.RECHECK)
         raise
 

@@ -356,15 +356,19 @@ RECHECK = ("the bank was re-read since the check — the check runs again, and t
            "follows it; call continue_pass")
 
 
-def stale_check(conn, request_id) -> bool:
+def stale_check(conn, request_id, token) -> bool:
     """Issue #15 (design D2): a request's check describes the import it ran on. Once a
     newer import landed, the request goes back to `queued` (committed on its own) and
-    the caller refuses with RECHECK. True when that happened."""
+    the caller refuses with RECHECK. True when that happened. Only the holder of the
+    request's CURRENT token moves it (code round C1, Astra S1: a superseded holder
+    requeued the request under its successor); anyone else changes nothing."""
     import passes
     with db.tx(conn):
         req = conn.execute("SELECT * FROM package_requests WHERE request_id=?",
                            (request_id,)).fetchone()
         if req is None or req["state"] not in ("snapshot-done", "built"):
+            return False
+        if token is None or req["token"] is None or int(token) != req["token"]:
             return False
         if req["checked_snapshot"] is not None and \
                 req["checked_snapshot"] == lineage.latest_import(conn):
@@ -390,7 +394,7 @@ def build_quarterly_package(conn, quarter: str, package_token=None, *, bound=Tru
         raise RuntimeError("build_quarterly_package opens its own transactions")
     if bound:
         rid = _request_for_build(conn, quarter, package_token)
-        if stale_check(conn, rid):
+        if stale_check(conn, rid, package_token):
             raise db.Refusal(RECHECK)
     # The custody lock over documents/ and packages/ (db.custody_lock): a build
     # reads held documents' bytes and writes into packages/, which reset_store
@@ -452,8 +456,10 @@ def _build(conn, quarter: str, package_token=None, bound=False) -> dict:
                              " updated_at=? WHERE request_id=?", (pkg_id, db.now(), request_id))
     except _Recheck as exc:
         path.unlink(missing_ok=True)
-        stale_check(conn, exc.request_id)
-        raise db.Refusal(RECHECK)
+        if stale_check(conn, exc.request_id, package_token):
+            raise db.Refusal(RECHECK)
+        raise db.Refusal("this package request has been taken over by a later turn — stop, "
+                         "nothing was written")
     except BaseException:
         path.unlink(missing_ok=True)       # an unregistered zip is never left to hand out
         raise

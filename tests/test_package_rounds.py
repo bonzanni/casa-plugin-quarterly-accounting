@@ -258,6 +258,50 @@ class TestTheCheckIsBoundToItsImport(Rounds):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 0)
 
 
+class TestCodeRoundC1(Rounds):
+    def test_a_superseded_holder_never_requeues_its_successors_request(self):
+        # Astra S1: stale_check committed a requeue for whoever called it
+        import package
+        import steps
+        self.seed(1, documents=1)
+        end, _ = self.handed_over()
+        old = end["package_token"]
+        self.clock.advance(steps.LEASE_S)
+        c = self.claim()["continue"]                          # a later turn takes it over
+        self.assertEqual(c["next"], "build")
+        sim.run_pass(self.conn, self.bf)                      # and a cron import lands
+        before = dict(self.request())
+        self.assertFalse(package.stale_check(self.conn, before["request_id"], old))
+        self.assertEqual(dict(self.request()), before)        # the old holder wrote nothing
+        self.assertIn("taken over", self.text("build_quarterly_package", quarter="2026-Q3",
+                                              package_token=old))
+        self.assertEqual(dict(self.request()), before)
+        # its current holder is the one sent back to the check
+        self.assertIn("re-read since the check", self.text(
+            "build_quarterly_package", quarter="2026-Q3",
+            package_token=c["package_token"]))
+        self.assertEqual(self.request()["state"], "queued")
+
+    def test_every_continuation_says_when_a_queued_package_waits(self):
+        # Astra S1: a stalled send's recovery answered next=null without `more`, and the
+        # queued package behind it waited with nothing to start it
+        import steps
+        self.seed(1, documents=1)
+        p, pkg, d = self.staged()
+        out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
+                        package_token=p)
+        self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
+        self.call("stage_for_delivery", channel="telegram", resend=True)   # left unsent
+        t = self.begin("operator")
+        self.assertEqual(self.ask(quarter="2026-Q2")["status"], "queued")
+        self.call("end_pass", pass_token=t, outcome="interrupted")
+        self.clock.advance(steps.LEASE_S)
+        out = self.claim()
+        self.assertIsNone(out["continue"].get("next"))       # the stalled resend, recovered
+        self.assertTrue(out["more"])
+        self.assertEqual(self.claim()["continue"]["next"], "snapshot")
+
+
 class TestSendTheLastBuild(Rounds):
     def test_the_previous_build_is_sent_unchanged_and_never_revoked(self):
         self.seed(1, documents=1)

@@ -348,6 +348,9 @@ def claim(conn) -> dict:
                         out = _claim_request(conn, now_cand[1])
                     notice = out.pop("_notice", None)
                     out["speak"] = alerts.pending_in_tx(conn, must=notice)
+                    # issue #15 (code round C1, Astra S1): every continuation says whether a
+                    # queued package waits for continue_pass, whatever it continued
+                    out["more"] = passes.queued_waiting(conn)
                     _fits(out)
                     return out
         except _Retry:

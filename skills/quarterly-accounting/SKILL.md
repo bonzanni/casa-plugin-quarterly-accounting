@@ -85,7 +85,7 @@ token: the old one is refused from then on.
    `record_delivery` — is sent verbatim and marked delivered (`mark_rendering_delivered`),
    including on a cron turn and alongside `<silent/>`. It is how anything owed about a
    package reaches the operator exactly once.
-8. An answer with `more: true` (`end_pass`, `record_delivery`) means a package the operator
+8. An answer with `more: true` (`end_pass`, `record_delivery`, `continue_pass`) means a package the operator
    asked for is waiting for the next round of its check: when you are done with this
    answer, call `continue_pass()` and do what it returns — on any turn, the cron's too.
 
