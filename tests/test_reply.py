@@ -166,7 +166,8 @@ class TestGrammar(Base):
         self.assertNotIn("something else in the same message", out["receipt"])
 
     def test_a_correction_beside_a_collective_is_never_confirmed(self):
-        # R5 Terra: the collective used to confirm Zapier before its correction ran
+        # R5 Terra: the collective used to confirm Zapier before its correction ran.
+        # R8: a collective beside a verdict applies nothing (it may refer back to it)
         for text in ("All three guesses are right. The Zapier one is wrong.",
                      "The Zapier one is wrong. All three guesses are right."):
             with self.subTest(text=text):
@@ -177,7 +178,19 @@ class TestGrammar(Base):
                 self.deliver()
                 out = reply.apply_reply(self.conn, text)
                 self.assertIsNone(self.author(z), out["receipt"])
-                self.assertEqual([self.author(p)[0] for p in others], ["operator"] * 2)
+                self.assertEqual([self.author(p)[0] for p in others], ["auto"] * 2)
+                self.assertIn("something else in the same message", out["receipt"])
+
+    def test_a_collective_after_named_approvals_confirms_only_those(self):
+        # R8 Astra: "those two guesses" refers back to the two just named
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe", "Figma"))]
+        self.deliver()
+        for text in ("Zapier and Vercel are right. Those two guesses are all right, confirm them.",
+                     "Zapier and Vercel are right. All those guesses are right, confirm them."):
+            with self.subTest(text=text):
+                reply.apply_reply(self.conn, text)
+                self.assertEqual([self.author(p)[0] for p in pids[2:]], ["auto", "auto"])
 
     def test_an_unresolved_clause_leaves_the_sheet_unapproved(self):
         a1 = self.item("Adobe", 5445, "2026-09-14")

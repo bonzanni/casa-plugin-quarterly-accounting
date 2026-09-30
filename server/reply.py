@@ -51,6 +51,7 @@ _COLLECTIVE = re.compile(_YES + _THEM + r"\s+(?:are|look)\s+" + _OK
                          + r"(?:\s*[,:\u2013\u2014-]?\s*(?:so\s+|and\s+)?" + _TAIL + r")?")
 _CONFIRM_ALL = re.compile(_YES + r"(?:please\s+)?confirm\s+(?:all\s+" + _NUM + r"|" + _THEM
                           + r")(?:\s+please)?")
+_ALL_GOOD = re.compile(r"all (?:good|fine|correct|right)")
 _COUNT = re.compile(r"\b(\d{1,3}|both|" + "|".join(_NUMBERS) + r")\b")
 
 
@@ -63,7 +64,7 @@ PATTERNS = [
     # round 4: the phrase a view offers when a payment has more candidates than it prints
     ("candidates", re.compile(r"(?:show\s+(?:me\s+)?)?(?:the\s+)?candidates for\s+(?P<t>.+)")),
     ("bulk_except", re.compile(r"all (?:good|fine|correct|right) (?:except|but) (?P<t>.+)")),
-    ("all_good", re.compile(r"all (?:good|fine|correct|right)")),
+    ("all_good", _ALL_GOOD),
     ("all_good", _COLLECTIVE),
     ("all_good", _CONFIRM_ALL),
     ("unpair", re.compile(_T + r"\s+(?:is|are)\s+(?:wrong|not right|incorrect)")),
@@ -515,7 +516,11 @@ def apply_reply(conn, text: str) -> dict:
     # R7 (Astra): the reply's sheet-wide clauses are ONE approval — every count any of
     # them states is checked together, and it applies once or not at all
     if sheet_wide:
-        if run.unresolved > 0:
+        # R8 (Astra): a collective ("those two guesses", "all those proposals") beside a
+        # verdict on a single pairing may refer back to the pairings just judged —
+        # only the bare "all good" names the whole sheet whatever else is said
+        collective = any(m.re is not _ALL_GOOD for m in sheet_wide)
+        if run.unresolved > 0 or (collective and run.named):
             run.excepted = True
         run.stated = set().union(*(_counts(m.group(0)) for m in sheet_wide))
         _apply(conn, run, "all_good", sheet_wide[0], items)
@@ -560,7 +565,7 @@ def _apply(conn, run, verb, m, items):
             waiting.append((d, cur))
         stated = run.stated
         # the count names the sheet: its pairings waiting, the ones decided here included
-        if stated and stated != {len(waiting) + decided} and stated != {len(waiting)}:
+        if stated and stated != {len(waiting) + decided}:
             # a count that is not the sheet's: the operator means a sheet other than
             # this one, or only some of its lines — confirm none of them
             n = len(waiting) + decided

@@ -2111,6 +2111,9 @@ catch, because it launders a guess into a human decision. So:
   and confirms the rest. Any other clause left unresolved (ambiguous, stale, refused)
   and it approves nothing. Several sheet-wide clauses in one reply are one approval:
   their counts are checked together, and it applies once or not at all.
+  A collective form ("those two guesses…") beside a verdict on a single pairing ("the
+  Zapier one is right/wrong") applies nothing: it may refer back to the pairings just
+  judged. Only the bare "all good" names the whole sheet whatever else is said.
 - **Facts are distinct from verdicts.** "3 is my accountant" records an identity; it
   does **not** mean "no invoice expected" (that is "3 needs no invoice", a per-payment
   exemption through `set_exemption`), and it certainly does not mean "never for this
