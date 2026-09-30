@@ -32,39 +32,27 @@ _DATE = re.compile(r"\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|
 _T = r"(?:the\s+)?(?P<t>.+?)(?:\s+one)?"
 # issue #11: the sheet's pairings named together ("those six guesses are all right,
 # confirm them"; "all six proposals are right — confirm them"; "confirm all six") are
-# the sheet reply. A count given ("six", "both") must be the sheet's own
+# the sheet reply. EVERY count the clause states ("six", "both", "6") must be the
+# sheet's own — read from the whole clause, so no position of a count escapes it
 _NUMBERS = {w: i for i, w in enumerate(("two", "three", "four", "five", "six", "seven",
                                          "eight", "nine", "ten", "eleven", "twelve"), 2)}
 _NUM = r"(?:\d{1,3}|" + "|".join(_NUMBERS) + r")"
 _OK = r"(?:all\s+)?(?:good|fine|correct|right|ok|okay)"
-
-
-def _them(named: bool) -> str:
-    """"those six guesses", "all the proposals", "both pairings" — with the count and
-    "both" captured only where `named`, so one pattern holds each group once."""
-    both, n = (r"(?P<both>both)", r"(?P<n>" + _NUM + ")") if named else ("both", _NUM)
-    return (r"(?:(?:all|" + both + r")(?:\s+(?:of\s+)?(?:the|those|these))?|the|those|these)"
-            r"(?:\s+" + n + r")?\s+(?:guesses|guessed ones|proposals|pairings|matches|suggestions)")
-
-
-def _confirm(named: bool) -> str:
-    n = r"(?P<n2>" + _NUM + ")" if named else _NUM      # "confirm all six"
-    return (r"(?:please\s+)?confirm\s+(?:them(?:\s+all)?|all(?:\s+of\s+them)?|all\s+" + n
-            + r"|" + _them(named) + r")(?:\s+please)?")
-
-
+_THEM = (r"(?:(?:all|both)(?:\s+(?:of\s+)?(?:the|those|these))?|the|those|these)"
+         r"(?:\s+" + _NUM + r")?\s+(?:guesses|guessed ones|proposals|pairings|matches|suggestions)")
+_CONFIRM = (r"(?:please\s+)?confirm\s+(?:them(?:\s+all)?|all(?:\s+of\s+them)?|all\s+" + _NUM
+            + r"|" + _THEM + r")(?:\s+please)?")
+_YES = r"(?:(?:yes|yep|ok|okay)\s*[,:]?\s+)?"
 _COLLECTIVE = re.compile(
-    r"(?:(?:yes|yep|ok|okay)\s*[,:]?\s+)?"
-    r"(?:" + _them(True) + r"\s+(?:are|look)\s+" + _OK + r"|they(?:\s+are|'re)\s+" + _OK + r")"
-    r"(?:\s*[,:\u2013\u2014-]?\s*(?:so\s+|and\s+)?" + _confirm(False) + r")?")
-_CONFIRM_ALL = re.compile(r"(?:(?:yes|yep|ok|okay)\s*[,:]?\s+)?" + _confirm(True))
+    _YES + r"(?:" + _THEM + r"\s+(?:are|look)\s+" + _OK + r"|they(?:\s+are|'re)\s+" + _OK + r")"
+    r"(?:\s*[,:\u2013\u2014-]?\s*(?:so\s+|and\s+)?" + _CONFIRM + r")?")
+_CONFIRM_ALL = re.compile(_YES + _CONFIRM)
+_COUNT = re.compile(r"\b(\d{1,3}|both|" + "|".join(_NUMBERS) + r")\b")
 
 
-def _count(m):
-    """The number of pairings a collective reply names, or None when it names none."""
-    g = m.groupdict()
-    n = g.get("n") or g.get("n2") or ("two" if g.get("both") else None)
-    return None if n is None else _NUMBERS.get(n) or int(n)
+def _counts(clause: str) -> set:
+    """Every number of pairings a collective reply states, anywhere in it."""
+    return {2 if w == "both" else _NUMBERS.get(w) or int(w) for w in _COUNT.findall(clause)}
 
 
 PATTERNS = [
@@ -520,13 +508,13 @@ def _apply(conn, run, verb, m, items):
             if cur is None or not views._needs_check(d) or d["candidates"]:
                 continue
             waiting.append((d, cur))
-        n = _count(m)
-        if n is not None and len(waiting) != n:
+        stated = _counts(m.group(0))
+        if stated and stated != {len(waiting)}:
             # a count that is not the sheet's: the operator means a sheet other than
             # this one, or only some of its lines — confirm none of them
             run.lines.append(f"Nothing applied: that sheet has {len(waiting)} pairing"
                              f"{'' if len(waiting) == 1 else 's'} waiting for your approval, "
-                             f"not {n}. Say \"all good\" to confirm all of them, or name the "
+                             f"not {' or '.join(str(x) for x in sorted(stated))}. Say \"all good\" to confirm all of them, or name the "
                              "ones that are right, e.g. \"the Zapier one is good\".")
             run.unresolved += 1
             return

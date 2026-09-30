@@ -109,11 +109,14 @@ class TestGrammar(Base):
     def test_a_count_that_is_not_the_sheets_confirms_nothing(self):
         pids = [self.item(f"Vendor{i}", 1000 + i, f"2026-09-{10 + i:02d}") for i in range(3)]
         self.deliver()
-        for text in ("those five guesses are right", "confirm all 4", "both guesses are good"):
+        # R1 Astra: a count in the trailing "confirm …" is checked as well
+        for text in ("those five guesses are right", "confirm all 4", "both guesses are good",
+                     "the guesses look right, confirm both pairings",
+                     "these three guesses are right, confirm all four"):
             with self.subTest(text=text):
                 out = reply.apply_reply(self.conn, text)
                 self.assertEqual(out["applied"], [])
-                self.assertIn("that sheet has 3 pairings waiting for your approval",
+                self.assertIn("that sheet has 3 pairings waiting for your approval, not ",
                               out["receipt"])
                 self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
         out = reply.apply_reply(self.conn, "confirm all three")
