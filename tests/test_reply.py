@@ -159,7 +159,7 @@ class TestGrammar(Base):
         z = self.item("Zapier", 9900, "2026-09-17")
         v = self.item("Vercel", 1210, "2026-09-18")
         self.deliver()
-        out = reply.apply_reply(self.conn, "All good. The Zapier one is wrong. Is Vercel right?")
+        out = reply.apply_reply(self.conn, "All good. The Zapier one is wrong.")
         # R5: the sheet is approved last, for what no other clause named
         self.assertIsNone(self.author(z))
         self.assertEqual(self.author(v)[0], "operator")
@@ -188,6 +188,26 @@ class TestGrammar(Base):
         self.assertEqual([self.author(p)[0] for p in (a1, a2, v)], ["auto"] * 3)
         self.assertEqual(self.operator_entries(), 0)
         self.assertIn("something else in the same message", out["receipt"])
+
+    def test_a_question_beside_a_sheet_wide_approval_leaves_the_sheet_unapproved(self):
+        # R6 Astra: a question may carry an exclusion
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
+        self.deliver()
+        for text in ("Confirm all three. Can you leave the Zapier one unconfirmed?",
+                     "All good. Is Vercel right?"):
+            with self.subTest(text=text):
+                out = reply.apply_reply(self.conn, text)
+                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
+                self.assertIn("something else in the same message", out["receipt"])
+
+    def test_a_search_request_beside_all_good_takes_nothing_from_it(self):
+        # R6 Astra S2: only a verdict on a pairing takes it out of the sheet-wide approval
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
+        self.deliver()
+        reply.apply_reply(self.conn, "All good. Have another look at Zapier.")
+        self.assertEqual([self.author(p)[0] for p in pids], ["operator"] * 3)
 
     def test_a_qualifier_that_names_no_payment_leaves_the_sheet_unapproved(self):
         # R5 Astra: "Only Vercel is right" parses as a confirm whose target resolves to

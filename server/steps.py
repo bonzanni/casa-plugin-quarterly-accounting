@@ -153,7 +153,7 @@ def _open_request(conn, pass_id, quarter, channel) -> None:
 
 
 def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
-           by_refusal=False) -> dict:
+           by_refusal=False, out_of_time=False) -> dict:
     """The specialist's last action (or Ellen's, when the delegation came back in
     her turn without one). A superseded specialist is refused here like anywhere."""
     if step not in STEPS:
@@ -163,6 +163,9 @@ def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
     for k, v in counts.items():
         if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
             raise db.Refusal(f"{k} is a count")
+    if out_of_time and (stopped or by_refusal):
+        raise db.Refusal("out_of_time=true is a finish without `stopped`: time ran out, "
+                         "nothing refused")
     with db.tx(conn):
         passes.check_token(conn, token)
         m = passes._marker(conn)
@@ -178,19 +181,21 @@ def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
         # the specialist says a refusal stopped it: a time-out said as a stop is put
         # right, and a real refusal (the ledger changed, was restored) still stops the
         # pass. Before the import nothing goes on anyway, so any stop is taken as said.
-        # A refused stop is KEPT on the unfinished step (R2): a plain finish replaces
-        # it, and a step that expires instead ends stopped — as the stop said
-        out_of_time = _age(row["started_at"]) >= SWEEP_STOP_S and conn.execute(
+        # A refused stop is KEPT on the unfinished step (R2): only a finish that says
+        # `out_of_time=true` clears it (R6: never inferred from who seems to finish), and
+        # a step that expires instead ends stopped — as the stop said
+        late = _age(row["started_at"]) >= SWEEP_STOP_S and conn.execute(
             "SELECT 1 FROM snapshots WHERE pass_id=?", (m["pass_id"],)).fetchone() is not None
-        if stopped and out_of_time and not by_refusal:
+        if stopped and late and not by_refusal:
             import views
             conn.execute("UPDATE pass_steps SET finish_json=? WHERE pass_id=? AND step=?",
                          (db.canonical({"stopped": views.clip(str(stopped), STOPPED_MAX)}),
                           m["pass_id"], step))
             refused = ("your step's time is up, and running out of time is not a stop: "
-                       "finish again with the counts and no `stopped` — the pass goes on "
-                       "and a later pass resumes. Only if a refusal stopped you, finish "
-                       "again with `stopped=<the refusal>` and `stopped_by_refusal=true`")
+                       "finish again with the counts, no `stopped`, and `out_of_time=true` "
+                       "— the pass goes on and a later pass resumes. Only if a refusal "
+                       "stopped you, finish again with `stopped=<the refusal>` and "
+                       "`stopped_by_refusal=true`")
         else:
             refused = None
         if refused is None:
@@ -201,8 +206,8 @@ def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
                 body["failed"] = True
             by = "resident" if failed or not body else "specialist"
             kept = _finish(row).get("stopped")      # an unfinished step holds only a kept stop
-            if kept and by == "resident" and "stopped" not in body:
-                body["stopped"] = kept              # only the specialist's own finish replaces it
+            if kept and not out_of_time and "stopped" not in body:
+                body["stopped"] = kept              # only `out_of_time=true` clears it
             conn.execute("UPDATE pass_steps SET finished_at=?, finished_by=?, finish_json=?"
                          " WHERE pass_id=? AND step=?",
                          (db.now(), by, db.canonical(body), m["pass_id"], step))

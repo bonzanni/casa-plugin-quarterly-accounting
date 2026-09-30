@@ -364,7 +364,7 @@ class _Run:
         self.unresolved = 0               # corrections in this reply that did not apply
         self.rebuilds = []                # rebuild requests, released only if nothing is unresolved
         self.excepted = False             # a clause of this reply opens with an exception
-        self.named = set()                # payments another clause of this reply named
+        self.named = set()                # payments another clause of this reply judged
 
     def result(self, not_a_reply=False) -> dict:
         if self.rebuilds:
@@ -480,9 +480,10 @@ def apply_reply(conn, text: str) -> dict:
     # "…\nexcluding …") stands in a clause of its own. A sheet as a whole is approved
     # only by a reply understood whole: any clause not understood (a question aside),
     # or one opening with an exception, and no sheet-wide approval applies
-    run.excepted = any(not c.endswith("?") and (verb is None or _NUMBERED.fullmatch(c) or
-                                                _EXCEPTION.match(c.lstrip(" -\u2013\u2014,:")))
-                       for c, verb, _ in parsed)
+    # R6 (Astra): a question may carry one too ("… Can you leave the Zapier one out?")
+    run.excepted = any(verb is None or c.endswith("?") or _NUMBERED.fullmatch(c) or
+                       _EXCEPTION.match(c.lstrip(" -\u2013\u2014,:")) for c, verb, _ in parsed
+                       if verb != "all_good")
     sheet_wide = []
     for clause, verb, m in parsed:
         if verb == "all_good":
@@ -507,7 +508,7 @@ def apply_reply(conn, text: str) -> dict:
             run.unresolved += 1
             continue
         _apply(conn, run, verb, m, items)
-    # A sheet as a whole is approved last, and only for what no other clause named:
+    # A sheet as a whole is approved last, and only for what no other clause judged:
     # "All good. The Zapier one is wrong." unpairs Zapier and confirms the rest. Any
     # other clause left unresolved (ambiguous, stale, refused) and it approves nothing
     blocked = run.unresolved > 0
@@ -583,7 +584,8 @@ def _apply(conn, run, verb, m, items):
                 run.lines.append(problem)
                 run.unresolved += 1
                 continue
-            run.named.add(d["pid"])
+            if verb in ("unpair", "confirm"):
+                run.named.add(d["pid"])   # its own verdict, said in its own receipt line
             _one(conn, run, verb, d, m)
         return
     if verb == "never":

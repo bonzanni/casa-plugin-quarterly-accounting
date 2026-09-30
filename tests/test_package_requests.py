@@ -534,7 +534,7 @@ class TestReviewC1(Requests):
                                   stopped="time budget exhausted").startswith(
                                       "refused: your step's time is up"))
         self.call("record_step", pass_token=t, step="snapshot", action="finish",
-                  remaining_in_cycle=0)
+                  remaining_in_cycle=0, out_of_time=True)
         c = self.claim()["continue"]
         self.assertEqual(c["next"], "end-pass-then-build")
         end = self.call("end_pass", pass_token=c["pass_token"], outcome="complete")
@@ -575,8 +575,9 @@ class TestReviewC1(Requests):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 0)
 
     def test_the_residents_own_finish_keeps_a_refused_late_stop(self):
-        # the delegation came back in Ellen's turn without a finish: hers keeps the stop
-        for extra in ({}, {"failed": True}):
+        # the delegation came back in Ellen's turn without a finish: hers keeps the stop,
+        # counts or not (R6 Terra: a counted finish is not taken for the specialist's)
+        for extra in ({}, {"failed": True}, {"remaining_in_cycle": 0}):
             with self.subTest(**extra):
                 self.setUp()
                 self.seed(1)
@@ -589,6 +590,13 @@ class TestReviewC1(Requests):
                 self.assertIn("ledger changed", c["finish"]["stopped"])
                 self.call("end_pass", pass_token=c["pass_token"], outcome="stopped")
                 self.assertEqual(self.request()["state"], "stopped")
+
+    def test_out_of_time_goes_with_no_stop(self):
+        self.seed(1)
+        t = self.snapshot(finish=False)
+        self.assertTrue(self.text("record_step", pass_token=t, step="snapshot",
+                                  action="finish", stopped="x", out_of_time=True).startswith(
+                                      "refused: out_of_time=true is a finish without"))
 
     def test_failed_does_not_let_a_late_stop_through(self):
         # R2 Terra: failed=true with a time-out said as a stop is refused like any other

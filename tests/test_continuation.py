@@ -248,7 +248,7 @@ class TestInlineErrors(Flow):
         self.assertIsNone(self.conn.execute("SELECT finished_at FROM pass_steps ORDER BY rowid"
                                             " DESC LIMIT 1").fetchone()[0])
         self.call("record_step", pass_token=t1, step="sweep", action="finish",
-                  remaining_in_cycle=2, triage_remaining=3)
+                  remaining_in_cycle=2, triage_remaining=3, out_of_time=True)
         c = self.claim()["continue"]
         self.assertEqual((c["ended"], c["next"]), ("finished", "gmail-round"))
         self.assertEqual(c["finish"], {"remaining_in_cycle": 2, "triage_remaining": 3})

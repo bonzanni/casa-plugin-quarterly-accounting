@@ -2103,11 +2103,11 @@ catch, because it launders a guess into a human decision. So:
   stated must be the number of pairings waiting on that sheet, or nothing applies and
   the receipt says how many there are.
   A sheet as a whole ("all good" or a collective) is approved only by a reply understood
-  whole: when any other clause is not understood (a question aside), or opens with an
+  whole: when any other clause is not understood, is a question, or opens with an
   exception, no sheet-wide approval applies — the reply is split into clauses, so a
   qualification ("…\nexcept the Zapier one") may stand in a clause of its own.
   The sheet-wide approval is applied after every other clause, and only to the
-  pairings no other clause named: "All good. The Zapier one is wrong." unpairs Zapier
+  pairings no other clause judged ("is wrong", "is right"): "All good. The Zapier one is wrong." unpairs Zapier
   and confirms the rest. Any other clause left unresolved (ambiguous, stale, refused)
   and it approves nothing.
 - **Facts are distinct from verdicts.** "3 is my accountant" records an identity; it
