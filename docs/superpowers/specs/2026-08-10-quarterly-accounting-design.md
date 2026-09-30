@@ -2488,7 +2488,12 @@ never searched for again.
 answers for the current quarter and, when anything older is still open, ends with one
 line: `+2 older still missing (Q2) — say "show older"`. A default that silently dropped
 a EUR 4,000 invoice from June because it is now October would be the worst kind of
-tidiness.
+tidiness. "Still open" is every older required item without its document, searched or not:
+the ones nobody has looked for yet get their own line, `+72 older not searched yet (Q2) —
+say "show older"`, and "show older" lists both (issue #4: after an interrupted catch-up
+of Q2 the report named only Q3, `0 missing a document`, because the line counted only
+older items already searched). The current quarter's `not checked yet` line then counts
+the current quarter only, so no payment is counted twice.
 
 ### Running the pass on demand
 

@@ -535,7 +535,11 @@ def _compose(conn, view, q, items, members, lead):
     from what was actually printed."""
     stop, gmail_down, interrupted = lead
     cur = [d for d in items if d["quarter"] == q]
-    older_missing = [d for d in items if d["quarter"] and d["quarter"] < q and _is_missing(d)]
+    # every older open item, searched or not: an older payment nobody has looked
+    # for yet is still open work the default quarter must not hide (issue #4)
+    older_open = [d for d in items if d["quarter"] and d["quarter"] < q and _open_required(d)]
+    older_missing = [d for d in older_open if _is_missing(d)]
+    older_unsearched = [d for d in older_open if _is_unsearched(d)]
     missing = [d for d in cur if _is_missing(d)]
     unsearched = [d for d in items if _is_unsearched(d)]
     guessed = [d for d in items if _needs_check(d)]
@@ -555,7 +559,7 @@ def _compose(conn, view, q, items, members, lead):
               "missing": f"Missing · {dates.quarter_label(q)}",
               "check": f"To check · {dates.quarter_label(q)}",
               "rest": f"Nice to have · {dates.quarter_label(q)}",
-              "older": "Older, still missing",
+              "older": "Older, still open",
               "quarter": f"Accounting · {dates.quarter_label(q)}"}
     # the same quarter figure the coverage line prints; older ones have their own line
     parts["head"] = _degraded_block(gmail_down, interrupted, missing, unsearched)
@@ -601,8 +605,8 @@ def _compose(conn, view, q, items, members, lead):
         secs.append(_Section("", _item_blocks(nice, lambda d: [], q),
                              empty="Nothing else is missing."))
     if view == "older":
-        secs.append(_Section("", _item_blocks(older_missing, _missing_detail, q),
-                             empty="Nothing older is missing."))
+        secs.append(_Section("", _item_blocks(older_open, _missing_detail, q),
+                             empty="Nothing older is open."))
 
     packages = []
     if view == "quarter":
@@ -620,17 +624,21 @@ def _compose(conn, view, q, items, members, lead):
                 counts.append(f"{len(uncl)} not yet classified — the categories aren't in yet.")
             # one line, one source: an interrupted pass's lead already says how
             # many it did not reach, from the run record
-            if unsearched and not gmail_down and interrupted is None:
-                counts.append(f"{_plural(len(unsearched), 'new payment')} not checked yet"
+            # older ones are counted on their own quarter's line below
+            new = [d for d in unsearched if d not in older_unsearched]
+            if new and not gmail_down and interrupted is None:
+                counts.append(f"{_plural(len(new), 'new payment')} not checked yet"
                               " — the next pass looks.")
             if counts:
                 out += ["", *counts]
             if nice:
                 out.append(f'+{len(nice)} nice-to-have — say "show the rest"')
-            if older_missing:
-                qs = sorted({dates.quarter_label(d["quarter"]).split()[0] for d in older_missing})
-                out.append(f'+{len(older_missing)} older still missing ({", ".join(qs)}) — '
-                           'say "show older"')
+            # missing and not-searched stay distinct states, each on its own line
+            for ds, state in ((older_missing, "still missing"),
+                              (older_unsearched, "not searched yet")):
+                if ds:
+                    qs = sorted({dates.quarter_label(d["quarter"]).split()[0] for d in ds})
+                    out.append(f'+{len(ds)} older {state} ({", ".join(qs)}) — say "show older"')
         if view in ("status", "all"):
             if printed_guessed or matched_clean:
                 out.append("")

@@ -427,6 +427,41 @@ class TestSheet(Base):
         passes.end_pass(self.conn, tok, "complete", {})
         self.assertNotIn("Review interrupted.", self.render()["text"])
 
+    def _older(self, counterparty, searched):
+        pid = self.add(counterparty=counterparty, booking_date="2026-05-04", searched=searched)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE binding SET watermark='2026-04-01'")
+        self.settle(pid)
+        return pid
+
+    def test_an_interrupted_catch_up_names_the_older_quarter_it_left(self):
+        # issue #4: the start quarter was Q2, the pass was interrupted before
+        # searching it; the report named only Q3, "0 missing", and never Q2
+        for i in range(3):
+            self._older(f"OldNew{i}", searched=False)
+        self.add(counterparty="NowSeen", tags=("internal-transfer",))
+        passes.end_pass(self.conn, self.token, "interrupted", {"checked": 1, "total": 4})
+        text = self.render()["text"]
+        self.assertIn('+3 older not searched yet (Q2) — say "show older"', flat(text))
+        older = self.render("older")["text"]
+        for i in range(3):
+            self.assertIn(f"OldNew{i} · ", older)
+        self.assertEqual(older.count("Not searched yet."), 3)
+
+    def test_older_missing_and_older_unsearched_are_kept_apart(self):
+        self._older("OldSeen", searched=True)
+        self._older("OldNew", searched=False)
+        self.add(counterparty="NowNew", searched=False)
+        text = flat(self.render()["text"])
+        self.assertIn('+1 older still missing (Q2) — say "show older" · '
+                      '+1 older not searched yet (Q2) — say "show older"', text)
+        # the current quarter's line counts the current quarter only: nothing twice
+        self.assertIn("1 new payment not checked yet — the next pass looks.", text)
+        older = self.render("older")["text"]
+        self.assertIn("OldSeen · ", older)
+        self.assertIn("OldNew · ", older)
+        self.assertNotIn("NowNew", older)
+
     def test_degraded_counts_agree_with_coverage_and_skip_the_item_view(self):
         old = self.add(counterparty="OldCo", booking_date="2026-05-04")
         with db.tx(self.conn):
