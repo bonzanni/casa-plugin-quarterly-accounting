@@ -71,16 +71,21 @@ def _parse_ts(ts: str) -> _dt.datetime:
     return _dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
 
 
-def note_confirmed(proj, tag_revision) -> bool:
+def note_confirmed(proj, tag_revision, *, epoch) -> bool:
     """Whether the lineage's current accounting note is known visible on its row
     without reading it (issue #1: notes are not in the export). Only a read can
     confirm a note; the confirmation stands while (1) the note is the one that
     read saw, (2) the row's tag revision is still the one that read saw — an
-    erasure strips tags and notes together — and (3) the read was taken more than
-    a delegation's ceiling after the last add_note the plugin handed out, dated by
-    the import its snapshot belongs to, never by when it was recorded (rounds D1,
-    D2: an issued write carried out after the read would bury the note unseen;
-    Casa ends every delegation at its ceiling, steps.CEILING_ASSUMED_S)."""
+    erasure strips tags and notes together — and (3) no add_note of ANOTHER note
+    text can still land after that read (issue #14). A write of the current text
+    landing late leaves the same text on top; a write of another one (an older
+    revision carried out late, round D1, or before a held read, D2) would bury
+    it. Every write is carried out within a delegation's ceiling of its issue or
+    never (steps.CEILING_ASSUMED_S), so the read — dated by the import its
+    snapshot belongs to, which precedes it, never by when it was recorded — must
+    come more than a ceiling after the latest other-text issue and after the
+    store's epoch (writes an earlier store generation or version handed out).
+    Strictly after: stamps are whole seconds (design round D1, Terra S1)."""
     import steps
     if proj["note_body"] is None:
         return True
@@ -88,10 +93,15 @@ def note_confirmed(proj, tag_revision) -> bool:
         return False
     if proj["note_seen_rev"] is None or proj["note_seen_rev"] != tag_revision:
         return False
-    if proj["note_issued_at"] is not None:
-        if proj["note_seen_at"] is None or (_parse_ts(proj["note_seen_at"])
-                < _parse_ts(proj["note_issued_at"])
-                + _dt.timedelta(seconds=steps.CEILING_ASSUMED_S)):
+    others = [proj["note_other_issued_at"], epoch]
+    if proj["note_issued_seq"] != proj["note_seq"]:
+        others.append(proj["note_issued_at"])
+    others = [t for t in others if t is not None]
+    if others:
+        bound = max(_parse_ts(t) for t in others)
+        if proj["note_seen_at"] is None or not (
+                _parse_ts(proj["note_seen_at"])
+                > bound + _dt.timedelta(seconds=steps.CEILING_ASSUMED_S)):
             return False
     return True
 
@@ -375,8 +385,15 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
             step = owed_write(conn, pid, observed, note_visible)
             if step is not None:
                 if "add_note" in step:
-                    conn.execute("UPDATE projections SET note_issued_at=? WHERE pid=?",
-                                 (db.now(), pid))
+                    # the previous issue, if it carried another text, becomes an "other"
+                    # (issue #14); the max keeps a later one a merge brought in (D1)
+                    if proj["note_issued_at"] is not None and \
+                            proj["note_issued_seq"] != proj["note_seq"]:
+                        conn.execute("UPDATE projections SET note_other_issued_at="
+                                     "max(coalesce(note_other_issued_at, ''), note_issued_at)"
+                                     " WHERE pid=?", (pid,))
+                    conn.execute("UPDATE projections SET note_issued_at=?, note_issued_seq=?"
+                                 " WHERE pid=?", (db.now(), proj["note_seq"], pid))
                 instructions = {**step, "workflow": gate["workflow"],
                                 "expected_generation": gate["expected_generation"],
                                 "expected_ledger": gate["expected_ledger"]}

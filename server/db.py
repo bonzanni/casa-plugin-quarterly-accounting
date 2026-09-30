@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -165,6 +165,8 @@ CREATE TABLE IF NOT EXISTS projections (
   note_seen_rev INTEGER,         -- that read's `Tag revision:` (issue #1)
   note_seen_at TEXT,             -- the import time of the snapshot that read belongs to
   note_issued_at TEXT,           -- when an add_note was last returned to the specialist
+  note_issued_seq INTEGER,       -- the note_seq that add_note carried (issue #14)
+  note_other_issued_at TEXT,     -- the latest add_note of any OTHER note_seq (issue #14)
   read_snapshot INTEGER,         -- the snapshot the sweep's latest READ belongs to
   last_facts_json TEXT,          -- the destination row's facts when last seen (names an erased row)
   note_seq INTEGER, note_body TEXT,
@@ -311,7 +313,28 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE projections ADD COLUMN note_seen_at TEXT",
         "ALTER TABLE projections ADD COLUMN note_issued_at TEXT",
         "ALTER TABLE projections ADD COLUMN read_snapshot INTEGER"],
+    # 5 -> 6 (issue #14): a read-back confirms the note it shows unless a note of another
+    # revision could still land. An issue this version did not record by revision is
+    # treated as another revision's, and the store's epoch (every write an earlier
+    # version could have issued) is the upgrade itself.
+    5: ["ALTER TABLE projections ADD COLUMN note_issued_seq INTEGER",
+        "ALTER TABLE projections ADD COLUMN note_other_issued_at TEXT",
+        "UPDATE projections SET note_other_issued_at = note_issued_at"],
 }
+
+
+def set_epoch(conn: sqlite3.Connection) -> None:
+    """The store's epoch (issue #14): a store is created, reset or upgraded from a
+    version that did not record its note writes by revision. Any write an earlier
+    generation handed out may still land within a delegation's ceiling after it, so
+    no read confirms a note until then (sweep.note_confirmed)."""
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('store_epoch_at', ?)",
+                 (now(),))
+
+
+def epoch(conn: sqlite3.Connection):
+    row = conn.execute("SELECT value FROM meta WHERE key='store_epoch_at'").fetchone()
+    return row[0] if row else None
 
 
 def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:
@@ -327,10 +350,13 @@ def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:
                 conn.execute(stmt)
             conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
                          (str(SCHEMA_VERSION),))
+            set_epoch(conn)
             return
         for version in range(current, SCHEMA_VERSION):
             for stmt in MIGRATIONS[version]:
                 conn.execute(stmt)
+        if current < 6:
+            set_epoch(conn)
         conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
 
 
