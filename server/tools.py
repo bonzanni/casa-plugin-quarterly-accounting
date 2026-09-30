@@ -438,11 +438,15 @@ def t_begin(args):
           "snapshot names quarter and channel; a judge carries report={checked, total, "
           "not_searched}), then passes the same pass_token to the specialist. The specialist, "
           "as its last action: action=\"finish\" with remaining_in_cycle, triage_remaining, "
-          "and stopped=<the refusal> if it stopped. Ellen finishes it herself only when the "
+          "and stopped=<the refusal> only if a refusal stopped it (running out of time is not "
+          "a stop: finish with the counts; once the step's time is up a stop also needs "
+          "stopped_by_refusal=true, and a finish refused for a stop that was only time "
+          "running out is made again with out_of_time=true). Ellen finishes it herself only when the "
           "delegation came back in her turn without a finish (failed=true on an error).",
           obj({"pass_token": TOKEN, "step": S, "action": S, "quarter": Q, "channel": S,
                "doc_ids": AI, "report": O, "remaining_in_cycle": I, "triage_remaining": I,
-               "stopped": S, "failed": B}, ("pass_token", "step", "action")))
+               "stopped": S, "stopped_by_refusal": B, "out_of_time": B, "failed": B},
+              ("pass_token", "step", "action")))
 def t_step(args):
     _need(args, "pass_token", "step", "action")
     token, step, action = _int(args, "pass_token"), args["step"], args["action"]
@@ -451,7 +455,8 @@ def t_step(args):
     fin = {"remaining_in_cycle": _int(args, "remaining_in_cycle"),
            "triage_remaining": _int(args, "triage_remaining")}
     if action == "start":
-        for k in ("remaining_in_cycle", "triage_remaining", "stopped", "failed"):
+        for k in ("remaining_in_cycle", "triage_remaining", "stopped", "stopped_by_refusal",
+                  "out_of_time", "failed"):
             if args.get(k) is not None:
                 raise db.Refusal(f'{k} goes with action="finish"')
         return steps.start(conn(), token, step, carry)
@@ -463,7 +468,9 @@ def t_step(args):
                                   "quarter": "quarter goes with a snapshot start",
                                   "channel": "channel goes with a snapshot start"}[k])
         return steps.finish(conn(), token, step, counts=fin, stopped=args.get("stopped"),
-                            failed=_bool(args, "failed", False))
+                            failed=_bool(args, "failed", False),
+                            by_refusal=_bool(args, "stopped_by_refusal", False),
+                            out_of_time=_bool(args, "out_of_time", False))
     raise db.Refusal('action is "start" or "finish"')
 
 

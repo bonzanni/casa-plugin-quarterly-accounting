@@ -2096,6 +2096,24 @@ catch, because it launders a guess into a human decision. So:
 - **Only explicit approval approves.** "all good" confirms the pairings shown on that
   sheet; it resolves no missing invoice and picks no winner among alternatives. "4 good"
   confirms exactly line 4.
+  **Erratum (issue #11, v0.3.4):** the sheet's pairings named together are the same
+  reply — "those six guesses are all right, confirm them", "both proposals are good",
+  "confirm all six". The collective is named ("all", "both" or a count); a pronoun or a
+  bare "the guesses" is not, since it may mean the pairings just named. Every count
+  stated must be the number of pairings waiting on that sheet, or nothing applies and
+  the receipt says how many there are.
+  A sheet as a whole ("all good" or a collective) is approved only by a reply understood
+  whole: when any other clause is not understood, is a question, or opens with an
+  exception, no sheet-wide approval applies — the reply is split into clauses, so a
+  qualification ("…\nexcept the Zapier one") may stand in a clause of its own.
+  The sheet-wide approval is applied after every other clause, and only to the
+  pairings no other clause judged ("is wrong", "is right"): "All good. The Zapier one is wrong." unpairs Zapier
+  and confirms the rest. Any other clause left unresolved (ambiguous, stale, refused)
+  and it approves nothing. Several sheet-wide clauses in one reply are one approval:
+  their counts are checked together, and it applies once or not at all.
+  A collective form ("those two guesses…") beside a verdict on a single pairing ("the
+  Zapier one is right/wrong") applies nothing: it may refer back to the pairings just
+  judged. Only the bare "all good" names the whole sheet whatever else is said.
 - **Facts are distinct from verdicts.** "3 is my accountant" records an identity; it
   does **not** mean "no invoice expected" (that is "3 needs no invoice", a per-payment
   exemption through `set_exemption`), and it certainly does not mean "never for this

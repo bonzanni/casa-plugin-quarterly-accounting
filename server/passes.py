@@ -139,9 +139,10 @@ def snapshot_fate(conn, pass_id: str, outcome: str) -> tuple:
     step = conn.execute("SELECT finished_at, finish_json FROM pass_steps WHERE pass_id=? AND"
                         " step='snapshot'", (pass_id,)).fetchone()
     fin = json.loads(step["finish_json"] or "{}") if step is not None else {}
-    finished = step is not None and step["finished_at"] is not None
-    if (finished and fin.get("stopped")) or outcome == "stopped":
-        return "stopped", (fin.get("stopped") if finished else None) or "the bank check stopped"
+    # a stop kept on an unfinished step (a late stop the step never confirmed or
+    # replaced, issue #10) is a stop: finish_json is written only by a finish or by it
+    if fin.get("stopped") or outcome == "stopped":
+        return "stopped", fin.get("stopped") or "the bank check stopped"
     # the evidence the pass read the bank is its own import, never the step's say-so
     imported = conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?",
                             (pass_id,)).fetchone() is not None

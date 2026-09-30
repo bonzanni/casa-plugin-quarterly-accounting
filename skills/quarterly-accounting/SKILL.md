@@ -278,11 +278,15 @@ write you make — `record_probe`, `record_observation`, `record_match`, `propos
 
 Your delegation is cut off at a wall-clock limit, not a turn count, and a delegation cut
 off returns nothing. Every answer to a call carrying your token carries `clock` while
-your step runs: `time_left_s`, and `wrap_up` once it is time to stop. At `wrap_up`, stop
-where you are and finish: whatever is left, a later pass resumes. Your last action,
+your step runs: `time_left_s`, and `wrap_up` once your time is up. At `wrap_up`, finish
+where you are: whatever is left, a later pass resumes. Your last action,
 always — done, stopped or out of time — is `record_step(pass_token, step=<the step Ellen
 named>, action="finish", remaining_in_cycle=…, triage_remaining=…)`, with
-`stopped=<the refusal>` if you stopped; then reply briefly, the first line being
+`stopped=<the refusal>` only if a refusal stopped you. Running out of time (`time_up`,
+`wrap_up`) is never `stopped`: finish with the counts, and the pass goes on (once your time
+is up, a stop is taken only with `stopped_by_refusal=true`; if a finish is refused because
+you said `stopped` for time running out, finish again as that refusal says, with
+`out_of_time=true`). Then reply briefly, the first line being
 `quarterly-accounting: <step> finished`. If a write answers that this pass is no longer
 the current one, stop and return: the pass has moved on and your recorded work is kept. You never speak to the operator: everything you would
 say goes back to Ellen. Binding the account, packaging, the start date, the package name,
@@ -362,9 +366,9 @@ named in your context. Your one expectation write is in step 6.
    Work in batches to make the budget go far: read several of the listed rows in one turn
    (several `get_transaction` calls at once, where your tools allow it), then record all
    their observations in the next, and make the returned writes the same way — one write per
-   row, then that row read again. When time is up (`time_up`, or `wrap_up`), stop where you
-   are and finish with `remaining_in_cycle`: the pass ends `interrupted`, and the next pass
-   resumes where this one stopped.
+   row, then that row read again. When time is up (`time_up`, or `wrap_up`), finish where
+   you are with `remaining_in_cycle` and no `stopped` (running out of time is not a stop):
+   the pass ends `interrupted`, and the next pass resumes where this one left off.
 6. **Triage.** Only the items that say `fresh: true` — seen in this pass's import. An item
    with `fresh: false` was not in the export: leave it (the server refuses to match it); a
    later pass handles it. Triage does not wait for the sweep: the import already knows what
@@ -375,7 +379,7 @@ named in your context. Your one expectation write is in step 6.
    need a document and have none of the right kind — only those seen in this import
    (`not_fresh` counts the others), a page at a time. Judge the page; while its `next` is
    set and there is time, list again with `after=<next>` (passed back unchanged) and judge
-   that page. When you stop, finish with the last page's `remaining` count as
+   that page. When you run out of pages or time, finish with the last page's `remaining` count as
    `triage_remaining`; a later pass reaches the rest. For each, compare against
    `list_unmatched_documents` (it pages the same way: follow its `next`) and the KB
    (`get_counterparty`), reading each candidate with `read_document(doc_id)`: it names the
@@ -431,7 +435,8 @@ named in your context. Your one expectation write is in step 6.
    portal), and its writes put their tags and notes on the bank ledger in this pass rather
    than the next. Same procedure, same `snapshot_id` rule.
 8. **Finish and reply briefly.** `record_step(pass_token, step=…, action="finish",
-   remaining_in_cycle=…, triage_remaining=…)` (with `stopped=…` if you stopped), then a
+   remaining_in_cycle=…, triage_remaining=…)` (with `stopped=<the refusal>` only if a
+   refusal stopped you — never for running out of time), then a
    short reply whose first line is `quarterly-accounting: <step> finished` — what was
    matched, proposed or left missing, for Ellen, never for the operator. Ellen's Gmail round
    is built from the store, not from your reply: a search idea for a vendor ("their

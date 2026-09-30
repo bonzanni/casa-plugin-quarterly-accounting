@@ -524,6 +524,89 @@ class TestReviewC1(Requests):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 1)
         self.assertEqual(len(os.listdir(db.data_dir() / "packages")), 1)
 
+    def test_a_snapshot_out_of_time_after_its_import_is_built(self):
+        # issue #10: a `stopped` said for the clock running out does not cost the package
+        self.seed(1)
+        t = self.snapshot(finish=False)
+        self.clock.advance(steps.SWEEP_STOP_S)
+        self.assertTrue(self.text("record_step", pass_token=t, step="snapshot",
+                                  action="finish", remaining_in_cycle=0,
+                                  stopped="time budget exhausted").startswith(
+                                      "refused: your step's time is up"))
+        self.call("record_step", pass_token=t, step="snapshot", action="finish",
+                  remaining_in_cycle=0, out_of_time=True)
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "end-pass-then-build")
+        end = self.call("end_pass", pass_token=c["pass_token"], outcome="complete")
+        self.assertEqual(self.request()["state"], "snapshot-done")
+        self.assertEqual(self.alerts_of("package-stopped"), [])
+        self.call("build_quarterly_package", quarter="2026-Q3",
+                  package_token=end["package_token"])
+
+    def test_a_refusal_after_the_time_is_up_builds_no_package(self):
+        # issue #10 R1 (Terra): the ledger changed under the pass after 450 s — the
+        # confirmed stop closes the request `stopped`, as on 0.3.3
+        self.seed(1)
+        t = self.snapshot(finish=False)
+        self.clock.advance(steps.SWEEP_STOP_S + 5)
+        self.call("record_step", pass_token=t, step="snapshot", action="finish",
+                  remaining_in_cycle=0, stopped="the bank ledger changed during this pass",
+                  stopped_by_refusal=True)
+        c = self.claim()["continue"]
+        self.call("end_pass", pass_token=c["pass_token"], outcome="stopped")
+        self.assertEqual(self.request()["state"], "stopped")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 0)
+
+    def test_a_refused_late_stop_never_retried_builds_no_package(self):
+        # R2 Astra: the stop the finish was refused for is kept on the step; a step that
+        # then expires ends stopped, as 0.3.3 ended it on the stop itself
+        self.seed(1)
+        t = self.snapshot(finish=False)
+        self.clock.advance(599)
+        self.assertTrue(self.text("record_step", pass_token=t, step="snapshot",
+                                  action="finish", remaining_in_cycle=0,
+                                  stopped="the bank ledger changed during this pass").startswith(
+                                      "refused: your step's time is up"))
+        self.clock.advance(1)
+        c = self.claim()["continue"]
+        self.assertEqual(c["ended"], "expired")
+        self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted")
+        self.assertEqual(self.request()["state"], "stopped")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 0)
+
+    def test_the_residents_own_finish_keeps_a_refused_late_stop(self):
+        # the delegation came back in Ellen's turn without a finish: hers keeps the stop,
+        # counts or not (R6 Terra: a counted finish is not taken for the specialist's)
+        for extra in ({}, {"failed": True}, {"remaining_in_cycle": 0}):
+            with self.subTest(**extra):
+                self.setUp()
+                self.seed(1)
+                t = self.snapshot(finish=False)
+                self.clock.advance(steps.SWEEP_STOP_S)
+                self.text("record_step", pass_token=t, step="snapshot", action="finish",
+                          stopped="the bank ledger changed during this pass")
+                self.call("record_step", pass_token=t, step="snapshot", action="finish", **extra)
+                c = self.claim()["continue"]
+                self.assertIn("ledger changed", c["finish"]["stopped"])
+                self.call("end_pass", pass_token=c["pass_token"], outcome="stopped")
+                self.assertEqual(self.request()["state"], "stopped")
+
+    def test_out_of_time_goes_with_no_stop(self):
+        self.seed(1)
+        t = self.snapshot(finish=False)
+        self.assertTrue(self.text("record_step", pass_token=t, step="snapshot",
+                                  action="finish", stopped="x", out_of_time=True).startswith(
+                                      "refused: out_of_time=true is a finish without"))
+
+    def test_failed_does_not_let_a_late_stop_through(self):
+        # R2 Terra: failed=true with a time-out said as a stop is refused like any other
+        self.seed(1)
+        t = self.snapshot(finish=False)
+        self.clock.advance(steps.SWEEP_STOP_S)
+        self.assertTrue(self.text("record_step", pass_token=t, step="snapshot",
+                                  action="finish", stopped="time budget exhausted",
+                                  failed=True).startswith("refused: your step's time is up"))
+
     def test_a_reclaimed_stopped_snapshot_is_told_not_built(self):
         # I4
         self.seed(1)

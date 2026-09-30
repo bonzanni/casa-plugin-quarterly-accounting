@@ -30,11 +30,43 @@ _MONTHS = {m.lower(): i + 1 for i, m in enumerate(
 _AMOUNT = re.compile(r"(?:eur\s*|€\s*)?(\d{1,3}(?:,\d{3})*\.\d{2}|\d+[.,]\d{2})")
 _DATE = re.compile(r"\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b")
 _T = r"(?:the\s+)?(?P<t>.+?)(?:\s+one)?"
+# issue #11: the sheet's pairings named together ("those six guesses are all right,
+# confirm them"; "all six proposals are right — confirm them"; "confirm all six") are
+# the sheet reply. The collective must be NAMED in the clause — "all", "both" or a
+# count — never a bare "the guesses" or a pronoun, which may mean the ones just named
+# ("Zapier and Vercel are right. Confirm them.", R2). EVERY count the clause states
+# must be the sheet's own — read from the whole clause, so no position escapes it
+_NUMBERS = {w: i for i, w in enumerate(("two", "three", "four", "five", "six", "seven",
+                                         "eight", "nine", "ten", "eleven", "twelve"), 2)}
+_NUM = r"(?:\d{1,3}|" + "|".join(_NUMBERS) + r")"
+_OK = r"(?:all\s+)?(?:good|fine|correct|right|ok|okay)"
+_NOUN = r"(?:guesses|guessed ones|proposals|pairings|matches|suggestions)"
+_THEM = (r"(?:(?:all|both)(?:\s+(?:of\s+)?(?:the|those|these))?(?:\s+" + _NUM + r")?"
+         r"|(?:the|those|these)\s+" + _NUM + r")\s+" + _NOUN)
+_YES = r"(?:(?:yes|yep|ok|okay)\s*[,:]?\s+)?"
+# the tail's pronoun has its antecedent in the same clause
+_TAIL = (r"(?:please\s+)?confirm\s+(?:them(?:\s+all)?|all\s+of\s+them|all\s+" + _NUM + r"|" + _THEM
+         + r")(?:\s+please)?")
+_COLLECTIVE = re.compile(_YES + _THEM + r"\s+(?:are|look)\s+" + _OK
+                         + r"(?:\s*[,:\u2013\u2014-]?\s*(?:so\s+|and\s+)?" + _TAIL + r")?")
+_CONFIRM_ALL = re.compile(_YES + r"(?:please\s+)?confirm\s+(?:all\s+" + _NUM + r"|" + _THEM
+                          + r")(?:\s+please)?")
+_ALL_GOOD = re.compile(r"all (?:good|fine|correct|right)")
+_COUNT = re.compile(r"\b(\d{1,3}|both|" + "|".join(_NUMBERS) + r")\b")
+
+
+def _counts(clause: str) -> set:
+    """Every number of pairings a collective reply states, anywhere in it."""
+    return {2 if w == "both" else _NUMBERS.get(w) or int(w) for w in _COUNT.findall(clause)}
+
+
 PATTERNS = [
     # round 4: the phrase a view offers when a payment has more candidates than it prints
     ("candidates", re.compile(r"(?:show\s+(?:me\s+)?)?(?:the\s+)?candidates for\s+(?P<t>.+)")),
     ("bulk_except", re.compile(r"all (?:good|fine|correct|right) (?:except|but) (?P<t>.+)")),
-    ("all_good", re.compile(r"all (?:good|fine|correct|right)")),
+    ("all_good", _ALL_GOOD),
+    ("all_good", _COLLECTIVE),
+    ("all_good", _CONFIRM_ALL),
     ("unpair", re.compile(_T + r"\s+(?:is|are)\s+(?:wrong|not right|incorrect)")),
     ("unpair", re.compile(r"no to\s+(?:the\s+)?(?P<t>.+?)(?:\s+one)?")),
     ("confirm", re.compile(_T + r"\s+(?:is\s+|are\s+)?(?:good|right|correct|fine|ok)")),
@@ -332,6 +364,9 @@ class _Run:
         self.touched_quarters = set()
         self.unresolved = 0               # corrections in this reply that did not apply
         self.rebuilds = []                # rebuild requests, released only if nothing is unresolved
+        self.excepted = False             # a clause of this reply opens with an exception
+        self.named = set()                # payments another clause of this reply judged
+        self.stated = set()               # every count the reply's sheet-wide clauses state
 
     def result(self, not_a_reply=False) -> dict:
         if self.rebuilds:
@@ -416,6 +451,22 @@ def _bind_match(conn, d, match_id):
     return s["render_id"], rev
 
 
+_EXCEPTION = re.compile(r"(?:except|but|apart from|other than|besides|save for|excluding|"
+                        r"with the exception|not\b)")
+
+
+_NUMBERED = re.compile(r"\d{1,2}(?:\s+\w+)?")
+
+
+def _parse(clause: str):
+    """(verb, match) for the one pattern that consumes the clause whole, or (None, None)."""
+    for name, rx in PATTERNS:
+        m = rx.fullmatch(clause)
+        if m:
+            return name, m
+    return None, None
+
+
 def apply_reply(conn, text: str) -> dict:
     run = _Run(conn)
     clauses = _clauses(text)
@@ -425,21 +476,29 @@ def apply_reply(conn, text: str) -> dict:
     if not clauses or all(c.endswith("?") for c in clauses):
         return run.result(not_a_reply=True)
     items = _open_items(conn)
-    for clause in clauses:
+    parsed = [(c, *_parse(c)) for c in clauses]
+    # R3/R4 (Astra): a reply is split into clauses, so a qualification of a sheet-wide
+    # approval ("all good,\nexcept the Zapier one"; "…\nwith the exception of …";
+    # "…\nexcluding …") stands in a clause of its own. A sheet as a whole is approved
+    # only by a reply understood whole: any clause not understood (a question aside),
+    # or one opening with an exception, and no sheet-wide approval applies
+    # R6 (Astra): a question may carry one too ("… Can you leave the Zapier one out?")
+    run.excepted = any(verb is None or c.endswith("?") or _NUMBERED.fullmatch(c) or
+                       _EXCEPTION.match(c.lstrip(" -\u2013\u2014,:")) for c, verb, _ in parsed
+                       if verb != "all_good")
+    sheet_wide = []
+    for clause, verb, m in parsed:
+        if verb == "all_good":
+            sheet_wide.append(m)          # R5 (Terra): applied after every other clause
+            continue
         if clause.endswith("?"):
             run.lines.append(f"“{clause}” is a question — nothing changed for it.")
             continue
-        if re.fullmatch(r"\d{1,2}(?:\s+\w+)?", clause):
+        if _NUMBERED.fullmatch(clause):
             run.lines.append(f"“{clause}”: there are no numbered lines — name the payee, "
                              "e.g. \"the Zapier one is wrong\".")
             run.unresolved += 1
             continue
-        verb, m = None, None
-        for name, rx in PATTERNS:
-            m = rx.fullmatch(clause)
-            if m:
-                verb = name
-                break
         if verb is None:
             names = _targets(clause)
             if names and all(_resolve(conn, n, items)[0] is not None for n in names):
@@ -451,10 +510,30 @@ def apply_reply(conn, text: str) -> dict:
             run.unresolved += 1
             continue
         _apply(conn, run, verb, m, items)
+    # A sheet as a whole is approved last, and only for what no other clause judged:
+    # "All good. The Zapier one is wrong." unpairs Zapier and confirms the rest. Any
+    # other clause left unresolved (ambiguous, stale, refused) and it approves nothing
+    # R7 (Astra): the reply's sheet-wide clauses are ONE approval — every count any of
+    # them states is checked together, and it applies once or not at all
+    if sheet_wide:
+        # R8 (Astra): a collective ("those two guesses", "all those proposals") beside a
+        # verdict on a single pairing may refer back to the pairings just judged —
+        # only the bare "all good" names the whole sheet whatever else is said
+        collective = any(m.re is not _ALL_GOOD for m in sheet_wide)
+        if run.unresolved > 0 or (collective and run.named):
+            run.excepted = True
+        run.stated = set().union(*(_counts(m.group(0)) for m in sheet_wide))
+        _apply(conn, run, "all_good", sheet_wide[0], items)
     return run.result()
 
 
 def _apply(conn, run, verb, m, items):
+    if verb == "all_good" and run.excepted:
+        run.lines.append("Nothing applied for that: something else in the same message "
+                         "leaves unclear what is approved. Say \"all good\" and \"the Zapier one is "
+                         "wrong\" as two sentences, or only the one that is wrong.")
+        run.unresolved += 1
+        return
     if verb == "bulk_except":
         t = re.sub(r"^the\s+|\s+one$", "", m.group("t").strip())
         d, _ = _resolve(conn, t, items)
@@ -474,11 +553,29 @@ def _apply(conn, run, verb, m, items):
             run.unresolved += 1
             return
         said = len(run.lines)
+        waiting, decided = [], 0
         for pid in views.render_items(conn, last["render_id"]):
+            if pid in run.named:
+                decided += 1              # another clause of this reply decides it
+                continue
             d = work.describe(conn, pid)
             cur = d["current"]
             if cur is None or not views._needs_check(d) or d["candidates"]:
                 continue
+            waiting.append((d, cur))
+        stated = run.stated
+        # the count names the sheet: its pairings waiting, the ones decided here included
+        if stated and stated != {len(waiting) + decided}:
+            # a count that is not the sheet's: the operator means a sheet other than
+            # this one, or only some of its lines — confirm none of them
+            n = len(waiting) + decided
+            run.lines.append(f"Nothing applied: that sheet has {n} pairing"
+                             f"{'' if n == 1 else 's'} waiting for your approval, "
+                             f"not {' or '.join(str(x) for x in sorted(stated))}. Say \"all good\" to confirm all of them, or name the "
+                             "ones that are right, e.g. \"the Zapier one is good\".")
+            run.unresolved += 1
+            return
+        for d, cur in waiting:
             run.guarded(d, lambda d=d, cur=cur: matches.confirm_match(
                 conn, match_id=cur["match_id"],
                 expected_revision=_bind_match(conn, d, cur["match_id"])[1],
@@ -495,6 +592,8 @@ def _apply(conn, run, verb, m, items):
                 run.lines.append(problem)
                 run.unresolved += 1
                 continue
+            if verb in ("unpair", "confirm"):
+                run.named.add(d["pid"])   # its own verdict, said in its own receipt line
             _one(conn, run, verb, d, m)
         return
     if verb == "never":

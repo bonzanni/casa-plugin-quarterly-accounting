@@ -92,6 +92,172 @@ class TestGrammar(Base):
         self.assertEqual(self.author(a)[0], "operator")
         self.assertEqual(self.author(late)[0], "auto")
 
+    def test_the_guesses_named_together_are_the_sheet_reply(self):
+        # issue #11: the operator's own words, from two live runs
+        for text in ("Those six guesses are all right, confirm them.",
+                     "All six proposals are right — confirm them"):
+            with self.subTest(text=text):
+                self.setUp()
+                pids = [self.item(f"Vendor{i}", 1000 + i, f"2026-09-{10 + i:02d}")
+                        for i in range(6)]
+                self.deliver()
+                out = reply.apply_reply(self.conn, text)
+                self.assertEqual(len(out["applied"]), 6, out["receipt"])
+                self.assertEqual([self.author(p)[0] for p in pids], ["operator"] * 6)
+                self.assertNotIn("didn't understand", out["receipt"])
+
+    def test_a_count_that_is_not_the_sheets_confirms_nothing(self):
+        pids = [self.item(f"Vendor{i}", 1000 + i, f"2026-09-{10 + i:02d}") for i in range(3)]
+        self.deliver()
+        # R1 Astra: a count in the trailing "confirm …" is checked as well
+        for text in ("those five guesses are right", "confirm all 4", "both guesses are good",
+                     "all the guesses look right, confirm both pairings",
+                     "these three guesses are right, confirm all four"):
+            with self.subTest(text=text):
+                out = reply.apply_reply(self.conn, text)
+                self.assertEqual(out["applied"], [])
+                self.assertIn("that sheet has 3 pairings waiting for your approval, not ",
+                              out["receipt"])
+                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
+        out = reply.apply_reply(self.conn, "confirm all three")
+        self.assertEqual(len(out["applied"]), 3)
+
+    def test_a_pronoun_or_a_bare_the_guesses_confirms_no_more_than_was_named(self):
+        # R2 Astra: "them" may mean the ones just named — never the whole sheet
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe", "Figma"))]
+        self.deliver()
+        for text in ("Zapier and Vercel are right. Confirm them.",
+                     "Zapier and Vercel are right. They're all good.",
+                     "Zapier and Vercel are right. The guesses are right, confirm them.",
+                     "Zapier and Vercel are right. Confirm them all."):
+            with self.subTest(text=text):
+                reply.apply_reply(self.conn, text)
+                self.assertEqual([self.author(p)[0] for p in pids[2:]], ["auto", "auto"])
+
+    def test_an_exception_on_its_own_line_approves_no_sheet(self):
+        # R3 Astra: the line break must not cut the exception loose from the approval
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
+        self.deliver()
+        for text in ("Confirm all three,\nexcept the Zapier one.", "All good,\nexcept the Zapier one",
+                     "All three guesses are right.\nBut not the Zapier one.",
+                     # R4 Astra: any clause the grammar does not understand may qualify it
+                     "Confirm all three,\nwith the exception of the Zapier one.",
+                     "Confirm all three,\nexcluding the Zapier one.",
+                     "Confirm all three.\n— except the Zapier one",
+                     "All good.\nZapier not so sure.", "All good. 1 wrong."):
+            with self.subTest(text=text):
+                out = reply.apply_reply(self.conn, text)
+                self.assertEqual(out["applied"], [])
+                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
+                self.assertIn("something else in the same message", out["receipt"])
+                self.assertEqual(self.operator_entries(), 0)
+
+    def test_an_approval_beside_understood_clauses_still_applies(self):
+        # the form the receipts recommend: the approval and the correction, two sentences
+        z = self.item("Zapier", 9900, "2026-09-17")
+        v = self.item("Vercel", 1210, "2026-09-18")
+        self.deliver()
+        out = reply.apply_reply(self.conn, "All good. The Zapier one is wrong.")
+        # R5: the sheet is approved last, for what no other clause named
+        self.assertIsNone(self.author(z))
+        self.assertEqual(self.author(v)[0], "operator")
+        self.assertNotIn("something else in the same message", out["receipt"])
+
+    def test_a_correction_beside_a_collective_is_never_confirmed(self):
+        # R5 Terra: the collective used to confirm Zapier before its correction ran.
+        # R8: a collective beside a verdict applies nothing (it may refer back to it)
+        for text in ("All three guesses are right. The Zapier one is wrong.",
+                     "The Zapier one is wrong. All three guesses are right."):
+            with self.subTest(text=text):
+                self.setUp()
+                z = self.item("Zapier", 9900, "2026-09-17")
+                others = [self.item("Vercel", 1210, "2026-09-18"),
+                          self.item("Adobe", 5445, "2026-09-14")]
+                self.deliver()
+                out = reply.apply_reply(self.conn, text)
+                self.assertIsNone(self.author(z), out["receipt"])
+                self.assertEqual([self.author(p)[0] for p in others], ["auto"] * 2)
+                self.assertIn("something else in the same message", out["receipt"])
+
+    def test_a_collective_after_named_approvals_confirms_only_those(self):
+        # R8 Astra: "those two guesses" refers back to the two just named
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe", "Figma"))]
+        self.deliver()
+        for text in ("Zapier and Vercel are right. Those two guesses are all right, confirm them.",
+                     "Zapier and Vercel are right. All those guesses are right, confirm them."):
+            with self.subTest(text=text):
+                reply.apply_reply(self.conn, text)
+                self.assertEqual([self.author(p)[0] for p in pids[2:]], ["auto", "auto"])
+
+    def test_an_unresolved_clause_leaves_the_sheet_unapproved(self):
+        a1 = self.item("Adobe", 5445, "2026-09-14")
+        a2 = self.item("Adobe", 2999, "2026-09-03")
+        v = self.item("Vercel", 1210, "2026-09-18")
+        self.deliver()
+        out = reply.apply_reply(self.conn, "All good. The Adobe one is wrong.")   # which Adobe?
+        self.assertEqual([self.author(p)[0] for p in (a1, a2, v)], ["auto"] * 3)
+        self.assertEqual(self.operator_entries(), 0)
+        self.assertIn("something else in the same message", out["receipt"])
+
+    def test_a_question_beside_a_sheet_wide_approval_leaves_the_sheet_unapproved(self):
+        # R6 Astra: a question may carry an exclusion
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
+        self.deliver()
+        for text in ("Confirm all three. Can you leave the Zapier one unconfirmed?",
+                     "All good. Is Vercel right?"):
+            with self.subTest(text=text):
+                out = reply.apply_reply(self.conn, text)
+                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
+                self.assertIn("something else in the same message", out["receipt"])
+
+    def test_two_sheet_wide_clauses_are_one_approval(self):
+        # R7 Astra: a count one clause states bounds every other sheet-wide clause
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
+        self.deliver()
+        for text in ("Those two guesses are all right. Confirm all those guesses.",
+                     "Confirm all those guesses. Those two guesses are all right.",
+                     "All good. Both guesses are right."):
+            with self.subTest(text=text):
+                out = reply.apply_reply(self.conn, text)
+                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
+                self.assertIn("that sheet has 3 pairings waiting", out["receipt"])
+        out = reply.apply_reply(self.conn, "All good. All three guesses are right.")
+        self.assertEqual([self.author(p)[0] for p in pids], ["operator"] * 3)
+
+    def test_a_search_request_beside_all_good_takes_nothing_from_it(self):
+        # R6 Astra S2: only a verdict on a pairing takes it out of the sheet-wide approval
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
+        self.deliver()
+        reply.apply_reply(self.conn, "All good. Have another look at Zapier.")
+        self.assertEqual([self.author(p)[0] for p in pids], ["operator"] * 3)
+
+    def test_a_qualifier_that_names_no_payment_leaves_the_sheet_unapproved(self):
+        # R5 Astra: "Only Vercel is right" parses as a confirm whose target resolves to
+        # nothing — it is unresolved, so the sheet-wide approval applies nothing
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
+        self.deliver()
+        for text in ("Confirm all three. Only Vercel is right.",
+                     "Only Vercel is right. Confirm all three."):
+            with self.subTest(text=text):
+                reply.apply_reply(self.conn, text)
+                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
+                self.assertEqual(self.operator_entries(), 0)
+
+    def test_a_collective_confirmation_binds_like_all_good(self):
+        a = self.item("Adobe", 5445, "2026-09-14")
+        self.deliver()
+        late = self.item("Figma", 1815, "2026-09-15")          # created after the sheet was sent
+        reply.apply_reply(self.conn, "all the guesses are right, confirm them")
+        self.assertEqual(self.author(a)[0], "operator")
+        self.assertEqual(self.author(late)[0], "auto")
+
     def test_identity_is_not_an_exemption(self):
         pid = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)
         self.deliver()
