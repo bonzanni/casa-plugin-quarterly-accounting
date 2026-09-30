@@ -92,6 +92,41 @@ class TestGrammar(Base):
         self.assertEqual(self.author(a)[0], "operator")
         self.assertEqual(self.author(late)[0], "auto")
 
+    def test_the_guesses_named_together_are_the_sheet_reply(self):
+        # issue #11: the operator's own words, from two live runs
+        for text in ("Those six guesses are all right, confirm them.",
+                     "All six proposals are right — confirm them"):
+            with self.subTest(text=text):
+                self.setUp()
+                pids = [self.item(f"Vendor{i}", 1000 + i, f"2026-09-{10 + i:02d}")
+                        for i in range(6)]
+                self.deliver()
+                out = reply.apply_reply(self.conn, text)
+                self.assertEqual(len(out["applied"]), 6, out["receipt"])
+                self.assertEqual([self.author(p)[0] for p in pids], ["operator"] * 6)
+                self.assertNotIn("didn't understand", out["receipt"])
+
+    def test_a_count_that_is_not_the_sheets_confirms_nothing(self):
+        pids = [self.item(f"Vendor{i}", 1000 + i, f"2026-09-{10 + i:02d}") for i in range(3)]
+        self.deliver()
+        for text in ("those five guesses are right", "confirm all 4", "both guesses are good"):
+            with self.subTest(text=text):
+                out = reply.apply_reply(self.conn, text)
+                self.assertEqual(out["applied"], [])
+                self.assertIn("that sheet has 3 pairings waiting for your approval",
+                              out["receipt"])
+                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
+        out = reply.apply_reply(self.conn, "confirm all three")
+        self.assertEqual(len(out["applied"]), 3)
+
+    def test_a_collective_confirmation_binds_like_all_good(self):
+        a = self.item("Adobe", 5445, "2026-09-14")
+        self.deliver()
+        late = self.item("Figma", 1815, "2026-09-15")          # created after the sheet was sent
+        reply.apply_reply(self.conn, "the guesses are right, confirm them")
+        self.assertEqual(self.author(a)[0], "operator")
+        self.assertEqual(self.author(late)[0], "auto")
+
     def test_identity_is_not_an_exemption(self):
         pid = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)
         self.deliver()

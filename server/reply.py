@@ -30,11 +30,50 @@ _MONTHS = {m.lower(): i + 1 for i, m in enumerate(
 _AMOUNT = re.compile(r"(?:eur\s*|€\s*)?(\d{1,3}(?:,\d{3})*\.\d{2}|\d+[.,]\d{2})")
 _DATE = re.compile(r"\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b")
 _T = r"(?:the\s+)?(?P<t>.+?)(?:\s+one)?"
+# issue #11: the sheet's pairings named together ("those six guesses are all right,
+# confirm them"; "all six proposals are right — confirm them"; "confirm all six") are
+# the sheet reply. A count given ("six", "both") must be the sheet's own
+_NUMBERS = {w: i for i, w in enumerate(("two", "three", "four", "five", "six", "seven",
+                                         "eight", "nine", "ten", "eleven", "twelve"), 2)}
+_NUM = r"(?:\d{1,3}|" + "|".join(_NUMBERS) + r")"
+_OK = r"(?:all\s+)?(?:good|fine|correct|right|ok|okay)"
+
+
+def _them(named: bool) -> str:
+    """"those six guesses", "all the proposals", "both pairings" — with the count and
+    "both" captured only where `named`, so one pattern holds each group once."""
+    both, n = (r"(?P<both>both)", r"(?P<n>" + _NUM + ")") if named else ("both", _NUM)
+    return (r"(?:(?:all|" + both + r")(?:\s+(?:of\s+)?(?:the|those|these))?|the|those|these)"
+            r"(?:\s+" + n + r")?\s+(?:guesses|guessed ones|proposals|pairings|matches|suggestions)")
+
+
+def _confirm(named: bool) -> str:
+    n = r"(?P<n2>" + _NUM + ")" if named else _NUM      # "confirm all six"
+    return (r"(?:please\s+)?confirm\s+(?:them(?:\s+all)?|all(?:\s+of\s+them)?|all\s+" + n
+            + r"|" + _them(named) + r")(?:\s+please)?")
+
+
+_COLLECTIVE = re.compile(
+    r"(?:(?:yes|yep|ok|okay)\s*[,:]?\s+)?"
+    r"(?:" + _them(True) + r"\s+(?:are|look)\s+" + _OK + r"|they(?:\s+are|'re)\s+" + _OK + r")"
+    r"(?:\s*[,:\u2013\u2014-]?\s*(?:so\s+|and\s+)?" + _confirm(False) + r")?")
+_CONFIRM_ALL = re.compile(r"(?:(?:yes|yep|ok|okay)\s*[,:]?\s+)?" + _confirm(True))
+
+
+def _count(m):
+    """The number of pairings a collective reply names, or None when it names none."""
+    g = m.groupdict()
+    n = g.get("n") or g.get("n2") or ("two" if g.get("both") else None)
+    return None if n is None else _NUMBERS.get(n) or int(n)
+
+
 PATTERNS = [
     # round 4: the phrase a view offers when a payment has more candidates than it prints
     ("candidates", re.compile(r"(?:show\s+(?:me\s+)?)?(?:the\s+)?candidates for\s+(?P<t>.+)")),
     ("bulk_except", re.compile(r"all (?:good|fine|correct|right) (?:except|but) (?P<t>.+)")),
     ("all_good", re.compile(r"all (?:good|fine|correct|right)")),
+    ("all_good", _COLLECTIVE),
+    ("all_good", _CONFIRM_ALL),
     ("unpair", re.compile(_T + r"\s+(?:is|are)\s+(?:wrong|not right|incorrect)")),
     ("unpair", re.compile(r"no to\s+(?:the\s+)?(?P<t>.+?)(?:\s+one)?")),
     ("confirm", re.compile(_T + r"\s+(?:is\s+|are\s+)?(?:good|right|correct|fine|ok)")),
@@ -474,11 +513,24 @@ def _apply(conn, run, verb, m, items):
             run.unresolved += 1
             return
         said = len(run.lines)
+        waiting = []
         for pid in views.render_items(conn, last["render_id"]):
             d = work.describe(conn, pid)
             cur = d["current"]
             if cur is None or not views._needs_check(d) or d["candidates"]:
                 continue
+            waiting.append((d, cur))
+        n = _count(m)
+        if n is not None and len(waiting) != n:
+            # a count that is not the sheet's: the operator means a sheet other than
+            # this one, or only some of its lines — confirm none of them
+            run.lines.append(f"Nothing applied: that sheet has {len(waiting)} pairing"
+                             f"{'' if len(waiting) == 1 else 's'} waiting for your approval, "
+                             f"not {n}. Say \"all good\" to confirm all of them, or name the "
+                             "ones that are right, e.g. \"the Zapier one is good\".")
+            run.unresolved += 1
+            return
+        for d, cur in waiting:
             run.guarded(d, lambda d=d, cur=cur: matches.confirm_match(
                 conn, match_id=cur["match_id"],
                 expected_revision=_bind_match(conn, d, cur["match_id"])[1],
