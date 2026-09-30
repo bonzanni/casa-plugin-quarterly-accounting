@@ -368,6 +368,8 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
     with db.tx(conn):
         check_token(conn, token)
         m = _marker(conn)
+        if outcome in ("complete", "interrupted"):
+            _round_judged(conn, m["pass_id"])
         if outcome == "complete":
             _judgment_owed(conn, m["pass_id"])
         full = {**(report or {}), **throughput(conn, m["pass_id"])}
@@ -392,6 +394,27 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
     owed = ([notice] if notice is not None else []) + alerts.pass_notices(conn, m["pass_id"])
     out["speak"] = alerts.pending_rendering(conn, must=owed)
     return out
+
+
+def _round_judged(conn, pass_id: str) -> None:
+    """Issue #18: a package round that read the bank is not ended without judging its
+    quarter — a round with no judge step can never be whole, so ending it costs a whole
+    round more. Stopped and failed rounds, and a round that did not import, end as
+    before: there is nothing to judge after them."""
+    if conn.execute("SELECT 1 FROM package_requests WHERE pass_id=? AND state='snapshot'",
+                    (pass_id,)).fetchone() is None:
+        return
+    if conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?", (pass_id,)).fetchone() is None:
+        return
+    steps = {r["step"]: r for r in conn.execute(
+        "SELECT step, finish_json FROM pass_steps WHERE pass_id=?", (pass_id,))}
+    snap = steps.get("snapshot")
+    if snap is not None and json.loads(snap["finish_json"] or "{}").get("stopped"):
+        return
+    if "judge" not in steps:
+        raise db.Refusal("not ended: this package round has not judged its quarter. Start the "
+                         "judge step (record_step step=\"judge\"), delegate it, and end the "
+                         "pass after it")
 
 
 def _judgment_owed(conn, pass_id: str) -> None:

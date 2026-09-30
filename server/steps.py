@@ -9,7 +9,8 @@ calls claim() (the continue_pass tool). It continues exactly what is due, and
 every claim rotates the token (passes.rotate): the one integer the stale-pass
 fence (passes.check_token) compares on every write. So whatever a superseded
 holder still does is refused by the check that already refuses a reclaimed
-pass. Nothing here matches a notification to a delegation.
+pass. A notification closes the step its delegation served, bound by the delegation
+id recorded on the step (issue #17), and never anything else.
 
 A package request (package_requests) carries its own token under the same
 rule: end_pass hands it over in its own transaction, and claim() takes over
@@ -116,11 +117,17 @@ def start(conn, token, step: str, carry: dict) -> dict:
         if step not in FOR_TRIGGER.get(m["trigger"], ()):
             raise db.Refusal(f"a {step} step belongs to {BELONGS[step]}, not to this "
                              f"{m['trigger']} pass")
-        if conn.execute("SELECT 1 FROM pass_steps WHERE pass_id=? AND step=?",
-                        (m["pass_id"], step)).fetchone() is not None:
+        prior = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
+                             (m["pass_id"], step)).fetchone()
+        req = round_request(conn, m["pass_id"])
+        # issue #17: a package round judges after every Gmail chunk. A judge step whose
+        # judgment finished is started again on the same row — the row is always the
+        # round's latest judgment, which is what its check reads
+        restart = (prior is not None and step == "judge" and req is not None
+                   and _ended(prior) == "finished")
+        if prior is not None and not restart:
             raise db.Refusal(f"the {step} step was already started in this pass")
         now = db._clock().replace(microsecond=0)
-        req = round_request(conn, m["pass_id"])
         if step == "snapshot" and req is None:
             raise db.Refusal("this package pass holds no package request: ask for the package "
                              "with begin_pass(trigger=\"package\", quarter, channel)")
@@ -132,8 +139,24 @@ def start(conn, token, step: str, carry: dict) -> dict:
             q = req["quarter"] if req is not None else None
             carry = {**carry, "due_at_start": {str(p): v for p, v in
                                                work.judge_due_state(conn, q).items()}}
-        conn.execute("INSERT INTO pass_steps(pass_id, step, started_at, carry_json)"
-                     " VALUES (?,?,?,?)", (m["pass_id"], step, _stamp(now), db.canonical(carry)))
+        if restart:
+            # the delegations this row served before, so a notice naming one of them can
+            # never be read as this judgment's (D2)
+            old = json.loads(prior["carry_json"] or "{}")
+            gone = old.get("delegations_before", []) + (
+                [old["delegation"]] if old.get("delegation") else [])
+            if gone:
+                carry = {**carry, "delegations_before": gone}
+        if restart:
+            conn.execute("UPDATE pass_steps SET started_at=?, finished_at=NULL, finished_by=NULL,"
+                         " finish_json=NULL, carry_json=? WHERE pass_id=? AND step=?",
+                         (_stamp(now), db.canonical(carry), m["pass_id"], step))
+            # a claim keys on the step's name: the restarted judgment is unclaimed
+            conn.execute("UPDATE pass_marker SET claimed_step=NULL WHERE id=1")
+        else:
+            conn.execute("INSERT INTO pass_steps(pass_id, step, started_at, carry_json)"
+                         " VALUES (?,?,?,?)",
+                         (m["pass_id"], step, _stamp(now), db.canonical(carry)))
         return {"step": step, "started_at": _stamp(now),
                 "sweep_stop_at": _stamp(now + _dt.timedelta(seconds=SWEEP_STOP_S)),
                 "return_by": _stamp(now + _dt.timedelta(seconds=RETURN_BY_S))}
@@ -169,6 +192,14 @@ def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
         if row["finished_at"] is not None:
             return {"step": step, "finished": True, "already": True}
         body = {k: v for k, v in counts.items() if v is not None}
+        # issue #18: a judgment is whole only when it says how far triage got. A judge
+        # finish that carries counts carries that one; a countless finish (Ellen's, the
+        # delegation back without one) is accepted and counts as not whole
+        if (step == "judge" and body and not failed and not stopped
+                and body.get("triage_remaining") is None):
+            raise db.Refusal("a judge step's finish carries triage_remaining: the last triage "
+                             "page's `remaining` (0 when every page was judged) — finish "
+                             "again with it")
         # issue #10: running out of time is not a stop. Once the step's time is up (the
         # sweep pages `time_up`) after this pass's import, a `stopped` is refused unless
         # the specialist says a refusal stopped it: a time-out said as a stop is put
@@ -209,6 +240,92 @@ def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
     if refused is not None:
         raise db.Refusal(refused)       # after the commit: the kept stop stays
     return {"step": step, "finished": True, "already": False}
+
+
+# --- a delegation's end ends its step (issue #17, D1) --------------------------------------
+DELEGATION_PREFIX = 8          # Casa's notice prints the first 8 characters of the id
+_DELEGATION_CHARS = set("0123456789abcdefABCDEF-")
+
+
+def _delegation_id(value) -> str:
+    if (not isinstance(value, str) or not DELEGATION_PREFIX <= len(value) <= 64
+            or set(value) - _DELEGATION_CHARS):
+        raise db.Refusal("delegation_id is the id delegate_to_agent returned (or the one the "
+                         "notification names), as given")
+    return value
+
+
+def delegated(conn, token, step: str, delegation_id) -> dict:
+    """Ellen, right after delegate_to_agent answered: the step is served by that
+    delegation, so its notification can close the step (continue_pass)."""
+    if step not in STEPS:
+        raise db.Refusal("step is sweep, judge, handover or snapshot")
+    if token is None:
+        raise db.Refusal("a step belongs to a pass: pass the pass_token")
+    did = _delegation_id(delegation_id)
+    with db.tx(conn):
+        passes.check_token(conn, token)
+        m = passes._marker(conn)
+        row = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
+                           (m["pass_id"], step)).fetchone()
+        if row is None:
+            raise db.Refusal(f"the {step} step was not started in this pass")
+        if row["finished_at"] is not None:
+            # the delegation came back in the turn and the step is already finished
+            # (a sync answer): nothing is left for a notification to close
+            return {"step": step, "bound": False, "finished": True}
+        cur = latest(conn, m["pass_id"])
+        if cur["step"] != step or _ended(row) is not None:
+            raise db.Refusal(f"the {step} step is not the one running in this pass")
+        carry = json.loads(row["carry_json"] or "{}")
+        if carry.get("delegation") and carry["delegation"] != did:
+            carry["delegations_before"] = carry.get("delegations_before", []) + [
+                carry["delegation"]]
+        carry["delegation"] = did
+        conn.execute("UPDATE pass_steps SET carry_json=? WHERE pass_id=? AND step=?",
+                     (db.canonical(carry), m["pass_id"], step))
+        return {"step": step, "bound": True}
+
+
+def _recorded_delegations(conn) -> list:
+    """Every delegation id ever bound to a step, in any pass (C1, Astra S1: a notice
+    replayed from an older pass must not bind by a prefix a newer delegation shares)."""
+    out = []
+    for r in conn.execute("SELECT carry_json FROM pass_steps"):
+        c = json.loads(r["carry_json"] or "{}")
+        out += c.get("delegations_before", []) + ([c["delegation"]] if c.get("delegation")
+                                                   else [])
+    return out
+
+
+def _close_delegated(conn, delegation_id, status) -> None:
+    """A notification says delegation `delegation_id` ended: the running step it served
+    is over. Bound by the id recorded on that step (a prefix of at least
+    DELEGATION_PREFIX characters that no other delegation ever recorded shares);
+    anything else — a stale or replayed notice, a finished step, a restarted judgment
+    served by a newer delegation — changes nothing."""
+    did = _delegation_id(delegation_id)
+    if status not in ("ok", "error"):
+        raise db.Refusal("delegation_status is 'ok' or 'error' (a restart orphan is 'error')")
+    with db.tx(conn):
+        m = _live_pass(conn)
+        if m is None:
+            return
+        row = latest(conn, m["pass_id"])
+        if row is None or _ended(row) is not None:
+            return
+        mine = json.loads(row["carry_json"] or "{}").get("delegation")
+        if not mine or not mine.startswith(did):
+            return
+        if sum(1 for d in _recorded_delegations(conn) if d.startswith(did)) != 1:
+            return      # ambiguous: another delegation shares it — the step expires, as in 0.4.0
+        body = {"failed": True} if status == "error" else {}
+        kept = _finish(row).get("stopped")  # a kept stop (issue #10) stays a stop
+        if kept:
+            body["stopped"] = kept
+        conn.execute("UPDATE pass_steps SET finished_at=?, finished_by='resident', finish_json=?"
+                     " WHERE pass_id=? AND step=?",
+                     (db.now(), db.canonical(body), m["pass_id"], row["step"]))
 
 
 # --- the clock ---------------------------------------------------------------------------
@@ -312,7 +429,7 @@ def _same(a, b) -> bool:
     return True
 
 
-def claim(conn) -> dict:
+def claim(conn, delegation_id=None, delegation_status=None) -> dict:
     """continue_pass: in one write transaction, claim what is due — the live pass
     (younger than STALE_AFTER_S) whose latest step is over and not already
     claimed by a holder with a fresh lease; else an open package request whose
@@ -322,6 +439,10 @@ def claim(conn) -> dict:
     import alerts
     if conn.in_transaction:
         raise RuntimeError("continue_pass opens its own transactions")
+    if delegation_id is not None or delegation_status is not None:
+        # issue #17 (D1): a notification's claim first closes the step its delegation
+        # served, if that step is still running
+        _close_delegated(conn, delegation_id, delegation_status)
     for _ in range(5):
         cand = _choose(conn)
         custody = cand[0] == "delivery"
@@ -403,6 +524,13 @@ def _claim_pass(conn, m, step) -> dict:
         if req is not None:             # a package round (issue #15): end_pass decides it
             c["request"] = {"id": req["request_id"], "quarter": req["quarter"],
                             "channel": req["channel"], "round": req["round"] + 1}
+            if _another_chunk(conn, m["pass_id"], req, step):
+                # issue #17: the next Gmail chunk of this round, then another judgment
+                can_run = binding.check_setup(conn)["can_run"]
+                if can_run:
+                    c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req),
+                             judge_due=len(work.judge_due_state(conn, req["quarter"])),
+                             next="gmail-round")
     elif step["step"] == "handover":
         c.update(next="end-pass-then-case",
                  documents=[_pairing(conn, d) for d in carry.get("doc_ids", [])])
@@ -417,10 +545,45 @@ def _claim_pass(conn, m, step) -> dict:
         if fin.get("stopped") or not can_run or not imported or req is None:
             c.update(can_run=can_run, next="end-pass")
         else:
-            c.update(can_run=can_run, work=work.work_list(conn, req),
+            c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req),
                      judge_due=len(work.judge_due_state(conn, req["quarter"])),
                      next="gmail-round")
     return {"continue": c}
+
+
+def _hand_chunk(conn, pass_id, req) -> dict:
+    """A package round's Gmail chunk (issue #17), with the count of the quarter's items
+    still unsearched for the request kept on the round's snapshot row: the next chunk is
+    handed out only if a chunk brought that count down (_another_chunk)."""
+    import work
+    w = work.work_list(conn, req)
+    row = conn.execute("SELECT carry_json FROM pass_steps WHERE pass_id=? AND step='snapshot'",
+                       (pass_id,)).fetchone()
+    carry = {**json.loads(row["carry_json"] or "{}"), "handed": w["total"]}
+    conn.execute("UPDATE pass_steps SET carry_json=? WHERE pass_id=? AND step='snapshot'",
+                 (db.canonical(carry), pass_id))
+    return w
+
+
+def _another_chunk(conn, pass_id, req, step) -> bool:
+    """Issue #17: after a package round's judgment, another Gmail chunk runs in the same
+    pass iff the judgment finished (not failed, stopped or expired), this pass's Gmail
+    probe was ok, and the quarter's items still unsearched for the request are fewer than
+    when the last chunk was handed out, yet not none — so the loop ends: that count is a
+    non-negative integer that must fall with every chunk (a search of an item already
+    searched is not progress), and what a pass leaves, round_fate takes from there."""
+    import work
+    if _ended(step) != "finished" or _finish(step).get("stopped"):
+        return False
+    probe = conn.execute("SELECT ok FROM probes WHERE kind='gmail' AND pass_id=?",
+                         (pass_id,)).fetchone()
+    if probe is None or not probe["ok"]:
+        return False
+    snap = conn.execute("SELECT carry_json FROM pass_steps WHERE pass_id=? AND step='snapshot'",
+                        (pass_id,)).fetchone()
+    handed = json.loads(snap["carry_json"] or "{}").get("handed") if snap is not None else None
+    left = len(work.package_work(conn, req))
+    return handed is not None and 0 < left < handed
 
 
 def _claim_round(conn, req) -> dict:

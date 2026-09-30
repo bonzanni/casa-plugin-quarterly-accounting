@@ -225,8 +225,11 @@ def triage(conn, bf, token) -> dict:
         doc = docs[0]
         snap = _bank_row(bf, lineage_row(conn, item["pid"]))
         twin = _identical_pairing(conn, item, doc)
+        # issue #19: the specialist states the date it read on the document (the sim's
+        # "reading" is the filed one, or the payment's date when none was filed)
         kw = dict(pid=item["pid"], doc_id=doc["doc_id"], expected_revision=item["revision"],
                   row_snapshot=snap, token=token,
+                  document_date=doc["document_date"] or item["date"],
                   runners_up=[f"{d['document_number']} ({d['document_date']})" for d in docs[1:]],
                   labels=("guessed",) if len(docs) > 1 else ("clean",))
         if twin is not None:
@@ -235,7 +238,9 @@ def triage(conn, bf, token) -> dict:
             matches.propose_match(conn, pid=twin, doc_id=other["current"]["document"]["doc_id"],
                                   expected_revision=other["revision"],
                                   row_snapshot=_bank_row(bf, lineage_row(conn, twin)),
-                                  token=token)
+                                  token=token,
+                                  document_date=other["current"]["document"]["date"]
+                                  or other["date"])
             done["proposed"] += [item["pid"], twin]
         else:
             matches.record_match(conn, author="auto", **kw)

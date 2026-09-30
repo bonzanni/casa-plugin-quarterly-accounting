@@ -348,7 +348,7 @@ class TestRowSnapshotFromTheListing(ToolCase):
         self.assertNotIn("row_snapshot", item)
         out = _json("record_match", pid=self.pid, doc_id=self.doc(), author="auto",
                     expected_revision=item["revision"], row_digest=item["row_digest"],
-                    pass_token=self.token)
+                    pass_token=self.token, document_date="2026-07-01")
         self.assertEqual(out["state"], "matched")
 
     def test_a_digest_of_other_facts_is_refused(self):
@@ -357,10 +357,11 @@ class TestRowSnapshotFromTheListing(ToolCase):
         for bad in ("0" * 64, item["row_digest"][:16]):
             out = _text("record_match", pid=self.pid, doc_id=self.doc(), author="auto",
                         expected_revision=item["revision"], row_digest=bad,
-                        pass_token=self.token)
+                        pass_token=self.token, document_date="2026-07-01")
             self.assertTrue(out.startswith("refused: the row changed"), out)
         out = _text("record_match", pid=self.pid, doc_id=self.doc(), author="auto",
-                    expected_revision=item["revision"], pass_token=self.token)
+                    expected_revision=item["revision"], pass_token=self.token,
+                    document_date="2026-07-01")
         self.assertEqual(out, "refused: pass the item's row_digest from list_quarter_state")
 
     def test_the_quarter_listing_and_the_one_item_carry_it_too(self):

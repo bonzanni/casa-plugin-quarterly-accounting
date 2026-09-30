@@ -178,7 +178,7 @@ class Bounded(Flow):
         doc = self.file(amount_minor=1007, document_date="2026-07-08")
         out = self.call("record_match", pid=item["pid"], doc_id=doc, author="auto",
                         expected_revision=item["revision"], row_digest=item["row_digest"],
-                        pass_token=self.t1)
+                        pass_token=self.t1, document_date="2026-07-01")
         self.assertEqual(out["state"], "matched")
 
     def test_quarter_pages_fit_and_visit_every_item_once(self):
@@ -188,7 +188,7 @@ class Bounded(Flow):
             d = self.page(pid=pid)["item"]
             self.call("propose_match", pid=pid, doc_id=doc, expected_revision=d["revision"],
                       row_digest=d["row_digest"], pass_token=self.t1,
-                      labels=["guessed"] * 3000,
+                      document_date="2026-07-01", labels=["guessed"] * 3000,
                       runners_up=["r" * 300] * 20, rationale="because " * 300)
         self.assertEqual(self.conn.execute("SELECT DISTINCT label FROM matches").fetchall()[0][0],
                          "guessed")                    # stored once from now on
