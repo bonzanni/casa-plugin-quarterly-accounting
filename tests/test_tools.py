@@ -376,7 +376,7 @@ class TestArgumentTypes(ToolCase):
         import tools  # noqa: F401
         bools = [(n, k) for n, t in qa_server.TOOLS.items()
                  for k, v in t["schema"]["properties"].items() if v.get("type") == "boolean"]
-        self.assertEqual(len(bools), 16, bools)  # fix wave F: + fresh_only; + failed; #10: + stopped_by_refusal, out_of_time; #15: + last_built
+        self.assertEqual(len(bools), 17, bools)  # fix wave F: + fresh_only; + failed; #10: + stopped_by_refusal, out_of_time; #15: + last_built; #22: + dates_unread
         for n, k in bools:
             res = _tool(n, **{k: "false"})
             text = res["content"][0]["text"]

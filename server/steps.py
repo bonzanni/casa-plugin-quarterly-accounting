@@ -120,11 +120,11 @@ def start(conn, token, step: str, carry: dict) -> dict:
         prior = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
                              (m["pass_id"], step)).fetchone()
         req = round_request(conn, m["pass_id"])
-        # issue #17: a package round judges after every Gmail chunk. A judge step whose
-        # judgment finished is started again on the same row — the row is always the
-        # round's latest judgment, which is what its check reads
-        restart = (prior is not None and step == "judge" and req is not None
-                   and _ended(prior) == "finished")
+        # issue #17: a package round judges after every Gmail chunk, and so does a check
+        # (issue #21). A judge step whose judgment finished is started again on the same
+        # row — the row is always the pass's latest judgment, which is what its check
+        # (package_check, _judgment_owed) reads
+        restart = (prior is not None and step == "judge" and _ended(prior) == "finished")
         if prior is not None and not restart:
             raise db.Refusal(f"the {step} step was already started in this pass")
         now = db._clock().replace(microsecond=0)
@@ -515,22 +515,31 @@ def _claim_pass(conn, m, step) -> dict:
          "throughput": passes.throughput(conn, m["pass_id"])}
     if step["step"] == "sweep":
         can_run = binding.check_setup(conn)["can_run"]
-        c.update(can_run=can_run, work=work.work_list(conn), judge_due=work.judge_due(conn))
         c["next"] = ("end-pass" if fin.get("stopped") or not can_run or not imported
                      else "gmail-round")
+        # issue #21: a check's Gmail round comes in chunks too, each ended by a judgment
+        c.update(can_run=can_run, judge_due=work.judge_due(conn),
+                 work=(_hand_chunk(conn, m["pass_id"], None) if c["next"] == "gmail-round"
+                       else work.work_list(conn)))
     elif step["step"] == "judge":
         c.update(next="end-pass", report=carry.get("report", {}))
         req = round_request(conn, m["pass_id"])
         if req is not None:             # a package round (issue #15): end_pass decides it
             c["request"] = {"id": req["request_id"], "quarter": req["quarter"],
                             "channel": req["channel"], "round": req["round"] + 1}
-            if _another_chunk(conn, m["pass_id"], req, step):
-                # issue #17: the next Gmail chunk of this round, then another judgment
-                can_run = binding.check_setup(conn)["can_run"]
-                if can_run:
-                    c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req),
-                             judge_due=len(work.judge_due_state(conn, req["quarter"])),
-                             next="gmail-round")
+        another = _another_chunk(conn, m["pass_id"], req, step)
+        if another:
+            # issue #17 (#21 for a check): the next Gmail chunk of this pass, then another
+            # judgment
+            can_run = binding.check_setup(conn)["can_run"]
+            if can_run:
+                c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req),
+                         judge_due=(len(work.judge_due_state(conn, req["quarter"]))
+                                    if req is not None else work.judge_due(conn)),
+                         next="gmail-round")
+        if req is None and _first_carry(conn, m["pass_id"]).get("since_seq") is not None:
+            # issue #21 (D1): a check's report is the server's, over the searches it owes
+            c["report"] = _check_report(conn, m["pass_id"])
     elif step["step"] == "handover":
         c.update(next="end-pass-then-case",
                  documents=[_pairing(conn, d) for d in carry.get("doc_ids", [])])
@@ -551,27 +560,63 @@ def _claim_pass(conn, m, step) -> dict:
     return {"continue": c}
 
 
+def _first_step(conn, pass_id) -> str:
+    """The step that opens the pass's Gmail round: a package round's snapshot, a
+    check's sweep. Its row keeps the round's chunk bookkeeping."""
+    return "snapshot" if round_request(conn, pass_id) is not None else "sweep"
+
+
+def _first_carry(conn, pass_id) -> dict:
+    row = conn.execute("SELECT carry_json FROM pass_steps WHERE pass_id=? AND step=?",
+                       (pass_id, _first_step(conn, pass_id))).fetchone()
+    return json.loads(row["carry_json"] or "{}") if row is not None else {}
+
+
+def _set_first_carry(conn, pass_id, carry) -> None:
+    conn.execute("UPDATE pass_steps SET carry_json=? WHERE pass_id=? AND step=?",
+                 (db.canonical(carry), pass_id, _first_step(conn, pass_id)))
+
+
 def _hand_chunk(conn, pass_id, req) -> dict:
-    """A package round's Gmail chunk (issue #17), with the count of the quarter's items
-    still unsearched for the request kept on the round's snapshot row: the next chunk is
-    handed out only if a chunk brought that count down (_another_chunk)."""
+    """A Gmail chunk (issue #17: a package round's; issue #21: a check's), with the count
+    of items still to search kept on the pass's first step row: the next chunk is handed
+    out only if a chunk brought that count down (_another_chunk). A check measures from
+    one origin, `since_seq`, allocated at its first hand-out and kept (a re-claimed
+    continuation keeps it), and grows the searches it owes (`owed`, by pid) at every
+    hand-out, for its report."""
     import work
-    w = work.work_list(conn, req)
-    row = conn.execute("SELECT carry_json FROM pass_steps WHERE pass_id=? AND step='snapshot'",
-                       (pass_id,)).fetchone()
-    carry = {**json.loads(row["carry_json"] or "{}"), "handed": w["total"]}
-    conn.execute("UPDATE pass_steps SET carry_json=? WHERE pass_id=? AND step='snapshot'",
-                 (db.canonical(carry), pass_id))
+    carry = _first_carry(conn, pass_id)
+    if req is not None:
+        w = work.work_list(conn, req)
+    else:
+        if carry.get("since_seq") is None:
+            carry["since_seq"] = db.next_seq(conn)
+        w = work.work_list(conn, since_seq=carry["since_seq"])
+        carry["owed"] = work.grow_owed(conn, carry.get("owed", []), carry["since_seq"])
+    carry["handed"] = w["total"]
+    _set_first_carry(conn, pass_id, carry)
     return w
 
 
+def _check_report(conn, pass_id) -> dict:
+    """Issue #21 (D1): a check's {checked, total, not_searched}, over the searches it
+    owes — grown here too, so an item that joined the work after the last hand-out is
+    counted as not searched rather than left out."""
+    import work
+    carry = _first_carry(conn, pass_id)
+    carry["owed"] = work.grow_owed(conn, carry.get("owed", []), carry["since_seq"])
+    _set_first_carry(conn, pass_id, carry)
+    return work.check_report(conn, carry["owed"], carry["since_seq"])
+
+
 def _another_chunk(conn, pass_id, req, step) -> bool:
-    """Issue #17: after a package round's judgment, another Gmail chunk runs in the same
+    """Issue #17 (#21 for a check): after a judgment, another Gmail chunk runs in the same
     pass iff the judgment finished (not failed, stopped or expired), this pass's Gmail
-    probe was ok, and the quarter's items still unsearched for the request are fewer than
-    when the last chunk was handed out, yet not none — so the loop ends: that count is a
-    non-negative integer that must fall with every chunk (a search of an item already
-    searched is not progress), and what a pass leaves, round_fate takes from there."""
+    probe was ok, and the items still to search (a package: the quarter's, unsearched for
+    the request; a check: unsearched since its origin) are fewer than when the last
+    chunk was handed out, yet not none — so the loop ends: that count is a non-negative
+    integer that must fall with every chunk (a search of an item already searched is not
+    progress), and what a pass leaves, round_fate or the next check takes from there."""
     import work
     if _ended(step) != "finished" or _finish(step).get("stopped"):
         return False
@@ -579,11 +624,17 @@ def _another_chunk(conn, pass_id, req, step) -> bool:
                          (pass_id,)).fetchone()
     if probe is None or not probe["ok"]:
         return False
-    snap = conn.execute("SELECT carry_json FROM pass_steps WHERE pass_id=? AND step='snapshot'",
-                        (pass_id,)).fetchone()
-    handed = json.loads(snap["carry_json"] or "{}").get("handed") if snap is not None else None
-    left = len(work.package_work(conn, req))
-    return handed is not None and 0 < left < handed
+    carry = _first_carry(conn, pass_id)
+    handed = carry.get("handed")
+    if handed is None:
+        return False
+    if req is not None:
+        left = len(work.package_work(conn, req))
+    elif carry.get("since_seq") is not None:
+        left = len(work.check_work(conn, carry["since_seq"]))
+    else:
+        return False
+    return 0 < left < handed
 
 
 def _claim_round(conn, req) -> dict:

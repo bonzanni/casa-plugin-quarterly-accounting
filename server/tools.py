@@ -626,11 +626,14 @@ def t_stop(args):
           "remaining say what was left out, and `next` is the cursor for the next page — pass it "
           "back unchanged as `after` (null when nothing is left); pages follow payment ids, so a "
           "page asked again with the same `after` is the same page. pid=N re-reads that one "
-          "payment (`item`; null once it has ended). Read it fresh for every "
+          "payment (`item`; null once it has ended). dates_unread=true with a quarter lists "
+          "its payments whose paired document's date was never read on the document "
+          "(`dates_unread`, paged the same way): read each and confirm its date with "
+          "update_document_metadata. Read it fresh for every "
           "question; never answer from memory. Counts and totals come from build_review."
           " During a pass, pass the pass_token.",
           obj({"quarter": Q, "triage": B, "fresh_only": B, "limit": I, "pass_token": TOKEN,
-               "pid": I,
+               "pid": I, "dates_unread": B,
                "after": {"type": "array", "description": "the cursor from the previous `next`, "
                                                           "passed back unchanged"}}))
 def t_state(args):
@@ -638,7 +641,8 @@ def t_state(args):
                                    triage_only=_bool(args, "triage", False),
                                    fresh_only=_bool(args, "fresh_only", True),
                                    limit=_limit(args, work.TRIAGE_LIMIT),
-                                   after=args.get("after"), pid=_int(args, "pid"))
+                                   after=args.get("after"), pid=_int(args, "pid"),
+                                   unread_dates=_bool(args, "dates_unread", False))
 
 
 @register("build_review",

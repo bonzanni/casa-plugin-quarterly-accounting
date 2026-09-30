@@ -81,9 +81,9 @@ class Bounded(Flow):
         w = c["work"]
         self.assertEqual(len(w["triage"]) + w["remaining"], w["total"])
         self.assertEqual(w["total"], N)
-        # worst-case items (every clip at its full length) still fill most of a page;
-        # what is left out is `remaining`, counted not searched
-        self.assertGreaterEqual(len(w["triage"]), 25)
+        # worst-case items (every clip at its full length) still fill a chunk (issue #21:
+        # a check's Gmail round comes GMAIL_CHUNK at a time); the rest is `remaining`
+        self.assertEqual(len(w["triage"]), work.GMAIL_CHUNK)
         self.assertEqual([d["pid"] for d in w["triage"]], self.pids[:len(w["triage"])])
         # the new token works: the Gmail round and the end
         self.call("record_search", pid=w["triage"][0]["pid"], pass_token=c["pass_token"],

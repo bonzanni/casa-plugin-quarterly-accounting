@@ -316,6 +316,8 @@ class TestNoticesThatCarryNothing(Flow):
         c = self.claim()["continue"]
         self.assertEqual(self.claim(), {"continue": None, "held": True})   # the fresh lease
         t2 = c["pass_token"]
+        self.call("record_search", pid=c["work"]["triage"][0]["pid"], pass_token=t2,
+                  queries=["q"])
         self.start(t2, step="judge", report={"checked": 1, "total": 1, "not_searched": 0})
         self.assertEqual(self.claim()["running"]["step"], "judge")          # step 5 running
         self.call("record_step", pass_token=t2, step="judge", action="finish")

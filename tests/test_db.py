@@ -56,7 +56,7 @@ class TestSchema(TempEnv):
     def _assert_current_behaviour(self, c, old_seq: int, deliveries=1, first_sent=False):
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
-        self.assertEqual(db.SCHEMA_VERSION, 6)
+        self.assertEqual(db.SCHEMA_VERSION, 7)
         # the migrated store has every column and index a fresh store has
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
@@ -125,7 +125,7 @@ class TestSchema(TempEnv):
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)
         self.assertEqual(c2.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "6")
+                         .fetchone()[0], "7")
 
     def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
         # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
@@ -235,6 +235,31 @@ class TestSchema(TempEnv):
         self.assertEqual((p2["note_issued_seq"], p2["note_other_issued_at"]),
                          (None, "2026-09-02T10:00:00Z"))
         self.assertEqual(c.execute("SELECT as_built FROM deliveries").fetchone()[0], 0)
+
+    def test_a_v0_5_0_schema_6_store_migrates_with_every_document_date_unread(self):
+        # schema 6 as v0.5.0 shipped it (02c02c2). Issue #22: no earlier version marked a
+        # date read on the document, so every filed document starts unread; the upgrade
+        # is not an epoch (0.5.0 already records note issues by revision)
+        from tests.schema_history import DDL_V6
+        self.assertNotIn("date_read_at", DDL_V6)
+        old = self._released_store(DDL_V6, 6)
+        old.execute("INSERT INTO documents(sha256, ext, size, kind, document_date, source,"
+                    " extraction_author, ingested_at, ingest_quarter) VALUES ('ab', 'pdf', 1,"
+                    " 'invoice', '2026-05-20', 'gmail', 'resident', 'x', '2026-Q2')")
+        old.close()
+        c = db.open_store()
+        self.addCleanup(c.close)
+        self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
+                         .fetchone()[0], "7")
+        fresh = sqlite3.connect(":memory:")
+        self.addCleanup(fresh.close)
+        for stmt in db._statements(db.DDL):
+            fresh.execute(stmt)
+        cols = lambda conn: sorted(r[1] for r in conn.execute("PRAGMA table_info(documents)"))
+        self.assertEqual(cols(c), cols(fresh))
+        self.assertEqual(tuple(c.execute("SELECT document_date, date_read_at FROM documents")
+                               .fetchone()), ("2026-05-20", None))
+        self.assertIsNone(db.epoch(c))
 
     def test_a_staged_path_is_unique_in_a_fresh_store(self):
         c = db.open_store()

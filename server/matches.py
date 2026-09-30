@@ -160,6 +160,10 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
             conn.execute("UPDATE documents SET document_date=? WHERE doc_id=?",
                          (document_date, doc_id))
             lineage.settle_doc_holders(conn, doc_id)
+        if document_date:
+            # issue #22: the date was read on the document, whether or not it changed
+            conn.execute("UPDATE documents SET date_read_at=? WHERE doc_id=?",
+                         (db.now(), doc_id))
         before = _states(conn, pid)
         mid = _match_id_for(conn, pid, doc_id)
         conn.execute("UPDATE matches SET label=?, rationale=?, runners_up_json=? WHERE match_id=?",

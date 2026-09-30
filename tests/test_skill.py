@@ -48,8 +48,9 @@ OPERATOR_LINES = (
 OUTCOME_RULE = ("The outcome for `end_pass`: `stopped` when `can_run` is false or the step's "
                 "finish says `stopped`; `failed` when the step ended unfinished and nothing was "
                 "imported this pass; `interrupted` when anything remains (`remaining_in_cycle`, "
-                "`triage_remaining`, `work` truncated or `not_fresh`, an item not searched) or "
-                "the step ended unfinished after the import; `complete` otherwise.")
+                "`triage_remaining`, `work` truncated or `not_fresh`, an item not searched — "
+                "after a judge step, the continuation's `report` says `not_searched` above 0) "
+                "or the step ended unfinished after the import; `complete` otherwise.")
 
 
 class TestSkill(TempEnv):
@@ -74,7 +75,7 @@ class TestSkill(TempEnv):
                                         "bank_writes", "request_id", "labels", "runners_up",
                                         "can_run", "remaining_in_cycle", "erase_candidates",
                                         "expected_ledger", "receipt_pages", "not_fresh",
-                                        "time_up", "wrap_up", "time_left_s"}:
+                                        "time_up", "wrap_up", "time_left_s", "not_searched"}:
                 continue
             if "_" in n:
                 self.assertIn(n, ours | EXTERNAL, n)
@@ -168,9 +169,32 @@ class TestSkill(TempEnv):
         self.assertIn("`receipt_pages` — send EVERY page, in order", SKILL)
 
     def test_the_gmail_probe_is_always_made(self):
-        rnd = self.section("**Gmail round.**", "\n5. If anything was filed")
+        rnd = self.section("**Gmail round.**", "\n5. After a chunk with any item")
         self.assertIn("Always make the Gmail probe first", rnd)
         self.assertNotIn("skip it when", rnd)
+
+    def test_a_check_runs_in_chunks_each_ended_by_an_async_judgment(self):
+        # issue #21: every turn of a check ends at a delegation whose notification starts
+        # the next one; the Gmail round is a chunk of at most 10; the report is the server's
+        sec = " ".join(self.section('## Ellen: the pass (cron, or "go and check now")',
+                                    "## The specialist's pass").split())
+        self.assertNotIn('mode="sync"', sec)
+        self.assertEqual(sec.count('`mode="async"`'), 2)
+        self.assertIn("never carry on to the next step in the same turn", sec)
+        self.assertIn("a chunk of at most 10 items not yet searched in this check", sec)
+        self.assertIn("After a chunk with any item in it (the Gmail probe ok), always go on to "
+                      "the judge step", sec)
+        self.assertIn("`next` is `gmail-round` — the next chunk", sec)
+        self.assertIn("the server counts the whole check, every chunk; never add to it", sec)
+        self.assertNotIn("Skip `portal` items", sec)
+
+    def test_a_package_judgment_confirms_the_dates_its_files_are_named_by(self):
+        # issue #22
+        triage = " ".join(self.section("**Triage.**", "7. **Identity").split())
+        self.assertIn("`list_quarter_state(quarter=<the quarter>, dates_unread=true, "
+                      "pass_token=…)`", triage)
+        self.assertIn("`update_document_metadata(doc_id, document_date=<that date>, "
+                      "pass_token=…)` — the same date when the filed one was right", triage)
 
     def test_a_due_judgment_starts_the_judge_step(self):
         # issue #3 C3: a payment that joined triage behind the cursor with a fitting
@@ -331,7 +355,7 @@ class TestSkill(TempEnv):
             self.assertIn("`status: pending`", sec, head)
 
     def test_the_gmail_round_works_from_the_store(self):
-        rnd = " ".join(self.section("**Gmail round.**", "\n5. If anything was filed").split())
+        rnd = " ".join(self.section("**Gmail round.**", "\n5. After a chunk with any item").split())
         self.assertIn("The work list is the continuation's `work`", rnd)
         self.assertIn("never a list from the specialist's reply", rnd)
         for field in ("`search_hint`", "`window_days`", "`has:attachment`", "search Sent"):
