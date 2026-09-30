@@ -135,6 +135,19 @@ class TestGrammar(Base):
                 reply.apply_reply(self.conn, text)
                 self.assertEqual([self.author(p)[0] for p in pids[2:]], ["auto", "auto"])
 
+    def test_an_exception_on_its_own_line_approves_no_sheet(self):
+        # R3 Astra: the line break must not cut the exception loose from the approval
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
+        self.deliver()
+        for text in ("Confirm all three,\nexcept the Zapier one.", "All good,\nexcept the Zapier one",
+                     "All three guesses are right.\nBut not the Zapier one."):
+            with self.subTest(text=text):
+                out = reply.apply_reply(self.conn, text)
+                self.assertEqual(out["applied"], [])
+                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
+                self.assertIn("an exception in the same message", out["receipt"])
+
     def test_a_collective_confirmation_binds_like_all_good(self):
         a = self.item("Adobe", 5445, "2026-09-14")
         self.deliver()

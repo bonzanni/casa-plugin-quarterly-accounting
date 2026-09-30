@@ -363,6 +363,7 @@ class _Run:
         self.touched_quarters = set()
         self.unresolved = 0               # corrections in this reply that did not apply
         self.rebuilds = []                # rebuild requests, released only if nothing is unresolved
+        self.excepted = False             # a clause of this reply opens with an exception
 
     def result(self, not_a_reply=False) -> dict:
         if self.rebuilds:
@@ -447,6 +448,9 @@ def _bind_match(conn, d, match_id):
     return s["render_id"], rev
 
 
+_EXCEPTION = re.compile(r"(?:except|but|apart from|other than|besides|save for)\b")
+
+
 def apply_reply(conn, text: str) -> dict:
     run = _Run(conn)
     clauses = _clauses(text)
@@ -456,6 +460,10 @@ def apply_reply(conn, text: str) -> dict:
     if not clauses or all(c.endswith("?") for c in clauses):
         return run.result(not_a_reply=True)
     items = _open_items(conn)
+    # R3 (Astra): a line break splits "all good,\nexcept the Zapier one" into two
+    # clauses, and the exception would no longer qualify the approval. A reply with a
+    # clause that opens with an exception approves no sheet as a whole
+    run.excepted = any(_EXCEPTION.match(c) for c in clauses)
     for clause in clauses:
         if clause.endswith("?"):
             run.lines.append(f"“{clause}” is a question — nothing changed for it.")
@@ -486,6 +494,12 @@ def apply_reply(conn, text: str) -> dict:
 
 
 def _apply(conn, run, verb, m, items):
+    if verb == "all_good" and run.excepted:
+        run.lines.append("Nothing applied for that: an exception in the same message leaves "
+                         "unclear what is approved. Say \"all good\" and \"the Zapier one is "
+                         "wrong\" as two sentences, or only the one that is wrong.")
+        run.unresolved += 1
+        return
     if verb == "bulk_except":
         t = re.sub(r"^the\s+|\s+one$", "", m.group("t").strip())
         d, _ = _resolve(conn, t, items)
