@@ -140,7 +140,8 @@ alongside Ellen.
   `action="finish"` with its counts (`remaining_in_cycle`, `triage_remaining`) and
   `stopped=<refusal>` if a refusal stopped it. Running out of time is not a stop
   (issue #10): once the step is past `SWEEP_STOP_S` and the pass has imported, a
-  `stopped` is stored as `said` with `time_up: true`, and the pass goes on.
+  `stopped` finish is refused unless it carries `stopped_by_refusal=true` — a
+  time-out said as a stop is put right, a real late refusal still stops.
 - **Finished by Ellen.** She writes `action="finish"` herself only when the delegation
   returned to her in the same turn without a finish. On an error she adds
   `failed=true`.
@@ -567,8 +568,8 @@ Two notes on the schema:
 - **`finish(conn, token, step, *, by, counts, stopped=None, failed=False)`**:
   - checks the token, so a superseded specialist is refused here;
   - a second finish of a finished step is a no-op.
-  - past `SWEEP_STOP_S`, after this pass's import, a `stopped` is kept as `said` and
-    the finish carries `time_up: true` (issue #10): it routes nothing.
+  - past `SWEEP_STOP_S`, after this pass's import, a `stopped` without
+    `by_refusal` is refused (issue #10).
 - **`claim(conn)`** is §3.3, all in one transaction:
   - `work` comes from `work.list_quarter_state(triage_only=True)`;
   - `documents` comes from `match_state WHERE doc_id=? AND state IN ('matched',

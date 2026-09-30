@@ -232,25 +232,39 @@ class TestInlineErrors(Flow):
         self.assertLessEqual(len(c["finish"]["stopped"]), 300)
 
     def test_a_sweep_out_of_time_is_not_a_stop(self):
-        # issue #10: the specialist said `stopped` for the clock running out; the pass
-        # still reaches its Gmail round, and the words are kept as said
+        # issue #10: the specialist said `stopped` for the clock running out; the finish
+        # is refused with the reason, and the plain finish reaches the Gmail round
         self.seed(3)
         t1 = self.begin()
         self.start(t1)
         self.probe_import(t1)
         self.clock.advance(steps.SWEEP_STOP_S)
         self.assertTrue(self.call("list_projections", pass_token=t1)["time_up"])
-        out = self.call("record_step", pass_token=t1, step="sweep", action="finish",
-                        remaining_in_cycle=2, triage_remaining=3,
-                        stopped="time_up: wall-clock budget for this pass exhausted")
-        self.assertIn("out of time, not stopped", out["recorded_as"])
+        refused = self.text("record_step", pass_token=t1, step="sweep", action="finish",
+                            remaining_in_cycle=2, triage_remaining=3,
+                            stopped="time_up: wall-clock budget for this pass exhausted")
+        self.assertTrue(refused.startswith("refused: your step's time is up, and running out "
+                                           "of time is not a stop"), refused)
+        self.assertIsNone(self.conn.execute("SELECT finished_at FROM pass_steps ORDER BY rowid"
+                                            " DESC LIMIT 1").fetchone()[0])
+        self.call("record_step", pass_token=t1, step="sweep", action="finish",
+                  remaining_in_cycle=2, triage_remaining=3)
         c = self.claim()["continue"]
         self.assertEqual((c["ended"], c["next"]), ("finished", "gmail-round"))
-        self.assertEqual(c["finish"], {"remaining_in_cycle": 2, "triage_remaining": 3,
-                                       "time_up": True, "said": "time_up: wall-clock budget "
-                                       "for this pass exhausted"})
-        end = self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted")
-        self.assertEqual(end["outcome"], "interrupted")
+        self.assertEqual(c["finish"], {"remaining_in_cycle": 2, "triage_remaining": 3})
+
+    def test_a_refusal_after_the_time_is_up_still_stops_once_said_so(self):
+        self.seed(1)
+        t1 = self.begin()
+        self.start(t1)
+        self.probe_import(t1)
+        self.clock.advance(steps.SWEEP_STOP_S + 5)
+        self.call("record_step", pass_token=t1, step="sweep", action="finish",
+                  stopped="the ledger was restored since this pass began",
+                  stopped_by_refusal=True)
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "end-pass")
+        self.assertEqual(c["finish"], {"stopped": "the ledger was restored since this pass began"})
 
     def test_a_stop_before_the_time_is_up_still_stops(self):
         self.seed(1)
@@ -258,9 +272,8 @@ class TestInlineErrors(Flow):
         self.start(t1)
         self.probe_import(t1)
         self.clock.advance(steps.SWEEP_STOP_S - 1)
-        out = self.call("record_step", pass_token=t1, step="sweep", action="finish",
-                        stopped="the ledger was restored since this pass began")
-        self.assertNotIn("recorded_as", out)
+        self.call("record_step", pass_token=t1, step="sweep", action="finish",
+                  stopped="the ledger was restored since this pass began")
         c = self.claim()["continue"]
         self.assertEqual(c["next"], "end-pass")
         self.assertEqual(c["finish"], {"stopped": "the ledger was restored since this pass began"})

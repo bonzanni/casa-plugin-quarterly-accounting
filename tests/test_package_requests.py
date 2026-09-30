@@ -529,8 +529,12 @@ class TestReviewC1(Requests):
         self.seed(1)
         t = self.snapshot(finish=False)
         self.clock.advance(steps.SWEEP_STOP_S)
+        self.assertTrue(self.text("record_step", pass_token=t, step="snapshot",
+                                  action="finish", remaining_in_cycle=0,
+                                  stopped="time budget exhausted").startswith(
+                                      "refused: your step's time is up"))
         self.call("record_step", pass_token=t, step="snapshot", action="finish",
-                  remaining_in_cycle=0, stopped="time budget exhausted")
+                  remaining_in_cycle=0)
         c = self.claim()["continue"]
         self.assertEqual(c["next"], "end-pass-then-build")
         end = self.call("end_pass", pass_token=c["pass_token"], outcome="complete")
@@ -538,6 +542,20 @@ class TestReviewC1(Requests):
         self.assertEqual(self.alerts_of("package-stopped"), [])
         self.call("build_quarterly_package", quarter="2026-Q3",
                   package_token=end["package_token"])
+
+    def test_a_refusal_after_the_time_is_up_builds_no_package(self):
+        # issue #10 R1 (Terra): the ledger changed under the pass after 450 s — the
+        # confirmed stop closes the request `stopped`, as on 0.3.3
+        self.seed(1)
+        t = self.snapshot(finish=False)
+        self.clock.advance(steps.SWEEP_STOP_S + 5)
+        self.call("record_step", pass_token=t, step="snapshot", action="finish",
+                  remaining_in_cycle=0, stopped="the bank ledger changed during this pass",
+                  stopped_by_refusal=True)
+        c = self.claim()["continue"]
+        self.call("end_pass", pass_token=c["pass_token"], outcome="stopped")
+        self.assertEqual(self.request()["state"], "stopped")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 0)
 
     def test_a_reclaimed_stopped_snapshot_is_told_not_built(self):
         # I4

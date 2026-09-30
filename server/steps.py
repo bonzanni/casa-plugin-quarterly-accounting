@@ -152,7 +152,8 @@ def _open_request(conn, pass_id, quarter, channel) -> None:
                  (quarter, channel, pass_id, now, now))
 
 
-def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False) -> dict:
+def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
+           by_refusal=False) -> dict:
     """The specialist's last action (or Ellen's, when the delegation came back in
     her turn without one). A superseded specialist is refused here like anywhere."""
     if step not in STEPS:
@@ -173,28 +174,28 @@ def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False) 
             return {"step": step, "finished": True, "already": True}
         body = {k: v for k, v in counts.items() if v is not None}
         # issue #10: running out of time is not a stop. Once the step's time is up (the
-        # sweep pages `time_up`) after this pass's import, a `stopped` is recorded as
-        # out of time: the pass goes on, and the specialist's words are kept, not
-        # routed on. Before the import nothing goes on anyway, and a stop's reason
-        # (a refused import) is what the operator is told
+        # sweep pages `time_up`) after this pass's import, a `stopped` is refused unless
+        # the specialist says a refusal stopped it: a time-out said as a stop is put
+        # right, and a real refusal (the ledger changed, was restored) still stops the
+        # pass. Before the import nothing goes on anyway, so any stop is taken as said
         out_of_time = _age(row["started_at"]) >= SWEEP_STOP_S and conn.execute(
             "SELECT 1 FROM snapshots WHERE pass_id=?", (m["pass_id"],)).fetchone() is not None
+        if stopped and out_of_time and not failed and not by_refusal:
+            raise db.Refusal("your step's time is up, and running out of time is not a stop: "
+                             "finish again with the counts and no `stopped` — the pass goes "
+                             "on and a later pass resumes. Only if a refusal stopped you, "
+                             "finish again with `stopped=<the refusal>` and "
+                             "`stopped_by_refusal=true`")
         if stopped:
             import views
-            body["said" if out_of_time else "stopped"] = views.clip(str(stopped), STOPPED_MAX)
+            body["stopped"] = views.clip(str(stopped), STOPPED_MAX)
         if failed:
             body["failed"] = True
         by = "resident" if failed or not body else "specialist"
-        if out_of_time and not failed:
-            body["time_up"] = True
         conn.execute("UPDATE pass_steps SET finished_at=?, finished_by=?, finish_json=?"
                      " WHERE pass_id=? AND step=?",
                      (db.now(), by, db.canonical(body), m["pass_id"], step))
-        out = {"step": step, "finished": True, "already": False}
-        if "said" in body:
-            out["recorded_as"] = ("out of time, not stopped: the step's time was up, so the "
-                                  "pass goes on and a later pass resumes")
-        return out
+        return {"step": step, "finished": True, "already": False}
 
 
 # --- the clock ---------------------------------------------------------------------------

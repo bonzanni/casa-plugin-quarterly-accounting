@@ -283,7 +283,8 @@ where you are: whatever is left, a later pass resumes. Your last action,
 always — done, stopped or out of time — is `record_step(pass_token, step=<the step Ellen
 named>, action="finish", remaining_in_cycle=…, triage_remaining=…)`, with
 `stopped=<the refusal>` only if a refusal stopped you. Running out of time (`time_up`,
-`wrap_up`) is never `stopped`: finish with the counts, and the pass goes on. Then reply briefly, the first line being
+`wrap_up`) is never `stopped`: finish with the counts, and the pass goes on (once your time
+is up, a stop is taken only with `stopped_by_refusal=true`). Then reply briefly, the first line being
 `quarterly-accounting: <step> finished`. If a write answers that this pass is no longer
 the current one, stop and return: the pass has moved on and your recorded work is kept. You never speak to the operator: everything you would
 say goes back to Ellen. Binding the account, packaging, the start date, the package name,
