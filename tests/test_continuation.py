@@ -251,7 +251,8 @@ class TestInlineErrors(Flow):
                   remaining_in_cycle=2, triage_remaining=3, out_of_time=True)
         c = self.claim()["continue"]
         self.assertEqual((c["ended"], c["next"]), ("finished", "gmail-round"))
-        self.assertEqual(c["finish"], {"remaining_in_cycle": 2, "triage_remaining": 3})
+        self.assertEqual(c["finish"], {"remaining_in_cycle": 2, "triage_remaining": 3,
+                                       "out_of_time": True})
 
     def test_a_refusal_after_the_time_is_up_still_stops_once_said_so(self):
         self.seed(1)
@@ -459,8 +460,9 @@ class TestContractAndSurface(Flow):
                                   action="start").startswith("refused: missing argument"))
         t1 = self.begin()
         for args, words in (
-                ({"step": "snapshot", "action": "start", "quarter": "2026-Q3",
-                  "channel": "telegram"}, "refused: a snapshot step belongs to"),
+                ({"step": "snapshot", "action": "start"}, "refused: a snapshot step belongs to"),
+                ({"step": "snapshot", "action": "start", "quarter": "2026-Q3"},
+                 "refused: a package's quarter goes with begin_pass"),
                 ({"step": "handover", "action": "start", "doc_ids": [1]},
                  "refused: a handover step belongs to"),
                 ({"step": "sweep", "action": "finish"}, "refused: the sweep step was not started"),
@@ -477,7 +479,8 @@ class TestContractAndSurface(Flow):
                                   action="start").startswith("refused: the sweep step was "
                                                              "already started"))
         self.assertTrue(self.text("record_step", pass_token=t1, step="sweep", action="finish",
-                                  quarter="2026-Q3").startswith("refused: quarter goes with"))
+                                  quarter="2026-Q3").startswith(
+                                      "refused: a package's quarter goes with begin_pass"))
         self.call("record_step", pass_token=t1, step="sweep", action="finish")
         again = self.call("record_step", pass_token=t1, step="sweep", action="finish",
                           failed=True)

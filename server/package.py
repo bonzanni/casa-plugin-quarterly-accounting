@@ -288,7 +288,8 @@ def _reserve(stem: str, stamp: str) -> tuple:
             continue
 
 
-def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, size) -> str:
+def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, size,
+             check=None) -> str:
     c = manifest["counts"]
     out = [f"Accounting {dates.quarter_label(quarter)} · {c['payments']} payments · "
            f"{c['with_documents']} with documents"]
@@ -309,6 +310,14 @@ def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, si
     if c.get("unread"):
         out.append(f"{c['unread']} not seen in the last bank check, so shipped unclassified "
                    "— say \"go and check now\", then rebuild.")
+    check = check or {}
+    if check.get("gmail") == "down":
+        out.append("The email search couldn't run, so documents emailed since the last check "
+                   "may be missing.")
+    if check.get("unfinished"):
+        n = check["unfinished"]
+        out.append(f"The check couldn't get through {n} payment{'s' if n != 1 else ''} — say "
+                   "\"rebuild it\" to try again.")
     if partial:
         out.append("The quarter isn't over yet.")
     if oversize:
@@ -343,6 +352,32 @@ def _request_for_build(conn, quarter: str, package_token) -> int:
     return req["request_id"]
 
 
+RECHECK = ("the bank was re-read since the check — the check runs again, and the package "
+           "follows it; call continue_pass")
+
+
+def stale_check(conn, request_id) -> bool:
+    """Issue #15 (design D2): a request's check describes the import it ran on. Once a
+    newer import landed, the request goes back to `queued` (committed on its own) and
+    the caller refuses with RECHECK. True when that happened."""
+    import passes
+    with db.tx(conn):
+        req = conn.execute("SELECT * FROM package_requests WHERE request_id=?",
+                           (request_id,)).fetchone()
+        if req is None or req["state"] not in ("snapshot-done", "built"):
+            return False
+        if req["checked_snapshot"] is not None and \
+                req["checked_snapshot"] == lineage.latest_import(conn):
+            return False
+        passes.requeue(conn, request_id)
+        return True
+
+
+class _Recheck(Exception):
+    def __init__(self, request_id):
+        self.request_id = request_id
+
+
 def build_quarterly_package(conn, quarter: str, package_token=None, *, bound=True) -> dict:
     """Build the quarter's zip for the package request holding `package_token`.
     The token is checked before the custody lock (an early refusal) and again in
@@ -354,7 +389,9 @@ def build_quarterly_package(conn, quarter: str, package_token=None, *, bound=Tru
     if conn.in_transaction:
         raise RuntimeError("build_quarterly_package opens its own transactions")
     if bound:
-        _request_for_build(conn, quarter, package_token)
+        rid = _request_for_build(conn, quarter, package_token)
+        if stale_check(conn, rid):
+            raise db.Refusal(RECHECK)
     # The custody lock over documents/ and packages/ (db.custody_lock): a build
     # reads held documents' bytes and writes into packages/, which reset_store
     # erases under that lock. Taken BEFORE the freeze transaction, never inside
@@ -377,6 +414,11 @@ def _build(conn, quarter: str, package_token=None, bound=False) -> dict:
         data, digest, partial, manifest = _render(
             frozen, quarter, today, [f"{h}: {n / 1e6:.1f} MB" for n, h in sizes])
     b = frozen["binding"]
+    check = None
+    if bound and package_token is not None:
+        row = conn.execute("SELECT check_json FROM package_requests WHERE token=?",
+                           (int(package_token),)).fetchone()
+        check = json.loads(row["check_json"]) if row is not None and row["check_json"] else None
     stem = f"{b['package_name']}-{quarter}{'-partial' if partial else ''}-{today}"
     fd, path = _reserve(stem, stamp)
     with os.fdopen(fd, "wb") as f:
@@ -384,11 +426,15 @@ def _build(conn, quarter: str, package_token=None, bound=False) -> dict:
         f.flush()
         os.fsync(f.fileno())
     caption = _caption(quarter, manifest, frozen["prev"], digest, partial, b, path.name,
-                       oversize, len(data))
+                       oversize, len(data), check)
     try:
         with db.tx(conn):
             # the binding check: in the transaction that registers and links the zip
             request_id = _request_for_build(conn, quarter, package_token) if bound else None
+            if request_id is not None and conn.execute(
+                    "SELECT checked_snapshot FROM package_requests WHERE request_id=?",
+                    (request_id,)).fetchone()[0] != lineage.latest_import(conn):
+                raise _Recheck(request_id)
             if lineage.latest_import(conn) != frozen["snapshot_id"]:
                 # round E3 (Terra S1): an import landed between the freeze and this
                 # commit, so rows judged fresh may no longer be; never register or hand
@@ -396,13 +442,18 @@ def _build(conn, quarter: str, package_token=None, bound=False) -> dict:
                 raise db.Refusal("the bank was re-read while building — build again")
             pkg_id = conn.execute(
                 "INSERT INTO packages(quarter, filename, path, built_at, partial, digest, size,"
-                " oversize, caption, manifest_json, snapshot_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " oversize, caption, manifest_json, snapshot_id, request_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (quarter, path.name, str(path), stamp, int(partial), digest, len(data),
                  int(oversize), caption, db.canonical(manifest),
-                 frozen["snapshot_id"])).lastrowid
+                 frozen["snapshot_id"], request_id)).lastrowid
             if request_id is not None:
                 conn.execute("UPDATE package_requests SET package_id=?, state='built',"
                              " updated_at=? WHERE request_id=?", (pkg_id, db.now(), request_id))
+    except _Recheck as exc:
+        path.unlink(missing_ok=True)
+        stale_check(conn, exc.request_id)
+        raise db.Refusal(RECHECK)
     except BaseException:
         path.unlink(missing_ok=True)       # an unregistered zip is never left to hand out
         raise

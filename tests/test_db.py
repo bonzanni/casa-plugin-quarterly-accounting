@@ -56,7 +56,7 @@ class TestSchema(TempEnv):
     def _assert_current_behaviour(self, c, old_seq: int, deliveries=1, first_sent=False):
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
-        self.assertEqual(db.SCHEMA_VERSION, 5)
+        self.assertEqual(db.SCHEMA_VERSION, 6)
         # the migrated store has every column and index a fresh store has
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
@@ -98,6 +98,9 @@ class TestSchema(TempEnv):
                                               "note_seen_rev", "note_seen_at",
                                               "note_issued_at", "read_snapshot")),
                          (None,) * 6)
+        # issue #14: the store's epoch is the upgrade; no issue of an unknown revision
+        self.assertEqual((p["note_issued_seq"], p["note_other_issued_at"]), (None, None))
+        self.assertIsNotNone(db.epoch(c))
         self.assertFalse(lineage.is_fresh(c, p))
         # fix E4/E5: a package built before the migration names no import, so its
         # first send is refused (build it again); the unsent send is not revoked yet
@@ -122,7 +125,7 @@ class TestSchema(TempEnv):
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)
         self.assertEqual(c2.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "5")
+                         .fetchone()[0], "6")
 
     def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
         # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
@@ -190,6 +193,48 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self._assert_current_behaviour(c, old_seq=0)
+
+    def test_a_v0_3_5_schema_5_store_migrates_to_current_keeping_its_data(self):
+        # schema 5 as v0.3.5 shipped it (7cd8eda). Issue #14: an issue of unknown revision
+        # is an "other" one, and the upgrade is the store's epoch. Issue #15: a request an
+        # older version left buildable without its check goes back to `queued`, and a
+        # package remembers the request it was built for
+        from tests.schema_history import DDL_V5
+        self.assertIn("note_seen_seq", DDL_V5)
+        self.assertNotIn("note_issued_seq", DDL_V5)
+        old = self._released_store(DDL_V5, 5)
+        old.execute("UPDATE renders SET delivered_seq=0 WHERE render_id='r-old'")
+        for rid, state, pkg, tok in ((1, "built", 1, 7), (2, "snapshot-done", None, 8),
+                                     (3, "staged", None, 9), (4, "delivered", None, None),
+                                     (5, "snapshot", None, None)):
+            old.execute("INSERT INTO package_requests(request_id, quarter, channel, pass_id,"
+                        " package_id, token, lease_at, state, created_at, updated_at) VALUES"
+                        " (?, '2026-Q3', 'telegram', 'p', ?, ?, ?, ?, 'x', 'x')",
+                        (rid, pkg, tok, "2026-09-03T00:00:00Z" if tok else None, state))
+        old.execute("INSERT INTO projections(dest_row_id, admitted_at, note_issued_at) VALUES"
+                    " (2, '2026-09-01T00:00:00Z', '2026-09-02T10:00:00Z')")
+        old.close()
+        c = db.open_store()
+        self.addCleanup(c.close)
+        self._assert_current_behaviour(c, old_seq=0)
+        reqs = {r["request_id"]: dict(r) for r in c.execute("SELECT * FROM package_requests")}
+        self.assertEqual({k: (v["state"], v["package_id"], v["token"], v["lease_at"])
+                          for k, v in reqs.items()},
+                         {1: ("queued", None, None, None), 2: ("queued", None, None, None),
+                          3: ("staged", None, 9, "2026-09-03T00:00:00Z"),
+                          4: ("delivered", None, None, None), 5: ("snapshot", None, None, None)})
+        self.assertEqual(c.execute("SELECT request_id FROM packages WHERE package_id=1")
+                         .fetchone()[0], 1)
+        # the old build is never sent as a first send: its request went back to its check
+        import delivery
+        with self.assertRaises(db.Refusal) as cm:
+            delivery.stage_for_delivery(c, channel="telegram", package_id=1, package_token=7)
+        self.assertIn("no longer the one its request will send", str(cm.exception))
+        import lineage
+        p2 = lineage.projection(c, 2)
+        self.assertEqual((p2["note_issued_seq"], p2["note_other_issued_at"]),
+                         (None, "2026-09-02T10:00:00Z"))
+        self.assertEqual(c.execute("SELECT as_built FROM deliveries").fetchone()[0], 0)
 
     def test_a_staged_path_is_unique_in_a_fresh_store(self):
         c = db.open_store()

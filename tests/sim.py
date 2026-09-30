@@ -365,9 +365,15 @@ def package_pass(conn, bf, quarter="2026-Q3", channel="telegram", sweep_budget=N
     specialist, then continue_pass and end_pass — whose answer hands over the
     package request's package_token."""
     import steps
-    continue_earlier(conn)
-    token = passes.begin_pass(conn, "package")["pass_token"]
-    steps.start(conn, token, "snapshot", {"quarter": quarter, "channel": channel})
+    begun = passes.begin_pass(conn, "package", quarter=quarter, channel=channel)
+    if begun["status"] == "queued":
+        continue_earlier(conn)
+        c = steps.claim(conn)["continue"]
+        assert c is not None and c["next"] == "snapshot", c
+        token = c["pass_token"]
+    else:
+        token = begun["pass_token"]
+    steps.start(conn, token, "snapshot", {})
     probe(conn, bf, token)
     ledger.import_ledger_export(conn, path=bf.export(), token=token,
                                 ledger_instance=bf.last_export_instance)
@@ -378,5 +384,14 @@ def package_pass(conn, bf, quarter="2026-Q3", channel="telegram", sweep_budget=N
         remaining = sweep_within(conn, bf, token, sweep_budget)
     steps.finish(conn, token, "snapshot", counts={"remaining_in_cycle": remaining})
     c = _continue(conn)
-    assert c["next"] == "end-pass-then-build", c
+    assert c["next"] == "gmail-round", c
+    token = c["pass_token"]
+    # Ellen's Gmail round: the sim has no mailbox — its probe, and each item searched
+    passes.record_probe(conn, token, "gmail", True)
+    for item in c["work"]["triage"]:
+        work.record_search(conn, pid=item["pid"], token=token, queries=["sim"])
+    steps.start(conn, token, "judge", {})
+    steps.finish(conn, token, "judge", counts={"triage_remaining": 0})
+    c = _continue(conn)
+    assert c["next"] == "end-pass", c
     return passes.end_pass(conn, c["pass_token"], outcome(c, remaining), {})

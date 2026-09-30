@@ -28,8 +28,8 @@ class Requests(Flow):
         """Packaging step 1 up to the claim: begin_pass(package), the snapshot step,
         the specialist's probes, import and quarter sweep, its finish."""
         self.assertIsNone(self.claim()["continue"])
-        t = self.begin("package")
-        self.start(t, step="snapshot", quarter="2026-Q3", channel=channel)
+        t = self.begin("package", quarter="2026-Q3", channel=channel)
+        self.start(t, step="snapshot")
         if do_import:
             self.probe_import(t)
             self.sweep(t, quarter="2026-Q3")
@@ -42,8 +42,22 @@ class Requests(Flow):
         """Through end_pass: returns (end_pass's answer, the claim's pass token)."""
         self.snapshot(channel)
         c = self.claim()["continue"]
-        self.assertEqual(c["next"], "end-pass-then-build")
+        self.assertEqual(c["next"], "gmail-round")
+        c = self.rest_of_round(c["pass_token"], c["work"]["triage"])
         return self.call("end_pass", pass_token=c["pass_token"], outcome="complete"), c
+
+    def rest_of_round(self, token, items=()):
+        """Issue #15: after the snapshot, Ellen's Gmail round (its probe, each work item
+        searched) and the judge step finished whole; returns the judge's continuation."""
+        self.call("record_probe", pass_token=token, kind="gmail", ok=True)
+        for it in items:
+            self.call("record_search", pid=it["pid"], pass_token=token, queries=["q"])
+        self.start(token, step="judge")
+        self.call("record_step", pass_token=token, step="judge", action="finish",
+                  triage_remaining=0)
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "end-pass")
+        return c
 
     def built(self, channel="telegram"):
         end, _ = self.handed_over(channel)
@@ -396,18 +410,25 @@ class TestPackageNotices(Requests):
         rest = self.claim()["speak"]                                      # the older ones follow
         self.assertNotIn("may not have arrived", rest["text"])
 
-    def test_a_revoked_send_raises_one_notice(self):
-        # (12) the next pass's import revokes an unsent first send
+    def test_a_revoked_send_goes_back_to_its_check(self):
+        # (12) the next pass's import revokes an unsent first send. Issue #15 (design
+        # D2): the operator asked for the package, so its request is queued again and
+        # the package follows a fresh check — nothing to ask again, nothing to tell
         self.seed(1, documents=1)
         _, pkg, d = self.staged()
         out = sim.run_pass(self.conn, self.bf)      # its import supersedes the build's
         self.assertEqual(out["import"]["revoked_deliveries"], [d["delivery_id"]])
-        self.assertEqual(self.request()["state"], "revoked")
-        self.assertEqual(len(self.alerts_of("package-revoked")), 1)
-        self.assertEqual(out["end"]["speak"]["text"],
-                         "The bank was re-read before I could send the Q3 2026 package —\n"
-                         "ask for it again and I'll rebuild it.")
+        r = self.request()
+        self.assertEqual((r["state"], r["package_id"], r["delivery_id"], r["token"]),
+                         ("queued", None, None, None))
+        self.assertEqual(len(self.alerts_of("package-revoked")), 0)
+        self.assertTrue(out["end"]["more"])
         self.assertFalse(pathlib.Path(d["path"]).exists())
+        # the old build is never sent as a first send: its request no longer owns it
+        self.assertIn("no longer the one its request will send",
+                      self.text("stage_for_delivery", channel="telegram",
+                                package_id=pkg["package_id"], package_token=1))
+        self.assertEqual(self.claim()["continue"]["next"], "snapshot")
 
 
 class TestReclaimRecovers(Requests):
@@ -422,10 +443,26 @@ class TestReclaimRecovers(Requests):
         old = self.conn.execute("SELECT * FROM passes WHERE generation=?", (t,)).fetchone()
         self.assertEqual(old["outcome"], "interrupted")
         self.assertIsNotNone(old["ended_at"])
+        # issue #15: the round read the bank but never searched or judged — the request
+        # waits for its next round, which follows the pass that reclaimed it
+        self.assertEqual((self.request()["state"], self.request()["round"]), ("queued", 1))
+        self.assertIsNone(self.claim()["continue"])          # the operator's pass is live
+        end = self.call("end_pass", pass_token=out["pass_token"], outcome="complete")
+        self.assertTrue(end["more"])
         c = self.claim()["continue"]
-        self.assertEqual((c["next"], c["request"]["id"]), ("build", rid))
+        self.assertEqual((c["next"], c["request"]["id"], c["request"]["round"]),
+                         ("snapshot", rid, 2))
+        t2 = c["pass_token"]
+        self.start(t2, step="snapshot")
+        self.probe_import(t2)
+        self.call("record_step", pass_token=t2, step="snapshot", action="finish",
+                  remaining_in_cycle=0)
+        c = self.claim()["continue"]
+        c = self.rest_of_round(c["pass_token"], c["work"]["triage"])
+        end = self.call("end_pass", pass_token=c["pass_token"], outcome="complete")
+        self.assertEqual(end["next"], "build")
         pkg = self.call("build_quarterly_package", quarter="2026-Q3",
-                        package_token=c["package_token"])
+                        package_token=end["package_token"])
         self.assertEqual(self.request()["package_id"], pkg["package_id"])
 
     def test_an_unfinished_snapshot_fails_with_one_notice_until_delivered(self):
@@ -536,7 +573,8 @@ class TestReviewC1(Requests):
         self.call("record_step", pass_token=t, step="snapshot", action="finish",
                   remaining_in_cycle=0, out_of_time=True)
         c = self.claim()["continue"]
-        self.assertEqual(c["next"], "end-pass-then-build")
+        self.assertEqual(c["next"], "gmail-round")
+        c = self.rest_of_round(c["pass_token"], c["work"]["triage"])
         end = self.call("end_pass", pass_token=c["pass_token"], outcome="complete")
         self.assertEqual(self.request()["state"], "snapshot-done")
         self.assertEqual(self.alerts_of("package-stopped"), [])
@@ -624,11 +662,11 @@ class TestReviewC1(Requests):
     def test_a_failed_snapshot_pass_hands_over_nothing_to_build(self):
         # I5: a pass that read no bank must not build from an older import
         self.seed(1)
-        t = self.begin("package")
-        self.start(t, step="snapshot", quarter="2026-Q3", channel="telegram")
+        t = self.begin("package", quarter="2026-Q3", channel="telegram")
+        self.start(t, step="snapshot")
         self.call("record_step", pass_token=t, step="snapshot", action="finish", failed=True)
         c = self.claim()["continue"]
-        self.assertEqual(c["next"], "end-pass-then-build")
+        self.assertEqual(c["next"], "end-pass")
         end = self.call("end_pass", pass_token=c["pass_token"], outcome="failed")
         self.assertIsNone(end["next"])
         self.assertEqual(end["request"]["state"], "recovery-failed")
@@ -689,20 +727,23 @@ def expected_fate(imported, step_state, outcome):
 class TestSnapshotFate(Requests):
     """Every path that moves a request out of `snapshot` decides its fate by one
     function, from the evidence in the store and the outcome."""
-    def pass_in(self, step_state, imported):
+    def pass_in(self, step_state, imported, rest=True):
         self.assertIsNone(self.claim()["continue"])
-        t = self.begin("package")
-        if step_state == "none":             # a request whose step row never landed
-            with db.tx(self.conn):
-                self.conn.execute(
-                    "INSERT INTO package_requests(quarter, channel, pass_id, state, created_at,"
-                    " updated_at) VALUES ('2026-Q3', 'telegram', ?, 'snapshot', ?, ?)",
-                    (self.conn.execute("SELECT pass_id FROM pass_marker").fetchone()[0],
-                     db.now(), db.now()))
-        else:
-            self.start(t, step="snapshot", quarter="2026-Q3", channel="telegram")
+        t = self.begin("package", quarter="2026-Q3", channel="telegram")
+        if step_state != "none":             # "none": a request whose step row never landed
+            self.start(t, step="snapshot")
         if imported == "this pass":
             self.probe_import(t)
+        if imported == "this pass" and rest:
+            # the rest of the round (issue #15), so the check half of the fate is met and
+            # this class sees the bank half alone
+            self.call("record_probe", pass_token=t, kind="gmail", ok=True)
+            for it in self.call("list_quarter_state", triage=True, quarter="2026-Q3",
+                                pass_token=t)["triage"]:
+                self.call("record_search", pid=it["pid"], pass_token=t, queries=["q"])
+            self.start(t, step="judge")
+            self.call("record_step", pass_token=t, step="judge", action="finish",
+                      triage_remaining=0)
         if step_state not in ("none", "started"):
             extra = {"failed": {"failed": True},
                      "stopped": {"stopped": "the bound account is gone from bank-feed"}}
@@ -783,10 +824,11 @@ class TestSnapshotFate(Requests):
     def test_an_expired_step_after_its_import_builds_from_that_import(self):
         # the step never recorded a finish, but the pass did read the bank
         self.seed(1, documents=1)
-        t = self.pass_in("started", "this pass")
+        self.pass_in("started", "this pass", rest=False)
         self.clock.advance(steps.STEP_EXPIRY_S)
         c = self.claim()["continue"]
-        self.assertEqual(c["ended"], "expired")
+        self.assertEqual((c["ended"], c["next"]), ("expired", "gmail-round"))
+        c = self.rest_of_round(c["pass_token"], c["work"]["triage"])
         end = self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted")
         self.assertEqual(end["next"], "build")
         self.assertIsNone(end["speak"])
@@ -945,13 +987,15 @@ class TestEveryCallTellsItsOwnNotice(Requests):
         out = self.call("begin_pass", trigger="operator")
         self.assert_told(out["speak"], "I couldn't build the Q3 2026 package", "begin_pass")
 
-    def test_end_pass_tells_its_pass_s_own_revocations(self):
+    def test_end_pass_after_a_revocation_says_the_package_follows(self):
+        # issue #15: a request's revoked send is not a notice any more — its request is
+        # queued again, and end_pass says continue_pass has work (`more`)
         self.seed(1, documents=1)
-        _, pkg, d = self.staged()
+        self.staged()
         self.fill_alerts()
         end = sim.run_pass(self.conn, self.bf)["end"]         # its import revokes the send
-        self.assert_told(end["speak"], "The bank was re-read before I could send the Q3 2026",
-                         "end_pass")
+        self.assertTrue(end["more"])
+        self.assertEqual(self.request()["state"], "queued")
 
     def test_continue_pass_on_a_staged_send(self):
         self.seed(1, documents=1)

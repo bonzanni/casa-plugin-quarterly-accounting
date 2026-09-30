@@ -63,12 +63,38 @@ def rotate(conn) -> int:
     return conn.execute("SELECT value FROM counters WHERE name='pass_generation'").fetchone()[0]
 
 
-def begin_pass(conn, trigger: str, reply=None) -> dict:
+def begin_pass(conn, trigger: str, reply=None, quarter=None, channel=None) -> dict:
+    """Start a pass. A package pass is ASKED for here (issue #15): its quarter and
+    channel open the package request first, whether or not a pass can start now — a
+    request asked for while another pass runs is `queued` and follows that pass."""
+    import dates
     if reply is None:
         reply = "silent" if trigger == "cron" else "telegram"
     if reply not in REPLIES:
         raise db.Refusal("reply is 'telegram' or 'silent'")
+    if trigger == "package":
+        if not quarter:
+            raise db.Refusal("a package is asked for with its quarter")
+        dates.parse_quarter(quarter)
+        if channel not in ("telegram", "email"):
+            raise db.Refusal("a package is asked for with its channel: 'telegram' or 'email'")
+    elif quarter is not None or channel is not None:
+        raise db.Refusal("quarter and channel go with a package pass")
     with db.tx(conn):
+        req = None
+        if trigger == "package":
+            label = dates.quarter_label(quarter)
+            open_ = conn.execute("SELECT request_id FROM package_requests WHERE quarter=? AND"
+                                 " state IN ('queued', 'snapshot')", (quarter,)).fetchone()
+            if open_ is not None:
+                # its check is under way and nothing is staged yet: the latest ask's
+                # channel is the one it goes by ("email it to me" while it is checked)
+                conn.execute("UPDATE package_requests SET channel=?, updated_at=? WHERE"
+                             " request_id=?", (channel, db.now(), open_[0]))
+                return {"status": "already",
+                        "text": f"The {label} package is already on its way — it follows "
+                                "when the check is done."}
+            req = _open_request(conn, quarter, channel)
         m = _marker(conn)
         reclaimed, recovered, owed = False, None, []
         if m is not None and m["live"]:
@@ -76,6 +102,10 @@ def begin_pass(conn, trigger: str, reply=None) -> dict:
             # a claim holding a fresh lease is a live holder, however old the pass
             held = m["lease_at"] is not None and _age_s(m["lease_at"]) < LEASE_S
             if age < STALE_AFTER_S or held:
+                if req is not None:
+                    return {"status": "queued", "request": req,
+                            "text": f"A check is running — the {label} package follows "
+                                    "when it ends."}
                 minutes = int(age // 60)
                 when = ("a minute ago" if minutes <= 1 else f"{minutes} minutes ago"
                         if minutes < 90 else f"{round(minutes / 60)} hours ago")
@@ -86,23 +116,71 @@ def begin_pass(conn, trigger: str, reply=None) -> dict:
             recovered, notice = _terminalize(conn, displaced)
             import alerts
             owed = ([notice] if notice is not None else []) + alerts.pass_notices(conn, displaced)
-        gen = rotate(conn)
-        now = db.now()
-        pass_id = f"p{gen}"
-        # the claim columns are cleared with every new marker
-        conn.execute("INSERT OR REPLACE INTO pass_marker(id, generation, live, pass_id, trigger,"
-                     " started_at, claimed_step, lease_at) VALUES (1, ?, 1, ?, ?, ?, NULL, NULL)",
-                     (gen, pass_id, trigger, now))
-        conn.execute("INSERT INTO passes(pass_id, generation, trigger, started_at, reply)"
-                     " VALUES (?, ?, ?, ?, ?)", (pass_id, gen, trigger, now, reply))
+        gen, pass_id = start_pass(conn, trigger, reply)
         out = {"status": "started", "pass_token": gen, "pass_id": pass_id,
                "reclaimed": reclaimed, "recovered": recovered}
+        if req is not None:
+            _bind_round(conn, req["id"], pass_id)
+            out["request"] = req
         if reclaimed and owed:
             # what the reclaim raised is in this call's own message (a notice a call
             # raises is in that call's returned rendering)
             import alerts
             out["speak"] = alerts.pending_in_tx(conn, must=owed)
         return out
+
+
+def start_pass(conn, trigger: str, reply: str) -> tuple:
+    """A new live pass (the caller checked none is live): its marker, with the claim
+    columns cleared, and its row. Returns (token, pass_id). Inside the caller's write
+    transaction: begin_pass, and a claim that starts a queued package round."""
+    gen = rotate(conn)
+    now = db.now()
+    pass_id = f"p{gen}"
+    conn.execute("INSERT OR REPLACE INTO pass_marker(id, generation, live, pass_id, trigger,"
+                 " started_at, claimed_step, lease_at) VALUES (1, ?, 1, ?, ?, ?, NULL, NULL)",
+                 (gen, pass_id, trigger, now))
+    conn.execute("INSERT INTO passes(pass_id, generation, trigger, started_at, reply)"
+                 " VALUES (?, ?, ?, ?, ?)", (pass_id, gen, trigger, now, reply))
+    return gen, pass_id
+
+
+def _open_request(conn, quarter, channel) -> dict:
+    """A package request, `queued` until a round of its check runs. A newer request for
+    the quarter supersedes an open one that has not staged a send (a staged one is
+    settled by its holder, or taken back by a claim): the operator asked again, and the
+    new one is checked afresh and is the one that arrives."""
+    now = db.now()
+    conn.execute("UPDATE package_requests SET state='superseded', updated_at=? WHERE quarter=?"
+                 " AND state IN ('snapshot-done', 'built')", (now, quarter))
+    rid = conn.execute("INSERT INTO package_requests(quarter, channel, state, created_at,"
+                       " updated_at, created_seq) VALUES (?,?, 'queued', ?, ?, ?)",
+                       (quarter, channel, now, now, db.next_seq(conn))).lastrowid
+    return {"id": rid, "quarter": quarter, "channel": channel}
+
+
+def _bind_round(conn, request_id, pass_id) -> None:
+    """A queued request's next round runs in `pass_id`."""
+    conn.execute("UPDATE package_requests SET state='snapshot', pass_id=?, token=NULL,"
+                 " lease_at=NULL, updated_at=? WHERE request_id=?",
+                 (pass_id, db.now(), request_id))
+
+
+def queued_waiting(conn) -> bool:
+    """A queued package request waits and no pass is live: continue_pass starts it."""
+    m = _marker(conn)
+    return (m is None or not m["live"]) and conn.execute(
+        "SELECT 1 FROM package_requests WHERE state='queued'").fetchone() is not None
+
+
+def requeue(conn, request_id) -> None:
+    """A buildable (or built, unsent) request whose check no longer describes the bank —
+    an import landed since (design D2) — goes back to `queued`: its token, lease and
+    package are cleared (the old build then has no request, so its first send is
+    refused, D3), and its rounds and remaining count are kept for the progress rule."""
+    conn.execute("UPDATE package_requests SET state='queued', token=NULL, lease_at=NULL,"
+                 " package_id=NULL, delivery_id=NULL, checked_snapshot=NULL, check_json=NULL,"
+                 " updated_at=? WHERE request_id=?", (db.now(), request_id))
 
 
 def _terminalize(conn, pass_id: str):
@@ -124,18 +202,15 @@ def _terminalize(conn, pass_id: str):
 
 
 def snapshot_fate(conn, pass_id: str, outcome: str) -> tuple:
-    """THE rule for a package request leaving `snapshot` (every path that moves it
-    uses this): its fate is decided from the STORED snapshot step, and from the
-    pass outcome only where that is more restrictive. Returns (state, reason).
+    """The bank half of a round's fate, from the STORED snapshot step, and from the
+    pass outcome only where that is more restrictive. Returns (state, reason):
 
-    - `snapshot-done` (buildable) only when THIS pass imported the bank (a
-      `snapshots` row of its own), neither the stored finish nor the outcome says
-      stopped, and the outcome is not `failed` — a build otherwise ships an older
-      import as this request's. A step's finish never grants a build: a step that
-      expired after its import builds from that import;
     - `stopped`, with the stored finish's reason (else a default), when the stored
       finish or the outcome says stopped;
-    - otherwise `recovery-failed`: the bank was not read for it."""
+    - `recovery-failed` when THIS pass did not import the bank (a `snapshots` row of
+      its own) or the outcome is `failed`: the bank was not read for it;
+    - otherwise `snapshot-done`: the round read the bank (round_fate decides the rest).
+    A step's finish never grants a build: a step that expired after its import counts."""
     step = conn.execute("SELECT finished_at, finish_json FROM pass_steps WHERE pass_id=? AND"
                         " step='snapshot'", (pass_id,)).fetchone()
     fin = json.loads(step["finish_json"] or "{}") if step is not None else {}
@@ -151,18 +226,59 @@ def snapshot_fate(conn, pass_id: str, outcome: str) -> tuple:
     return "recovery-failed", None
 
 
-def settle_snapshot_request(conn, req, outcome: str, *, token):
-    """Move `req` out of `snapshot` by snapshot_fate, inside the caller's transaction:
-    buildable (holding `token`, fresh lease when there is one) or closed with its
-    package notice. Returns (state, the notice's alert_id or None)."""
+def round_fate(conn, req, outcome: str) -> tuple:
+    """THE rule for a package request leaving `snapshot` (issue #15; every path that
+    moves it uses this). Returns (state, reason, check):
+
+    - stopped / recovery-failed: as snapshot_fate says;
+    - `snapshot-done` when its check needs nothing more (work.package_check: every item
+      of its quarter searched for it, or the Gmail probe failed; every judge-due payment
+      covered; the round whole);
+    - `queued` for another round while the rounds make progress: the first round, or
+      one that left less than the previous;
+    - else `snapshot-done` with `unfinished`: the check can get no further, so the
+      package ships and its caption says so. Never a time limit: a round that searched
+      or judged anything its predecessor had not reached is progress."""
+    import work
     state, reason = snapshot_fate(conn, req["pass_id"], outcome)
+    if state != "snapshot-done":
+        return state, reason, None
+    chk = work.package_check(conn, req, req["pass_id"])
+    remaining = chk["unsearched"] + chk["unjudged"] + chk["incomplete"]
+    check = {"gmail": "down"} if chk["gmail_down"] else {}
+    if remaining == 0:
+        return "snapshot-done", None, {**check, "remaining": 0}
+    if req["round"] == 0 or req["remaining"] is None or remaining < req["remaining"]:
+        return "queued", None, {**check, "remaining": remaining}
+    return "snapshot-done", None, {**check, "remaining": remaining, "unfinished": remaining}
+
+
+def settle_snapshot_request(conn, req, outcome: str, *, token):
+    """Move `req` out of `snapshot` by round_fate, inside the caller's transaction:
+    buildable (holding `token`, fresh lease when there is one, bound to the import its
+    check ran on), back to `queued` for another round, or closed with its package
+    notice. Returns (state, the notice's alert_id or None)."""
+    import lineage
+    state, reason, check = round_fate(conn, req, outcome)
     now = db.now()
-    conn.execute("UPDATE package_requests SET token=?, lease_at=?, pass_outcome=?, state=?,"
-                 " updated_at=? WHERE request_id=?",
-                 (token, now if token is not None else None, outcome, "snapshot-done", now,
-                  req["request_id"]))
-    if state == "snapshot-done":
+    if state == "queued":
+        conn.execute("UPDATE package_requests SET state='queued', token=NULL, lease_at=NULL,"
+                     " pass_outcome=?, round=round+1, remaining=?, updated_at=?"
+                     " WHERE request_id=?", (outcome, check["remaining"], now,
+                                             req["request_id"]))
         return state, None
+    if state == "snapshot-done":
+        caption = {k: v for k, v in check.items() if k in ("gmail", "unfinished")}
+        conn.execute("UPDATE package_requests SET token=?, lease_at=?, pass_outcome=?, state=?,"
+                     " round=round+1, remaining=?, check_json=?, checked_snapshot=?,"
+                     " updated_at=? WHERE request_id=?",
+                     (token, now if token is not None else None, outcome, "snapshot-done",
+                      check["remaining"], db.canonical(caption) if caption else None,
+                      lineage.latest_import(conn), now, req["request_id"]))
+        return state, None
+    # closed: the holder keeps the token, so its own request's close is said plainly
+    conn.execute("UPDATE package_requests SET token=?, updated_at=? WHERE request_id=?",
+                 (token, now, req["request_id"]))
     return state, _close(conn, req, state, outcome, reason=reason)
 
 
@@ -269,6 +385,8 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
         pass
     notice = handed.pop("_notice") if handed else None
     out = {"ended": m["pass_id"], "outcome": outcome, **(handed or {})}
+    # issue #15: a queued package request follows this pass — continue_pass starts it
+    out["more"] = queued_waiting(conn)
     # the notices this pass raised — its request's, its import's revocations — are
     # always in this rendering (older alerts may wait)
     owed = ([notice] if notice is not None else []) + alerts.pass_notices(conn, m["pass_id"])
@@ -322,6 +440,10 @@ def _hand_over(conn, pass_id: str, outcome: str):
         return None
     token = rotate(conn)
     state, notice = settle_snapshot_request(conn, req, outcome, token=token)
+    if state == "queued":           # another round follows: continue_pass starts it
+        return {"next": None, "request": {"id": req["request_id"], "quarter": req["quarter"],
+                                          "channel": req["channel"], "state": state},
+                "_notice": notice}
     return {"package_token": token, "next": "build" if state == "snapshot-done" else None,
             "request": {"id": req["request_id"], "quarter": req["quarter"],
                         "channel": req["channel"], "state": state},

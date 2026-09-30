@@ -99,13 +99,19 @@ CREATE TABLE IF NOT EXISTS pass_steps (
 CREATE TABLE IF NOT EXISTS package_requests (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,
   quarter TEXT NOT NULL, channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
-  pass_id TEXT NOT NULL, pass_outcome TEXT, reason TEXT,
+  pass_id TEXT,                  -- the pass of its latest round (NULL: queued, never run)
+  pass_outcome TEXT, reason TEXT,
   package_id INTEGER, delivery_id INTEGER,
   token INTEGER, lease_at TEXT,
-  state TEXT NOT NULL CHECK (state IN ('snapshot', 'snapshot-done', 'built', 'staged',
-        'delivered', 'uncertain', 'failed', 'stopped', 'recovery-failed', 'revoked',
-        'withdrawn', 'superseded')),
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+  state TEXT NOT NULL CHECK (state IN ('queued', 'snapshot', 'snapshot-done', 'built',
+        'staged', 'delivered', 'uncertain', 'failed', 'stopped', 'recovery-failed',
+        'revoked', 'withdrawn', 'superseded')),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  created_seq INTEGER NOT NULL DEFAULT 0,  -- a search counts for it only after this (#15)
+  round INTEGER NOT NULL DEFAULT 0,        -- rounds of its check finished (#15)
+  remaining INTEGER,                       -- what the last round left (#15)
+  check_json TEXT,                         -- what the caption says about the check (#15)
+  checked_snapshot INTEGER);               -- the import its finished check ran on (#15)
 CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state);
 CREATE TABLE IF NOT EXISTS probes (
   kind TEXT PRIMARY KEY, ok INTEGER NOT NULL, detail TEXT, data_json TEXT,
@@ -232,7 +238,8 @@ CREATE TABLE IF NOT EXISTS packages (
   filename TEXT NOT NULL UNIQUE, path TEXT NOT NULL, built_at TEXT NOT NULL,
   partial INTEGER NOT NULL, digest TEXT NOT NULL, size INTEGER NOT NULL,
   oversize INTEGER NOT NULL DEFAULT 0, caption TEXT NOT NULL, manifest_json TEXT NOT NULL,
-  snapshot_id INTEGER);          -- the import the build froze (fix E4: its first send checks it)
+  snapshot_id INTEGER,           -- the import the build froze (fix E4: its first send checks it)
+  request_id INTEGER);           -- the package request it was built for (#15, D3)
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id INTEGER PRIMARY KEY AUTOINCREMENT, package_id INTEGER, doc_id INTEGER,
   channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
@@ -241,7 +248,8 @@ CREATE TABLE IF NOT EXISTS deliveries (
   message_id TEXT, created_at TEXT NOT NULL, settled_at TEXT,
   revoked_at TEXT,               -- an unsent first send an import superseded (fix E5)
   withdrawn_at TEXT,             -- staged bytes taken back when a stalled send was recovered
-  lease_at TEXT);                -- a staged send's lease: past LEASE_S it is recovered
+  lease_at TEXT,                 -- a staged send's lease: past LEASE_S it is recovered
+  as_built INTEGER NOT NULL DEFAULT 0);   -- "send me the last package you built" (#15)
 -- every delivery has a path of its own: a holder that was superseded can never hold
 -- the path of a later copy
 CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_staged_path ON deliveries(staged_path);
@@ -319,7 +327,46 @@ MIGRATIONS: dict[int, list[str]] = {
     # version could have issued) is the upgrade itself.
     5: ["ALTER TABLE projections ADD COLUMN note_issued_seq INTEGER",
         "ALTER TABLE projections ADD COLUMN note_other_issued_at TEXT",
-        "UPDATE projections SET note_other_issued_at = note_issued_at"],
+        "UPDATE projections SET note_other_issued_at = note_issued_at",
+        # issue #15 (D3): a package remembers the request it was built for, so a build
+        # whose request no longer owns it is never sent as a first send
+        "ALTER TABLE packages ADD COLUMN request_id INTEGER",
+        "UPDATE packages SET request_id = (SELECT max(r.request_id) FROM package_requests r"
+        " WHERE r.package_id = packages.package_id)",
+        # issue #15: a package request is worked in rounds (state `queued`, pass_id
+        # nullable; SQLite cannot alter a CHECK, so the table is rebuilt). A request an
+        # older version left buildable without its quarter's Gmail round and judging
+        # goes back to `queued` with its token, lease and package cleared (design D1):
+        # the new flow checks it before anything is built or sent.
+        """CREATE TABLE package_requests_v6 (
+  request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  quarter TEXT NOT NULL, channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
+  pass_id TEXT,                  -- the pass of its latest round (NULL: queued, never run)
+  pass_outcome TEXT, reason TEXT,
+  package_id INTEGER, delivery_id INTEGER,
+  token INTEGER, lease_at TEXT,
+  state TEXT NOT NULL CHECK (state IN ('queued', 'snapshot', 'snapshot-done', 'built',
+        'staged', 'delivered', 'uncertain', 'failed', 'stopped', 'recovery-failed',
+        'revoked', 'withdrawn', 'superseded')),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  created_seq INTEGER NOT NULL DEFAULT 0,  -- a search counts for it only after this (#15)
+  round INTEGER NOT NULL DEFAULT 0,        -- rounds of its check finished (#15)
+  remaining INTEGER,                       -- what the last round left (#15)
+  check_json TEXT,                         -- what the caption says about the check (#15)
+  checked_snapshot INTEGER);               -- the import its finished check ran on (#15)""",
+        "INSERT INTO package_requests_v6(request_id, quarter, channel, pass_id, pass_outcome,"
+        " reason, package_id, delivery_id, token, lease_at, state, created_at, updated_at)"
+        " SELECT request_id, quarter, channel, pass_id, pass_outcome, reason,"
+        " CASE WHEN state IN ('snapshot-done', 'built') THEN NULL ELSE package_id END,"
+        " delivery_id,"
+        " CASE WHEN state IN ('snapshot-done', 'built') THEN NULL ELSE token END,"
+        " CASE WHEN state IN ('snapshot-done', 'built') THEN NULL ELSE lease_at END,"
+        " CASE WHEN state IN ('snapshot-done', 'built') THEN 'queued' ELSE state END,"
+        " created_at, updated_at FROM package_requests",
+        "DROP TABLE package_requests",
+        "ALTER TABLE package_requests_v6 RENAME TO package_requests",
+        "CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state)",
+        "ALTER TABLE deliveries ADD COLUMN as_built INTEGER NOT NULL DEFAULT 0"],
 }
 
 
