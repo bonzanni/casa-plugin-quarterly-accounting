@@ -2109,7 +2109,8 @@ catch, because it launders a guess into a human decision. So:
   The sheet-wide approval is applied after every other clause, and only to the
   pairings no other clause judged ("is wrong", "is right"): "All good. The Zapier one is wrong." unpairs Zapier
   and confirms the rest. Any other clause left unresolved (ambiguous, stale, refused)
-  and it approves nothing.
+  and it approves nothing. Several sheet-wide clauses in one reply are one approval:
+  their counts are checked together, and it applies once or not at all.
 - **Facts are distinct from verdicts.** "3 is my accountant" records an identity; it
   does **not** mean "no invoice expected" (that is "3 needs no invoice", a per-payment
   exemption through `set_exemption`), and it certainly does not mean "never for this

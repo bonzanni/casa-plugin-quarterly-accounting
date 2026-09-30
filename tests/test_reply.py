@@ -201,6 +201,21 @@ class TestGrammar(Base):
                 self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
                 self.assertIn("something else in the same message", out["receipt"])
 
+    def test_two_sheet_wide_clauses_are_one_approval(self):
+        # R7 Astra: a count one clause states bounds every other sheet-wide clause
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
+        self.deliver()
+        for text in ("Those two guesses are all right. Confirm all those guesses.",
+                     "Confirm all those guesses. Those two guesses are all right.",
+                     "All good. Both guesses are right."):
+            with self.subTest(text=text):
+                out = reply.apply_reply(self.conn, text)
+                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
+                self.assertIn("that sheet has 3 pairings waiting", out["receipt"])
+        out = reply.apply_reply(self.conn, "All good. All three guesses are right.")
+        self.assertEqual([self.author(p)[0] for p in pids], ["operator"] * 3)
+
     def test_a_search_request_beside_all_good_takes_nothing_from_it(self):
         # R6 Astra S2: only a verdict on a pairing takes it out of the sheet-wide approval
         pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")

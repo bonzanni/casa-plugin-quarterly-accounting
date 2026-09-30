@@ -365,6 +365,7 @@ class _Run:
         self.rebuilds = []                # rebuild requests, released only if nothing is unresolved
         self.excepted = False             # a clause of this reply opens with an exception
         self.named = set()                # payments another clause of this reply judged
+        self.stated = set()               # every count the reply's sheet-wide clauses state
 
     def result(self, not_a_reply=False) -> dict:
         if self.rebuilds:
@@ -511,11 +512,13 @@ def apply_reply(conn, text: str) -> dict:
     # A sheet as a whole is approved last, and only for what no other clause judged:
     # "All good. The Zapier one is wrong." unpairs Zapier and confirms the rest. Any
     # other clause left unresolved (ambiguous, stale, refused) and it approves nothing
-    blocked = run.unresolved > 0
-    for m in sheet_wide:
-        if blocked:
+    # R7 (Astra): the reply's sheet-wide clauses are ONE approval — every count any of
+    # them states is checked together, and it applies once or not at all
+    if sheet_wide:
+        if run.unresolved > 0:
             run.excepted = True
-        _apply(conn, run, "all_good", m, items)
+        run.stated = set().union(*(_counts(m.group(0)) for m in sheet_wide))
+        _apply(conn, run, "all_good", sheet_wide[0], items)
     return run.result()
 
 
@@ -555,7 +558,7 @@ def _apply(conn, run, verb, m, items):
             if cur is None or not views._needs_check(d) or d["candidates"]:
                 continue
             waiting.append((d, cur))
-        stated = _counts(m.group(0))
+        stated = run.stated
         # the count names the sheet: its pairings waiting, the ones decided here included
         if stated and stated != {len(waiting) + decided} and stated != {len(waiting)}:
             # a count that is not the sheet's: the operator means a sheet other than
