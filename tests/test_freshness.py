@@ -42,10 +42,16 @@ class ToolPass(test_e2e.Base):
 
     def begin(self, trigger, do_import=True, channel="telegram", candidates=0):
         bf = self.bf
-        token = call("begin_pass", trigger=trigger)["pass_token"]
-        if trigger == "package":        # the skill: the snapshot step names the quarter
-            call("record_step", pass_token=token, step="snapshot", action="start",
-                 quarter="2026-Q3", channel=channel)
+        if trigger == "package":        # issue #15: the ask names the quarter and channel
+            out = call("begin_pass", trigger=trigger, quarter="2026-Q3", channel=channel)
+            if out["status"] != "started":  # already on its way / queued: continue_pass
+                c = call("continue_pass")["continue"]
+                self.assertEqual(c["next"], "snapshot", c)
+                out = c
+            token = out["pass_token"]
+            call("record_step", pass_token=token, step="snapshot", action="start")
+        else:
+            token = call("begin_pass", trigger=trigger)["pass_token"]
         accounts = [{"account_id": r["account_id"], "category": r["category"], "label": r["name"]}
                     for r in bf.conn.execute("SELECT account_id, category, name FROM accounts")]
         call("record_probe", pass_token=token, kind="bank_tools", ok=True)
@@ -107,6 +113,15 @@ class ToolPass(test_e2e.Base):
         snapshot step)."""
         if self.conn.execute("SELECT trigger FROM pass_marker").fetchone()[0] == "package":
             call("record_step", pass_token=token, step="snapshot", action="finish")
+            # issue #15: the rest of the round — Ellen's Gmail round (its probe, each of
+            # the quarter's items searched) and a whole judge step
+            call("record_probe", pass_token=token, kind="gmail", ok=True)
+            for it in call("list_quarter_state", triage=True, quarter="2026-Q3",
+                           pass_token=token)["triage"]:
+                call("record_search", pid=it["pid"], pass_token=token, queries=["q"])
+            call("record_step", pass_token=token, step="judge", action="start")
+            call("record_step", pass_token=token, step="judge", action="finish",
+                 triage_remaining=0)
         out = call("end_pass", pass_token=token, outcome=outcome)
         if "package_token" in out:
             self.package_token = out["package_token"]
@@ -343,6 +358,12 @@ class TestSnapshotBoundCommits(ToolPass):
                          "build it again")
         self.assertEqual(self.sweep(token), 0)
         self.end(token, "complete")
+        # issue #15 (design D2): the first request's check predates both imports, so its
+        # token builds nothing — the request goes back to its check
+        self.assertIn("the bank was re-read since the check",
+                      _raw("build_quarterly_package", quarter="2026-Q3",
+                           package_token=self.package_token))
+        self.package_token = None
         _, files, rows, _ = self.zip_of()
         self.assertEqual(files, [])
         self.assertEqual({r["counterparty"]: r["expectation_kind"] for r in rows},
@@ -475,12 +496,16 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
         # request of its own, and meets the same snapshot check)
         out = _raw("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
                    package_token=pkg["package_token"])
-        self.assertEqual(out, "refused: the bank was re-read since this package was built "
-                              "— build it again")
+        # issue #15 (design D2): its request goes back to its check; the old build is
+        # never sent as a first send again, by any channel (D3)
+        self.assertEqual(out, "refused: the bank was re-read since the check — the check "
+                              "runs again, and the package follows it; call continue_pass")
+        self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
+                         "queued")
         self.assertTrue(_raw("stage_for_delivery", channel="email",
                              package_id=pkg["package_id"],
                              package_token=pkg["package_token"]).startswith(
-                                 "refused: this package was asked for by telegram"))
+                                 "refused: this package is no longer the one its request"))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0], 0)
         self.assertEqual(self.outbox_files(), [])
         self.assertEqual(self.handoff_files(), handoff_before)
@@ -547,7 +572,8 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
             out = _raw("record_delivery", delivery_id=d["delivery_id"], outcome="delivered",
                        message_id="m-1")
             self.assertEqual(out, "refused: the bank was re-read before this was sent — "
-                                  "build it again")
+                                  "nothing was recorded; call continue_pass (a package you "
+                                  "asked for follows its check)")
         rows = self.conn.execute("SELECT status, revoked_at IS NOT NULL FROM deliveries"
                                  " ORDER BY delivery_id").fetchall()
         self.assertEqual([tuple(r) for r in rows], [("failed", 1), ("failed", 1)])

@@ -82,6 +82,10 @@ PATTERNS = [
     ("revive", re.compile(r"have another look at\s+(?:the\s+)?(?P<t>.+?)(?:\s+one)?")),
     ("rebuild", re.compile(r"rebuild(?:\s+it|\s+(?P<q>q[1-4](?:\s+\d{4})?))?")),
     ("resend", re.compile(r"send it again")),
+    # issue #15: the previous build, asked for by name (a fresh one is the default)
+    ("send_last", re.compile(r"(?:send|give)(?: me)? (?:the |my )?(?:last|previous|old)"
+                             r" (?:package|zip)(?: (?:you|that you|i) (?:built|made|sent))?"
+                             r"(?: (?:for|of) (?P<q>q[1-4](?:\s+\d{4})?))?")),
     ("show", re.compile(r"(?P<s>show the rest|show older|all of them|check emailed invoices|more)")),
 ]
 CLASS_SCOPES = {"payslips": ("salary", "payroll"), "statements": ("fees", "interest", "tax"),
@@ -658,6 +662,10 @@ def _apply(conn, run, verb, m, items):
         return
     if verb == "resend":
         run.instructions.append("resend")
+        return
+    if verb == "send_last":
+        q = m.group("q")
+        run.instructions.append(f"send last {_quarter(q)}" if q else "send last")
         return
     if verb == "show":
         run.instructions.append(m.group("s"))

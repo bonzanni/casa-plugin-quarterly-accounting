@@ -107,6 +107,13 @@ def merge(conn, survivor: int, loser: int) -> None:
                      " last_known_kind=coalesce(?, last_known_kind) WHERE pid=?",
                      (lo["class_tags_json"], lo["class_observed_at"],
                       lo["class_observed_snapshot"], lo["last_known_kind"], survivor))
+    # the loser's handed-out note writes now target the survivor's row, and none carries
+    # the survivor's note text (note_seq is store-unique): they are "other" issues (#14)
+    others = [t for t in (s["note_other_issued_at"], lo["note_issued_at"],
+                          lo["note_other_issued_at"]) if t is not None]
+    if others:
+        conn.execute("UPDATE projections SET note_other_issued_at=? WHERE pid=?",
+                     (max(others), survivor))
     if lo["search_state"] == "accepted-missing":
         conn.execute("UPDATE projections SET search_state='accepted-missing' WHERE pid=?",
                      (survivor,))
@@ -409,10 +416,11 @@ def _import(conn, rows, token, ledger_instance) -> dict:
         lineage.settle_all(conn)
         # 6. a stamped lineage that owes bank-feed no write is settled for this cycle; one
         # that owes a tag or note write, or whose note is not known visible, is due a read
+        epoch = db.epoch(conn)
         for pid, r in stamped:
             p = lineage.projection(conn, pid)
             owed = sweep.owed_write(conn, pid, r["tags"],
-                                    sweep.note_confirmed(p, r["tag_revision"]))
+                                    sweep.note_confirmed(p, r["tag_revision"], epoch=epoch))
             conn.execute("UPDATE projections SET observed_revision=? WHERE pid=?",
                          (p["revision"] if owed is None else None, pid))
         passes.remember_ledger(conn, cur_pass["pass_id"])   # identity proved above

@@ -34,8 +34,8 @@ LEASE_S = passes.LEASE_S    # a claim with no progress may be claimed again
 ROW_COST_S = 10             # one row's read, record and repair, measured
 STEPS = ("sweep", "judge", "handover", "snapshot")
 FOR_TRIGGER = {"cron": ("sweep", "judge"), "operator": ("sweep", "judge"),
-               "handover": ("handover",), "package": ("snapshot",)}
-BELONGS = {"sweep": "a check (cron or operator)", "judge": "a check (cron or operator)",
+               "handover": ("handover",), "package": ("snapshot", "judge")}
+BELONGS = {"sweep": "a check (cron or operator)", "judge": "a check or a package pass",
            "handover": "a handover pass", "snapshot": "a package pass"}
 CARRY = ("quarter", "channel", "doc_ids", "report")
 COUNTS = ("remaining_in_cycle", "triage_remaining")
@@ -82,23 +82,18 @@ def _ended(step):
 def _carry(step: str, carry: dict) -> dict:
     given = {k: v for k, v in carry.items() if v is not None}
     allowed = {"sweep": (), "judge": ("report",), "handover": ("doc_ids",),
-               "snapshot": ("quarter", "channel")}[step]
+               "snapshot": ()}[step]
     for k in given:
         if k not in allowed:
             raise db.Refusal({"doc_ids": "doc_ids go with a handover start",
                               "report": "report goes with a judge start",
-                              "quarter": "quarter goes with a snapshot start",
-                              "channel": "channel goes with a snapshot start"}[k])
+                              "quarter": "a package's quarter goes with begin_pass",
+                              "channel": "a package's channel goes with begin_pass"}[k])
     if step == "handover":
         ids = given.get("doc_ids")
         if not ids or not isinstance(ids, list) or not all(
                 isinstance(i, int) and not isinstance(i, bool) for i in ids):
             raise db.Refusal("a handover start names the handed-over documents: doc_ids=[…]")
-    if step == "snapshot":
-        if not given.get("quarter"):
-            raise db.Refusal("a snapshot start names the quarter")
-        if given.get("channel") not in ("telegram", "email"):
-            raise db.Refusal("a snapshot start names the channel: 'telegram' or 'email'")
     if step == "judge" and "report" in given:
         rep = given["report"]
         if not isinstance(rep, dict) or any(k not in REPORT_KEYS for k in rep) or any(
@@ -125,31 +120,29 @@ def start(conn, token, step: str, carry: dict) -> dict:
                         (m["pass_id"], step)).fetchone() is not None:
             raise db.Refusal(f"the {step} step was already started in this pass")
         now = db._clock().replace(microsecond=0)
+        req = round_request(conn, m["pass_id"])
+        if step == "snapshot" and req is None:
+            raise db.Refusal("this package pass holds no package request: ask for the package "
+                             "with begin_pass(trigger=\"package\", quarter, channel)")
         if step == "judge":
             # the payments this judgment covers (issue #3, C6): end_pass lets the pass
-            # be complete only if every payment judge-due at its end was due here
+            # be complete only if every payment judge-due at its end was due here; a
+            # package round's judgment covers its quarter (issue #15)
             import work
+            q = req["quarter"] if req is not None else None
             carry = {**carry, "due_at_start": {str(p): v for p, v in
-                                               work.judge_due_state(conn).items()}}
+                                               work.judge_due_state(conn, q).items()}}
         conn.execute("INSERT INTO pass_steps(pass_id, step, started_at, carry_json)"
                      " VALUES (?,?,?,?)", (m["pass_id"], step, _stamp(now), db.canonical(carry)))
-        if step == "snapshot":
-            _open_request(conn, m["pass_id"], carry["quarter"], carry["channel"])
         return {"step": step, "started_at": _stamp(now),
                 "sweep_stop_at": _stamp(now + _dt.timedelta(seconds=SWEEP_STOP_S)),
                 "return_by": _stamp(now + _dt.timedelta(seconds=RETURN_BY_S))}
 
 
-def _open_request(conn, pass_id, quarter, channel) -> None:
-    """A package request, owned by its pass until end_pass hands it over. A newer
-    request for the quarter supersedes an open one that has not staged a send (a
-    staged one is settled by its holder, or taken back by a claim)."""
-    now = db.now()
-    conn.execute("UPDATE package_requests SET state='superseded', updated_at=? WHERE quarter=?"
-                 " AND state IN ('snapshot', 'snapshot-done', 'built')", (now, quarter))
-    conn.execute("INSERT INTO package_requests(quarter, channel, pass_id, state, created_at,"
-                 " updated_at) VALUES (?,?,?, 'snapshot', ?, ?)",
-                 (quarter, channel, pass_id, now, now))
+def round_request(conn, pass_id):
+    """The package request whose round runs in this pass (issue #15), or None."""
+    return conn.execute("SELECT * FROM package_requests WHERE pass_id=? AND state='snapshot'",
+                        (pass_id,)).fetchone()
 
 
 def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
@@ -204,6 +197,8 @@ def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
                 body["stopped"] = views.clip(str(stopped), STOPPED_MAX)
             if failed:
                 body["failed"] = True
+            if out_of_time:
+                body["out_of_time"] = True   # a timed-out judgment covers nothing (#15, D3)
             by = "resident" if failed or not body else "specialist"
             kept = _finish(row).get("stopped")      # an unfinished step holds only a kept stop
             if kept and not out_of_time and "stopped" not in body:
@@ -288,6 +283,12 @@ def _choose(conn):
                             " 'built') ORDER BY request_id").fetchall():
         if not _lease_fresh(req["lease_at"]):
             return ("request", req)
+    if m is None:
+        # issue #15: no pass is live and a package request waits for a round of its check
+        req = conn.execute("SELECT * FROM package_requests WHERE state='queued'"
+                           " ORDER BY request_id LIMIT 1").fetchone()
+        if req is not None:
+            return ("round", req)
     if running is not None:
         return ("none", {"continue": None, "running": running})
     if m is not None or conn.execute(
@@ -305,7 +306,7 @@ def _same(a, b) -> bool:
             (b[1]["generation"], b[2]["step"] if b[2] else None)
     if a[0] == "delivery":
         return (a[1]["delivery_id"], a[1]["status"]) == (b[1]["delivery_id"], b[1]["status"])
-    if a[0] == "request":
+    if a[0] in ("request", "round"):
         return (a[1]["request_id"], a[1]["state"], a[1]["token"]) == \
             (b[1]["request_id"], b[1]["state"], b[1]["token"])
     return True
@@ -341,10 +342,15 @@ def claim(conn) -> dict:
                         out = _claim_pass(conn, now_cand[1], now_cand[2])
                     elif kind == "delivery":
                         out = _claim_delivery(conn, now_cand[1])
+                    elif kind == "round":
+                        out = _claim_round(conn, now_cand[1])
                     else:
                         out = _claim_request(conn, now_cand[1])
                     notice = out.pop("_notice", None)
                     out["speak"] = alerts.pending_in_tx(conn, must=notice)
+                    # issue #15 (code round C1, Astra S1): every continuation says whether a
+                    # queued package waits for continue_pass, whatever it continued
+                    out["more"] = passes.queued_waiting(conn)
                     _fits(out)
                     return out
         except _Retry:
@@ -393,17 +399,42 @@ def _claim_pass(conn, m, step) -> dict:
                      else "gmail-round")
     elif step["step"] == "judge":
         c.update(next="end-pass", report=carry.get("report", {}))
+        req = round_request(conn, m["pass_id"])
+        if req is not None:             # a package round (issue #15): end_pass decides it
+            c["request"] = {"id": req["request_id"], "quarter": req["quarter"],
+                            "channel": req["channel"], "round": req["round"] + 1}
     elif step["step"] == "handover":
         c.update(next="end-pass-then-case",
                  documents=[_pairing(conn, d) for d in carry.get("doc_ids", [])])
     else:
-        req = conn.execute("SELECT * FROM package_requests WHERE pass_id=? AND"
-                           " state='snapshot'", (m["pass_id"],)).fetchone()
-        c.update(next="end-pass-then-build",
-                 request=None if req is None else {"id": req["request_id"],
-                                                   "quarter": req["quarter"],
-                                                   "channel": req["channel"]})
+        # a package round's snapshot (issue #15): its quarter's Gmail round, then judging
+        req = round_request(conn, m["pass_id"])
+        can_run = binding.check_setup(conn)["can_run"]
+        c["request"] = None if req is None else {"id": req["request_id"],
+                                                 "quarter": req["quarter"],
+                                                 "channel": req["channel"],
+                                                 "round": req["round"] + 1}
+        if fin.get("stopped") or not can_run or not imported or req is None:
+            c.update(can_run=can_run, next="end-pass")
+        else:
+            c.update(can_run=can_run, work=work.work_list(conn, req),
+                     judge_due=len(work.judge_due_state(conn, req["quarter"])),
+                     next="gmail-round")
     return {"continue": c}
+
+
+def _claim_round(conn, req) -> dict:
+    """Issue #15: no pass is live and a package request is queued — start the next
+    round of its check: a package pass of its own (reply silent: the operator heard
+    the one line when they asked), bound to the request."""
+    token, pass_id = passes.start_pass(conn, "package", "silent")
+    conn.execute("UPDATE pass_marker SET claimed_step='none', lease_at=? WHERE id=1",
+                 (db.now(),))
+    passes._bind_round(conn, req["request_id"], pass_id)
+    return {"continue": {"pass_token": token, "pass_id": pass_id, "trigger": "package",
+                         "reply": "silent", "step": None, "next": "snapshot",
+                         "request": {"id": req["request_id"], "quarter": req["quarter"],
+                                     "channel": req["channel"], "round": req["round"] + 1}}}
 
 
 def _pairing(conn, doc_id: int) -> dict:

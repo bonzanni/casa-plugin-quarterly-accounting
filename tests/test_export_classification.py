@@ -31,6 +31,11 @@ class Base(test_sweep_real.Base):
         p = mock.patch.object(db, "_clock", lambda: self.now)
         p.start()
         self.addCleanup(p.stop)
+        # the store was made before the clock was set: date its epoch (issue #14) a day
+        # before T0, as a store installed well before these passes
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE meta SET value=? WHERE key='store_epoch_at'",
+                              ((T0 - dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),))
 
     def later(self, seconds):
         self.now += dt.timedelta(seconds=seconds)
@@ -185,31 +190,144 @@ class TestTheNoteWindow(Base):
             lineage.note_text(self.conn, self.pid_of(rid))[:22]))
         self.assertNotIn("stale", self.accounting_notes(rid)[-1])
 
-    def test_d2_a_confirmation_is_dated_by_its_snapshot_not_by_its_recording(self):
-        # round D2 (Astra S2): a read taken inside the window and recorded after it
-        # must not count as a read taken after it
-        rids = self.settled()
-        rid = rids[1]
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE projections SET observed_revision=NULL WHERE pid=?",
-                              (self.pid_of(rid),))
-        ins = self.issue_add_note(rid)
+    def write(self, rid, ins):
         self.bf.call("add_note", row_ids=[rid], note=ins["add_note"], author="agent",
                      workflow=ins["workflow"], expected_generation=ins["expected_generation"],
                      expected_ledger=ins["expected_ledger"])
+
+    def new_revision(self, rid):
+        """The lineage's note text changes (a decision moved it): a new note_seq."""
+        pid = self.pid_of(rid)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET note_body='(an older body)',"
+                              " observed_revision=NULL WHERE pid=?", (pid,))
+            lineage.settle(self.conn, pid)
+        return lineage.projection(self.conn, pid)["note_seq"]
+
+    def test_d2_a_held_read_does_not_confirm_while_an_older_revision_may_land(self):
+        # round D2 (Astra S2), restated for issue #14: a read taken inside the window
+        # and recorded after it must not certify the note while a write of ANOTHER
+        # revision, handed out inside the window, can still land on top of it
+        rids = self.settled()
+        rid, pid = rids[1], self.pid_of(rids[1])
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET observed_revision=NULL WHERE pid=?", (pid,))
+        older = self.issue_add_note(rid)                     # revision A, in flight
+        issued_a = lineage.projection(self.conn, pid)["note_issued_at"]
+        self.later(20)
+        seq_b = self.new_revision(rid)
+        ins = self.issue_add_note(rid)                       # revision B, written at once
+        self.assertIn(f"Accounting revision {seq_b}:", ins["add_note"])
+        self.write(rid, ins)
         text = self.bf.call("get_transaction", row_id=rid)  # read inside the window
         self.later(steps.CEILING_ASSUMED_S + 100)            # recorded after it
         self.assertEqual(self.record_read(rid, text)["instructions"], {})
-        p = lineage.projection(self.conn, self.pid_of(rid))
-        self.assertFalse(sweep.note_confirmed(p, self.bf.tag_revision(rid)))
+        p = lineage.projection(self.conn, pid)
+        # NULL-safe (design round D2, Terra S1): A's issue is kept as the "other" one
+        self.assertEqual(p["note_other_issued_at"], issued_a)
+        self.assertEqual(p["note_issued_seq"], seq_b)
+        self.assertFalse(sweep.note_confirmed(p, self.bf.tag_revision(rid),
+                                                epoch=db.epoch(self.conn)))
+        self.write(rid, older)                               # A lands late, on top
         self.later(3600)
         self.new_pass()
-        self.assertIn(self.pid_of(rid), self.due())
+        self.assertIn(pid, self.due())
+        self.cycle()
+        self.assertIn(f"Accounting revision {seq_b}:", self.accounting_notes(rid)[-1])
+
+    def test_14_a_read_back_confirms_the_note_it_wrote(self):
+        # issue #14: one add_note, read back in the pass that wrote it, settles the row
+        rids = self.three_rows()
+        self.new_pass()
+        self.cycle()
+        self.assertTrue(all(len(self.accounting_notes(r)) == 1 for r in rids))
+        self.later(3600)
+        self.new_pass()
+        self.assertEqual(self.due(), [])
+
+    def test_14_nothing_confirms_within_a_ceiling_of_the_store_epoch(self):
+        # a store just created, reset or upgraded: a write an earlier generation handed
+        # out may still land, so the read-back is checked once more
+        with db.tx(self.conn):
+            db.set_epoch(self.conn)
+        rids = self.three_rows()
+        self.new_pass()
+        self.cycle()
+        self.later(3600)
+        self.new_pass()
+        self.assertEqual(sorted(self.due()), sorted(self.pid_of(r) for r in rids))
+        self.cycle()                                   # read: visible, nothing written
+        self.later(3600)
+        self.new_pass()
+        self.assertEqual(self.due(), [])
+
+    def test_14_reset_store_sets_the_epoch(self):
+        import binding
+        self.later(7200)
+        binding.reset_store(self.conn)
+        self.assertEqual(db.epoch(self.conn), db.now())
 
     def test_a_read_after_the_window_confirms(self):
         rids = self.settled()
         p = lineage.projection(self.conn, self.pid_of(rids[0]))
-        self.assertTrue(sweep.note_confirmed(p, self.bf.tag_revision(rids[0])))
+        self.assertTrue(sweep.note_confirmed(p, self.bf.tag_revision(rids[0]),
+                                               epoch=db.epoch(self.conn)))
+
+
+class TestNoteConfirmedRule(unittest.TestCase):
+    """Issue #14's rule (3) as a pure function: only an add_note of ANOTHER note text,
+    or the store's epoch, bounds a confirmation — strictly (design round D1)."""
+    E = "2026-09-01T00:00:00Z"
+
+    def proj(self, **over):
+        p = {"note_body": "b", "note_seq": 7, "note_seen_seq": 7, "note_seen_rev": 3,
+             "note_seen_at": "2026-09-02T10:00:00Z", "note_issued_at": "2026-09-02T10:05:00Z",
+             "note_issued_seq": 7, "note_other_issued_at": None}
+        p.update(over)
+        return p
+
+    def ok(self, **over):
+        return sweep.note_confirmed(self.proj(**over), 3, epoch=self.E)
+
+    def test_a_same_text_issue_after_the_read_does_not_bound_it(self):
+        self.assertTrue(self.ok())
+
+    def test_another_texts_issue_bounds_it_strictly(self):
+        self.assertFalse(self.ok(note_other_issued_at="2026-09-02T09:50:00Z"))
+        self.assertFalse(self.ok(note_other_issued_at="2026-09-02T09:50:00Z",
+                                 note_seen_at="2026-09-02T10:00:00Z"))   # exactly +600: not yet
+        self.assertTrue(self.ok(note_other_issued_at="2026-09-02T09:49:59Z"))
+
+    def test_an_issue_of_an_older_text_is_another_texts(self):
+        # the last issue carried seq 6, the current note is 7
+        self.assertFalse(self.ok(note_issued_seq=6))
+        self.assertFalse(self.ok(note_issued_seq=None))          # migrated: unknown seq
+        self.assertTrue(self.ok(note_issued_seq=6, note_issued_at="2026-09-02T09:00:00Z"))
+
+    def test_the_epoch_bounds_it(self):
+        self.assertFalse(sweep.note_confirmed(self.proj(), 3, epoch="2026-09-02T09:55:00Z"))
+
+    def test_rules_1_and_2_are_unchanged(self):
+        self.assertFalse(self.ok(note_seen_seq=6))
+        self.assertFalse(sweep.note_confirmed(self.proj(), 4, epoch=self.E))
+        self.assertTrue(self.ok(note_body=None, note_seen_seq=None))
+
+
+class TestMergeCarriesNoteIssues(_base.StoreCase):
+    def test_the_losers_issues_bound_the_survivors_confirmation(self):
+        # issue #14: a merged-in lineage's handed-out note writes target the survivor's
+        # row and carry none of its note texts
+        for r in (1, 2):
+            self.row(r)
+        a, b = self.lineage_for(1), self.lineage_for(2)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET note_issued_at='2026-09-02T10:00:00Z',"
+                              " note_other_issued_at='2026-09-02T09:00:00Z' WHERE pid=?", (b,))
+            self.conn.execute("UPDATE projections SET note_other_issued_at='2026-09-02T08:00:00Z'"
+                              " WHERE pid=?", (a,))
+            ledger.merge(self.conn, a, b)
+        self.assertEqual(lineage.projection(self.conn, a)["note_other_issued_at"],
+                         "2026-09-02T10:00:00Z")
 
 
 class TestTheExportFloor(Base):
@@ -283,7 +401,9 @@ class TestCatchUpConverges(Base):
             if not before:
                 break
         self.assertEqual(reads[-1], 0, reads)
-        self.assertLessEqual(len(reads), 7, reads)
+        # issue #14: a read-back confirms the note it wrote, so each pass takes the next
+        # 50 and none is read twice (0.3.5: [120, 120, 120, 90, 40, 0])
+        self.assertEqual(reads, [120, 70, 20, 0])
         self.assertTrue(all(self.owned(r) == ["acct::open"] for r in rids))
 
 

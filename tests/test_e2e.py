@@ -456,10 +456,12 @@ class ToolFlow(Base):
         """Ellen's begin_pass and the snapshot step, then the specialist's probes (step 1)
         and snapshot (step 3)."""
         bf = self.bf
-        token = self.call("begin_pass", trigger=trigger)["pass_token"]
-        if trigger == "package":
-            self.call("record_step", pass_token=token, step="snapshot", action="start",
-                      quarter="2026-Q3", channel="telegram")
+        if trigger == "package":        # issue #15: the ask names quarter and channel
+            token = self.call("begin_pass", trigger=trigger, quarter="2026-Q3",
+                              channel="telegram")["pass_token"]
+            self.call("record_step", pass_token=token, step="snapshot", action="start")
+        else:
+            token = self.call("begin_pass", trigger=trigger)["pass_token"]
         accounts = [{"account_id": r["account_id"], "category": r["category"], "label": r["name"]}
                     for r in bf.conn.execute("SELECT account_id, category, name FROM accounts")]
         self.call("record_probe", pass_token=token, kind="bank_tools", ok=True)
@@ -478,6 +480,15 @@ class ToolFlow(Base):
         """The specialist's last action (its snapshot finish), then Ellen's end_pass: the
         request is buildable only from a finished snapshot step."""
         self.call("record_step", pass_token=token, step="snapshot", action="finish")
+        # issue #15: the rest of the round — the Gmail round's probe, the quarter's items
+        # searched, a whole judge step
+        self.call("record_probe", pass_token=token, kind="gmail", ok=True)
+        for it in self.call("list_quarter_state", triage=True, quarter="2026-Q3",
+                            pass_token=token)["triage"]:
+            self.call("record_search", pid=it["pid"], pass_token=token, queries=["q"])
+        self.call("record_step", pass_token=token, step="judge", action="start")
+        self.call("record_step", pass_token=token, step="judge", action="finish",
+                  triage_remaining=0)
         return self.call("end_pass", pass_token=token, outcome=outcome)
 
     def package(self, sweep):

@@ -424,18 +424,22 @@ def t_observe(args):
 @register("begin_pass",
           "Start a pass (trigger: cron, operator, package, handover) — after continue_pass "
           "found nothing to continue. reply: where its continuation reports (silent for the "
-          "cron, telegram otherwise; that is the default). Returns pass_token, or 'busy' with "
-          "the text to say when another pass is running.",
-          obj({"trigger": S, "reply": S}, ("trigger",)))
+          "cron, telegram otherwise; that is the default). A package is ASKED for here, "
+          "first, with its quarter and channel ('telegram' or 'email'): the request is kept "
+          "whatever happens next. Returns pass_token; or 'queued' (a pass is running — the "
+          "package follows it), 'already' (that quarter's package is already on its way) or "
+          "'busy', each with the text to say.",
+          obj({"trigger": S, "reply": S, "quarter": Q, "channel": S}, ("trigger",)))
 def t_begin(args):
     _need(args, "trigger")
-    return passes.begin_pass(conn(), args["trigger"], args.get("reply"))
+    return passes.begin_pass(conn(), args["trigger"], args.get("reply"),
+                             quarter=_quarter(args), channel=args.get("channel"))
 
 
 @register("record_step",
           "Record a delegated step of the pass (step: sweep, judge, handover, snapshot). Ellen, "
           "just before delegate_to_agent: action=\"start\" (a handover names doc_ids; a "
-          "snapshot names quarter and channel; a judge carries report={checked, total, "
+          "judge carries report={checked, total, "
           "not_searched}), then passes the same pass_token to the specialist. The specialist, "
           "as its last action: action=\"finish\" with remaining_in_cycle, triage_remaining, "
           "and stopped=<the refusal> only if a refusal stopped it (running out of time is not "
@@ -465,8 +469,8 @@ def t_step(args):
             if v is not None:
                 raise db.Refusal({"doc_ids": "doc_ids go with a handover start",
                                   "report": "report goes with a judge start",
-                                  "quarter": "quarter goes with a snapshot start",
-                                  "channel": "channel goes with a snapshot start"}[k])
+                                  "quarter": "a package's quarter goes with begin_pass",
+                                  "channel": "a package's channel goes with begin_pass"}[k])
         return steps.finish(conn(), token, step, counts=fin, stopped=args.get("stopped"),
                             failed=_bool(args, "failed", False),
                             by_refusal=_bool(args, "stopped_by_refusal", False),
@@ -669,12 +673,14 @@ def t_build(args):
           "email (gmail send_email to the operator's own address only, with the returned "
           "request_id). Then record_delivery. For apply_reply's `resend` instruction (\"send it "
           "again\") pass resend=true and neither id: it stages the exact file the last view the "
-          "operator saw offered, or refuses with the words to say. A package built for a "
+          "operator saw offered, or refuses with the words to say. For its `send last` "
+          "instruction pass last_built=true (and the quarter it names, if any) and neither "
+          "id: the last package built, unchanged; send it with the returned caption. A package built for a "
           "package request needs its package_token; staging it again returns the same send. "
           "Telegram: pass the returned filename to send_media. During a pass, pass the "
           "pass_token.",
-          obj({"channel": S, "package_id": I, "doc_id": I, "resend": B, "pass_token": TOKEN,
-               "package_token": PKG_TOKEN}, ("channel",)))
+          obj({"channel": S, "package_id": I, "doc_id": I, "resend": B, "last_built": B,
+               "quarter": Q, "pass_token": TOKEN, "package_token": PKG_TOKEN}, ("channel",)))
 def t_stage(args):
     _need(args, "channel")
     resend = _bool(args, "resend", False)
@@ -688,7 +694,9 @@ def t_stage(args):
                                        package_id=package_id, doc_id=doc_id,
                                        pass_token=_int(args, "pass_token"),
                                        package_token=_int(args, "package_token"),
-                                       resend=resend)
+                                       resend=resend,
+                                       last_built=_bool(args, "last_built", False),
+                                       quarter=_quarter(args))
 
 
 @register("record_delivery",

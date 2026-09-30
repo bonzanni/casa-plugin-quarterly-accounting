@@ -63,7 +63,8 @@ class StoreCase(TempEnv):
         Returns the new pass token."""
         import passes
         self.end_live_pass()
-        token = passes.begin_pass(self.conn, trigger)["pass_token"]
+        kw = {"quarter": "2026-Q3", "channel": "telegram"} if trigger == "package" else {}
+        token = passes.begin_pass(self.conn, trigger, **kw)["pass_token"]
         b = self.conn.execute("SELECT account_id FROM binding").fetchone()
         accts = accounts if accounts is not None else (
             [{"account_id": b[0], "category": "company", "label": "Zakelijk"}] if b else [])
@@ -84,21 +85,33 @@ class StoreCase(TempEnv):
             passes.end_pass(self.conn, m["generation"], "complete", {})
 
     def package_token(self, quarter="2026-Q3", channel="telegram"):
-        """A package request as the skill makes one — begin_pass(package), the snapshot
-        step with this pass's own import (a bare snapshots row here), end_pass. Returns
+        """A package request as the skill makes one — begin_pass(package, quarter,
+        channel), the snapshot step with this pass's own import (a bare snapshots row
+        here), the Gmail round's probe, a whole judge step, end_pass (issue #15). Returns
         the package_token end_pass hands over."""
         import passes
-        import steps
         self.end_live_pass()
-        token = passes.begin_pass(self.conn, "package")["pass_token"]
-        steps.start(self.conn, token, "snapshot", {"quarter": quarter, "channel": channel})
+        token = passes.begin_pass(self.conn, "package", quarter=quarter,
+                                  channel=channel)["pass_token"]
         import db
+        import steps
+        steps.start(self.conn, token, "snapshot", {})
         with db.tx(self.conn):          # this pass's own import: what makes a request buildable
             self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
                               " VALUES ((SELECT pass_id FROM pass_marker), ?, 0, 0)",
                               (db.now(),))
         steps.finish(self.conn, token, "snapshot", counts={})
+        self.check_round(token)
         return passes.end_pass(self.conn, token, "complete", {})["package_token"]
+
+    def check_round(self, token, gmail_ok=True, triage_remaining=0):
+        """The rest of a package round (issue #15): Ellen's Gmail round (its probe) and
+        the judge step, finished whole."""
+        import passes
+        import steps
+        passes.record_probe(self.conn, token, "gmail", gmail_ok)
+        steps.start(self.conn, token, "judge", {})
+        steps.finish(self.conn, token, "judge", counts={"triage_remaining": triage_remaining})
 
     _doc_n = 0
 

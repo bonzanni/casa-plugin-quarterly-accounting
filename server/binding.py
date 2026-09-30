@@ -167,6 +167,9 @@ def reset_store(conn) -> dict:
             conn.execute("DELETE FROM sqlite_sequence WHERE name IN (%s)"
                          % ",".join("'%s'" % t for t in _TABLES_TO_WIPE))
             conn.execute("UPDATE counters SET value=0 WHERE name='seq'")
+            # the note texts restart with the sequence: a write handed out before the
+            # reset may still land with a text the new store will issue again (#14)
+            db.set_epoch(conn)
             conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
             # the marker row carries the last pass's trigger, id and start time —
             # operator data (fix wave B, Astra S2); the monotonic generation that
