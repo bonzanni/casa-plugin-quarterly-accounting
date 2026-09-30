@@ -85,10 +85,12 @@ def _why_not_kind(conn, proj, row, exp, doc) -> str:
 
 
 def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runners_up,
-             resolves, row_snapshot, token, row_digest=None):
+             resolves, row_snapshot, token, row_digest=None, document_date=None):
     import passes
     if token is None:
         raise db.Refusal("a machine pairing is written during a pass: pass the pass_token")
+    if document_date is not None:
+        documents._validate({"document_date": document_date})
     with db.tx(conn):
         passes.check_token(conn, token)
         pid = lineage.resolve_pid(conn, pid)
@@ -152,6 +154,12 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
         if set(resolves or ()) != conflicted:
             raise db.Refusal("this payment has unresolved candidates "
                              f"{sorted(conflicted)}; name exactly those in resolves")
+        if document_date and document_date != doc["document_date"]:
+            # issue #19: the date read from the document names its file in the package
+            # (package.doc_filename) and replaces the filed, provisional reading
+            conn.execute("UPDATE documents SET document_date=? WHERE doc_id=?",
+                         (document_date, doc_id))
+            lineage.settle_doc_holders(conn, doc_id)
         before = _states(conn, pid)
         mid = _match_id_for(conn, pid, doc_id)
         conn.execute("UPDATE matches SET label=?, rationale=?, runners_up_json=? WHERE match_id=?",
@@ -200,10 +208,10 @@ def _operator_pid(conn, pid) -> int:
 
 def record_match(conn, *, pid, doc_id, author, expected_revision, render_id=None,
                  labels=("clean",), rationale="", runners_up=(), resolves=(), row_snapshot=None,
-                 token=None, row_digest=None) -> dict:
+                 token=None, row_digest=None, document_date=None) -> dict:
     if author == "auto":
         return _machine(conn, "pair", pid, doc_id, expected_revision, labels, rationale,
-                        runners_up, resolves, row_snapshot, token, row_digest)
+                        runners_up, resolves, row_snapshot, token, row_digest, document_date)
     if author != "operator":
         raise db.Refusal("author is 'auto' or 'operator'")
     with db.tx(conn):
@@ -214,9 +222,9 @@ def record_match(conn, *, pid, doc_id, author, expected_revision, render_id=None
 
 def propose_match(conn, *, pid, doc_id, expected_revision, labels=("clean",), rationale="",
                   runners_up=(), resolves=(), row_snapshot=None, token=None,
-                  row_digest=None) -> dict:
+                  row_digest=None, document_date=None) -> dict:
     return _machine(conn, "propose", pid, doc_id, expected_revision, labels, rationale,
-                    runners_up, resolves, row_snapshot, token, row_digest)
+                    runners_up, resolves, row_snapshot, token, row_digest, document_date)
 
 
 def confirm_match(conn, *, match_id, expected_revision, render_id) -> dict:

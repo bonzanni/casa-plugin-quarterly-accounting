@@ -277,42 +277,56 @@ def t_set_exp(args):
 
 
 # --- matching ----------------------------------------------------------------
+DATE_READ = ("the date printed on the document (its issue date — not a due, delivery or email "
+             "date), YYYY-MM-DD, read from the file you just opened; it names the file in the "
+             "package and replaces the filed reading")
+
+
+def _date_read(args) -> None:
+    """Issue #19: a machine pairing states the date read from the document."""
+    if args.get("document_date") in (None, ""):
+        raise db.Refusal("pass document_date: " + DATE_READ)
 @register("record_match",
           "Pair a payment (pid) with a document. author='auto' (the specialist, during a pass: "
           "pass_token, row_digest: the item's value from list_quarter_state, labels, resolves naming exactly "
-          "the payment's unresolved candidates — its candidate_ids) or 'operator' (render_id and the revision the "
+          "the payment's unresolved candidates — its candidate_ids, and document_date: " + DATE_READ + ") "
+          "or 'operator' (render_id and the revision the "
           "operator was shown). expected_revision is the payment's revision. During a pass, pass the pass_token.",
           obj({"pid": I, "doc_id": I, "author": S, "expected_revision": I, "render_id": S,
                "labels": A, "rationale": S, "runners_up": A, "resolves": AI, "row_snapshot": O,
-               "row_digest": S, "pass_token": TOKEN},
+               "row_digest": S, "document_date": S, "pass_token": TOKEN},
               ("pid", "doc_id", "author", "expected_revision")))
 def t_record(args):
     _need(args, "pid", "doc_id", "author", "expected_revision")
+    pid, doc_id, rev = _int(args, "pid"), _int(args, "doc_id"), _int(args, "expected_revision")
+    if args["author"] == "auto":
+        _date_read(args)
     return matches.record_match(
-        conn(), pid=_int(args, "pid"), doc_id=_int(args, "doc_id"), author=args["author"],
-        expected_revision=_int(args, "expected_revision"), render_id=args.get("render_id"),
+        conn(), pid=pid, doc_id=doc_id, author=args["author"], expected_revision=rev, render_id=args.get("render_id"),
         labels=tuple(args.get("labels") or ("clean",)), rationale=args.get("rationale", ""),
         runners_up=tuple(args.get("runners_up") or ()), resolves=tuple(args.get("resolves") or ()),
         row_snapshot=args.get("row_snapshot"), row_digest=args.get("row_digest"),
-        token=_int(args, "pass_token"))
+        token=_int(args, "pass_token"), document_date=args.get("document_date"))
 
 
 @register("propose_match",
           "Pair a payment with a document without accepting it — only when candidates cannot be "
-          "told apart. Specialist only, during a pass; same arguments as record_match(auto).",
+          "told apart. Specialist only, during a pass; same arguments as record_match(auto), "
+          "document_date included: " + DATE_READ + ".",
           obj({"pid": I, "doc_id": I, "expected_revision": I, "labels": A, "rationale": S,
                "runners_up": A, "resolves": AI, "row_snapshot": O, "row_digest": S,
-               "pass_token": TOKEN},
-              ("pid", "doc_id", "expected_revision", "pass_token")))
+               "document_date": S, "pass_token": TOKEN},
+              ("pid", "doc_id", "expected_revision", "document_date", "pass_token")))
 def t_propose(args):
     _need(args, "pid", "doc_id", "expected_revision", "pass_token")
+    pid, doc_id, rev = _int(args, "pid"), _int(args, "doc_id"), _int(args, "expected_revision")
+    _date_read(args)
     return matches.propose_match(
-        conn(), pid=_int(args, "pid"), doc_id=_int(args, "doc_id"),
-        expected_revision=_int(args, "expected_revision"),
+        conn(), pid=pid, doc_id=doc_id, expected_revision=rev,
         labels=tuple(args.get("labels") or ("clean",)), rationale=args.get("rationale", ""),
         runners_up=tuple(args.get("runners_up") or ()), resolves=tuple(args.get("resolves") or ()),
         row_snapshot=args.get("row_snapshot"), row_digest=args.get("row_digest"),
-        token=_int(args, "pass_token"))
+        token=_int(args, "pass_token"), document_date=args.get("document_date"))
 
 
 @register("confirm_match",
@@ -446,10 +460,13 @@ def t_begin(args):
           "a stop: finish with the counts; once the step's time is up a stop also needs "
           "stopped_by_refusal=true, and a finish refused for a stop that was only time "
           "running out is made again with out_of_time=true). Ellen finishes it herself only when the "
-          "delegation came back in her turn without a finish (failed=true on an error).",
+          "delegation came back in her turn without a finish (failed=true on an error). Right after "
+          "delegate_to_agent answers with a delegation_id: action=\"delegated\" with that "
+          "delegation_id, so the delegation's notification can close the step.",
           obj({"pass_token": TOKEN, "step": S, "action": S, "quarter": Q, "channel": S,
                "doc_ids": AI, "report": O, "remaining_in_cycle": I, "triage_remaining": I,
-               "stopped": S, "stopped_by_refusal": B, "out_of_time": B, "failed": B},
+               "stopped": S, "stopped_by_refusal": B, "out_of_time": B, "failed": B,
+               "delegation_id": S},
               ("pass_token", "step", "action")))
 def t_step(args):
     _need(args, "pass_token", "step", "action")
@@ -458,6 +475,10 @@ def t_step(args):
              "doc_ids": args.get("doc_ids"), "report": args.get("report")}
     fin = {"remaining_in_cycle": _int(args, "remaining_in_cycle"),
            "triage_remaining": _int(args, "triage_remaining")}
+    if action == "delegated":
+        return steps.delegated(conn(), token, step, args.get("delegation_id"))
+    if args.get("delegation_id") is not None:
+        raise db.Refusal('delegation_id goes with action="delegated"')
     if action == "start":
         for k in ("remaining_in_cycle", "triage_remaining", "stopped", "stopped_by_refusal",
                   "out_of_time", "failed"):
@@ -475,7 +496,7 @@ def t_step(args):
                             failed=_bool(args, "failed", False),
                             by_refusal=_bool(args, "stopped_by_refusal", False),
                             out_of_time=_bool(args, "out_of_time", False))
-    raise db.Refusal('action is "start" or "finish"')
+    raise db.Refusal('action is "start", "delegated" or "finish"')
 
 
 @register("continue_pass",
@@ -484,10 +505,14 @@ def t_step(args):
           "something is due, this claims it for you alone and returns a NEW pass_token (or "
           "package_token) — use only that one from now on — with the next step, where to report "
           "(`reply`) and everything the step needs. Otherwise continue is null: write nothing. "
-          "Send any `speak` verbatim, then mark_rendering_delivered.",
-          obj({}))
+          "Send any `speak` verbatim, then mark_rendering_delivered. On a notification about a "
+          "delegation, pass the delegation_id it names and delegation_status (ok, or error — "
+          "a failure, time-out or restart orphan).",
+          obj({"delegation_id": S, "delegation_status": S}))
 def t_continue(args):
-    return _deliverable("continue_pass", steps.claim(conn()))
+    return _deliverable("continue_pass", steps.claim(
+        conn(), delegation_id=args.get("delegation_id"),
+        delegation_status=args.get("delegation_status")))
 
 
 @register("end_pass",

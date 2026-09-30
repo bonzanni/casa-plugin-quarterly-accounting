@@ -72,14 +72,41 @@ class TestTheCheckRuns(Rounds):
         self.assertEqual(sorted(r["status"] for r in self.rows_of(pkg)), ["MATCHED", "MISSING"])
         self.assertNotIn("couldn't", pkg["caption"])
 
+    def test_an_unsearched_item_is_searched_in_the_next_chunk_of_the_same_round(self):
+        # issue #17: after the judgment, the next Gmail chunk runs in the same pass (one
+        # bank read), listing only what is left, and then another judgment
+        self.seed(2)
+        c = self.snapshot_round(self.ask()["pass_token"])
+        t = c["pass_token"]
+        self.call("record_probe", pass_token=t, kind="gmail", ok=True)
+        self.search(t, c["work"]["triage"][:1])                         # the turn's share
+        self.start(t, step="judge")
+        self.call("record_step", pass_token=t, step="judge", action="finish",
+                  triage_remaining=0)
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "gmail-round")
+        self.assertEqual([i["pid"] for i in c["work"]["triage"]], [2])
+        t = c["pass_token"]
+        self.search(t, c["work"]["triage"])
+        end = self.end(self.judge(t))
+        self.assertEqual(end["next"], "build")
+        self.assertEqual(self.request()["round"], 1)
+        self.assertEqual(self.conn.execute(                    # one bank read for the round
+            "SELECT COUNT(*) FROM snapshots s JOIN passes p ON p.pass_id=s.pass_id"
+            " WHERE p.trigger='package'").fetchone()[0], 1)
+
     def test_an_unsearched_item_takes_another_round_and_only_it_is_listed(self):
+        # a round ended before its next chunk (Ellen ended it at the gmail-round)
         self.seed(2)
         t = self.ask()["pass_token"]
         c = self.snapshot_round(t)
         t = c["pass_token"]
         self.call("record_probe", pass_token=t, kind="gmail", ok=True)
         self.search(t, c["work"]["triage"][:1])                         # time ran out
-        end = self.end(self.judge(t), "interrupted")
+        self.start(t, step="judge")
+        self.call("record_step", pass_token=t, step="judge", action="finish",
+                  triage_remaining=0)
+        end = self.end(self.claim()["continue"], "interrupted")
         self.assertIsNone(end["next"])
         self.assertNotIn("package_token", end)
         self.assertTrue(end["more"])
@@ -159,7 +186,10 @@ class TestTheCheckRuns(Rounds):
         t = self.ask()["pass_token"]
         c = self.snapshot_round(t)
         self.assertEqual(c["work"]["triage"], [])
-        end = self.end(c)                                     # no Gmail round, no judge
+        # issue #18: not ended without a judgment
+        self.assertTrue(self.text("end_pass", pass_token=c["pass_token"], outcome="complete")
+                        .startswith("refused: not ended: this package round has not judged"))
+        end = self.end(self.judge(c["pass_token"]))           # judged, but no Gmail probe
         self.assertIsNone(end["next"])
         self.assertEqual((self.request()["state"], self.request()["remaining"]), ("queued", 1))
         c = self.snapshot_round(self.claim()["continue"]["pass_token"])

@@ -450,5 +450,40 @@ class TestReviewC3(TempEnv):
                       "too (rule 7)", flat)
 
 
+class TestIssues17To19(TempEnv):
+    def later(self):
+        return " ".join(SKILL[SKILL.index("## Ellen: a delegation that answers later"):
+                              SKILL.index("## Ellen: answering anything")].split())
+
+    def test_a_delegation_is_bound_to_its_step_and_its_notification_closes_it(self):
+        later = self.later()
+        self.assertIn('`record_step(pass_token, step=…, action="delegated", '
+                      'delegation_id=<that id>)`', later)
+        self.assertIn('`continue_pass(delegation_id=<the id in "(id …)">, '
+                      'delegation_status="ok")`', later)
+        self.assertIn('`delegation_status="error"` for anything else', later)
+
+    def test_a_package_round_ends_every_turn_at_an_async_delegation(self):
+        rnd = " ".join(SKILL[SKILL.index("2. **A round of the check.**"):
+                             SKILL.index("3. `build_quarterly_package(")].split())
+        self.assertEqual(rnd.count('`mode="async"`'), 3, rnd)
+        self.assertNotIn("sync mode", rnd)
+        self.assertIn("Never carry on to the next step in the same turn", rnd)
+        self.assertIn("a chunk of at most 10", rnd)
+        self.assertIn("`next` is `gmail-round` again", rnd)
+        self.assertIn("not ended without its judge step", rnd)
+        import work
+        self.assertEqual(work.GMAIL_CHUNK, 10)
+
+    def test_the_specialist_states_the_date_it_read_and_how_far_triage_got(self):
+        tri = " ".join(SKILL[SKILL.index("6. **Triage.**"):
+                             SKILL.index("7. **Identity")].split())
+        self.assertIn("passes it as `document_date`", tri)
+        self.assertIn("its issue date, not a due, delivery or email date", tri)
+        fin = " ".join(SKILL[SKILL.index("8. **Finish and reply briefly.**"):
+                             SKILL.index("## Packaging")].split())
+        self.assertIn("a judge step's finish without `triage_remaining` is refused", fin)
+
+
 if __name__ == "__main__":
     unittest.main()

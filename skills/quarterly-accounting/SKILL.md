@@ -15,7 +15,7 @@ Two agents share one store:
 | Work | Who |
 |---|---|
 | Reading state, rendering a view, applying a reply, filing a document, Gmail, sending anything to the operator | **Ellen**, directly — never delegate a lookup |
-| Anything with bank-feed; deciding whether a document explains a payment (reading it with `read_document`); researching a portal link | **The finance specialist**, through `delegate_to_agent(agent="finance", mode="sync")` |
+| Anything with bank-feed; deciding whether a document explains a payment (reading it with `read_document`); researching a portal link | **The finance specialist**, through `delegate_to_agent(agent="finance", mode="sync")` (a package round's: `mode="async"`) |
 
 The test: if answering needs a PDF opened and an opinion formed, it is the specialist's; if
 it needs a row read, it is Ellen's.
@@ -54,7 +54,10 @@ token: the old one is refused from then on.
    handed-over document, the package). The operator's request is never dropped.
 2. Just before `delegate_to_agent`, `record_step(pass_token, step=…, action="start")`
    with what the flow names, and pass that same token AND the step's name to the
-   specialist: the context says `pass_token=<token>, step=<the step>`.
+   specialist: the context says `pass_token=<token>, step=<the step>`. As soon as
+   `delegate_to_agent` answers with a `delegation_id`, `record_step(pass_token, step=…,
+   action="delegated", delegation_id=<that id>)`: it is how the delegation's notification
+   closes the step if the specialist never finishes it.
 3. When the delegation answers in this turn — whatever it answered, failed or not —
    `record_step(pass_token, step=…, action="finish")`, with `failed=true` for an error
    (when the specialist already finished its step, this changes nothing). Then
@@ -65,7 +68,10 @@ token: the old one is refused from then on.
    run: say "A check is running — ask again in a few minutes." — never `<silent/>`.
 5. On ANY system notification about a delegation to finance — returned, failed, timed
    out, orphaned by a restart, finished without its answer, or said again after a
-   restart — call `continue_pass()` first:
+   restart — call `continue_pass()` first, passing the id the notification names and how
+   it ended: `continue_pass(delegation_id=<the id in "(id …)">, delegation_status="ok")`
+   for "returned with status=ok" or "finished", `delegation_status="error"` for anything
+   else (failed, timed out, orphaned):
    - a continuation: do its `next` with ITS token and inputs; report where its `reply`
      says (`silent`: say nothing but `speak`), else here. Never use a token, step or
      work list from an earlier turn or from the notification.
@@ -396,7 +402,11 @@ named in your context. Your one expectation write is in step 6.
    `list_unmatched_documents` (it pages the same way: follow its `next`) and the KB
    (`get_counterparty`), reading each candidate with `read_document(doc_id)`: it names the
    path where the file was saved for you — open that path with `Read` (the store itself is
-   not readable to you). Never match a document you could not read. Correct a filed document's reading with `update_document_metadata(doc_id, …,
+   not readable to you). Never match a document you could not read. Read its date there
+   too: the date printed on the document — its issue date, not a due, delivery or email
+   date. The window below is measured from it, and every `record_match` and
+   `propose_match` passes it as `document_date` (it names the file in the package and
+   replaces the filed reading, which is often the email's date). Correct a filed document's reading with `update_document_metadata(doc_id, …,
    pass_token=…)`; a quotation, order confirmation or losing duplicate is
    `mark_irrelevant(doc_id, pass_token=…)`. The auto-match bar:
    - the payment is booked, on the bound account, and expects a document kind;
@@ -448,7 +458,8 @@ named in your context. Your one expectation write is in step 6.
    than the next. Same procedure, same `snapshot_id` rule.
 8. **Finish and reply briefly.** `record_step(pass_token, step=…, action="finish",
    remaining_in_cycle=…, triage_remaining=…)` (with `stopped=<the refusal>` only if a
-   refusal stopped you — never for running out of time), then a
+   refusal stopped you — never for running out of time; a judge step's finish without
+   `triage_remaining` is refused: it is how the check knows your triage saw every page), then a
    short reply whose first line is `quarterly-accounting: <step> finished` — what was
    matched, proposed or left missing, for Ellen, never for the operator. Ellen's Gmail round
    is built from the store, not from your reply: a search idea for a vendor ("their
@@ -475,25 +486,38 @@ done, however many rounds that takes; say nothing in between.
      then come back) and go on with step 2, with this pass's token.
 2. **A round of the check.** Every round, the first one and each one `continue_pass`
    starts later (its `next` is `snapshot`, its `reply` silent: say nothing of your own), is
-   one package pass you hold, begin to end:
+   one package pass you hold, begin to end. A round spans several of your turns, and each
+   turn ends at a delegation: both of a round's delegations are `mode="async"` — they
+   answer `status: pending` at once, and their notification starts your next turn. Never
+   carry on to the next step in the same turn.
    - `record_step(pass_token, step="snapshot", action="start")`, then delegate
-     "quarterly-accounting package snapshot" to the specialist, sync mode, with context
+     "quarterly-accounting package snapshot" to the specialist, `mode="async"`, with context
      `pass_token=<token>, step=snapshot` and the quarter: the probes of its pass, step 1 (stop if `can_run` is
      false), the snapshot of step 3, the ends of step 4, then the sweep of step 5 for that
      quarter only — `list_projections(pass_token, quarter=<the quarter>)`, every row it
      lists read and recorded, exactly as in the pass. It never calls `begin_pass` or
-     `end_pass` here; it finishes its step and returns. If it answers `status: pending`, end
-     the turn (the first round has already said its line; later rounds say nothing).
-   - At the continuation (`next` is `gmail-round`): the Gmail round of the pass, step 4,
-     on the continuation's `work` — the quarter's items not yet searched for this package.
-     Then, always, `record_step(pass_token, step="judge", action="start", report={checked,
+     `end_pass` here; it finishes its step and returns. It answers `status: pending`:
+     `record_step(…, action="delegated", delegation_id=…)` (rule 2) and end the turn (the
+     first round has already said its line; later rounds say nothing).
+   - At a continuation whose `next` is `gmail-round`: the Gmail round of the pass, step 4,
+     on the continuation's `work` — a chunk of at most 10 of the quarter's items not yet
+     searched for this package. Work the chunk in parallel batches, one call per item in the
+     same turn: every item's first `search_emails`, then the next queries where needed, then
+     every `download_attachment`, every `ingest_document`, every `record_search`. The
+     self-addressed search and the Telegram inbox sweep belong to the snapshot's
+     continuation only (its `step` is `snapshot`), not to later chunks. Then, always,
+     `record_step(pass_token, step="judge", action="start", report={checked,
      total, not_searched})` and delegate "judge the newly filed documents and the payments
-     triage did not reach, for <quarter> only" with context `pass_token=<token>,
-     step=judge` and the quarter (the specialist's steps 6 and 7, its triage listing only that
-     quarter). If it answers `status: pending`, end the turn.
+     triage did not reach, for <quarter> only", `mode="async"`, with context
+     `pass_token=<token>, step=judge` and the quarter (the specialist's steps 6 and 7, its
+     triage listing only that quarter); `record_step(…, action="delegated", …)` and end the
+     turn.
+   - At the judge's continuation, `next` is `gmail-round` again (the next chunk: as above,
+     with ITS token and work) or `end-pass`.
    - At the continuation whose `next` is `end-pass` (or when the snapshot stopped or failed):
      then `end_pass(pass_token, outcome, report)` yourself, by the outcome rule above —
-     always, whatever came back. The server decides from what the round did. Its answer carries `package_token` and `next`: `build` when the check is done (step 3); `next: null` with
+     always, whatever came back. A round that read the bank is not ended without its judge
+     step: if `end_pass` says so, start the judge step as above. The server decides from what the round did. Its answer carries `package_token` and `next`: `build` when the check is done (step 3); `next: null` with
      `more: true` when the check needs another round — call `continue_pass()` (rule 8) and
      do the round it starts; or a `speak` when the package cannot be built (the bank could
      not be read, or a refusal stopped it) — send it, mark it delivered, write no line of
