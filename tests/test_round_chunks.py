@@ -274,6 +274,26 @@ class TestADelegationsEndEndsItsStep(Chunks):
         c = self.call("continue_pass", delegation_id=twin, delegation_status="error")
         self.assertEqual(c["continue"]["ended"], "errored")
 
+    def test_a_restarted_judgment_remembers_the_delegation_it_replaced(self):
+        # judgment 2's delegation shares its prefix with judgment 1's: a replayed notice
+        # for judgment 1 is ambiguous and closes nothing
+        self.seed(12)
+        c = self.snapshot_round(self.ask()["pass_token"])
+        t = self.chunk(c)
+        self.start(t, step="judge")
+        self.call("record_step", pass_token=t, step="judge", action="delegated",
+                  delegation_id=D1)
+        self.call("record_step", pass_token=t, step="judge", action="finish",
+                  triage_remaining=0)
+        t = self.chunk(self.claim()["continue"])
+        self.start(t, step="judge")
+        twin = D1[:8] + D2[8:]
+        self.call("record_step", pass_token=t, step="judge", action="delegated",
+                  delegation_id=twin)
+        self.assertIn("running", self.call("continue_pass", delegation_id=D1[:8],
+                                           delegation_status="error"))
+        self.assertIsNone(self.judge_row()["finished_at"])
+
     def test_a_prefix_shared_with_an_older_passs_delegation_closes_nothing(self):
         # C1 (Astra S1): a notice replayed from an earlier pass never closes a newer step
         self.seed(1)
