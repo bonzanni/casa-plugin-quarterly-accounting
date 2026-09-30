@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -125,7 +125,8 @@ CREATE TABLE IF NOT EXISTS documents (
   source TEXT NOT NULL, source_ref TEXT, acquisition_json TEXT,
   extraction_author TEXT NOT NULL, original_name TEXT,
   irrelevant INTEGER NOT NULL DEFAULT 0,
-  ingested_at TEXT NOT NULL, ingest_quarter TEXT NOT NULL);
+  ingested_at TEXT NOT NULL, ingest_quarter TEXT NOT NULL,
+  date_read_at TEXT);            -- when document_date was last read on the document (#22)
 
 CREATE TABLE IF NOT EXISTS counterparties (
   cp_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
@@ -367,6 +368,10 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE package_requests_v6 RENAME TO package_requests",
         "CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state)",
         "ALTER TABLE deliveries ADD COLUMN as_built INTEGER NOT NULL DEFAULT 0"],
+    # issue #22: a document's date is marked when it was read on the document (a machine
+    # pairing, a confirmation). Nothing earlier kept that mark, so every filed document
+    # starts unread and the next package round's judge confirms its date.
+    6: ["ALTER TABLE documents ADD COLUMN date_read_at TEXT"],
 }
 
 

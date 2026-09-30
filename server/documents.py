@@ -231,6 +231,13 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         if fields:
             conn.execute("UPDATE documents SET %s WHERE doc_id=?"
                          % ", ".join(f"{k}=?" for k in fields), (*fields.values(), doc_id))
+        if "document_date" in fields:
+            # issue #22: a date written here was read on the document (the specialist
+            # after opening it, or the operator's own words): the file is named by it. A
+            # date cleared is no date read (D2, Astra S2): the file falls back to the
+            # payment's date, and the package says so
+            conn.execute("UPDATE documents SET date_read_at=? WHERE doc_id=?",
+                         (db.now() if fields["document_date"] else None, doc_id))
         lineage.settle_doc_holders(conn, doc_id)
         return {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields}
 

@@ -228,7 +228,9 @@ class TestContents(Base):
         names = [n for n in z.namelist() if n.startswith("unresolved/")]
         self.assertEqual(names, ["unresolved/2026-07-02_Adobe_100.00.pdf"])
         notes = z.read("notes.md").decode()
-        self.assertEqual(notes.count("unresolved/2026-07-02_Adobe_100.00.pdf"), 2)
+        # twice as a candidate, once among the files named by an unread date (issue #22)
+        self.assertEqual(notes.count("unresolved/2026-07-02_Adobe_100.00.pdf"), 3)
+        self.assertEqual(notes.split("## Dates not yet read")[1].count("Adobe"), 1)
 
     def test_same_day_same_amount_same_vendor_documents_get_distinct_names(self):
         a, b = self.line(), self.line()

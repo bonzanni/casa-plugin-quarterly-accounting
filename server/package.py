@@ -71,6 +71,13 @@ def _place(folder: str, doc: dict, used: set, named: dict, fallback_date: str) -
     return named[key]
 
 
+def _undated(named: dict, docs: dict) -> list:
+    """Issue #22: the files named by a date never read on their document (filed by a
+    provisional reading, paired before 0.6.0 or by the operator), in name order."""
+    return sorted(name for (_, doc_id), name in named.items()
+                  if docs[doc_id].get("date_read_at") is None)
+
+
 def _freeze(conn, quarter: str) -> dict:
     start, end = dates.quarter_bounds(quarter)
     conn.execute("BEGIN")                 # one consistent WAL read snapshot for the whole build
@@ -117,6 +124,7 @@ def _freeze(conn, quarter: str) -> dict:
 
 def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple:
     files, used, named, manifest_rows, matched_docs = {}, set(), {}, [], []
+    placed = {}                     # doc_id -> the document row, for every file named
     missing, unclassified, nice, unresolved_lines, anomalies = [], [], [], [], []
     unread = []
     table = [list(COLUMNS)]
@@ -149,6 +157,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
             doc = ln["docs"][d["current"]["match_id"]]
             folder = route(doc["kind"], exp["tier"] or "required")
             docname = _place(folder, doc, used, named, dates.effective_date(r))
+            placed[doc["doc_id"]] = doc
             files[docname] = documents_bytes(doc)
             matched_docs.append(doc["sha256"])
             confidence = "; ".join(x for x in d["current"]["labels"] if x != "clean")
@@ -159,6 +168,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 notes.append("pairing not yet confirmed")
             for mid, doc in sorted(ln["docs"].items()):
                 name = _place("unresolved", doc, used, named, dates.effective_date(r))
+                placed[doc["doc_id"]] = doc
                 files[name] = documents_bytes(doc)
                 set_aside.append(name)
                 # a row not observed ships its documents set aside, named in its own
@@ -225,6 +235,12 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                   + (_successor(frozen["facts"].get(h["superseded_by"]))
                      if h["superseded_by"] else "")
                   for h in frozen["history"]]
+    undated = _undated(named, placed)
+    if undated:
+        # issue #22: only when there is one, so a package whose dates were all read is
+        # the package it always was
+        notes += ["", "## Dates not yet read from the document", ""]
+        notes += [f"- {name} — named by the date it was filed with" for name in undated]
     if oversize_note:
         notes += ["", "## Too large to send", ""] + [f"- {x}" for x in oversize_note]
     # The digest covers every file INCLUDING notes.md (round p6, Astra S2: a change
@@ -246,7 +262,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                  "ended. Not a filing set.", ""] + notes
     files["notes.md"] = ("\n".join(notes) + "\n").encode("utf-8")
     counts = {"payments": len(frozen["lines"]), "with_documents": len(matched_docs),
-              "missing": len(missing), "unclassified": len(unclassified), "unread": len(unread)}
+              "missing": len(missing), "unclassified": len(unclassified), "unread": len(unread),
+              "undated": len(undated)}
     return (deterministic_zip(files), digest, partial,
             {"rows": manifest_rows, "documents": sorted(matched_docs), "counts": counts})
 
@@ -310,6 +327,10 @@ def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, si
     if c.get("unread"):
         out.append(f"{c['unread']} not seen in the last bank check, so shipped unclassified "
                    "— say \"go and check now\", then rebuild.")
+    if c.get("undated"):
+        n = c["undated"]
+        out.append(f"{n} file{'s are' if n != 1 else ' is'} named by a date not yet read from "
+                   "the document — listed in notes.md.")
     check = check or {}
     if check.get("gmail") == "down":
         out.append("The email search couldn't run, so documents emailed since the last check "

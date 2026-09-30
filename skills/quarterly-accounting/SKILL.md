@@ -15,7 +15,7 @@ Two agents share one store:
 | Work | Who |
 |---|---|
 | Reading state, rendering a view, applying a reply, filing a document, Gmail, sending anything to the operator | **Ellen**, directly — never delegate a lookup |
-| Anything with bank-feed; deciding whether a document explains a payment (reading it with `read_document`); researching a portal link | **The finance specialist**, through `delegate_to_agent(agent="finance", mode="sync")` (a package round's: `mode="async"`) |
+| Anything with bank-feed; deciding whether a document explains a payment (reading it with `read_document`); researching a portal link | **The finance specialist**, through `delegate_to_agent(agent="finance", mode="sync")` (a check's and a package round's: `mode="async"`) |
 
 The test: if answering needs a PDF opened and an opinion formed, it is the specialist's; if
 it needs a row read, it is Ellen's.
@@ -98,8 +98,9 @@ token: the old one is refused from then on.
 The outcome for `end_pass`: `stopped` when `can_run` is false or the step's finish says
 `stopped`; `failed` when the step ended unfinished and nothing was imported this pass;
 `interrupted` when anything remains (`remaining_in_cycle`, `triage_remaining`, `work`
-truncated or `not_fresh`, an item not searched) or the step ended unfinished after the
-import; `complete` otherwise.
+truncated or `not_fresh`, an item not searched — after a judge step, the continuation's
+`report` says `not_searched` above 0) or the step ended unfinished after the import;
+`complete` otherwise.
 
 ## Ellen: answering anything about the accounting
 
@@ -239,20 +240,25 @@ pass, whichever comes first:
 2. `check_setup()`. For an operator-triggered pass that will be long (first run, a
    catch-up), say one line first.
 3. `record_step(pass_token, step="sweep", action="start")`, then delegate to the finance
-   specialist, sync mode, the task "quarterly-accounting pass" with context
-   `pass_token=<token>, step=sweep` and this skill's section "The specialist's pass". If it answers
-   `status: pending`, say
-   "Checking the bank — this takes a few minutes; I'll send the result here."
-   (on the cron, output `<silent/>`) and end the turn. When it answers,
-   continue as above: the continuation's `next` is the Gmail round (`gmail-round`), or
-   step 6 (`end-pass`) when the pass stopped or failed — then sweep your Telegram inbox
+   specialist, `mode="async"`, the task "quarterly-accounting pass" with context
+   `pass_token=<token>, step=sweep` and this skill's section "The specialist's pass". It
+   answers `status: pending`: `record_step(…, action="delegated", delegation_id=…)` (rule
+   2), say "Checking the bank — this takes a few minutes; I'll send the result here." (on
+   the cron, output `<silent/>`) and end the turn. A check spans several of your turns,
+   and each turn ends at a delegation: never carry on to the next step in the same turn.
+   Its notification's continuation (rule 5) has `next`: the Gmail round (`gmail-round`),
+   or step 6 (`end-pass`) when the pass stopped or failed — then sweep your Telegram inbox
    first.
 4. **Gmail round.** Always make the Gmail probe first, even when Gmail was down last time:
    one small `search_emails` call, then `record_probe(pass_token, kind="gmail", ok=…,
    detail=…)` with what it showed. If it failed, skip the searches below (not the inbox
    sweep) — the next pass probes again. The work list is the continuation's `work` (its
-   `triage` items), never a list from the specialist's reply. Skip `portal` items. For each
-   other item, run its ladder of narrow queries with `search_emails`, built from the item's
+   `triage` items) — a chunk of at most 10 items not yet searched in this check, portals
+   already left out — never a list from the specialist's reply. Work the chunk in parallel
+   batches, one call per item in the same turn: every item's first `search_emails`, then
+   the next queries where needed, then every `download_attachment`, every
+   `ingest_document`, every `record_search`. For each item, run its ladder of narrow
+   queries with `search_emails`, built from the item's
    fields — its `search_hint`, the printed amount, its `window_days` around the date,
    `has:attachment` — never one broad query (Gmail returns at most 100 and drops the
    rest). For a CRDT, and a DBIT `refund`, search Sent. Stop at the first query that finds
@@ -264,21 +270,26 @@ pass, whichever comes first:
    `record_search(pid, pass_token, queries=[…], found_candidate=…, exhausted=…,
    incomplete=…)`. An item you never reached:
    `record_search(pid, pass_token, incomplete=true)` with no queries — it spends nothing, so
-   the item is not aged out for a search that never ran. The not-searched set is `work.remaining`, `not_fresh`, and
-   anything not reached. Also run one search for recent self-addressed mail with
-   attachments, and sweep your Telegram inbox as above (file only, say nothing).
-5. If anything was filed, or the continuation's `finish` says `triage_remaining` above 0, or
-   its `judge_due` is above 0, or the sweep ended unfinished (`ended` is `expired` or
-   `errored`):
+   the item is not aged out for a search that never ran. At the sweep's continuation only
+   (its `step` is `sweep`), also run one search for recent self-addressed mail with
+   attachments, and sweep your Telegram inbox as above (file only, say nothing) — not at
+   later chunks.
+5. After a chunk with any item in it (the Gmail probe ok), always go on to the judge step.
+   Otherwise, only if anything was filed, or the continuation's `finish` says
+   `triage_remaining` above 0, or its `judge_due` is above 0, or the sweep ended unfinished
+   (`ended` is `expired` or `errored`) — else step 6:
    `record_step(pass_token, step="judge", action="start", report={checked, total,
    not_searched})`, then delegate "judge the newly filed documents and the payments triage
-   did not reach" with context `pass_token=<token>, step=judge` (the same token; the specialist's steps 6 and 7: triage, then
-   the sweep once more). If it answers `status: pending`, output `<silent/>` and end the
-   turn. When it answers, continue as above: its `next` is step 6.
+   did not reach", `mode="async"`, with context `pass_token=<token>, step=judge` (the same
+   token; the specialist's steps 6 and 7: triage, then the sweep once more).
+   `record_step(…, action="delegated", …)`, output `<silent/>` and end the turn. Its
+   continuation's `next` is `gmail-round` — the next chunk: steps 4 and 5 again, with ITS
+   token and work — or `end-pass` (step 6), with the check's `report`.
 6. `end_pass(pass_token, outcome, report)` by the outcome rule above. If it refuses
    because a payment was not judged in this pass (`not ended: …`), do what it says:
    start the judge step (step 5) and end the pass after it, or end it `interrupted`. Report `{checked,
-   total, not_searched}` — after step 5, the continuation's `report`. If it returns `speak`,
+   total, not_searched}` — after step 5, the continuation's `report` (the server counts the
+   whole check, every chunk; never add to it). If it returns `speak`,
    send its text verbatim — a long alert's remainder comes with the next `speak` — call
    `mark_rendering_delivered` with its `render_id`, then output `<silent/>`. If not: on the
    cron, output `<silent/>` and nothing else; for the operator, render and send
@@ -408,7 +419,14 @@ named in your context. Your one expectation write is in step 6.
    `propose_match` passes it as `document_date` (it names the file in the package and
    replaces the filed reading, which is often the email's date). Correct a filed document's reading with `update_document_metadata(doc_id, …,
    pass_token=…)`; a quotation, order confirmation or losing duplicate is
-   `mark_irrelevant(doc_id, pass_token=…)`. The auto-match bar:
+   `mark_irrelevant(doc_id, pass_token=…)`. In a package's judge step, when triage is done
+   and there is time, confirm the dates the package's files will be named by:
+   `list_quarter_state(quarter=<the quarter>, dates_unread=true, pass_token=…)` lists the
+   quarter's pairings whose document's date was never read on it (paged the same way);
+   for each, `read_document(doc_id)` of its `current.document`, read the printed issue
+   date, and `update_document_metadata(doc_id, document_date=<that date>, pass_token=…)`
+   — the same date when the filed one was right. What time does not reach, the next
+   judgment does; the package says how many it names by an unread date. The auto-match bar:
    - the payment is booked, on the bound account, and expects a document kind;
    - the document is filed, is that kind, and reads as that kind (an invoice, not a quotation
      or order confirmation; a credit note only for a credit-note expectation; for a CRDT, a

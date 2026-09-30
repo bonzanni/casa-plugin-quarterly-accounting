@@ -119,7 +119,7 @@ class TestTheRoundInChunks(Chunks):
         self.end(c, "interrupted")
         self.assertEqual((self.request()["state"], self.request()["remaining"]), ("queued", 1))
 
-    def test_a_judgment_is_not_restarted_while_it_runs_nor_outside_a_package(self):
+    def test_a_judgment_is_not_restarted_while_it_runs_nor_after_it_failed(self):
         self.seed(12)
         c = self.snapshot_round(self.ask()["pass_token"])
         t = self.chunk(c)
@@ -129,27 +129,7 @@ class TestTheRoundInChunks(Chunks):
         self.call("record_step", pass_token=t, step="judge", action="finish", failed=True)
         self.assertEqual(self.text("record_step", pass_token=t, step="judge", action="start"),
                          "refused: the judge step was already started in this pass")
-        self.doCleanups()
-        self.setUp()
-        self.seed(1)
-        t = self.begin("operator")
-        self.start(t)
-        self.specialist(t)
-        t = self.claim()["continue"]["pass_token"]
-        self.start(t, step="judge")
-        self.call("record_step", pass_token=t, step="judge", action="finish",
-                  triage_remaining=0)
-        t = self.claim()["continue"]["pass_token"]
-        self.assertEqual(self.text("record_step", pass_token=t, step="judge", action="start"),
-                         "refused: the judge step was already started in this pass")
-
-    def test_the_cron_pass_still_lists_up_to_fifty(self):
-        self.seed(12)
-        t = self.begin("operator")
-        self.start(t)
-        self.specialist(t)
-        c = self.claim()["continue"]
-        self.assertEqual(len(c["work"]["triage"]), 12)
+        # issue #21: a check restarts its judgment per chunk too (tests/test_check_chunks.py)
 
     def test_portals_do_not_fill_a_chunk(self):
         # D1 (Astra S2, Terra S2): ten portal payments ahead in pid order

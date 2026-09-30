@@ -139,7 +139,9 @@ def _match_summary(conn, match_id) -> dict:
                          "issuer": d["issuer"] or d["counterparty"],
                          "number": d["document_number"], "date": d["document_date"],
                          "amount_minor": d["amount_minor"], "currency": d["currency"],
-                         "recipient": d["recipient"], "sha256": d["sha256"]}}
+                         "recipient": d["recipient"], "sha256": d["sha256"],
+                         # issue #22: the date names the file; was it read on the document?
+                         "date_read": d["date_read_at"] is not None}}
 
 
 def describe(conn, pid: int) -> dict:
@@ -285,13 +287,57 @@ def _paged(items: list, after, limit: int, view) -> dict:
             "next": [shown[-1]["pid"]] if rest and shown else None}
 
 
+def searched_since(d: dict, seq: int) -> bool:
+    """A search made after store sequence value `seq`, for the payment's facts as they
+    are now (issue #15; the check's origin since issue #21)."""
+    srch = d["search"]
+    return (srch.get("searched_seq") or 0) > seq and (
+        d["row_snapshot"] is not None
+        and srch.get("facts_fp") == db.canonical(d["row_snapshot"]))
+
+
 def searched_for(d: dict, req) -> bool:
     """Issue #15: a search counts for package request `req` when it was made after the
     request was opened and the payment's facts are the ones searched for."""
-    srch = d["search"]
-    return (srch.get("searched_seq") or 0) > req["created_seq"] and (
-        d["row_snapshot"] is not None
-        and srch.get("facts_fp") == db.canonical(d["row_snapshot"]))
+    return searched_since(d, req["created_seq"])
+
+
+def check_work(conn, since_seq: int, items=None) -> list:
+    """Issue #21: a check's Gmail work — fresh triage items, portals left out, not
+    searched since the check's origin `since_seq`. What still needs a search now: an
+    item a judgment pairs leaves it (the report counts `owed`, never this)."""
+    items = triage(conn) if items is None else items
+    return [d for d in items if d["fresh"] and not d["portal"]
+            and not searched_since(d, since_seq)]
+
+
+def grow_owed(conn, owed: list, since_seq: int) -> list:
+    """Issue #21 (D1): the searches a check owes, by pid — its work and every not-fresh
+    triage item (never handed out) — grown at every hand-out, never shrunk: an item
+    that leaves triage unsearched (a judgment paired it) is still owed."""
+    items = triage(conn)
+    add = {d["pid"] for d in check_work(conn, since_seq, items)}
+    add |= {d["pid"] for d in items if not d["fresh"]}
+    return sorted(set(owed) | add)
+
+
+def check_report(conn, owed: list, since_seq: int) -> dict:
+    """Issue #21 (D1): the check's report over ONE population, the owed pids (merged
+    lineages resolved, ended ones left out): searched = the payment's own search
+    record since the check's origin, never its absence from triage."""
+    seen, not_searched = set(), 0
+    for pid in owed:
+        rpid = lineage.resolve_pid(conn, pid)
+        if rpid in seen:
+            continue
+        d = describe(conn, rpid)
+        if d["ended"]:
+            continue
+        seen.add(rpid)
+        if not searched_since(d, since_seq):
+            not_searched += 1
+    return {"checked": len(seen) - not_searched, "total": len(seen),
+            "not_searched": not_searched}
 
 
 def package_work(conn, req) -> list:
@@ -339,12 +385,12 @@ def judge_due_state(conn, quarter=None) -> dict:
     return out
 
 
-def work_list(conn, req=None) -> dict:
-    """The sweep continuation's `work` (issue #2, #3): the first page of
-    list_quarter_state(triage=true), in the Gmail round's shape. For a package
-    request (issue #15): its quarter's items not yet searched for it, portals left out
-    before a chunk of GMAIL_CHUNK is cut (issue #17, D1: ten portals ahead in pid order
-    must not fill a chunk and hide a searchable item)."""
+def work_list(conn, req=None, since_seq=None) -> dict:
+    """A Gmail chunk, in the Gmail round's shape: the items still to search, portals
+    left out before a chunk of GMAIL_CHUNK is cut (issue #17, D1: ten portals ahead in
+    pid order must not fill a chunk and hide a searchable item). For a package request
+    (issue #15): its quarter's items not yet searched for it. For a check (issue #21):
+    the items not searched since its origin `since_seq`."""
     items = triage(conn)
     if req is not None:
         items = [d for d in items if d["quarter"] == req["quarter"]]
@@ -352,13 +398,25 @@ def work_list(conn, req=None) -> dict:
     items = [d for d in items if d["fresh"]]
     if req is not None:
         items = [d for d in items if not d["portal"] and not searched_for(d, req)]
-    pg = _paged(items, None, TRIAGE_LIMIT if req is None else GMAIL_CHUNK, work_item)
+    elif since_seq is not None:
+        items = check_work(conn, since_seq, items)
+    limit = TRIAGE_LIMIT if req is None and since_seq is None else GMAIL_CHUNK
+    pg = _paged(items, None, limit, work_item)
     return {"triage": pg["shown"], "total": len(items), "truncated": pg["remaining"] > 0,
             "remaining": pg["remaining"], "not_fresh": not_fresh, "notice": NOTICE_TRIAGE}
 
 
+def dates_unread(d: dict) -> bool:
+    """Issue #22: the payment's current pairing holds a document whose date was never
+    read on it (filed by Ellen's provisional reading, paired before 0.6.0 or by the
+    operator): the package would name the file by an unread date."""
+    cur = d["current"]
+    return (not d["ended"] and cur is not None and cur["state"] in ("matched", "proposed")
+            and not cur["document"]["date_read"])
+
+
 def list_quarter_state(conn, quarter=None, triage_only=False, fresh_only=True,
-                       limit=TRIAGE_LIMIT, after=None, pid=None) -> dict:
+                       limit=TRIAGE_LIMIT, after=None, pid=None, unread_dates=False) -> dict:
     if pid is not None:
         # one item re-read (a match refused as changed): the listed shape, or null
         # when the payment has ended
@@ -370,6 +428,17 @@ def list_quarter_state(conn, quarter=None, triage_only=False, fresh_only=True,
         item = budget.page([listed(d)], 1, ident=lambda v: f"payment #{v['pid']}")[0][0]
         return {"item": item, "notice": NOTICE_TRIAGE}
     after = _after(after)
+    if unread_dates:
+        # issue #22: a package's judge confirms the dates its files will be named by
+        if not quarter or triage_only:
+            raise db.Refusal("dates_unread=true lists one quarter's pairings: pass quarter, "
+                             "not triage")
+        items = [d for d in (describe(conn, p) for p in quarter_pids(conn, quarter))
+                 if dates_unread(d)]
+        pg = _paged(items, after, limit, listed)
+        return {"quarter": quarter, "dates_unread": pg["shown"], "total": len(items),
+                "truncated": pg["remaining"] > 0, "remaining": pg["remaining"],
+                "next": pg["next"], "notice": NOTICE_TRIAGE}
     if triage_only:
         # fix wave F (throughput): not every open payment of every quarter at once —
         # by default only the ones read since the latest import (the only ones a
