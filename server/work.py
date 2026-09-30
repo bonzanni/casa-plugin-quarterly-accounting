@@ -339,16 +339,6 @@ def judge_due_state(conn, quarter=None) -> dict:
     return out
 
 
-def searched_since(conn, req, seq) -> bool:
-    """Issue #17: whether any payment of the request's quarter had search effort recorded
-    after store sequence `seq` — the chunk before a judgment searched something."""
-    for pid in quarter_pids(conn, req["quarter"]):
-        srch = json.loads(lineage.projection(conn, pid)["search_json"] or "{}")
-        if (srch.get("searched_seq") or 0) > seq:
-            return True
-    return False
-
-
 def work_list(conn, req=None) -> dict:
     """The sweep continuation's `work` (issue #2, #3): the first page of
     list_quarter_state(triage=true), in the Gmail round's shape. For a package

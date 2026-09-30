@@ -139,23 +139,14 @@ def start(conn, token, step: str, carry: dict) -> dict:
             q = req["quarter"] if req is not None else None
             carry = {**carry, "due_at_start": {str(p): v for p, v in
                                                work.judge_due_state(conn, q).items()}}
-        if req is not None and step in ("snapshot", "judge"):
-            # issue #17: sequence marks — the Gmail chunk before a judgment searched between
-            # the previous step's start (`prev_seq`) and this one's (`seq`)
-            before = prior if restart else conn.execute(
-                "SELECT carry_json FROM pass_steps WHERE pass_id=? AND step='snapshot'",
-                (m["pass_id"],)).fetchone()
-            carry = {**carry, "seq": db.next_seq(conn)}
-            if step == "judge":
-                old = json.loads(before["carry_json"] or "{}") if before is not None else {}
-                carry["prev_seq"] = old.get("seq", 0)
-            if restart:
-                # the delegations this row served before, so a notice naming one of them
-                # can never be read as this judgment's (D2)
-                gone = old.get("delegations_before", []) + (
-                    [old["delegation"]] if old.get("delegation") else [])
-                if gone:
-                    carry["delegations_before"] = gone
+        if restart:
+            # the delegations this row served before, so a notice naming one of them can
+            # never be read as this judgment's (D2)
+            old = json.loads(prior["carry_json"] or "{}")
+            gone = old.get("delegations_before", []) + (
+                [old["delegation"]] if old.get("delegation") else [])
+            if gone:
+                carry = {**carry, "delegations_before": gone}
         if restart:
             conn.execute("UPDATE pass_steps SET started_at=?, finished_at=NULL, finished_by=NULL,"
                          " finish_json=NULL, carry_json=? WHERE pass_id=? AND step=?",
@@ -296,9 +287,11 @@ def delegated(conn, token, step: str, delegation_id) -> dict:
         return {"step": step, "bound": True}
 
 
-def _recorded_delegations(conn, pass_id) -> list:
+def _recorded_delegations(conn) -> list:
+    """Every delegation id ever bound to a step, in any pass (C1, Astra S1: a notice
+    replayed from an older pass must not bind by a prefix a newer delegation shares)."""
     out = []
-    for r in conn.execute("SELECT carry_json FROM pass_steps WHERE pass_id=?", (pass_id,)):
+    for r in conn.execute("SELECT carry_json FROM pass_steps"):
         c = json.loads(r["carry_json"] or "{}")
         out += c.get("delegations_before", []) + ([c["delegation"]] if c.get("delegation")
                                                    else [])
@@ -308,7 +301,7 @@ def _recorded_delegations(conn, pass_id) -> list:
 def _close_delegated(conn, delegation_id, status) -> None:
     """A notification says delegation `delegation_id` ended: the running step it served
     is over. Bound by the id recorded on that step (a prefix of at least
-    DELEGATION_PREFIX characters that no other delegation recorded in the pass shares);
+    DELEGATION_PREFIX characters that no other delegation ever recorded shares);
     anything else — a stale or replayed notice, a finished step, a restarted judgment
     served by a newer delegation — changes nothing."""
     did = _delegation_id(delegation_id)
@@ -324,8 +317,8 @@ def _close_delegated(conn, delegation_id, status) -> None:
         mine = json.loads(row["carry_json"] or "{}").get("delegation")
         if not mine or not mine.startswith(did):
             return
-        if sum(1 for d in _recorded_delegations(conn, m["pass_id"]) if d.startswith(did)) != 1:
-            return                          # ambiguous: another recorded delegation shares it
+        if sum(1 for d in _recorded_delegations(conn) if d.startswith(did)) != 1:
+            return      # ambiguous: another delegation shares it — the step expires, as in 0.4.0
         body = {"failed": True} if status == "error" else {}
         kept = _finish(row).get("stopped")  # a kept stop (issue #10) stays a stop
         if kept:
@@ -535,7 +528,7 @@ def _claim_pass(conn, m, step) -> dict:
                 # issue #17: the next Gmail chunk of this round, then another judgment
                 can_run = binding.check_setup(conn)["can_run"]
                 if can_run:
-                    c.update(can_run=can_run, work=work.work_list(conn, req),
+                    c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req),
                              judge_due=len(work.judge_due_state(conn, req["quarter"])),
                              next="gmail-round")
     elif step["step"] == "handover":
@@ -552,18 +545,33 @@ def _claim_pass(conn, m, step) -> dict:
         if fin.get("stopped") or not can_run or not imported or req is None:
             c.update(can_run=can_run, next="end-pass")
         else:
-            c.update(can_run=can_run, work=work.work_list(conn, req),
+            c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req),
                      judge_due=len(work.judge_due_state(conn, req["quarter"])),
                      next="gmail-round")
     return {"continue": c}
 
 
+def _hand_chunk(conn, pass_id, req) -> dict:
+    """A package round's Gmail chunk (issue #17), with the count of the quarter's items
+    still unsearched for the request kept on the round's snapshot row: the next chunk is
+    handed out only if a chunk brought that count down (_another_chunk)."""
+    import work
+    w = work.work_list(conn, req)
+    row = conn.execute("SELECT carry_json FROM pass_steps WHERE pass_id=? AND step='snapshot'",
+                       (pass_id,)).fetchone()
+    carry = {**json.loads(row["carry_json"] or "{}"), "handed": w["total"]}
+    conn.execute("UPDATE pass_steps SET carry_json=? WHERE pass_id=? AND step='snapshot'",
+                 (db.canonical(carry), pass_id))
+    return w
+
+
 def _another_chunk(conn, pass_id, req, step) -> bool:
     """Issue #17: after a package round's judgment, another Gmail chunk runs in the same
     pass iff the judgment finished (not failed, stopped or expired), this pass's Gmail
-    probe was ok, the quarter still has items unsearched for the request, and the chunk
-    before this judgment searched something — so the loop ends: every chunk either
-    searches an item or ends the pass (round_fate takes it from there)."""
+    probe was ok, and the quarter's items still unsearched for the request are fewer than
+    when the last chunk was handed out, yet not none — so the loop ends: that count is a
+    non-negative integer that must fall with every chunk (a search of an item already
+    searched is not progress), and what a pass leaves, round_fate takes from there."""
     import work
     if _ended(step) != "finished" or _finish(step).get("stopped"):
         return False
@@ -571,10 +579,11 @@ def _another_chunk(conn, pass_id, req, step) -> bool:
                          (pass_id,)).fetchone()
     if probe is None or not probe["ok"]:
         return False
-    if not work.package_work(conn, req):
-        return False
-    prev = json.loads(step["carry_json"] or "{}").get("prev_seq", 0)
-    return work.searched_since(conn, req, prev)
+    snap = conn.execute("SELECT carry_json FROM pass_steps WHERE pass_id=? AND step='snapshot'",
+                        (pass_id,)).fetchone()
+    handed = json.loads(snap["carry_json"] or "{}").get("handed") if snap is not None else None
+    left = len(work.package_work(conn, req))
+    return handed is not None and 0 < left < handed
 
 
 def _claim_round(conn, req) -> dict:

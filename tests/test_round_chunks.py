@@ -66,6 +66,18 @@ class TestTheRoundInChunks(Chunks):
         self.end(c, "interrupted")
         self.assertEqual((self.request()["state"], self.request()["remaining"]), ("queued", 2))
 
+    def test_searching_an_item_already_searched_is_not_progress(self):
+        self.seed(12)
+        c = self.snapshot_round(self.ask()["pass_token"])
+        first = c["work"]["triage"]
+        c = self.judged(self.chunk(c))
+        self.assertEqual((c["next"], c["work"]["total"]), ("gmail-round", 2))
+        t = c["pass_token"]
+        self.call("record_probe", pass_token=t, kind="gmail", ok=True)
+        self.search(t, first[:3])                            # the first chunk's, again
+        c = self.judged(t)
+        self.assertEqual(c["next"], "end-pass")
+
     def test_a_judgment_that_failed_stopped_or_expired_ends_the_pass(self):
         for how in ("failed", "stopped", "expired"):
             with self.subTest(how=how):
@@ -221,6 +233,32 @@ class TestADelegationsEndEndsItsStep(Chunks):
         c = self.call("continue_pass", delegation_id=D2[:8], delegation_status="error")
         self.assertEqual(c["continue"]["ended"], "errored")
 
+    def test_a_notice_replayed_after_the_specialists_finish_changes_nothing(self):
+        # a restart replays a notice: the specialist's own finish (its counts) stands
+        self.seed(12)
+        c = self.snapshot_round(self.ask()["pass_token"])
+        t = self.chunk(c)
+        self.start(t, step="judge")
+        self.call("record_step", pass_token=t, step="judge", action="delegated",
+                  delegation_id=D1)
+        self.call("record_step", pass_token=t, step="judge", action="finish",
+                  triage_remaining=0, remaining_in_cycle=0)
+        before = tuple(self.judge_row())
+        c = self.call("continue_pass", delegation_id=D1[:8], delegation_status="error")
+        self.assertEqual(tuple(self.judge_row()), before)
+        self.assertEqual((c["continue"]["ended"], c["continue"]["finish"]),
+                         ("finished", {"remaining_in_cycle": 0, "triage_remaining": 0}))
+        self.call("continue_pass", delegation_id=D1, delegation_status="error")   # again
+        self.assertEqual(tuple(self.judge_row()), before)
+
+    def test_an_expired_step_is_left_to_expire(self):
+        self.delegated_snapshot()
+        self.clock.advance(steps.STEP_EXPIRY_S)
+        c = self.call("continue_pass", delegation_id=D1, delegation_status="error")
+        self.assertEqual(c["continue"]["ended"], "expired")
+        self.assertIsNone(self.conn.execute(
+            "SELECT finished_at FROM pass_steps WHERE step='snapshot'").fetchone()[0])
+
     def test_an_ambiguous_prefix_closes_nothing(self):
         self.seed(12)
         c = self.snapshot_round(self.ask()["pass_token"])
@@ -233,6 +271,28 @@ class TestADelegationsEndEndsItsStep(Chunks):
                   delegation_id=twin)                              # re-delegated
         self.assertIn("running", self.call("continue_pass", delegation_id=D1[:8],
                                            delegation_status="error"))
+        c = self.call("continue_pass", delegation_id=twin, delegation_status="error")
+        self.assertEqual(c["continue"]["ended"], "errored")
+
+    def test_a_prefix_shared_with_an_older_passs_delegation_closes_nothing(self):
+        # C1 (Astra S1): a notice replayed from an earlier pass never closes a newer step
+        self.seed(1)
+        t = self.begin("operator")
+        self.start(t)
+        self.call("record_step", pass_token=t, step="sweep", action="delegated",
+                  delegation_id=D1)
+        self.specialist(t)
+        c = self.claim()["continue"]
+        self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted")
+        twin = D1[:8] + D2[8:]
+        t = self.ask()["pass_token"]
+        self.start(t, step="snapshot")
+        self.call("record_step", pass_token=t, step="snapshot", action="delegated",
+                  delegation_id=twin)
+        self.assertIn("running", self.call("continue_pass", delegation_id=D1[:8],
+                                           delegation_status="ok"))
+        self.assertIsNone(self.conn.execute(
+            "SELECT finished_at FROM pass_steps WHERE step='snapshot'").fetchone()[0])
         c = self.call("continue_pass", delegation_id=twin, delegation_status="error")
         self.assertEqual(c["continue"]["ended"], "errored")
 
