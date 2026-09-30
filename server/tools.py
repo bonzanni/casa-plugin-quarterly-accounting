@@ -438,7 +438,8 @@ def t_begin(args):
           "snapshot names quarter and channel; a judge carries report={checked, total, "
           "not_searched}), then passes the same pass_token to the specialist. The specialist, "
           "as its last action: action=\"finish\" with remaining_in_cycle, triage_remaining, "
-          "and stopped=<the refusal> if it stopped. Ellen finishes it herself only when the "
+          "and stopped=<the refusal> only if a refusal stopped it (running out of time is not "
+          "a stop: finish with the counts). Ellen finishes it herself only when the "
           "delegation came back in her turn without a finish (failed=true on an error).",
           obj({"pass_token": TOKEN, "step": S, "action": S, "quarter": Q, "channel": S,
                "doc_ids": AI, "report": O, "remaining_in_cycle": I, "triage_remaining": I,

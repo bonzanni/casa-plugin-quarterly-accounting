@@ -172,16 +172,29 @@ def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False) 
         if row["finished_at"] is not None:
             return {"step": step, "finished": True, "already": True}
         body = {k: v for k, v in counts.items() if v is not None}
+        # issue #10: running out of time is not a stop. Once the step's time is up (the
+        # sweep pages `time_up`) after this pass's import, a `stopped` is recorded as
+        # out of time: the pass goes on, and the specialist's words are kept, not
+        # routed on. Before the import nothing goes on anyway, and a stop's reason
+        # (a refused import) is what the operator is told
+        out_of_time = _age(row["started_at"]) >= SWEEP_STOP_S and conn.execute(
+            "SELECT 1 FROM snapshots WHERE pass_id=?", (m["pass_id"],)).fetchone() is not None
         if stopped:
             import views
-            body["stopped"] = views.clip(str(stopped), STOPPED_MAX)
+            body["said" if out_of_time else "stopped"] = views.clip(str(stopped), STOPPED_MAX)
         if failed:
             body["failed"] = True
         by = "resident" if failed or not body else "specialist"
+        if out_of_time and not failed:
+            body["time_up"] = True
         conn.execute("UPDATE pass_steps SET finished_at=?, finished_by=?, finish_json=?"
                      " WHERE pass_id=? AND step=?",
                      (db.now(), by, db.canonical(body), m["pass_id"], step))
-        return {"step": step, "finished": True, "already": False}
+        out = {"step": step, "finished": True, "already": False}
+        if "said" in body:
+            out["recorded_as"] = ("out of time, not stopped: the step's time was up, so the "
+                                  "pass goes on and a later pass resumes")
+        return out
 
 
 # --- the clock ---------------------------------------------------------------------------

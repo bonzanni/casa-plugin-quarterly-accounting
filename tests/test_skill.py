@@ -346,6 +346,11 @@ class TestSkill(TempEnv):
                       "and return: the pass has moved on and your recorded work is kept.", spec)
         sweep = " ".join(self.section("5. **Sweep.**", "6. **Triage.**").split())
         self.assertIn("until `remaining_in_cycle` is 0 or `time_up`", sweep)
+        # issue #10: running out of time is never reported as `stopped`
+        self.assertIn("`stopped=<the refusal>` only if a refusal stopped you. Running out of "
+                      "time (`time_up`, `wrap_up`) is never `stopped`", spec)
+        self.assertIn("finish where you are with `remaining_in_cycle` and no `stopped`", sweep)
+        self.assertNotIn("with `stopped=…` if you stopped", spec)
         self.assertNotIn("turn budget", spec)
         self.assertIn("`list_quarter_state(triage=true, pass_token=…)`", spec)
         self.assertIn("`upsert_counterparty(name, search_hint=…, pass_token=…)`", spec)

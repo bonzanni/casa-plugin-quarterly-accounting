@@ -138,7 +138,9 @@ alongside Ellen.
   token to the specialist.
 - **Finished by the specialist.** As its last action, the specialist writes
   `action="finish"` with its counts (`remaining_in_cycle`, `triage_remaining`) and
-  `stopped=<refusal>` if it stopped.
+  `stopped=<refusal>` if a refusal stopped it. Running out of time is not a stop
+  (issue #10): once the step is past `SWEEP_STOP_S` and the pass has imported, a
+  `stopped` is stored as `said` with `time_up: true`, and the pass goes on.
 - **Finished by Ellen.** She writes `action="finish"` herself only when the delegation
   returned to her in the same turn without a finish. On an error she adds
   `failed=true`.
@@ -565,6 +567,8 @@ Two notes on the schema:
 - **`finish(conn, token, step, *, by, counts, stopped=None, failed=False)`**:
   - checks the token, so a superseded specialist is refused here;
   - a second finish of a finished step is a no-op.
+  - past `SWEEP_STOP_S`, after this pass's import, a `stopped` is kept as `said` and
+    the finish carries `time_up: true` (issue #10): it routes nothing.
 - **`claim(conn)`** is §3.3, all in one transaction:
   - `work` comes from `work.list_quarter_state(triage_only=True)`;
   - `documents` comes from `match_state WHERE doc_id=? AND state IN ('matched',

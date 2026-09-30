@@ -524,6 +524,21 @@ class TestReviewC1(Requests):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 1)
         self.assertEqual(len(os.listdir(db.data_dir() / "packages")), 1)
 
+    def test_a_snapshot_out_of_time_after_its_import_is_built(self):
+        # issue #10: a `stopped` said for the clock running out does not cost the package
+        self.seed(1)
+        t = self.snapshot(finish=False)
+        self.clock.advance(steps.SWEEP_STOP_S)
+        self.call("record_step", pass_token=t, step="snapshot", action="finish",
+                  remaining_in_cycle=0, stopped="time budget exhausted")
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "end-pass-then-build")
+        end = self.call("end_pass", pass_token=c["pass_token"], outcome="complete")
+        self.assertEqual(self.request()["state"], "snapshot-done")
+        self.assertEqual(self.alerts_of("package-stopped"), [])
+        self.call("build_quarterly_package", quarter="2026-Q3",
+                  package_token=end["package_token"])
+
     def test_a_reclaimed_stopped_snapshot_is_told_not_built(self):
         # I4
         self.seed(1)
