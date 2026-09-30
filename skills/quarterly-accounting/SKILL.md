@@ -1,6 +1,6 @@
 ---
 name: quarterly-accounting
-description: Quarterly accounting for the operator's business account — use for ANY question, correction, document or request about accounting, invoices, receipts, payslips, missing documents, "what am I missing", "accounting list", "go and check now", a quarter's package ("give me Q3", "rebuild it", "send it again"), or when the weekly quarterly_accounting_pass cron fires. Also when a message names a vendor with a verdict ("the Zapier one is wrong"), says "all good", "all of them" or "more" after an accounting view, or contains the word "accounting", or when a system notification says a delegation to the finance specialist returned or failed.
+description: Quarterly accounting for the operator's business account — use for ANY question, correction, document or request about accounting, invoices, receipts, payslips, missing documents, "what am I missing", "accounting list", "go and check now", a quarter's package ("give me Q3", "rebuild it", "send it again", "send me the last package you built"), or when the weekly quarterly_accounting_pass cron fires. Also when a message names a vendor with a verdict ("the Zapier one is wrong"), says "all good", "all of them" or "more" after an accounting view, or contains the word "accounting", or when a system notification says a delegation to the finance specialist returned or failed.
 ---
 
 # Quarterly accounting
@@ -46,8 +46,9 @@ numbers. Name a payment by its date, amount and payee, as the views do.
 A pass's progress is in the store, never in a message, and every continuation gets a NEW
 token: the old one is refused from then on.
 
-1. Before `begin_pass` in any flow (the cron, "go and check now", a handed-over document,
-   a package), call `continue_pass()`. If it returns a continuation, it is an unfinished
+1. Before `begin_pass` in any flow (the cron, "go and check now", a handed-over document),
+   call `continue_pass()`. A package is the exception: its `begin_pass` comes FIRST, so the
+   ask is kept whatever happens next (Packaging, step 1). If it returns a continuation, it is an unfinished
    earlier one: do it first, to its end. Then return to what was asked — `continue_pass()`
    again, and when it has nothing, `begin_pass` and the requested flow (the check, the
    handed-over document, the package). The operator's request is never dropped.
@@ -84,6 +85,9 @@ token: the old one is refused from then on.
    `record_delivery` — is sent verbatim and marked delivered (`mark_rendering_delivered`),
    including on a cron turn and alongside `<silent/>`. It is how anything owed about a
    package reaches the operator exactly once.
+8. An answer with `more: true` (`end_pass`, `record_delivery`) means a package the operator
+   asked for is waiting for the next round of its check: when you are done with this
+   answer, call `continue_pass()` and do what it returns — on any turn, the cron's too.
 
 The outcome for `end_pass`: `stopped` when `can_run` is false or the step's finish says
 `stopped`; `failed` when the step ended unfinished and nothing was imported this pass;
@@ -142,6 +146,12 @@ question ("is the Zapier one right?") is not a reply — answer it with a view.
     filename=<the returned filename>)`; email: as in Packaging, step 3 — and
     `record_delivery(delivery_id, outcome)`. If it is refused (nothing waiting, or several —
     which one?), relay that.
+  - `send last <quarter>` / `send last` ("send me the last package you built for Q3") —
+    the previous build, unchanged: `stage_for_delivery(channel="telegram", last_built=true,
+    quarter=<the quarter, if the instruction names one>)` (`channel="email"` if they asked
+    by email), naming no package. Send it with the `caption` it returns (it says when the
+    package was built), then `record_delivery(delivery_id, outcome)`. Only on these words:
+    any other ask for a package is a fresh one (Packaging).
   - `show the rest` / `show older` — render `rest` / `older`.
   - `show item <pid>` — render `build_review(view="item", pid=<pid>)`, send it, mark it
     delivered (the operator asked for the candidates of that payment).
@@ -376,7 +386,9 @@ named in your context. Your one expectation write is in step 6.
    remaining count: the pass ends `interrupted` (the next pass's sweep makes the writes
    still owed).
    `list_quarter_state(triage=true, pass_token=…)` lists the payments that
-   need a document and have none of the right kind — only those seen in this import
+   need a document and have none of the right kind (in a package's judge step, whose
+   context names a quarter, only that quarter:
+   `list_quarter_state(triage=true, quarter=<the quarter>, pass_token=…)`) — only those seen in this import
    (`not_fresh` counts the others), a page at a time. Judge the page; while its `next` is
    set and there is time, list again with `after=<next>` (passed back unchanged) and judge
    that page. When you run out of pages or time, finish with the last page's `remaining` count as
@@ -445,32 +457,52 @@ named in your context. Your one expectation write is in step 6.
 
 ## Packaging (only when the operator asks)
 
-1. `continue_pass()` (above); then `begin_pass(trigger="package", reply="telegram")`
-   yourself — you hold the package pass, begin to end, exactly as in the cron flow. If it
-   answers `busy`, send its text: a pass is running, and the package is built when the
-   operator asks again after it. Then `record_step(pass_token, step="snapshot",
-   action="start", quarter=<the quarter>, channel="telegram"|"email")` and delegate
-   "quarterly-accounting package snapshot" to the specialist, sync mode, with context
-   `pass_token=<token>, step=snapshot` and the quarter: the probes of its pass, step 1 (stop if `can_run` is
-   false), the snapshot of step 3, the ends of step 4, then the sweep of step 5 for that
-   quarter only — `list_projections(pass_token, quarter=<the quarter>)`, every row it lists
-   read and recorded, exactly as in the pass (the import tells the store what each payment
-   is now; the sweep puts the quarter's tags and notes right on the bank ledger). It never calls `begin_pass`
-   or `end_pass` here; it finishes its step and returns whether it stopped and whether the
-   sweep reached `remaining_in_cycle` 0. If it answers `status: pending`, say
-   "Reading the bank first — the <quarter> package follows in a few minutes."
-   and end the turn. At the
-   continuation's `end-pass-then-build`, then `end_pass` yourself —
-   `end_pass(pass_token, outcome, report)` by the outcome rule above — always, whatever
-   came back. Its answer carries `package_token` and `next`: do `next` with that token
-   (`build` is step 2). Send any `speak` it returns and mark it delivered: a package that
-   stopped is told there (`next` is null) — build nothing, and write no line of your own.
-   Build only after the sweep. If the sweep ran out of room before 0,
-   the package still ships (the operator asked) with every payment classified as the import
-   saw it; a payment the export no longer carried ships unclassified with its documents set
-   aside, and the caption says how many — send it as it is; the operator can say "go and
-   check now", then rebuild.
-2. `build_quarterly_package(quarter, package_token)`. For Telegram:
+"Build Q3 and send it", "send me Q3", "give me Q3", "rebuild it" — every ask for a
+package is for a fresh one: the bank read again, the quarter's documents searched for in
+Gmail and judged, then built and sent. The previous build goes only on the words "send me
+the last package you built" (`send last`, above). The package arrives when the check is
+done, however many rounds that takes; say nothing in between.
+
+1. **Ask.** `begin_pass(trigger="package", quarter=<the quarter>, channel="telegram"|"email",
+   reply="telegram")` yourself — FIRST, before `continue_pass`: the ask is recorded whatever
+   happens next, and you hold the package pass, begin to end, exactly as in the cron flow.
+   It answers:
+   - `already` or `queued`: send its `text`, then `continue_pass()` and do any earlier
+     continuation it returns (rule 1). The package follows on its own.
+   - `started`: say
+     "Checking the bank and your email for <quarter> — the package follows when that's done."
+     Then `continue_pass()` (it can only find other work: do it first,
+     then come back) and go on with step 2, with this pass's token.
+2. **A round of the check.** Every round, the first one and each one `continue_pass`
+   starts later (its `next` is `snapshot`, its `reply` silent: say nothing of your own), is
+   one package pass you hold, begin to end:
+   - `record_step(pass_token, step="snapshot", action="start")`, then delegate
+     "quarterly-accounting package snapshot" to the specialist, sync mode, with context
+     `pass_token=<token>, step=snapshot` and the quarter: the probes of its pass, step 1 (stop if `can_run` is
+     false), the snapshot of step 3, the ends of step 4, then the sweep of step 5 for that
+     quarter only — `list_projections(pass_token, quarter=<the quarter>)`, every row it
+     lists read and recorded, exactly as in the pass. It never calls `begin_pass` or
+     `end_pass` here; it finishes its step and returns. If it answers `status: pending`, end
+     the turn (the first round has already said its line; later rounds say nothing).
+   - At the continuation (`next` is `gmail-round`): the Gmail round of the pass, step 4,
+     on the continuation's `work` — the quarter's items not yet searched for this package.
+     Then, always, `record_step(pass_token, step="judge", action="start", report={checked,
+     total, not_searched})` and delegate "judge the newly filed documents and the payments
+     triage did not reach, for <quarter> only" with context `pass_token=<token>,
+     step=judge` and the quarter (the specialist's steps 6 and 7, its triage listing only that
+     quarter). If it answers `status: pending`, end the turn.
+   - At the continuation whose `next` is `end-pass` (or when the snapshot stopped or failed):
+     then `end_pass(pass_token, outcome, report)` yourself, by the outcome rule above —
+     always, whatever came back. The server decides from what the round did. Its answer carries `package_token` and `next`: `build` when the check is done (step 3); `next: null` with
+     `more: true` when the check needs another round — call `continue_pass()` (rule 8) and
+     do the round it starts; or a `speak` when the package cannot be built (the bank could
+     not be read, or a refusal stopped it) — send it, mark it delivered, write no line of
+     your own. The check is done when every item of the quarter was searched for this
+     package (or the Gmail probe failed) and judged; a round that gets no further than the
+     one before ships the package with a caption that says so. A payment the export no
+     longer carried ships unclassified with its documents set aside, and the caption says
+     how many — send it as it is; the operator can say "go and check now", then rebuild.
+3. `build_quarterly_package(quarter, package_token)`. For Telegram:
    `stage_for_delivery(channel="telegram", package_id=…, package_token=…)`, then
    `send_media(path, kind="zip", filename=<the returned filename>, caption=…)` with the
    caption `build_quarterly_package` returned — the staged path's own name is random and
@@ -481,28 +513,32 @@ named in your context. Your one expectation write is in step 6.
    call `mark_rendering_delivered` with its `render_id` — that is what "send it again" binds
    to. The same holds for a resend that times out, and for an email recorded `uncertain`.
    If the build, or the first `stage_for_delivery` of a package, is refused because the bank
-   was re-read (while building, or since it was built), nothing was kept or staged: run
-   step 1 again (the package must follow the newest bank check), then build again, once. A resend
-   ("send it again") is the exact file already sent and is never refused for this.
+   was re-read since the check, nothing was kept or staged and the package's check runs
+   again: call `continue_pass()` and do the round it starts (step 2) — never build again
+   with the old token. A resend ("send it again") is the exact file already sent and is
+   never refused for this.
    A bank check that lands after a package's first send was staged but before it went out
    takes that send back: the staged file is removed, so `send_media` or `send_email` fails
    because the file is gone, or `record_delivery` answers that the bank was re-read before it
-   was sent. Either way nothing was delivered, and the operator is told through a `speak`
-   (that check's `end_pass`, or the next `continue_pass`) — never in your own words. A send
+   was sent. Either way nothing was delivered and the package's check runs again: call
+   `continue_pass()` (rule 8) — never in your own words. A send
    already under way at the moment of the check cannot be stopped; if it arrives, the "a
    delivered quarter changed" alert covers it.
-3. "Email me the Q3 package": `stage_for_delivery(channel="email", package_id=…,
-   package_token=…)`, then gmail's `send_email` to the operator's own address with the
+4. "Email me the Q3 package": the ask of step 1 with `channel="email"`, then, at step 3,
+   `stage_for_delivery(channel="email", package_id=…, package_token=…)`, then gmail's
+   `send_email` to the operator's own address with the
    returned path attached and the returned `request_id`. Casa asks the operator for one tap
    showing the recipient. Then `record_delivery(delivery_id, outcome, message_id=…,
    package_token=…)` — `delivered` only with the returned message id, otherwise
    `uncertain`. Never email anyone else. One request is sent once, by the channel it
-   was asked for: "email it to me" after a Telegram delivery is a new request — step 1
+   was last asked for: "email it to me" after a Telegram delivery is a new request — step 1
    again with `channel="email"`. A refusal that the package "was already sent" (or
    stopped, or taken back) is said to the operator as it is, never stopped on in silence.
+5. When the send is recorded, or when a continuation's `next` is null: if the answer says
+   `more: true`, `continue_pass()` (rule 8).
 
 A continuation of a package request (`continue_pass` returned a `package_token`): `build`
-and `stage` resume step 2 at that point, with ITS token. A continuation whose `next` is
+and `stage` resume step 3 at that point, with ITS token. A continuation whose `next` is
 null (a package request's, or a staged send's `delivery_id`) carries a `speak`: send it
 verbatim, then `mark_rendering_delivered` — a stopped package, a failed recovery, a send
 taken back because nobody finished sending it, a revoked send. Never send the file again yourself, and never write a failure

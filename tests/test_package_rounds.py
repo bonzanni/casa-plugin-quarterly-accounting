@@ -262,7 +262,9 @@ class TestSendTheLastBuild(Rounds):
     def test_the_previous_build_is_sent_unchanged_and_never_revoked(self):
         self.seed(1, documents=1)
         p, pkg, d = self.staged()
-        self.call("record_delivery", delivery_id=d["delivery_id"], outcome="delivered",
+        # its first send failed, so it never reached anyone: an ordinary resend of it would
+        # be refused once the bank moved on, and a staged first send would be revoked
+        self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
                   package_token=p)
         out = self.call("apply_reply", text="send me the last package you built for Q3")
         self.assertEqual(out["instructions"], ["send last 2026-Q3"])

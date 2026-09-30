@@ -35,7 +35,8 @@ OPERATOR_LINES = (
     # issue #2: the pending lines, the answers to a notice and to busy, the handover cases
     "Checking the bank — this takes a few minutes; I'll send the result here.",
     "Filed. Checking it against the payments — I'll tell you shortly.",
-    "Reading the bank first — the <quarter> package follows in a few minutes.",
+    # issue #15: the one line when the package's check starts
+    "Checking the bank and your email for <quarter> — the package follows when that's done.",
     "A check is running — ask again in a few minutes.",
     "A check is running — started N minutes ago.",
     "Ask again in a few minutes.",
@@ -261,10 +262,14 @@ class TestSkill(TempEnv):
         for head, until, begin in (("## Ellen: a document the operator hands over",
                                     "## Ellen: the pass", 'begin_pass(trigger="handover")'),
                                    ("## Packaging", "## Install",
-                                    'begin_pass(trigger="package", reply="telegram")')):
+                                    'begin_pass(trigger="package", quarter=<the quarter>, '
+                                    'channel="telegram"|"email", reply="telegram")')):
             sec = " ".join(self.section(head, until).split())
             self.assertIn(f"`{begin}` yourself", sec, head)
-            self.assertLess(sec.index("`continue_pass()`"), sec.index(f"`{begin}`"), head)
+            if head == "## Packaging":      # issue #15: the ask is recorded first
+                self.assertLess(sec.index(f"`{begin}`"), sec.index("`continue_pass()`"))
+            else:
+                self.assertLess(sec.index("`continue_pass()`"), sec.index(f"`{begin}`"), head)
             self.assertRegex(sec.lower(), r"then `end_pass(\([^)]*\))?` yourself", head)
             self.assertIn("never calls `begin_pass` or `end_pass` here", sec, head)
             self.assertIn("by the outcome rule above", sec, head)
@@ -317,7 +322,10 @@ class TestSkill(TempEnv):
                                   ("## Ellen: the pass", "## The specialist's pass", "sweep"),
                                   ("## Packaging", "## Install", "snapshot")):
             sec = " ".join(self.section(head, until).split())
-            self.assertLess(sec.index("`continue_pass()`"), sec.index("`begin_pass("), head)
+            if step == "snapshot":          # issue #15: a package's ask is recorded first
+                self.assertLess(sec.index("`begin_pass("), sec.index("`continue_pass()`"))
+            else:
+                self.assertLess(sec.index("`continue_pass()`"), sec.index("`begin_pass("), head)
             start = sec.index(f'record_step(pass_token, step="{step}", action="start"')
             self.assertLess(sec.index("`begin_pass("), start, head)
             self.assertIn("`status: pending`", sec, head)
