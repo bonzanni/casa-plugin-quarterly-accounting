@@ -32,21 +32,25 @@ _DATE = re.compile(r"\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|
 _T = r"(?:the\s+)?(?P<t>.+?)(?:\s+one)?"
 # issue #11: the sheet's pairings named together ("those six guesses are all right,
 # confirm them"; "all six proposals are right — confirm them"; "confirm all six") are
-# the sheet reply. EVERY count the clause states ("six", "both", "6") must be the
-# sheet's own — read from the whole clause, so no position of a count escapes it
+# the sheet reply. The collective must be NAMED in the clause — "all", "both" or a
+# count — never a bare "the guesses" or a pronoun, which may mean the ones just named
+# ("Zapier and Vercel are right. Confirm them.", R2). EVERY count the clause states
+# must be the sheet's own — read from the whole clause, so no position escapes it
 _NUMBERS = {w: i for i, w in enumerate(("two", "three", "four", "five", "six", "seven",
                                          "eight", "nine", "ten", "eleven", "twelve"), 2)}
 _NUM = r"(?:\d{1,3}|" + "|".join(_NUMBERS) + r")"
 _OK = r"(?:all\s+)?(?:good|fine|correct|right|ok|okay)"
-_THEM = (r"(?:(?:all|both)(?:\s+(?:of\s+)?(?:the|those|these))?|the|those|these)"
-         r"(?:\s+" + _NUM + r")?\s+(?:guesses|guessed ones|proposals|pairings|matches|suggestions)")
-_CONFIRM = (r"(?:please\s+)?confirm\s+(?:them(?:\s+all)?|all(?:\s+of\s+them)?|all\s+" + _NUM
-            + r"|" + _THEM + r")(?:\s+please)?")
+_NOUN = r"(?:guesses|guessed ones|proposals|pairings|matches|suggestions)"
+_THEM = (r"(?:(?:all|both)(?:\s+(?:of\s+)?(?:the|those|these))?(?:\s+" + _NUM + r")?"
+         r"|(?:the|those|these)\s+" + _NUM + r")\s+" + _NOUN)
 _YES = r"(?:(?:yes|yep|ok|okay)\s*[,:]?\s+)?"
-_COLLECTIVE = re.compile(
-    _YES + r"(?:" + _THEM + r"\s+(?:are|look)\s+" + _OK + r"|they(?:\s+are|'re)\s+" + _OK + r")"
-    r"(?:\s*[,:\u2013\u2014-]?\s*(?:so\s+|and\s+)?" + _CONFIRM + r")?")
-_CONFIRM_ALL = re.compile(_YES + _CONFIRM)
+# the tail's pronoun has its antecedent in the same clause
+_TAIL = (r"(?:please\s+)?confirm\s+(?:them(?:\s+all)?|all\s+of\s+them|all\s+" + _NUM + r"|" + _THEM
+         + r")(?:\s+please)?")
+_COLLECTIVE = re.compile(_YES + _THEM + r"\s+(?:are|look)\s+" + _OK
+                         + r"(?:\s*[,:\u2013\u2014-]?\s*(?:so\s+|and\s+)?" + _TAIL + r")?")
+_CONFIRM_ALL = re.compile(_YES + r"(?:please\s+)?confirm\s+(?:all\s+" + _NUM + r"|" + _THEM
+                          + r")(?:\s+please)?")
 _COUNT = re.compile(r"\b(\d{1,3}|both|" + "|".join(_NUMBERS) + r")\b")
 
 

@@ -141,7 +141,9 @@ alongside Ellen.
   `stopped=<refusal>` if a refusal stopped it. Running out of time is not a stop
   (issue #10): once the step is past `SWEEP_STOP_S` and the pass has imported, a
   `stopped` finish is refused unless it carries `stopped_by_refusal=true` — a
-  time-out said as a stop is put right, a real late refusal still stops.
+  time-out said as a stop is put right, a real late refusal still stops. The refused
+  stop is kept on the unfinished step: the specialist's plain finish replaces it,
+  Ellen's own finish keeps it, and a step that expires instead ends stopped.
 - **Finished by Ellen.** She writes `action="finish"` herself only when the delegation
   returned to her in the same turn without a finish. On an error she adds
   `failed=true`.

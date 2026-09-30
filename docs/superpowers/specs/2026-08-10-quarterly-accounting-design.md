@@ -2098,8 +2098,10 @@ catch, because it launders a guess into a human decision. So:
   confirms exactly line 4.
   **Erratum (issue #11, v0.3.4):** the sheet's pairings named together are the same
   reply — "those six guesses are all right, confirm them", "both proposals are good",
-  "confirm all six". A count that is not the number of pairings waiting on that sheet
-  applies nothing and says how many there are.
+  "confirm all six". The collective is named ("all", "both" or a count); a pronoun or a
+  bare "the guesses" is not, since it may mean the pairings just named. Every count
+  stated must be the number of pairings waiting on that sheet, or nothing applies and
+  the receipt says how many there are.
 - **Facts are distinct from verdicts.** "3 is my accountant" records an identity; it
   does **not** mean "no invoice expected" (that is "3 needs no invoice", a per-payment
   exemption through `set_exemption`), and it certainly does not mean "never for this

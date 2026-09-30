@@ -111,7 +111,7 @@ class TestGrammar(Base):
         self.deliver()
         # R1 Astra: a count in the trailing "confirm …" is checked as well
         for text in ("those five guesses are right", "confirm all 4", "both guesses are good",
-                     "the guesses look right, confirm both pairings",
+                     "all the guesses look right, confirm both pairings",
                      "these three guesses are right, confirm all four"):
             with self.subTest(text=text):
                 out = reply.apply_reply(self.conn, text)
@@ -122,11 +122,24 @@ class TestGrammar(Base):
         out = reply.apply_reply(self.conn, "confirm all three")
         self.assertEqual(len(out["applied"]), 3)
 
+    def test_a_pronoun_or_a_bare_the_guesses_confirms_no_more_than_was_named(self):
+        # R2 Astra: "them" may mean the ones just named — never the whole sheet
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe", "Figma"))]
+        self.deliver()
+        for text in ("Zapier and Vercel are right. Confirm them.",
+                     "Zapier and Vercel are right. They're all good.",
+                     "Zapier and Vercel are right. The guesses are right, confirm them.",
+                     "Zapier and Vercel are right. Confirm them all."):
+            with self.subTest(text=text):
+                reply.apply_reply(self.conn, text)
+                self.assertEqual([self.author(p)[0] for p in pids[2:]], ["auto", "auto"])
+
     def test_a_collective_confirmation_binds_like_all_good(self):
         a = self.item("Adobe", 5445, "2026-09-14")
         self.deliver()
         late = self.item("Figma", 1815, "2026-09-15")          # created after the sheet was sent
-        reply.apply_reply(self.conn, "the guesses are right, confirm them")
+        reply.apply_reply(self.conn, "all the guesses are right, confirm them")
         self.assertEqual(self.author(a)[0], "operator")
         self.assertEqual(self.author(late)[0], "auto")
 
