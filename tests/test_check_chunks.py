@@ -181,15 +181,31 @@ class TestTheReportCountsWhatThePassOwes(Check):
         self.assertEqual(c["report"], {"checked": 1, "total": 2, "not_searched": 1})
 
     def test_a_not_fresh_item_is_owed_and_counted_once(self):
+        # never handed out (not read in this import), yet owed: the check did not search it
         self.seed(2)
-        c = self.swept()
-        stale = c["work"]["triage"][1]["pid"]
-        with db.tx(self.conn):          # the export no longer carried it (read before import)
+        t = self.begin()
+        self.start(t)
+        self.specialist(t)
+        stale = sorted(d["pid"] for d in work.triage(self.conn))[1]
+        with db.tx(self.conn):          # the export no longer carried it
             self.conn.execute("UPDATE projections SET read_snapshot=NULL,"
                               " class_observed_snapshot=0 WHERE pid=?", (stale,))
         self.assertFalse(work.describe(self.conn, stale)["fresh"])
-        c = self.judged(self.chunk(c, n=1))
+        c = self.claim()["continue"]
+        self.assertEqual((c["work"]["total"], c["work"]["not_fresh"]), (1, 1))
+        c = self.judged(self.chunk(c))
         self.assertEqual(c["report"], {"checked": 1, "total": 2, "not_searched": 1})
+
+    def test_an_owed_payment_whose_lineage_ended_is_left_out(self):
+        self.seed(2)
+        c = self.swept()
+        t = self.chunk(c, n=1)
+        gone = c["work"]["triage"][1]["pid"]
+        with db.tx(self.conn):          # its row was erased: nothing is owed for it
+            self.conn.execute("UPDATE projections SET ended='erased' WHERE pid=?", (gone,))
+        self.assertTrue(work.describe(self.conn, gone)["ended"])
+        c = self.judged(t)
+        self.assertEqual(c["report"], {"checked": 1, "total": 1, "not_searched": 0})
 
 
 class TestTheLatestJudgmentCovers(Check):
