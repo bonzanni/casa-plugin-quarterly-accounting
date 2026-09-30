@@ -364,6 +364,7 @@ class _Run:
         self.unresolved = 0               # corrections in this reply that did not apply
         self.rebuilds = []                # rebuild requests, released only if nothing is unresolved
         self.excepted = False             # a clause of this reply opens with an exception
+        self.named = set()                # payments another clause of this reply named
 
     def result(self, not_a_reply=False) -> dict:
         if self.rebuilds:
@@ -482,7 +483,11 @@ def apply_reply(conn, text: str) -> dict:
     run.excepted = any(not c.endswith("?") and (verb is None or _NUMBERED.fullmatch(c) or
                                                 _EXCEPTION.match(c.lstrip(" -\u2013\u2014,:")))
                        for c, verb, _ in parsed)
+    sheet_wide = []
     for clause, verb, m in parsed:
+        if verb == "all_good":
+            sheet_wide.append(m)          # R5 (Terra): applied after every other clause
+            continue
         if clause.endswith("?"):
             run.lines.append(f"“{clause}” is a question — nothing changed for it.")
             continue
@@ -502,6 +507,14 @@ def apply_reply(conn, text: str) -> dict:
             run.unresolved += 1
             continue
         _apply(conn, run, verb, m, items)
+    # A sheet as a whole is approved last, and only for what no other clause named:
+    # "All good. The Zapier one is wrong." unpairs Zapier and confirms the rest. Any
+    # other clause left unresolved (ambiguous, stale, refused) and it approves nothing
+    blocked = run.unresolved > 0
+    for m in sheet_wide:
+        if blocked:
+            run.excepted = True
+        _apply(conn, run, "all_good", m, items)
     return run.result()
 
 
@@ -531,19 +544,24 @@ def _apply(conn, run, verb, m, items):
             run.unresolved += 1
             return
         said = len(run.lines)
-        waiting = []
+        waiting, decided = [], 0
         for pid in views.render_items(conn, last["render_id"]):
+            if pid in run.named:
+                decided += 1              # another clause of this reply decides it
+                continue
             d = work.describe(conn, pid)
             cur = d["current"]
             if cur is None or not views._needs_check(d) or d["candidates"]:
                 continue
             waiting.append((d, cur))
         stated = _counts(m.group(0))
-        if stated and stated != {len(waiting)}:
+        # the count names the sheet: its pairings waiting, the ones decided here included
+        if stated and stated != {len(waiting) + decided} and stated != {len(waiting)}:
             # a count that is not the sheet's: the operator means a sheet other than
             # this one, or only some of its lines — confirm none of them
-            run.lines.append(f"Nothing applied: that sheet has {len(waiting)} pairing"
-                             f"{'' if len(waiting) == 1 else 's'} waiting for your approval, "
+            n = len(waiting) + decided
+            run.lines.append(f"Nothing applied: that sheet has {n} pairing"
+                             f"{'' if n == 1 else 's'} waiting for your approval, "
                              f"not {' or '.join(str(x) for x in sorted(stated))}. Say \"all good\" to confirm all of them, or name the "
                              "ones that are right, e.g. \"the Zapier one is good\".")
             run.unresolved += 1
@@ -565,6 +583,7 @@ def _apply(conn, run, verb, m, items):
                 run.lines.append(problem)
                 run.unresolved += 1
                 continue
+            run.named.add(d["pid"])
             _one(conn, run, verb, d, m)
         return
     if verb == "never":

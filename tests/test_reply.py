@@ -160,9 +160,47 @@ class TestGrammar(Base):
         v = self.item("Vercel", 1210, "2026-09-18")
         self.deliver()
         out = reply.apply_reply(self.conn, "All good. The Zapier one is wrong. Is Vercel right?")
-        # (what the second sentence then does to Zapier is as on 0.3.3; not this test's)
-        self.assertEqual((self.author(z)[0], self.author(v)[0]), ("operator", "operator"))
+        # R5: the sheet is approved last, for what no other clause named
+        self.assertIsNone(self.author(z))
+        self.assertEqual(self.author(v)[0], "operator")
         self.assertNotIn("something else in the same message", out["receipt"])
+
+    def test_a_correction_beside_a_collective_is_never_confirmed(self):
+        # R5 Terra: the collective used to confirm Zapier before its correction ran
+        for text in ("All three guesses are right. The Zapier one is wrong.",
+                     "The Zapier one is wrong. All three guesses are right."):
+            with self.subTest(text=text):
+                self.setUp()
+                z = self.item("Zapier", 9900, "2026-09-17")
+                others = [self.item("Vercel", 1210, "2026-09-18"),
+                          self.item("Adobe", 5445, "2026-09-14")]
+                self.deliver()
+                out = reply.apply_reply(self.conn, text)
+                self.assertIsNone(self.author(z), out["receipt"])
+                self.assertEqual([self.author(p)[0] for p in others], ["operator"] * 2)
+
+    def test_an_unresolved_clause_leaves_the_sheet_unapproved(self):
+        a1 = self.item("Adobe", 5445, "2026-09-14")
+        a2 = self.item("Adobe", 2999, "2026-09-03")
+        v = self.item("Vercel", 1210, "2026-09-18")
+        self.deliver()
+        out = reply.apply_reply(self.conn, "All good. The Adobe one is wrong.")   # which Adobe?
+        self.assertEqual([self.author(p)[0] for p in (a1, a2, v)], ["auto"] * 3)
+        self.assertEqual(self.operator_entries(), 0)
+        self.assertIn("something else in the same message", out["receipt"])
+
+    def test_a_qualifier_that_names_no_payment_leaves_the_sheet_unapproved(self):
+        # R5 Astra: "Only Vercel is right" parses as a confirm whose target resolves to
+        # nothing — it is unresolved, so the sheet-wide approval applies nothing
+        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
+                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
+        self.deliver()
+        for text in ("Confirm all three. Only Vercel is right.",
+                     "Only Vercel is right. Confirm all three."):
+            with self.subTest(text=text):
+                reply.apply_reply(self.conn, text)
+                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
+                self.assertEqual(self.operator_entries(), 0)
 
     def test_a_collective_confirmation_binds_like_all_good(self):
         a = self.item("Adobe", 5445, "2026-09-14")
