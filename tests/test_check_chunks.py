@@ -306,6 +306,39 @@ class TestAChunkTurnFitsEllensTurn(Check):
         c = self.judged(t)
         self.assertEqual(c["report"], {"checked": 4, "total": 4, "not_searched": 0})
 
+    def test_the_chunk_size_follows_the_turn_limit(self):
+        # C2 (Terra S2): the hand-out derives its size from the capped costs, so a new
+        # limit or cap moves it — at 47: (47-12-26)//11 = 0 -> 1 first, (47-12)//11 = 3 later
+        from unittest import mock
+        with mock.patch.object(work, "ELLEN_TURNS", 47):
+            self.seed(6)
+            c = self.swept()
+            self.assertEqual(len(c["work"]["triage"]), 1)
+            c = self.judged(self.chunk(c))
+            self.assertEqual(len(c["work"]["triage"]), 3)
+
+    def test_an_owed_item_searched_then_paired_is_not_handed_out_again(self):
+        # C2 (Astra S2): the owed work leaves out what was searched since the origin
+        self.seed(5)
+        c = self.swept()
+        t = self.chunk(c)                                    # three searched
+        self.start(t, step="judge")
+        tri = {i["pid"]: i for i in
+               self.call("list_quarter_state", triage=True, pass_token=t)["triage"]}
+        for it in c["work"]["triage"]:
+            i = tri[it["pid"]]
+            doc = self.file(amount_minor=i["amount_minor"], document_date="2026-07-15")
+            self.call("record_match", pid=i["pid"], doc_id=doc, author="auto",
+                      expected_revision=i["revision"], row_digest=i["row_digest"],
+                      document_date="2026-07-15", pass_token=t)
+        self.call("record_step", pass_token=t, step="judge", action="finish",
+                  triage_remaining=0)
+        c = self.claim()["continue"]
+        self.assertEqual((c["next"], c["work"]["total"]), ("gmail-round", 2))
+        c = self.judged(self.chunk(c))
+        self.assertEqual((c["next"], c["report"]),
+                         ("end-pass", {"checked": 5, "total": 5, "not_searched": 0}))
+
     def test_an_owed_search_of_a_paired_item_that_finds_it_keeps_its_count(self):
         # C1 (Astra S2): unchanged either way — neither advanced nor reset
         c, pid = self.paired_unsearched_at(work.AGE_OUT_PASSES - 1)

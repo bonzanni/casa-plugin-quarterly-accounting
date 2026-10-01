@@ -223,9 +223,20 @@ FILING_HEAD = 2       # a pass's first chunk: the self-addressed search, list_in
 FILINGS_FIRST = 8     # ... and at most this many files attempted from those two
 FILING_COST = 3       # a file attempted: list + download + ingest (Telegram: share + ingest)
 ITEM_COST = 11        # an item: <= 4 queries, <= 2 tries (list, download, ingest), its record_search
-CHUNK_LATER = (ELLEN_TURNS - TURN_HEAD - TURN_TAIL) // ITEM_COST
-CHUNK_FIRST = (ELLEN_TURNS - TURN_HEAD - TURN_TAIL - FILING_HEAD
-               - FILINGS_FIRST * FILING_COST) // ITEM_COST
+
+
+def chunk_size(first: bool) -> int:
+    """The most items a chunk turn fits at one call per message (issue #24): what the
+    turn leaves after its head and tail (and, at a pass's first chunk, its filing), in
+    whole items. Never below one, so a chunk always makes progress."""
+    room = ELLEN_TURNS - TURN_HEAD - TURN_TAIL
+    if first:
+        room -= FILING_HEAD + FILINGS_FIRST * FILING_COST
+    return max(1, room // ITEM_COST)
+
+
+CHUNK_FIRST = chunk_size(True)
+CHUNK_LATER = chunk_size(False)
 # the operator's own documents filed lately (Casa keeps a Telegram file 7 days), so a
 # pass's filing skips them and its cap of FILINGS_FIRST reaches the next ones
 FILED_REFS_DAYS = 8
@@ -456,7 +467,7 @@ def work_list(conn, req=None, since_seq=None, owed=(), first=True) -> dict:
     elif since_seq is not None:
         items = check_work(conn, since_seq, items, owed)
     limit = (TRIAGE_LIMIT if req is None and since_seq is None
-             else CHUNK_FIRST if first else CHUNK_LATER)
+             else chunk_size(first))
     pg = _paged(items, None, limit, work_item)
     return {"triage": pg["shown"], "total": len(items), "truncated": pg["remaining"] > 0,
             "remaining": pg["remaining"], "not_fresh": not_fresh, "notice": NOTICE_TRIAGE}
