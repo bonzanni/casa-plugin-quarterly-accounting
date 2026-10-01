@@ -18,7 +18,8 @@ prompt:   Run the quarterly-accounting background pass. It covers every
           reports nothing, output `<silent/>` and nothing else."""
 EXTERNAL = {"sync", "list_accounts", "list_backups", "export_history", "get_transaction",
             "tag_transaction", "untag_transaction", "add_note", "search_emails", "get_email",
-            "download_attachment", "send_email", "delegate_to_agent", "send_message",
+            "download_attachment", "list_attachments", "send_email", "delegate_to_agent",
+            "send_message",
             "send_media", "list_inbound_files", "share_inbound_file", "Read", "WebSearch",
             "list_transactions", "restore_backup"}
 # Sentences the skill tells Ellen to say in her own words; they reach the operator.
@@ -71,7 +72,7 @@ class TestSkill(TempEnv):
             if n.endswith("_") or n in {"workflow", "expected_generation", "pass_token",
                                         "render_id", "row_digest", "resolves", "candidate_ids", "judge_due", "not_found",
                                         "write_error", "observed_tags", "observed_notes",
-                                        "instructions", "speak", "reshow", "true", "false",
+                                        "instructions", "speak", "reshow", "true", "false", "filed_refs",
                                         "bank_writes", "request_id", "labels", "runners_up",
                                         "can_run", "remaining_in_cycle", "erase_candidates",
                                         "expected_ledger", "receipt_pages", "not_fresh",
@@ -139,9 +140,11 @@ class TestSkill(TempEnv):
         self.assertEqual(positions, sorted(positions))
 
     def test_search_bookkeeping_carries_the_token(self):
-        self.assertIn("record_search(pid, pass_token, incomplete=true)", SKILL)
-        self.assertIn("spends nothing", SKILL)
+        self.assertIn("`record_search(pid, pass_token, queries=[…]", SKILL)
         self.assertIn("`end_pass(pass_token, outcome", SKILL)
+        # issue #24: an item not reached needs no record (it stays in the work); the bare
+        # incomplete record cost a call per item and changed nothing
+        self.assertNotIn("record_search(pid, pass_token, incomplete=true)", SKILL)
 
     def test_refusals_are_relayed_not_retried(self):
         self.assertIn("`refused: `", SKILL)
@@ -181,12 +184,39 @@ class TestSkill(TempEnv):
         self.assertNotIn('mode="sync"', sec)
         self.assertEqual(sec.count('`mode="async"`'), 2)
         self.assertIn("never carry on to the next step in the same turn", sec)
-        self.assertIn("a chunk of at most 10 items not yet searched in this check", sec)
+        self.assertIn("a chunk of at most 6 items not yet searched in this check (3 at the "
+                      "sweep's continuation)", sec)
         self.assertIn("After a chunk with any item in it (the Gmail probe ok), always go on to "
                       "the judge step", sec)
         self.assertIn("`next` is `gmail-round` — the next chunk", sec)
         self.assertIn("the server counts the whole check, every chunk; never add to it", sec)
         self.assertNotIn("Skip `portal` items", sec)
+
+    def test_a_chunk_is_worked_one_item_at_a_time_within_its_limits(self):
+        # issue #24: the chunk is sized for one call per message, by construction from
+        # these limits; each item is recorded before the next, so a turn that dies loses
+        # at most the item in flight
+        g = " ".join(self.section("4. **Gmail round.**", "5. After a chunk").split())
+        for phrase in ("one call per message", "ONE ITEM AT A TIME",
+                       "then its `record_search`, and only then the next item",
+                       "or after 4 queries", "at most 2 per item, a failed download counts",
+                       "`incomplete=true` when you stopped at the 4 queries",
+                       "search it all the same"):
+            self.assertIn(phrase, g)
+        # the filing comes first, capped, skipping what is filed, each file by its own ref
+        self.assertLess(g.index("**Filing"), g.index("**The items.**"))
+        for phrase in ("Skip every file whose ref is in the continuation's `filed_refs`",
+                       "the filing uses at most 24 calls", "failed ones too — so at most "
+                       "8 files, newest first, each once", "`<message id>:<attachment_id>`",
+                       "this continuation's `pass_token` and its own `source_ref`"):
+            self.assertIn(phrase, g)
+        sweep = " ".join(self.section("3. `record_step(pass_token, step=\"sweep\"",
+                                      "4. **Gmail round.**").split())
+        self.assertIn("as in step 4's filing (at most 8 files", sweep)
+        hand = " ".join(self.section("## Ellen: a document the operator hands over",
+                                     "2. A machine pairing").split())
+        self.assertIn("source_ref=<the path list_inbound_files showed>", hand)
+        self.assertNotIn("parallel batches", SKILL)
 
     def test_a_package_judgment_confirms_the_dates_its_files_are_named_by(self):
         # issue #22
@@ -493,11 +523,11 @@ class TestIssues17To19(TempEnv):
         self.assertEqual(rnd.count('`mode="async"`'), 3, rnd)
         self.assertNotIn("sync mode", rnd)
         self.assertIn("Never carry on to the next step in the same turn", rnd)
-        self.assertIn("a chunk of at most 10", rnd)
+        self.assertIn("a chunk of at most 6 of the quarter's items", rnd)
         self.assertIn("`next` is `gmail-round` again", rnd)
         self.assertIn("not ended without its judge step", rnd)
         import work
-        self.assertEqual(work.GMAIL_CHUNK, 10)
+        self.assertEqual((work.CHUNK_FIRST, work.CHUNK_LATER), (3, 6))
 
     def test_the_specialist_states_the_date_it_read_and_how_far_triage_got(self):
         tri = " ".join(SKILL[SKILL.index("6. **Triage.**"):

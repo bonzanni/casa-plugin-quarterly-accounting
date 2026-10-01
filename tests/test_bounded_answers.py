@@ -82,8 +82,9 @@ class Bounded(Flow):
         self.assertEqual(len(w["triage"]) + w["remaining"], w["total"])
         self.assertEqual(w["total"], N)
         # worst-case items (every clip at its full length) still fill a chunk (issue #21:
-        # a check's Gmail round comes GMAIL_CHUNK at a time); the rest is `remaining`
-        self.assertEqual(len(w["triage"]), work.GMAIL_CHUNK)
+        # a check's Gmail round comes in chunks; #24: CHUNK_FIRST at the first); the rest
+        # is `remaining`
+        self.assertEqual(len(w["triage"]), work.CHUNK_FIRST)
         self.assertEqual([d["pid"] for d in w["triage"]], self.pids[:len(w["triage"])])
         # the new token works: the Gmail round and the end
         self.call("record_search", pid=w["triage"][0]["pid"], pass_token=c["pass_token"],
@@ -91,6 +92,17 @@ class Bounded(Flow):
         end = self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted",
                         report={"checked": 0, "total": N, "not_searched": N})
         self.assertEqual(end["outcome"], "interrupted")
+
+    def test_the_first_chunk_fits_with_every_filed_ref_at_its_longest(self):
+        # issue #24 (D4): filed_refs rides on the first chunk's continuation
+        for i in range(work.FILED_REFS_SHOWN + 3):
+            self.file(source="manual-telegram", source_ref=f"/inbox/{i:03d}" + "r" * 900)
+        self.finish()
+        text = self.text("continue_pass")
+        self.assertLessEqual(len(text), budget.RESULT_LIMIT)
+        c = json.loads(text)["continue"]
+        self.assertEqual((c["next"], len(c["filed_refs"]), len(c["work"]["triage"])),
+                         ("gmail-round", work.FILED_REFS_SHOWN, work.CHUNK_FIRST))
 
     def page(self, after=None, **args):
         text = self.text("list_quarter_state", **args, **({"after": after} if after else {}))

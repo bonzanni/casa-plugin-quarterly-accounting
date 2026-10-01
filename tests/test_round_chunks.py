@@ -46,7 +46,7 @@ class TestTheRoundInChunks(Chunks):
             self.assertEqual(c["work"]["total"], 25 - sum(sizes))
             sizes.append(len(c["work"]["triage"]))
             c = self.judged(self.chunk(c))              # claimed at once: no lease wait
-        self.assertEqual(sizes, [10, 10, 5])
+        self.assertEqual(sizes, [3, 6, 6, 6, 4])     # issue #24: CHUNK_FIRST, CHUNK_LATER
         self.assertEqual(c["next"], "end-pass")
         end = self.end(c)
         self.assertEqual(end["next"], "build")
@@ -57,7 +57,7 @@ class TestTheRoundInChunks(Chunks):
             " WHERE p.trigger='package'").fetchone()[0], 1)
 
     def test_a_chunk_that_searched_nothing_ends_the_pass(self):
-        self.seed(12)
+        self.seed(5)
         c = self.snapshot_round(self.ask()["pass_token"])
         c = self.judged(self.chunk(c))
         self.assertEqual(c["next"], "gmail-round")
@@ -67,7 +67,7 @@ class TestTheRoundInChunks(Chunks):
         self.assertEqual((self.request()["state"], self.request()["remaining"]), ("queued", 2))
 
     def test_searching_an_item_already_searched_is_not_progress(self):
-        self.seed(12)
+        self.seed(5)
         c = self.snapshot_round(self.ask()["pass_token"])
         first = c["work"]["triage"]
         c = self.judged(self.chunk(c))
@@ -110,7 +110,7 @@ class TestTheRoundInChunks(Chunks):
                 self.assertEqual(self.judged(t)["next"], "end-pass")
 
     def test_the_restarted_judgment_is_the_one_the_check_reads(self):
-        self.seed(12)
+        self.seed(9)
         c = self.snapshot_round(self.ask()["pass_token"])
         c = self.judged(self.chunk(c))                       # judgment 1: whole
         c = self.judged(self.chunk(c), triage_remaining=3)   # judgment 2: short of pages

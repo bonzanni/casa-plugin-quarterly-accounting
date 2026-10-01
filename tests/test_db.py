@@ -56,7 +56,7 @@ class TestSchema(TempEnv):
     def _assert_current_behaviour(self, c, old_seq: int, deliveries=1, first_sent=False):
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
-        self.assertEqual(db.SCHEMA_VERSION, 7)
+        self.assertEqual(db.SCHEMA_VERSION, 8)
         # the migrated store has every column and index a fresh store has
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
@@ -125,7 +125,7 @@ class TestSchema(TempEnv):
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)
         self.assertEqual(c2.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "7")
+                         .fetchone()[0], "8")
 
     def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
         # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
@@ -250,7 +250,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "7")
+                         .fetchone()[0], "8")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -259,6 +259,29 @@ class TestSchema(TempEnv):
         self.assertEqual(cols(c), cols(fresh))
         self.assertEqual(tuple(c.execute("SELECT document_date, date_read_at FROM documents")
                                .fetchone()), ("2026-05-20", None))
+        self.assertIsNone(db.epoch(c))
+
+    def test_a_v0_6_0_schema_7_store_migrates_with_no_operator_refs(self):
+        # schema 7 as v0.6.0 shipped it (847cee7). Issue #24 (D5): no earlier version kept
+        # the operator's files by their own ref, so the table starts empty
+        from tests.schema_history import DDL_V7
+        self.assertNotIn("operator_refs", DDL_V7)
+        old = self._released_store(DDL_V7, 7)
+        old.close()
+        c = db.open_store()
+        self.addCleanup(c.close)
+        self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
+                         .fetchone()[0], "8")
+        fresh = sqlite3.connect(":memory:")
+        self.addCleanup(fresh.close)
+        for stmt in db._statements(db.DDL):
+            fresh.execute(stmt)
+        shape = lambda conn: sorted(tuple(r) for r in conn.execute(
+            "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"))
+        self.assertEqual(shape(c), shape(fresh))
+        cols = lambda conn: sorted(r[1] for r in conn.execute("PRAGMA table_info(operator_refs)"))
+        self.assertEqual(cols(c), cols(fresh))
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM operator_refs").fetchone()[0], 0)
         self.assertIsNone(db.epoch(c))
 
     def test_a_staged_path_is_unique_in_a_fresh_store(self):
