@@ -29,7 +29,10 @@ round D5 (f157e11): Astra DNS, Terra SHIP WITH FIXES, one shared S1. `filed_refs
 self-addressed mail by its message id, so an attachment not filed (past the cap, or a
 download that failed) was skipped for good. And the idempotent ingest kept a document's
 first ref only. Folded in (marked D5): a ref per attachment, kept in its own table on
-every successful ingest. Design round D6 pending.
+every successful ingest. Design round D6 (c0f0593): Terra SHIP; Astra SHIP WITH FIXES, one S2.
+"A skip costs no attempt" conflicted with the `list_attachments` call that finding a
+self-addressed mail's attachment ids takes. Folded in (marked D6): the filing's limit is
+stated in calls, and only a skip that needs no call is free. The code round reviews it.
 
 ---
 
@@ -86,8 +89,10 @@ Constants (`work.py`):
     TURN_TAIL       = 4   # record_step(judge, start), delegate_to_agent,
                           # record_step(judge, delegated), the closing message
     FILING_HEAD     = 2   # first chunk: the self-addressed search, list_inbound_files
-    FILINGS_FIRST   = 8   # first chunk: at most 8 files ATTEMPTED from those two
-    FILING_COST     = 3   # per attempt: list + download + ingest (Telegram: share + ingest)
+    FILINGS_FIRST   = 8   # first chunk: the filing's calls are FILINGS_FIRST × FILING_COST
+    FILING_COST     = 3   # per file: list + download + ingest (Telegram: share + ingest)
+                          # D6: the limit is 24 CALLS — each list_attachments, share,
+                          # download and ingest counts; a skip that needs no call is free
     ITEM_COST       = 11  # per item: ≤ 4 queries, ≤ 2 attachments ATTEMPTED × (list,
                           # download, ingest), its record_search
     CHUNK_LATER     = (ELLEN_TURNS − TURN_HEAD − TURN_TAIL) // ITEM_COST            = 6
@@ -145,8 +150,11 @@ Gmail round (the check's step 4 and the package round's `gmail-round`):
 
 - The probe first, as today.
 - The first chunk only (the `sweep` / `snapshot` continuation): the self-addressed search
-  and the Telegram inbox sweep, BEFORE the items. Together they attempt at most 8 files,
-  newest first, each once, every `ingest_document` with the continuation's `pass_token`.
+  and the Telegram inbox sweep, BEFORE the items. Together they use at most 24 calls after
+  the search and the inbox listing (D6): each `list_attachments`, `share_inbound_file`,
+  `download_attachment` and `ingest_document` counts, failed ones too. That is 8 files at
+  most. Newest first, each file once, every `ingest_document` with the continuation's
+  `pass_token`.
   What is left waits for the next pass, or the operator's next message.
 - Each such filing passes its `source_ref`, one per FILE (D5). For self-addressed mail it
   is `<message id>:<attachment_id>`, where `attachment_id` is the gmail plugin's
@@ -162,7 +170,8 @@ Gmail round (the check's step 4 and the package round's `gmail-round`):
   from schema 7 creates it empty.
 - The first chunk's continuation carries `filed_refs`: the table's refs filed in the last
   8 days (Casa keeps an inbox file 7 days), newest first, at most 60. Ellen skips any file
-  whose ref is listed, and a skip costs no attempt. A file past the cap is therefore filed
+  whose ref is listed. A skip that needs no call (a Telegram file, or an attachment already
+listed in this turn) is free. Listing a message's attachments is a call and counts (D6). A file past the cap is therefore filed
   by a later pass, not starved (D4, Terra S2; D5).
 - The same cap holds wherever the skill sweeps the inbox in a pass turn, including the
   `end-pass` turn of a sweep that stopped or failed (D2, Terra S1).
@@ -196,6 +205,9 @@ Gmail round (the check's step 4 and the package round's `gmail-round`):
   one: each pass's 8 attempts go to them, and the good file waits until they leave the
   inbox (7 days) or the self-addressed search's window. 0.6.0 made no attempt cap, but its
   chunk turn with nine failing attempts and ten items did not fit 80 either.
+- More than ~20 recent self-addressed messages whose attachments are all filed: listing
+  them uses the filing's calls, and an older new one waits (D6). 0.6.0 listed and
+  re-downloaded every one of them at every pass.
 - More than 60 operator-supplied files in 8 days: the oldest refs are not listed, and
   filing one again costs an attempt (ingest is idempotent).
 - Ellen's off-script calls (a `set_watermark`, a status card in an operator's turn) are
