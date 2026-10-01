@@ -1,7 +1,7 @@
 # Issue #24 — a Gmail chunk fits Ellen's turn when she calls one tool at a time
 
 Issue: bonzanni/casa-plugin-quarterly-accounting#24 (bug, severity:high). Plugin 0.6.0 →
-0.6.1 (no schema change). Follows `2026-09-30-issues-21-22-design.md` (0.6.0) and
+0.6.1 (schema 7 → 8: one table, D5). Follows `2026-09-30-issues-21-22-design.md` (0.6.0) and
 `2026-09-30-issues-17-18-19-design.md` (0.5.0), whose chunk mechanism this bounds.
 
 Status: draft. Design round D1 (4895d30): Astra DNS, Terra DNS. Both raised the same S1:
@@ -25,7 +25,11 @@ ask that reclaims a died chunk turn spends two prescribed calls before `continue
 (`begin_pass`, its line), which makes 81 messages. Terra S1: searching an owed item that a
 judgment paired can age it out, which 0.6.0 never did. Terra S2: Telegram files stay in the
 inbox, so newest-first with a cap of 8 starves the ninth. Folded in (marked D4). Design
-round D5 pending.
+round D5 (f157e11): Astra DNS, Terra SHIP WITH FIXES, one shared S1. `filed_refs` keyed a
+self-addressed mail by its message id, so an attachment not filed (past the cap, or a
+download that failed) was skipped for good. And the idempotent ingest kept a document's
+first ref only. Folded in (marked D5): a ref per attachment, kept in its own table on
+every successful ingest. Design round D6 pending.
 
 ---
 
@@ -144,13 +148,22 @@ Gmail round (the check's step 4 and the package round's `gmail-round`):
   and the Telegram inbox sweep, BEFORE the items. Together they attempt at most 8 files,
   newest first, each once, every `ingest_document` with the continuation's `pass_token`.
   What is left waits for the next pass, or the operator's next message.
-- Each such filing passes its `source_ref`: the message id for self-addressed mail, the
-  path `list_inbound_files` shows for a Telegram file (also in an operator's turn). The
-  first chunk's continuation carries `filed_refs`, the `source_ref`s of the
-  `manual-email` / `manual-telegram` documents filed in the last 8 days (Casa keeps an
-  inbox file 7 days), newest first, at most 60. Ellen skips any file whose ref is listed:
-  that costs no attempt. A ninth file is therefore filed by the next pass, not starved
-  (D4, Terra S2).
+- Each such filing passes its `source_ref`, one per FILE (D5). For self-addressed mail it
+  is `<message id>:<attachment_id>`, where `attachment_id` is the gmail plugin's
+  attachment id (the part id, which Gmail keeps immutable). For a Telegram file it is the
+  path `list_inbound_files` shows, in an operator's turn too.
+- The store keeps every such ref in its own table, schema 8 (D5):
+  `operator_refs(ref TEXT PRIMARY KEY, source, doc_id, filed_at)`. A row is written (insert
+  or replace, `filed_at` = now) by every successful `ingest_document` with
+  `source="manual-email"` or `"manual-telegram"` and a `source_ref`. The idempotent branch
+  writes one too: the bytes were already held under another ref, and this ref still names
+  a file now in the store. A failed attempt (a download or share that failed) writes
+  nothing, so the next pass tries it again. `reset_store` wipes the table. The migration
+  from schema 7 creates it empty.
+- The first chunk's continuation carries `filed_refs`: the table's refs filed in the last
+  8 days (Casa keeps an inbox file 7 days), newest first, at most 60. Ellen skips any file
+  whose ref is listed, and a skip costs no attempt. A file past the cap is therefore filed
+  by a later pass, not starved (D4, Terra S2; D5).
 - The same cap holds wherever the skill sweeps the inbox in a pass turn, including the
   `end-pass` turn of a sweep that stopped or failed (D2, Terra S1).
 - Then the chunk **one item at a time**: its queries, its downloads and ingests, then its
@@ -179,6 +192,10 @@ Gmail round (the check's step 4 and the package round's `gmail-round`):
   before its `continue_pass` reclaims a chunk whose turn died: that prefix is outside
   `TURN_HEAD`. This needs a died turn first. 0.6.0's chunk of 10 did not fit even
   without the prefix.
+- Eight or more operator files that keep failing (download or share), all newer than a good
+  one: each pass's 8 attempts go to them, and the good file waits until they leave the
+  inbox (7 days) or the self-addressed search's window. 0.6.0 made no attempt cap, but its
+  chunk turn with nine failing attempts and ten items did not fit 80 either.
 - More than 60 operator-supplied files in 8 days: the oldest refs are not listed, and
   filing one again costs an attempt (ingest is idempotent).
 - Ellen's off-script calls (a `set_watermark`, a status card in an operator's turn) are
@@ -196,8 +213,12 @@ Gmail round (the check's step 4 and the package round's `gmail-round`):
   portals never handed out; 25 items run 3 + 6 + 6 + 6 + 4.
 - An owed-only search (paired item) with no candidate leaves `passes_without_candidate`
   and `search_state` unchanged; the same search of a triage item advances them as before.
-- `filed_refs` on a first chunk lists exactly the recent manual documents' refs, newest
-  first, bounded; later chunks carry none.
+- `filed_refs` on a first chunk lists exactly the recent operator refs, newest first,
+  bounded; later chunks carry none. Two attachments of one message are two refs. An
+  idempotent re-ingest under a new ref records that ref. A gmail-source ingest, or one
+  without a ref, records none.
+- Migration 7 → 8 on a frozen schema-7 store (DDL_V7 in `tests/schema_history.py`) gives
+  the fresh store's tables. `reset_store` empties `operator_refs`.
 - Astra's D3 (b): ten items, a judge pairs unreached items 5–7 between chunks. They come in
   the next chunk, are searched, and the report is `{10, 10, 0}`. 0.6.0's `check_work`
   fails this test.
