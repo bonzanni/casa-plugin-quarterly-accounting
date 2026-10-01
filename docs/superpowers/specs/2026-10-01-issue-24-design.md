@@ -8,7 +8,12 @@ Status: draft. Design round D1 (4895d30): Astra DNS, Terra DNS. Both raised the 
 the self-addressed search and the Telegram inbox sweep file an unbounded number of documents
 before the first `record_search`, so the first budget check can come too late. Astra also
 raised an S2: Telegram filings carried no `pass_token`, so they could not be charged. Both
-are folded in below (marked D1). Design round D2 pending.
+are folded in below (marked D1). Design round D2 (039ea59): Astra DNS, Terra DNS, with
+different findings. Astra S1: stopping at an ingest's `room: false` in the middle of an item
+left that item's search unrecorded, and the judge then paired it (the report regressed
+against 0.6.0). Terra S1: a sweep that stopped goes straight to `end-pass` with an uncapped
+inbox sweep, and no counter is armed there. Both folded in (marked D2). Design round D3
+pending.
 
 ---
 
@@ -95,7 +100,9 @@ The charge is written in the call's own transaction. The answers of both calls t
 
 (D1: on `ingest_document` too, so a filing is checked like an item. `ITEM_RESERVE` ≥ a
 filing's cost, so one rule covers both: start another filing or item only while the last
-answer said `room: true`.)
+answer said `room: true`.) `room` is read only between units (D2, Astra S1). An item once
+started is finished, `record_search` included, whatever its own ingests answer: the
+`room: true` that admitted it reserved `ITEM_RESERVE` for it.
 
 Nothing is charged, and `chunk` is absent, while a step runs (the judge's own
 `record_search` calls) or outside a pass.
@@ -115,14 +122,21 @@ Gmail round (the check's step 4 and the package round's `gmail-round`):
   Together they file at most `FILINGS_FIRST` = 8 files, newest first, each with the
   continuation's `pass_token` (D1). A file is filed once per pass: no second
   `share_inbound_file` or download of the same file.
+- The cap holds for every filing sweep in a pass turn, not only in a Gmail chunk (D2, Terra
+  S1). That includes the inbox sweep the skill prescribes before `end_pass` when the sweep
+  stopped or failed: that turn has no armed counter, and its fixed cost (`continue_pass`,
+  `list_inbound_files`, 8 × 2, `end_pass`, a `speak` 2, a status card 2–3, the closing
+  message) is under 30.
 - Then the chunk **one item at a time**: its queries, its downloads and ingests, then its
   `record_search` — before the next item. Several calls for the same item may go in one
   message; never start an item before the previous one is recorded.
 - At most 4 queries and 2 attachments per item in one chunk. An item not found within that:
   `record_search(…, queries=[…], incomplete=true)` — `exhausted=true` only when the ideas
   ran out.
-- When a `record_search` or an `ingest_document` answers `chunk.room: false`, stop the items and go to the
-  judge step. Items not reached need no record: they stay in the work and come in the next
+- Before starting a filing or an item, read the last `chunk` answer (from a `record_search`
+  or an `ingest_document`). If it says `room: false`, start nothing more and go to the
+  judge step. An item already started is finished first, its `record_search` included
+  (D2). Items not reached need no record: they stay in the work and come in the next
   chunk. (The old "an item you never reached: `record_search(incomplete=true)` with no
   queries" is removed from the Gmail round: it cost a call per unreached item and changed
   nothing — an unrecorded item is not searched since the origin, `work.searched_since`.)
@@ -159,6 +173,9 @@ and the next chunk is handed out; the report (`check_report`, `owed`) is untouch
   `chunk`.
 - `room` turns false exactly when `spent + ITEM_RESERVE > budget` (boundary both sides), on
   `record_search` and on `ingest_document`.
+- Astra's D2 trace: 8 filings, then items of 11 calls each. The item whose ingest answers
+  `room: false` is finished and recorded. The report equals 0.6.0's, and the turn stays
+  ≤ `ELLEN_TURNS` messages.
 - A first chunk with 8 filings and 10 items of 11 calls each cuts the items but records at
   least four, and its message count stays ≤ `ELLEN_TURNS`.
 - A simulated serial chunk turn (one message per call, items of 4–11 calls, heavy ones
