@@ -4,7 +4,14 @@ Issue: bonzanni/casa-plugin-quarterly-accounting#24 (bug, severity:high). Plugin
 0.6.1 (schema 7 → 8: one table, D5). Follows `2026-09-30-issues-21-22-design.md` (0.6.0) and
 `2026-09-30-issues-17-18-19-design.md` (0.5.0), whose chunk mechanism this bounds.
 
-Status: draft. Design round D1 (4895d30): Astra DNS, Terra DNS. Both raised the same S1:
+Status: converged 2026-10-01. Code round C4 on f8bfd5e: Astra SHIP, Terra SHIP (all runs
+`medium`). Earlier code rounds: C1 (f471394) Astra DNS, Terra SWF; an item's listings were
+uncapped, and the owed work's filters were untested. C2 (3e0ec86) SWF/SWF, test gaps.
+C3 (0bc826b) Terra SHIP, Astra SWF, a test gap. Mutation check: 19/19 killed. ha-casa-app#1137
+was ruled 80 on 2026-10-01, matching `ELLEN_TURNS`, and is not shipped yet. ha-casa-app#1121
+was ruled the same day: a turn that hits the limit says so.
+
+Design round D1 (4895d30): Astra DNS, Terra DNS. Both raised the same S1:
 the self-addressed search and the Telegram inbox sweep file an unbounded number of documents
 before the first `record_search`, so the first budget check can come too late. Astra also
 raised an S2: Telegram filings carried no `pass_token`, so they could not be charged. Both
