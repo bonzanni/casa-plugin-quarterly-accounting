@@ -181,7 +181,8 @@ pass, whichever comes first:
 1. File it first, always, yourself. `list_inbound_files`, then `share_inbound_file(path)` for
    each PDF or image not yet filed,
    then `ingest_document(source_path=<returned path>, source="manual-telegram",
-   extraction_author="resident", kind=<your provisional reading>, …)`. Filing is idempotent.
+   source_ref=<the path list_inbound_files showed>, extraction_author="resident",
+   kind=<your provisional reading>, …)`. Filing is idempotent.
    A document emailed to self is found by the pass's self-mail search, `source="manual-email"`.
 2. A machine pairing is a pass's work, so the document is judged in a short handover pass.
    You hold that pass — you begin it and you end it, exactly as in the cron flow — so a
@@ -248,32 +249,45 @@ pass, whichever comes first:
    and each turn ends at a delegation: never carry on to the next step in the same turn.
    Its notification's continuation (rule 5) has `next`: the Gmail round (`gmail-round`),
    or step 6 (`end-pass`) when the pass stopped or failed — then sweep your Telegram inbox
-   first.
-4. **Gmail round.** Always make the Gmail probe first, even when Gmail was down last time:
-   one small `search_emails` call, then `record_probe(pass_token, kind="gmail", ok=…,
-   detail=…)` with what it showed. If it failed, skip the searches below (not the inbox
-   sweep) — the next pass probes again. The work list is the continuation's `work` (its
-   `triage` items) — a chunk of at most 10 items not yet searched in this check, portals
-   already left out — never a list from the specialist's reply. Work the chunk in parallel
-   batches, one call per item in the same turn: every item's first `search_emails`, then
-   the next queries where needed, then every `download_attachment`, every
-   `ingest_document`, every `record_search`. For each item, run its ladder of narrow
-   queries with `search_emails`, built from the item's
-   fields — its `search_hint`, the printed amount, its `window_days` around the date,
-   `has:attachment` — never one broad query (Gmail returns at most 100 and drops the
-   rest). For a CRDT, and a DBIT `refund`, search Sent. Stop at the first query that finds
-   the document or when the ideas run out.
-   `download_attachment` every plausible candidate and file it with
-   `ingest_document(source_path=<returned path>, kind=<your provisional reading>,
-   source="gmail", extraction_author="resident", source_ref=<message id>, pass_token=…)`
-   (`source="manual-email"` for the self-addressed search). Record each item with
-   `record_search(pid, pass_token, queries=[…], found_candidate=…, exhausted=…,
-   incomplete=…)`. An item you never reached:
-   `record_search(pid, pass_token, incomplete=true)` with no queries — it spends nothing, so
-   the item is not aged out for a search that never ran. At the sweep's continuation only
-   (its `step` is `sweep`), also run one search for recent self-addressed mail with
-   attachments, and sweep your Telegram inbox as above (file only, say nothing) — not at
-   later chunks.
+   first, as in step 4's filing (at most 8 files, each with its `source_ref` and that
+   continuation's `pass_token`).
+4. **Gmail round.** A chunk is sized for your turn when you make one call per message
+   and keep to the limits below; work it in this order.
+   - **The probe.** Always make the Gmail probe first, even when Gmail was down last time:
+     one small `search_emails` call, then `record_probe(pass_token, kind="gmail", ok=…,
+     detail=…)` with what it showed. If it failed, skip the searches below (not the
+     filing) — the next pass probes again.
+   - **Filing — at the sweep's continuation only** (its `step` is `sweep`; not at later
+     chunks), before the items: one search for recent self-addressed mail with
+     attachments, and your Telegram inbox swept as above (file only, say nothing).
+     Skip every file whose ref is in the continuation's `filed_refs` — it is filed
+     already. After the search and the inbox listing, the filing uses at most 24 calls:
+     every `list_attachments`, `share_inbound_file`, `download_attachment` and
+     `ingest_document` counts, failed ones too — so at most 8 files, newest first, each
+     once. File each with this continuation's `pass_token` and its own
+     `source_ref`: `<message id>:<attachment_id>` for an attachment of self-addressed mail
+     (`source="manual-email"`), the path `list_inbound_files` shows for a Telegram file
+     (`source="manual-telegram"`). What is left waits for the next pass, or the
+     operator's next message.
+   - **The items.** The work list is the continuation's `work` (its `triage` items) — a
+     chunk of at most 6 items not yet searched in this check (3 at the sweep's
+     continuation), portals already left out — never a list from the specialist's reply.
+     Work it ONE ITEM AT A TIME: the item's queries, its downloads and filings, then its
+     `record_search`, and only then the next item. For each item, run its ladder of
+     narrow queries with `search_emails`, built from the item's fields — its
+     `search_hint`, the printed amount, its `window_days` around the date,
+     `has:attachment` — never one broad query (Gmail returns at most 100 and drops the
+     rest). For a CRDT, and a DBIT `refund`, search Sent. Stop at the first query that
+     finds the document, when the ideas run out, or after 4 queries. Then at most 2 tries
+     per item: a try is the message's `list_attachments` (when you need it), then
+     `download_attachment` of a plausible candidate and its filing — a listing that shows
+     nothing plausible, or a failed listing or download, uses a try. File it with
+     `ingest_document(source_path=<returned path>, kind=<your provisional reading>,
+     source="gmail", extraction_author="resident", source_ref=<message id>,
+     pass_token=…)`. Record the item with `record_search(pid, pass_token, queries=[…],
+     found_candidate=…, exhausted=…, incomplete=…)`: `exhausted=true` only when the ideas
+     ran out, `incomplete=true` when you stopped at the 4 queries. An item may have been
+     paired since it was handed out; search it all the same.
 5. After a chunk with any item in it (the Gmail probe ok), always go on to the judge step.
    Otherwise, only if anything was filed, or the continuation's `finish` says
    `triage_remaining` above 0, or its `judge_due` is above 0, or the sweep ended unfinished
@@ -518,12 +532,12 @@ done, however many rounds that takes; say nothing in between.
      `record_step(…, action="delegated", delegation_id=…)` (rule 2) and end the turn (the
      first round has already said its line; later rounds say nothing).
    - At a continuation whose `next` is `gmail-round`: the Gmail round of the pass, step 4,
-     on the continuation's `work` — a chunk of at most 10 of the quarter's items not yet
-     searched for this package. Work the chunk in parallel batches, one call per item in the
-     same turn: every item's first `search_emails`, then the next queries where needed, then
-     every `download_attachment`, every `ingest_document`, every `record_search`. The
-     self-addressed search and the Telegram inbox sweep belong to the snapshot's
-     continuation only (its `step` is `snapshot`), not to later chunks. Then, always,
+     on the continuation's `work` — a chunk of at most 6 of the quarter's items not yet
+     searched for this package (3 at the snapshot's continuation). Work it exactly as the
+     pass's step 4 says: the probe; the filing at the snapshot's continuation only (its
+     `step` is `snapshot`; at most 8 files, skipping its `filed_refs`), not at later
+     chunks; then ONE ITEM AT A TIME, each recorded before the next, within the per-item
+     limits. Then, always,
      `record_step(pass_token, step="judge", action="start", report={checked,
      total, not_searched})` and delegate "judge the newly filed documents and the payments
      triage did not reach, for <quarter> only", `mode="async"`, with context

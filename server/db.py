@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -261,6 +261,11 @@ CREATE TABLE IF NOT EXISTS alerts (
   alert_id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
   occurrence_key TEXT NOT NULL UNIQUE, detail TEXT NOT NULL, raised_at TEXT NOT NULL,
   render_id TEXT, sent_at TEXT);
+CREATE TABLE IF NOT EXISTS operator_refs (
+  -- issue #24 (D5): each file the operator supplied (an attachment of a self-addressed
+  -- mail, a Telegram file) by its own ref, once filed, so a pass's capped filing skips it
+  ref TEXT PRIMARY KEY, source TEXT NOT NULL, doc_id INTEGER NOT NULL, filed_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at);
 """
 
 # Migrations from version N to N+1, appended when the schema changes. Each is
@@ -372,6 +377,12 @@ MIGRATIONS: dict[int, list[str]] = {
     # pairing, a confirmation). Nothing earlier kept that mark, so every filed document
     # starts unread and the next package round's judge confirms its date.
     6: ["ALTER TABLE documents ADD COLUMN date_read_at TEXT"],
+    # issue #24 (D5): the files the operator supplied, by their own ref, once filed. None
+    # was kept before, so the next pass's filing tries each once more (ingest is
+    # idempotent) and records it.
+    7: ["""CREATE TABLE IF NOT EXISTS operator_refs (
+  ref TEXT PRIMARY KEY, source TEXT NOT NULL, doc_id INTEGER NOT NULL, filed_at TEXT NOT NULL)""",
+        "CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at)"],
 }
 
 

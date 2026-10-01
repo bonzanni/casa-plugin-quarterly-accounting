@@ -296,7 +296,9 @@ class TestRestoreAndReset(Base):
         binding.reset_store(self.conn)
         self.assertEqual([t for t in bf.tags(rid) if t.startswith("acct::")], [])
         self.assertFalse([n for n in bf.notes(rid) if n.startswith("Accounting revision")])
-        out = sim.run_pass(self.conn, bf)
+        # the reset store binds again with today's quarter as its start: admit the Q3
+        # fixture as the first pass does, whatever date the suite runs on
+        out = self.first_pass()
         self.assertTrue(out["gate"]["allowed"])
         self.assertIn(version.WORKFLOW, bf.registered())
         self.assertNotEqual(bf.registered()[version.WORKFLOW], install)
