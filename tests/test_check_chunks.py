@@ -339,6 +339,29 @@ class TestAChunkTurnFitsEllensTurn(Check):
         self.assertEqual((c["next"], c["report"]),
                          ("end-pass", {"checked": 5, "total": 5, "not_searched": 0}))
 
+    def test_an_owed_search_of_an_item_that_no_longer_wants_a_document_keeps_its_count(self):
+        # C3 (Astra S2): not only a pairing takes an item out of triage — an expectation
+        # of no document does too, and its owed search moves nothing either
+        self.seed(4)
+        pid4 = sorted(d["pid"] for d in work.triage(self.conn))[3]
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET passes_without_candidate=? WHERE pid=?",
+                              (work.AGE_OUT_PASSES - 1, pid4))
+        c = self.swept()
+        t = self.chunk(c)
+        with db.tx(self.conn):
+            kb.set_expectation_in_tx(self.conn, scope_type="counterparty", scope="Adobe",
+                                     kind="none", author="specialist")
+        self.assertNotIn(pid4, {d["pid"] for d in work.triage(self.conn)})
+        self.assertIsNone(work.describe(self.conn, pid4)["current"])
+        c = self.judged(t)
+        self.assertEqual([i["pid"] for i in c["work"]["triage"]], [pid4])
+        out = self.call("record_search", pid=pid4, pass_token=c["pass_token"], queries=["q"])
+        self.assertEqual((out["search_state"], out["passes_without_candidate"]),
+                         ("active", work.AGE_OUT_PASSES - 1))
+        c = self.judged(c["pass_token"])
+        self.assertEqual(c["report"], {"checked": 4, "total": 4, "not_searched": 0})
+
     def test_an_owed_search_of_a_paired_item_that_finds_it_keeps_its_count(self):
         # C1 (Astra S2): unchanged either way — neither advanced nor reset
         c, pid = self.paired_unsearched_at(work.AGE_OUT_PASSES - 1)
