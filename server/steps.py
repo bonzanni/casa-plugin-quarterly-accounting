@@ -519,8 +519,10 @@ def _claim_pass(conn, m, step) -> dict:
                      else "gmail-round")
         # issue #21: a check's Gmail round comes in chunks too, each ended by a judgment
         c.update(can_run=can_run, judge_due=work.judge_due(conn),
-                 work=(_hand_chunk(conn, m["pass_id"], None) if c["next"] == "gmail-round"
+                 work=(_hand_chunk(conn, m["pass_id"], None, True) if c["next"] == "gmail-round"
                        else work.work_list(conn)))
+        if c["next"] == "gmail-round":
+            c["filed_refs"] = work.filed_refs(conn)      # issue #24 (D4): the filing skips them
     elif step["step"] == "judge":
         c.update(next="end-pass", report=carry.get("report", {}))
         req = round_request(conn, m["pass_id"])
@@ -533,7 +535,7 @@ def _claim_pass(conn, m, step) -> dict:
             # judgment
             can_run = binding.check_setup(conn)["can_run"]
             if can_run:
-                c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req),
+                c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req, False),
                          judge_due=(len(work.judge_due_state(conn, req["quarter"]))
                                     if req is not None else work.judge_due(conn)),
                          next="gmail-round")
@@ -554,9 +556,9 @@ def _claim_pass(conn, m, step) -> dict:
         if fin.get("stopped") or not can_run or not imported or req is None:
             c.update(can_run=can_run, next="end-pass")
         else:
-            c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req),
+            c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req, True),
                      judge_due=len(work.judge_due_state(conn, req["quarter"])),
-                     next="gmail-round")
+                     next="gmail-round", filed_refs=work.filed_refs(conn))
     return {"continue": c}
 
 
@@ -577,22 +579,24 @@ def _set_first_carry(conn, pass_id, carry) -> None:
                  (db.canonical(carry), pass_id, _first_step(conn, pass_id)))
 
 
-def _hand_chunk(conn, pass_id, req) -> dict:
+def _hand_chunk(conn, pass_id, req, first) -> dict:
     """A Gmail chunk (issue #17: a package round's; issue #21: a check's), with the count
     of items still to search kept on the pass's first step row: the next chunk is handed
     out only if a chunk brought that count down (_another_chunk). A check measures from
     one origin, `since_seq`, allocated at its first hand-out and kept (a re-claimed
     continuation keeps it), and grows the searches it owes (`owed`, by pid) at every
-    hand-out, for its report."""
+    hand-out, for its report — and its work (issue #24). `first`: the continuation of
+    the pass's first step, whose turn also files (a smaller chunk)."""
     import work
     carry = _first_carry(conn, pass_id)
     if req is not None:
-        w = work.work_list(conn, req)
+        w = work.work_list(conn, req, first=first)
     else:
         if carry.get("since_seq") is None:
             carry["since_seq"] = db.next_seq(conn)
-        w = work.work_list(conn, since_seq=carry["since_seq"])
         carry["owed"] = work.grow_owed(conn, carry.get("owed", []), carry["since_seq"])
+        w = work.work_list(conn, since_seq=carry["since_seq"], owed=carry["owed"],
+                           first=first)
     carry["handed"] = w["total"]
     _set_first_carry(conn, pass_id, carry)
     return w
@@ -631,7 +635,7 @@ def _another_chunk(conn, pass_id, req, step) -> bool:
     if req is not None:
         left = len(work.package_work(conn, req))
     elif carry.get("since_seq") is not None:
-        left = len(work.check_work(conn, carry["since_seq"]))
+        left = len(work.check_work(conn, carry["since_seq"], owed=carry.get("owed", [])))
     else:
         return False
     return 0 < left < handed

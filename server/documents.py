@@ -134,6 +134,7 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 # (re)installed under the held name, never beside it as a second copy no
                 # row names (fix wave F)
                 _install(data, sha, "." + existing["ext"])
+                _operator_ref(conn, source, source_ref, existing[0])
                 return {"doc_id": existing[0], "sha256": sha, "created": False,
                         "collisions": collisions(conn, existing[0])}
             _install(data, sha, ext)
@@ -148,8 +149,18 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                  db.canonical(acquisition) if acquisition is not None else None,
                  extraction_author, name, db.now(), dates.quarter_of(db.now()[:10])))
             doc_id = cur.lastrowid
+            _operator_ref(conn, source, source_ref, doc_id)
             return {"doc_id": doc_id, "sha256": sha, "created": True,
                     "collisions": collisions(conn, doc_id)}
+
+
+def _operator_ref(conn, source, source_ref, doc_id) -> None:
+    """Issue #24 (D5): a file the operator supplied, filed — by its own ref (an
+    attachment of a self-addressed mail, a Telegram file), also when its bytes were
+    already held — so a pass's capped filing skips it next time."""
+    if source in ("manual-email", "manual-telegram") and source_ref:
+        conn.execute("INSERT OR REPLACE INTO operator_refs(ref, source, doc_id, filed_at)"
+                     " VALUES (?,?,?,?)", (source_ref, source, doc_id, db.now()))
 
 
 def _doc(conn, doc_id):
