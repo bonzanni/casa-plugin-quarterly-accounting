@@ -13,7 +13,14 @@ different findings. Astra S1: stopping at an ingest's `room: false` in the middl
 left that item's search unrecorded, and the judge then paired it (the report regressed
 against 0.6.0). Terra S1: a sweep that stopped goes straight to `end-pass` with an uncapped
 inbox sweep, and no counter is armed there. Both folded in (marked D2). Design round D3
-pending.
+(c2e819d): Terra SHIP; Astra DNS, two S1s. (a) Failed downloads and listings without an
+ingest cost messages but were never charged: 101 messages under the caps. That is the
+third round with one shape: the server infers Ellen's message count from the calls it can
+see, and an unseen call escapes. Generalized (marked D3): the chunk turn is bounded by
+construction, from the caps, and the counter is gone. (b) Items handed out but not reached
+were paired by the next judge before any search, so the check's report said `not_searched`
+where 0.6.0 said complete. Generalized (marked D3): the check's work is its owed searches,
+not current triage. Design round D4 pending.
 
 ---
 
@@ -50,140 +57,116 @@ turn. The limit is read from `defaults/agents/assistant/runtime.yaml`.
 ## The property this adds
 
 > **A chunk turn ends at its delegation within `ELLEN_TURNS` messages when Ellen makes one
-> tool call per message, and a turn that dies anyway loses at most the item in flight.**
+> tool call per message and follows the caps, and a turn that dies anyway loses at most the
+> item in flight.**
 
-Two parts: the server cuts the chunk short by a count of calls it can see; the skill works
-the chunk item by item and records each item when it is done.
+### 1. The chunk turn is bounded by construction (D3)
 
-### 1. The server counts the chunk turn's calls
+Every unit of work in a chunk turn has a capped cost in messages, so the chunk size alone
+bounds the turn. The server needs no count of Ellen's calls (D1–D3 tried to count them,
+and each round found a call it could not see).
 
 Constants (`work.py`):
 
-    ELLEN_TURNS   = 80   # Casa's assistant max_turns (ha-casa-app#1137); one message per call
-    TURN_TAIL     = 4    # record_step(judge, start), delegate_to_agent,
-                         # record_step(judge, delegated), the closing message
-    HEAD          = 5    # continue_pass, a `speak` (send_message + mark_rendering_delivered),
-                         # the Gmail probe (search_emails + record_probe)
-    HEAD_FIRST    = 2    # the first chunk only: the self-addressed search, list_inbound_files
-    FILINGS_FIRST = 8    # the first chunk only: at most this many files from those two (D1)
-    ITEM_RESERVE  = 11   # the most one item may cost: 4 queries, 2 attachments × (list,
-                         # download, ingest), its record_search
-    GMAIL_CHUNK   = 10   # unchanged: the most items a chunk hands out
+    ELLEN_TURNS     = 80  # Casa's assistant max_turns (ha-casa-app#1137): model calls,
+                          # the closing message included
+    TURN_HEAD       = 5   # continue_pass, one `speak` (send_message + mark_rendering_delivered),
+                          # the Gmail probe (search_emails + record_probe)
+    TURN_TAIL       = 4   # record_step(judge, start), delegate_to_agent,
+                          # record_step(judge, delegated), the closing message
+    FILING_HEAD     = 2   # first chunk: the self-addressed search, list_inbound_files
+    FILINGS_FIRST   = 8   # first chunk: at most 8 files ATTEMPTED from those two
+    FILING_COST     = 3   # per attempt: list + download + ingest (Telegram: share + ingest)
+    ITEM_COST       = 11  # per item: ≤ 4 queries, ≤ 2 attachments ATTEMPTED × (list,
+                          # download, ingest), its record_search
+    CHUNK_LATER     = (ELLEN_TURNS − TURN_HEAD − TURN_TAIL) // ITEM_COST            = 6
+    CHUNK_FIRST     = (ELLEN_TURNS − TURN_HEAD − TURN_TAIL − FILING_HEAD
+                       − FILINGS_FIRST × FILING_COST) // ITEM_COST                   = 4
 
-At every chunk hand-out (`steps._hand_chunk`, package round and check alike) the pass's
-first step row's carry gets
+`GMAIL_CHUNK` (10) is replaced by the two sizes: the continuation of the pass's first step
+(`sweep`, `snapshot`) hands out at most `CHUNK_FIRST` items, and a judge continuation hands
+out at most `CHUNK_LATER`. Check: 5 + 4 + 2 + 24 + 4 × 11 = 79, and 5 + 4 + 6 × 11 = 75,
+both ≤ 80.
 
-    turn = {"budget": ELLEN_TURNS − HEAD − TURN_TAIL − (HEAD_FIRST if first chunk), "spent": 0}
+The caps count attempts, not successes. A failed download, or a listing that files nothing,
+uses up an attachment of the item's 2, or a file of the 8 (D3).
 
-replacing any earlier one (a re-claimed continuation, the next chunk: each is a new turn).
-"First chunk" = the continuation of the pass's first step (`sweep` / `snapshot`).
+### 2. The check's work is its owed searches (D3)
 
-The counter is armed by the hand-out: `turn` also keeps the token the hand-out minted.
-Any `record_step(action="start")` of the pass disarms it (removes `turn`). A call is charged
-only while `turn` is armed and the call's token is the armed one. That is the chunk turn:
-from the hand-out to the judge step's start. The judge's own calls, a later claim's token,
-a stale token, and a step that runs past its expiry are therefore never charged.
+In 0.6.0, `check_work` is cut from current triage. An item that was handed out but not yet
+searched, and that a judge then pairs, leaves the work: it is never searched, and the
+report (over `owed`) counts it `not_searched`. Smaller chunks make that common: an item in
+chunk 2 waits through judge 1. So the work becomes
 
-In the chunk turn:
+    check_work = fresh, non-portal triage items not searched since since_seq
+               ∪ owed pids (merged lineages resolved), not ended, fresh, non-portal,
+                 not searched since since_seq
 
-- `record_search` charges `1 + len(queries)` (the queries as passed, before de-duplication:
-  what Ellen says she ran);
-- `ingest_document` charges 3 (a `list_attachments`, a `download_attachment`, the ingest —
-  an overcount when the message id was already listed). Inbox filings at the first chunk
-  are charged the same way (`share_inbound_file` + ingest: 2, charged 3). They carry the
-  continuation's `pass_token` (D1, Astra S2). An operator's hand-over outside a pass stays
-  tokenless and is never charged.
+ordered as triage is (required first, then date, then pid). A paired owed item is searched
+like any other. Its search may find the paired document again; ingest is idempotent, and
+`record_search` records the search. The loop (`0 < left < handed`) and the report read the
+same set: `left` falls only by searches, and every owed item is either searched or still in
+the work. `owed` is unchanged: it grows at every hand-out and never shrinks. A not-fresh
+item is owed but never handed out (as in 0.6.0).
 
-The charge is written in the call's own transaction. The answers of both calls then carry
+Package rounds keep `package_work` (triage-based). A round's item paired by an earlier
+chunk's judge needs no search for the package: it has its document, and round_fate reads
+the quarter's work, as in 0.6.0.
 
-    chunk = {"room": spent + ITEM_RESERVE <= budget, "calls_left": budget − spent}
-
-(D1: on `ingest_document` too, so a filing is checked like an item. `ITEM_RESERVE` ≥ a
-filing's cost, so one rule covers both: start another filing or item only while the last
-answer said `room: true`.) `room` is read only between units (D2, Astra S1). An item once
-started is finished, `record_search` included, whatever its own ingests answer: the
-`room: true` that admitted it reserved `ITEM_RESERVE` for it.
-
-Nothing is charged, and `chunk` is absent, while a step runs (the judge's own
-`record_search` calls) or outside a pass.
-
-At 80, a later chunk has 71 calls for items. A first chunk has 69 calls for filings and
-items: at most 8 filings (24 charged) leave 45 or more, which is at least four heavy items.
-A first chunk therefore always records items, and the loop's count falls. Ten items at the
-measured ~4.5 calls each fit (~45). A run of heavy items is cut at the first answer past 58
-on a first chunk, or 60 on a later one.
-
-### 2. The skill: item by item, each recorded at once
+### 3. The skill: item by item, each recorded at once, within the caps
 
 Gmail round (the check's step 4 and the package round's `gmail-round`):
 
-- The first chunk (the `sweep` / `snapshot` continuation): the probe, then the
-  self-addressed search and the Telegram inbox sweep, BEFORE the items (today: after).
-  Together they file at most `FILINGS_FIRST` = 8 files, newest first, each with the
-  continuation's `pass_token` (D1). A file is filed once per pass: no second
-  `share_inbound_file` or download of the same file.
-- The cap holds for every filing sweep in a pass turn, not only in a Gmail chunk (D2, Terra
-  S1). That includes the inbox sweep the skill prescribes before `end_pass` when the sweep
-  stopped or failed: that turn has no armed counter, and its fixed cost (`continue_pass`,
-  `list_inbound_files`, 8 × 2, `end_pass`, a `speak` 2, a status card 2–3, the closing
-  message) is under 30.
+- The probe first, as today.
+- The first chunk only (the `sweep` / `snapshot` continuation): the self-addressed search
+  and the Telegram inbox sweep, BEFORE the items. Together they attempt at most 8 files,
+  newest first, each once, every `ingest_document` with the continuation's `pass_token`.
+  What is left waits for the next pass, or the operator's next message.
+- The same cap holds wherever the skill sweeps the inbox in a pass turn, including the
+  `end-pass` turn of a sweep that stopped or failed (D2, Terra S1).
 - Then the chunk **one item at a time**: its queries, its downloads and ingests, then its
-  `record_search` — before the next item. Several calls for the same item may go in one
-  message; never start an item before the previous one is recorded.
-- At most 4 queries and 2 attachments per item in one chunk. An item not found within that:
-  `record_search(…, queries=[…], incomplete=true)` — `exhausted=true` only when the ideas
-  ran out.
-- Before starting a filing or an item, read the last `chunk` answer (from a `record_search`
-  or an `ingest_document`). If it says `room: false`, start nothing more and go to the
-  judge step. An item already started is finished first, its `record_search` included
-  (D2). Items not reached need no record: they stay in the work and come in the next
-  chunk. (The old "an item you never reached: `record_search(incomplete=true)` with no
-  queries" is removed from the Gmail round: it cost a call per unreached item and changed
-  nothing — an unrecorded item is not searched since the origin, `work.searched_since`.)
+  `record_search`, before the next item.
+- Per item: at most 4 queries and at most 2 attachments attempted. An item not found
+  within that: `record_search(…, queries=[…], incomplete=true)`. Set `exhausted=true` only
+  when the ideas ran out.
+- Every item handed out is worked: the chunk is sized for it. An unreached item (a turn
+  that died) needs no record. It stays in the work, and the old "`record_search(incomplete=true)`
+  with no queries" is removed from the Gmail round.
 
-### The loop is unchanged
+### The loop
 
-`_another_chunk` still requires `0 < left < handed`. A cut chunk recorded at least one item
-(the budget always admits the first: `ITEM_RESERVE` ≤ every budget at 80), so `left` falls
-and the next chunk is handed out; the report (`check_report`, `owed`) is untouched.
+`_another_chunk` still requires `0 < left < handed`, with `left` and `handed` over the new
+`check_work` for a check and `package_work` for a package.
 
 ## Residuals (stated)
 
-- Filings past the 8 (D1). In 0.6.0 such a turn died at the limit. Now the turn ends at its
-  delegation, and the files left over wait. A Telegram document is filed in the operator's
-  next text turn, which files the inbox first ("Ellen: a document the operator hands
-  over", step 1). A self-addressed mail waits for the next pass's self-addressed search.
-  The check's report is unchanged: it never counted filings.
-- Calls the server cannot see are estimated: Ellen's off-script calls (a `set_watermark`,
-  a status card in an operator's turn), more than one `speak`, an item past the caps. The
-  margin at 80 (~25 calls over ten typical items) absorbs a few.
-- While Casa's limit is below `ELLEN_TURNS` (before #1137 ships), a full chunk can still die
-  at the limit; recording item by item limits the loss to the item in flight, and the next
-  `continue_pass` (the operator's next message, or a stale reclaim) resumes it.
-- Parallel calls make the count an overestimate: a chunk is cut earlier than it had to be,
-  never later.
+- Files past the 8 (D1). In 0.6.0 such a turn died at the limit. Now the turn ends at its
+  delegation, and the files left wait: a Telegram document is filed in the operator's next
+  text turn (which files the inbox first), and a self-addressed mail by the next pass's
+  self-addressed search.
+- More judges per check: about 1 + ⌈(n − 4) / 6⌉ for n items, against ⌈n / 10⌉ in 0.6.0.
+  Each judge is a specialist delegation bounded by its 510 s wrap-up.
+- Ellen's off-script calls (a `set_watermark`, a status card in an operator's turn) are
+  outside the caps. A typical item costs ~4.5 messages against the 11 budgeted, which
+  leaves a wide margin.
+- While Casa's limit is below `ELLEN_TURNS` (before #1137 ships), a chunk can still die at
+  the limit. Recording item by item limits the loss to the item in flight.
 - A turn that dies is still silent until ha-casa-app#1121.
 
 ## Testing
 
-- `_hand_chunk` sets the budget (first vs later chunk) and resets `spent` at every hand-out,
-  package round and check.
-- `record_search` during a chunk turn charges `1 + len(queries)` and answers `chunk`;
-  `ingest_document` charges 3; a judge step's `record_search` charges nothing and carries no
-  `chunk`.
-- `room` turns false exactly when `spent + ITEM_RESERVE > budget` (boundary both sides), on
-  `record_search` and on `ingest_document`.
-- Astra's D2 trace: 8 filings, then items of 11 calls each. The item whose ingest answers
-  `room: false` is finished and recorded. The report equals 0.6.0's, and the turn stays
-  ≤ `ELLEN_TURNS` messages.
-- A first chunk with 8 filings and 10 items of 11 calls each cuts the items but records at
-  least four, and its message count stays ≤ `ELLEN_TURNS`.
-- A simulated serial chunk turn (one message per call, items of 4–11 calls, heavy ones
-  included) never exceeds `ELLEN_TURNS` messages from `continue_pass` to the closing message,
-  with the skill's head and tail counted; and records ≥ 1 item per chunk.
-- A check whose chunk is cut runs to `end-pass` with every item searched (the loop still
-  falls); the package round likewise.
-- Skill text: item-by-item order, record before the next item, the caps, `room`,
-  the self-mail search and inbox sweep before the items, no `incomplete` record for an
-  unreached item in the Gmail round.
+- The arithmetic: `CHUNK_FIRST` and `CHUNK_LATER` derived from the constants; the worst-case
+  first and later turns ≤ `ELLEN_TURNS`. A test asserts the sum from the constants.
+- Hand-outs: a check's first chunk ≤ 4 and later ≤ 6, and a package round's the same;
+  portals never handed out; 25 items run 4 + 6 + 6 + 6 + 3.
+- Astra's D3 (b): ten items, a judge pairs unreached items 5–7 between chunks. They come in
+  the next chunk, are searched, and the report is `{10, 10, 0}`. 0.6.0's `check_work`
+  fails this test.
+- `left` falls only by searches; a paired-but-unsearched owed item keeps the loop going.
+- An ended owed lineage (or a portal, or a not-fresh one) is never handed out; a merged one
+  is handed out once, under its surviving pid.
+- Skill text: item-by-item order, record before the next item, the caps (counting
+  attempts), filing first with the token and at most 8, the cap in the end-pass inbox sweep,
+  no `incomplete` record for an unreached item in the Gmail round.
+- Package rounds: their suite is unchanged except for the chunk sizes.
 - Mutation-check each new guard (in a worktree).
