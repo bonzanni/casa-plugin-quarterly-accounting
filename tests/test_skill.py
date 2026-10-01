@@ -199,7 +199,9 @@ class TestSkill(TempEnv):
         g = " ".join(self.section("4. **Gmail round.**", "5. After a chunk").split())
         for phrase in ("one call per message", "ONE ITEM AT A TIME",
                        "then its `record_search`, and only then the next item",
-                       "or after 4 queries", "at most 2 per item, a failed download counts",
+                       "or after 4 queries", "Then at most 2 tries per item: a try is the message's "
+                       "`list_attachments` (when you need it)", "a listing that shows nothing "
+                       "plausible, or a failed listing or download, uses a try",
                        "`incomplete=true` when you stopped at the 4 queries",
                        "search it all the same"):
             self.assertIn(phrase, g)

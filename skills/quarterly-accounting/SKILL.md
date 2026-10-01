@@ -278,9 +278,11 @@ pass, whichever comes first:
      `search_hint`, the printed amount, its `window_days` around the date,
      `has:attachment` — never one broad query (Gmail returns at most 100 and drops the
      rest). For a CRDT, and a DBIT `refund`, search Sent. Stop at the first query that
-     finds the document, when the ideas run out, or after 4 queries. `download_attachment`
-     a plausible candidate — at most 2 per item, a failed download counts — and file it
-     with `ingest_document(source_path=<returned path>, kind=<your provisional reading>,
+     finds the document, when the ideas run out, or after 4 queries. Then at most 2 tries
+     per item: a try is the message's `list_attachments` (when you need it), then
+     `download_attachment` of a plausible candidate and its filing — a listing that shows
+     nothing plausible, or a failed listing or download, uses a try. File it with
+     `ingest_document(source_path=<returned path>, kind=<your provisional reading>,
      source="gmail", extraction_author="resident", source_ref=<message id>,
      pass_token=…)`. Record the item with `record_search(pid, pass_token, queries=[…],
      found_candidate=…, exhausted=…, incomplete=…)`: `exhausted=true` only when the ideas

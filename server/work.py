@@ -222,7 +222,7 @@ TURN_TAIL = 4         # record_step(judge, start), the delegation, record_step(d
 FILING_HEAD = 2       # a pass's first chunk: the self-addressed search, list_inbound_files
 FILINGS_FIRST = 8     # ... and at most this many files attempted from those two
 FILING_COST = 3       # a file attempted: list + download + ingest (Telegram: share + ingest)
-ITEM_COST = 11        # an item: <= 4 queries, <= 2 attachments attempted x 3, its record_search
+ITEM_COST = 11        # an item: <= 4 queries, <= 2 tries (list, download, ingest), its record_search
 CHUNK_LATER = (ELLEN_TURNS - TURN_HEAD - TURN_TAIL) // ITEM_COST
 CHUNK_FIRST = (ELLEN_TURNS - TURN_HEAD - TURN_TAIL - FILING_HEAD
                - FILINGS_FIRST * FILING_COST) // ITEM_COST

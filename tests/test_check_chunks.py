@@ -229,6 +229,8 @@ class TestTheReportCountsWhatThePassOwes(Check):
         self.assertTrue(work.describe(self.conn, gone)["ended"])
         c = self.judged(t)
         self.assertEqual(c["report"], {"checked": 1, "total": 1, "not_searched": 0})
+        # issue #24 (C1): owed, yet never handed out again (the owed work skips it)
+        self.assertEqual((c["next"], c.get("work")), ("end-pass", None))
 
 
 class TestTheLatestJudgmentCovers(Check):
@@ -303,6 +305,37 @@ class TestAChunkTurnFitsEllensTurn(Check):
         self.assertTrue(work.searched_since(d, self.sweep_carry()["since_seq"]))
         c = self.judged(t)
         self.assertEqual(c["report"], {"checked": 4, "total": 4, "not_searched": 0})
+
+    def test_an_owed_search_of_a_paired_item_that_finds_it_keeps_its_count(self):
+        # C1 (Astra S2): unchanged either way — neither advanced nor reset
+        c, pid = self.paired_unsearched_at(work.AGE_OUT_PASSES - 1)
+        out = self.call("record_search", pid=pid, pass_token=c["pass_token"], queries=["q"],
+                        found_candidate=True)
+        self.assertEqual((out["search_state"], out["passes_without_candidate"]),
+                         ("active", work.AGE_OUT_PASSES - 1))
+
+    def test_an_owed_item_that_became_a_portal_is_not_handed_out(self):
+        # C1 (Terra S2): the owed work leaves portals out, as triage's does
+        self.seed(4)
+        pid4 = sorted(d["pid"] for d in work.triage(self.conn))[3]
+        c = self.swept()
+        t = self.chunk(c)
+        doc = self.file(amount_minor=1003, document_date="2026-07-15")
+        self.start(t, step="judge")
+        item = [i for i in self.call("list_quarter_state", triage=True, pass_token=t)["triage"]
+                if i["pid"] == pid4][0]
+        self.call("record_match", pid=pid4, doc_id=doc, author="auto",
+                  expected_revision=item["revision"], row_digest=item["row_digest"],
+                  document_date="2026-07-15", pass_token=t)
+        with db.tx(self.conn):
+            kb.upsert_in_tx(self.conn, "Adobe", patterns=["Adobe"], source="portal",
+                            document_link="https://example.invalid/invoices",
+                            link_note="found in the account page")
+        self.assertTrue(work.describe(self.conn, pid4)["portal"])
+        self.call("record_step", pass_token=t, step="judge", action="finish",
+                  triage_remaining=0)
+        c = self.claim()["continue"]
+        self.assertEqual((c["next"], c.get("work")), ("end-pass", None))
 
     def test_a_triage_items_fruitless_search_still_ages_it_out(self):
         self.seed(1)
