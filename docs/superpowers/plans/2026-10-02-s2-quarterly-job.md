@@ -121,7 +121,8 @@ class Schema10(StoreCase):
                         <= self.cols("work_requests"))
 
     def test_new_columns(self):
-        self.assertTrue({"protocol", "holder_job", "orphaned_by", "adoptions", "acq",
+        self.assertTrue({"protocol", "holder_job", "orphaned_by", "adoptions", "adopters_json",
+                         "acq",
                          "acq_gen", "read_seq", "w_refreshes", "judge_after", "judge_pages"}
                         <= self.cols("passes"))
         self.assertTrue({"protocol", "started_seq"} <= self.cols("pass_steps"))
@@ -172,6 +173,7 @@ In `server/db.py`:
         "ALTER TABLE passes ADD COLUMN holder_job TEXT",
         "ALTER TABLE passes ADD COLUMN orphaned_by TEXT",
         "ALTER TABLE passes ADD COLUMN adoptions INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE passes ADD COLUMN adopters_json TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE passes ADD COLUMN acq INTEGER",
         "ALTER TABLE passes ADD COLUMN acq_gen INTEGER",
         "ALTER TABLE passes ADD COLUMN read_seq INTEGER",
@@ -361,8 +363,8 @@ git commit -m "fix(s2): a row whose bank write is unconfirmed stays due (read-ba
     step, *, counts, stopped=None, failed=False, by_refusal=False, out_of_time=False) ->
     dict`: the bodies; `start`/`finish` wrap them.
   - A `pass_steps` row inserted under a job pass carries `protocol='job'`.
-  - `steps.claim(conn, delegation_id=None, delegation_status=None, *, sends_only=False)`:
-    with `sends_only`, `_choose` skips its pass and round branches.
+  - `steps._choose(conn, sends_only=False)`: with `sends_only`, it skips its pass and round
+    branches (used by Task 10's `_claim_sends_tx`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -464,8 +466,8 @@ def _ended(step):
 
 - `clock` and `sweep_allowance` return `None` when the live pass's protocol is `job`.
 - `_choose(conn, sends_only=False)`: when `sends_only`, skip the `m is not None` pass block and
-  the `round` branch, and return only the `delivery`/`request`/`none` outcomes. `claim` passes
-  it through, and re-checks `_choose(conn, sends_only)` inside the transaction.
+  the `round` branch, and return only the `delivery`/`request`/`none` outcomes. `claim` is
+  unchanged.
 
 `passes.judgment_gap(conn, pass_id) -> int` is the count `_judgment_owed` computes: judge-due
 payments not covered by a finished judgment of this pass. `_judgment_owed` raises from it as
@@ -546,6 +548,16 @@ class Claim(StoreCase):
                                 (pid,)).fetchone()
         self.assertEqual((row["adoptions"], row["holder_job"]), (1, B))
 
+    def test_a_job_that_held_the_pass_before_is_not_charged_again(self):
+        import job
+        t = job.claim(self.conn, A)
+        pid = self.start_job_pass(t)
+        for j in (B, A, B, A, B):                # A→B→A→B…: one adoption, by B
+            job.claim(self.conn, j)
+        row = self.conn.execute("SELECT adoptions, ended_at FROM passes WHERE pass_id=?",
+                                (pid,)).fetchone()
+        self.assertEqual((row["adoptions"], row["ended_at"]), (1, None))
+
     def test_third_adoption_stops_the_pass(self):
         import job
         t = job.claim(self.conn, A)
@@ -567,7 +579,8 @@ class Claim(StoreCase):
 
 `StoreCase.start_job_pass(token, trigger="operator")` is added in this task. It opens
 `db.tx`, calls `passes.start_pass(..., protocol="job", token=token)`, and sets
-`passes.holder_job` to the claim's job id.
+`passes.holder_job` to the claim's job id and `adopters_json` to `[<that job id>]`, as
+Task 7's `_begin_next` does.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -626,13 +639,18 @@ def claim(conn, job_id) -> int:
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain', ?)", (job_id,))
         p = live_job_pass(conn)
         if p is not None:
-            if p["holder_job"] != job_id:
+            # every job id that ever held the pass, its starter first (spec §6.3: one
+            # adoption per adopting job id, whatever came in between)
+            held = json.loads(p["adopters_json"])
+            if job_id not in held:
                 if p["adoptions"] >= ADOPTIONS_MAX:
                     stop_exhausted_pass(conn, token, p["pass_id"])
                     _stamp_measure(conn, token)
                     return token
-                conn.execute("UPDATE passes SET adoptions=adoptions+1, holder_job=?,"
-                             " orphaned_by=NULL WHERE pass_id=?", (job_id, p["pass_id"]))
+                conn.execute("UPDATE passes SET adoptions=adoptions+1, adopters_json=?"
+                             " WHERE pass_id=?", (json.dumps(held + [job_id]), p["pass_id"]))
+            conn.execute("UPDATE passes SET holder_job=?, orphaned_by=NULL WHERE pass_id=?",
+                         (job_id, p["pass_id"]))
             conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
         _stamp_measure(conn, token)
         return token
@@ -741,8 +759,9 @@ class Acquisition(StoreCase):
                                   "missing": []})
 
     def export(self, rows):
-        """An export file in the handoff folder, as bank-feed publishes one."""
-        return self.publish("export.csv", self.export_csv(rows), producer="bank-feed-export")
+        """An export file in the handoff folder: StoreCase.export_csv publishes it and
+        returns its path, as bank-feed's export_history does."""
+        return self.export_csv(rows)
 
     def handed(self):
         import db, job
@@ -752,7 +771,7 @@ class Acquisition(StoreCase):
     def test_import_needs_its_acquisitions_sync_under_the_same_claim(self):
         import db, ledger
         acq = self.handed()
-        path = self.export([self.row_dict(1)])
+        path = self.export([{"row_id": 1}])
         with self.assertRaises(db.Refusal):            # no bank_sync for this acq yet
             ledger.import_ledger_export(self.conn, path=path, token=self.tok,
                                         ledger_instance=self.LEDGER, acq=acq)
@@ -765,7 +784,7 @@ class Acquisition(StoreCase):
         import db, ledger
         acq = self.handed()
         self.probes(acq)
-        path = self.export([self.row_dict(1)])
+        path = self.export([{"row_id": 1}])
         ledger.import_ledger_export(self.conn, path=path, token=self.tok,
                                     ledger_instance=self.LEDGER, acq=acq)
         acq2 = self.handed()
@@ -779,7 +798,7 @@ class Acquisition(StoreCase):
         acq1 = self.handed()
         self.probes(acq1)
         acq2 = self.handed()                            # re-handed in the same claim
-        path = self.export([self.row_dict(1)])
+        path = self.export([{"row_id": 1}])
         with self.assertRaises(db.Refusal):
             ledger.import_ledger_export(self.conn, path=path, token=self.tok,
                                         ledger_instance=self.LEDGER, acq=acq1)
@@ -789,7 +808,7 @@ class Acquisition(StoreCase):
         acq = self.handed()
         self.probes(acq)
         self.tok = job.claim(self.conn, A)              # the turn ended; a new turn
-        path = self.export([self.row_dict(1)])
+        path = self.export([{"row_id": 1}])
         with self.assertRaises(db.Refusal):
             ledger.import_ledger_export(self.conn, path=path, token=self.tok,
                                         ledger_instance=self.LEDGER, acq=acq)
@@ -800,7 +819,7 @@ class FreshnessF(Acquisition):
         import ledger
         acq = self.handed()
         self.probes(acq)
-        ledger.import_ledger_export(self.conn, path=self.export([self.row_dict(1)]),
+        ledger.import_ledger_export(self.conn, path=self.export([{"row_id": 1}]),
                                     token=self.tok, ledger_instance=self.LEDGER, acq=acq)
 
     def reason(self):
@@ -852,8 +871,7 @@ class FreshnessF(Acquisition):
 
 `StoreCase` gains these helpers in this task (each a few lines, built on the existing
 `EXPORT_COLS`, `row()`, `lineage_for()` and `tests/sim.py`):
-- `export_csv(rows) -> bytes` writes `EXPORT_COLS` as CSV;
-- `row_dict(row_id, **over) -> dict` is the export row for a payment;
+- (`export_csv(rows)` already exists: it publishes a synthetic export and returns its path);
 - `sweep_to_zero()` lists and observes until `remaining_in_cycle` is 0, with no writes owed
   (pass `observed_tags` equal to `desired`);
 - `only_pid()` is the single live lineage's pid;
@@ -894,10 +912,14 @@ def hand_acquisition(conn, token, pass_id) -> int:
     return acq
 ```
 
-`ledger.import_ledger_export`:
-- Add `acq=None`.
-- Inside the import's transaction, after `passes.check_token`, when the current pass's
-  protocol is `job`:
+`ledger.import_ledger_export` and `ledger._import`:
+- The public function takes `acq=None`. After `casa_handoff.capture(path)` succeeds, it
+  computes `export_ref = pathlib.Path(os.path.realpath(path)).parent.name`. `capture` has
+  already proved the layout `<root>/<producer>/<id>/<filename>`, so this is the handoff id. It
+  then passes both on: `_import(conn, rows, token, ledger_instance, acq=acq,
+  export_ref=export_ref)`. The custody lock is still taken before `_import`'s transaction.
+- `_import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None)`. Inside its
+  transaction, after `passes.check_token`, when the current pass's protocol is `job`:
 
 ```python
         if cur_pass["protocol"] == "job":
@@ -912,13 +934,13 @@ def hand_acquisition(conn, token, pass_id) -> int:
                     or json.loads(sync["data_json"] or "{}").get("acq") != acq):
                 raise db.Refusal("record this bank read's sync first (record_probe "
                                  "kind=\"bank_sync\" with its acq), then export and import")
-            ref = os.path.basename(os.path.dirname(path))      # the handoff id
-            if conn.execute("SELECT 1 FROM snapshots WHERE export_ref=?", (ref,)).fetchone():
+            if conn.execute("SELECT 1 FROM snapshots WHERE export_ref=?",
+                            (export_ref,)).fetchone():
                 raise db.Refusal("this export was imported already — export again")
 ```
 
 - In the `INSERT INTO snapshots`, add `job_id` (`cur_pass["holder_job"]`), `read_seq`
-  (`cur_pass["read_seq"]`), `acq` and `export_ref` (`ref` for a job pass, else NULL).
+  (`cur_pass["read_seq"]`), `acq` and `export_ref` (for a job pass; NULL otherwise).
 
 `sweep.list_projections`: in the `if not due_all:` branch, also run
 `UPDATE snapshots SET swept_at=coalesce(swept_at, ?) WHERE snapshot_id=?` with
@@ -955,7 +977,7 @@ def fresh_reason(conn):
         return LATE_ASK
     if s["swept_at"] is None:
         return UNSWEPT
-    if p["w_refreshes"] < W_REFRESH_MAX and _age_s(s["swept_at"]) >= W_S:
+    if p["w_refreshes"] < W_REFRESH_MAX and passes._age_s(s["swept_at"]) >= W_S:
         return STALE
     return None
 
@@ -966,8 +988,8 @@ def require_fresh(conn) -> None:
         raise db.Refusal(f"{why}: the bank must be read again: call job_next")
 ```
 
-(`_age_s` is `passes._age_s`. Condition 2 compares with `>=`, so a request in the same
-sequence step as the watermark is not served.)
+(Condition 2 compares with `>=`, so a request in the same sequence step as the watermark is
+not served.)
 
 `matches`:
 - In the transactions of `record_match` (when `author == "auto"`), `propose_match` and
@@ -1059,21 +1081,33 @@ class Requests(StoreCase):
         r = self.conn.execute("SELECT state, pass_id FROM work_requests").fetchone()
         self.assertEqual((r["state"], r["pass_id"]), ("queued", None))
 
-    def test_exhausted_adoptions_close_work_and_package_requests(self):
-        import asks, job
+    def test_exhausted_adoptions_close_a_check_pass_requests(self):
+        import asks, db, job
         asks.request_work(self.conn, "check", "operator")
+        t = job.claim(self.conn, A)
+        pid = self.start_job_pass(t)
+        with db.tx(self.conn):
+            asks.take_queued(self.conn, pid)
+        for j in ("bbbbbbbb-2", "cccccccc-3", "dddddddd-4"):
+            job.claim(self.conn, j)
+        w = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
+        self.assertEqual((w["state"], w["outcome"]), ("done", "stopped"))
+
+    def test_exhausted_adoptions_close_a_package_round_and_leave_other_work_queued(self):
+        import asks, job
         asks.request_package(self.conn, "2026-Q3", "telegram")
         t = job.claim(self.conn, A)
         pid = self.start_job_pass(t, trigger="package")
         self.bind_round_and_take(pid)
+        asks.request_work(self.conn, "check", "operator")   # not this pass's to take
         for j in ("bbbbbbbb-2", "cccccccc-3", "dddddddd-4"):
             job.claim(self.conn, j)
-        w = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
-        p = self.conn.execute("SELECT state FROM package_requests").fetchone()
-        self.assertEqual((w["state"], w["outcome"]), ("done", "stopped"))
-        self.assertEqual(p["state"], "stopped")
+        self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
+                         "stopped")
         self.assertEqual(self.conn.execute("SELECT count(*) FROM alerts WHERE kind="
                                            "'package-stopped'").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT state FROM work_requests").fetchone()[0],
+                         "queued")
 
     def test_a_handover_is_done_only_after_a_later_whole_judgment_naming_its_docs(self):
         import asks, db, job, steps
@@ -1095,6 +1129,26 @@ class Requests(StoreCase):
         steps.finish(self.conn, t, "judge", counts={"triage_remaining": 0})
         with db.tx(self.conn):
             self.assertTrue(asks.handover_covered(self.conn, pid))
+
+    def test_a_verdict_from_an_earlier_judgment_does_not_cover(self):
+        import asks, db, job, steps
+        t = job.claim(self.conn, A)
+        pid = self.start_job_pass(t)
+        steps.start(self.conn, t, "sweep", {})
+        steps.finish(self.conn, t, "sweep", counts={"remaining_in_cycle": 0})
+        self.hand_empty_chunk()
+        d = self.doc()
+        asks.request_work(self.conn, "handover", "operator", doc_ids=[d])
+        with db.tx(self.conn):
+            asks.take_queued(self.conn, pid)
+        steps.start(self.conn, t, "judge", {})
+        with db.tx(self.conn):
+            asks.record_verdicts(self.conn, pid, {str(d): "no-payment-yet"})
+        steps.finish(self.conn, t, "judge", counts={"triage_remaining": 0})
+        steps.start(self.conn, t, "judge", {})          # a restart (e.g. after a refresh)
+        steps.finish(self.conn, t, "judge", counts={"triage_remaining": 0})   # names nothing
+        with db.tx(self.conn):
+            self.assertFalse(asks.handover_covered(self.conn, pid))
 ```
 
 The helpers `StoreCase.bind_round_and_take(pass_id)` (`passes._bind_round` on the queued
@@ -1199,8 +1253,14 @@ def requeue_taken(conn, pass_id) -> None:
 
 
 def record_verdicts(conn, pass_id, documents) -> None:
-    """The judge's per-document verdicts (spec §5.2) on the pass's taken handovers."""
+    """The judge's per-document verdicts (spec §5.2) on the pass's taken handovers, each
+    tagged with the running judgment's started_seq: a verdict covers only the judgment
+    that made it (INV-J12; Astra plan-r1)."""
     assert conn.in_transaction
+    j = conn.execute("SELECT started_seq FROM pass_steps WHERE pass_id=? AND step='judge'"
+                     " AND finished_at IS NULL", (pass_id,)).fetchone()
+    if j is None:
+        raise db.Refusal("no judge step is running")
     allowed = {"matched", "proposed", "no-payment-yet", "clash", "unreadable",
                "out-of-range", "irrelevant"}
     for doc_id, verdict in (documents or {}).items():
@@ -1211,7 +1271,7 @@ def record_verdicts(conn, pass_id, documents) -> None:
                               (pass_id,)).fetchall():
             if int(doc_id) in json.loads(r["doc_ids_json"]):
                 v = json.loads(r["verdicts_json"])
-                v[str(int(doc_id))] = verdict
+                v[str(int(doc_id))] = {"verdict": verdict, "judge": j["started_seq"]}
                 conn.execute("UPDATE work_requests SET verdicts_json=? WHERE request_id=?",
                              (db.canonical(v), r["request_id"]))
 
@@ -1230,7 +1290,8 @@ def handover_covered(conn, pass_id) -> bool:
                 or json.loads(j["finish_json"] or "{}").get("triage_remaining") is None:
             return False
         v = json.loads(r["verdicts_json"])
-        if any(str(d) not in v for d in json.loads(r["doc_ids_json"])):
+        if any((v.get(str(d)) or {}).get("judge") != j["started_seq"]
+               for d in json.loads(r["doc_ids_json"])):
             return False
     return True
 ```
@@ -1387,6 +1448,19 @@ class CheckPass(StoreCase):
         t = self.drv.token
         self.assertEqual(job.next_unit(self.conn, t)["unit"], "probes")
 
+    def test_eight_asks_that_each_stop_at_once_all_get_dispositions(self):
+        import asks
+        self.drv.bankfeed.restore_since_install()        # every pass stops at its probes
+        for q in ("2025-Q1", "2025-Q2", "2025-Q3", "2025-Q4",
+                  "2026-Q1", "2026-Q2", "2026-Q3", "2026-Q4"):
+            asks.request_package(self.conn, q, "telegram")
+        asks.request_work(self.conn, "check", "operator")
+        self.drv.run_job(A)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM package_requests WHERE"
+                                           " state='queued'").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM work_requests WHERE"
+                                           " state='queued'").fetchone()[0], 0)
+
     def test_a_stopped_gate_ends_the_pass_stopped(self):
         import asks
         self.drv.bankfeed.restore_since_install()        # the ledger was restored
@@ -1452,7 +1526,9 @@ def _choose(conn, token) -> dict:
                 return u
         if not ended:
             passes._end_pass_tx(conn, token, _outcome(conn, p), {})
-    raise RuntimeError("the cursor did not settle in 8 passes")      # a bug, reported loudly
+    # eight passes ended in this call (e.g. eight package asks each stopped at once):
+    # their dispositions commit with this answer, and the next batch goes on
+    return {"unit": "end-batch"}
 
 
 def _begin_next(conn, token):
@@ -1470,7 +1546,8 @@ def _begin_next(conn, token):
         _, pid = passes.start_pass(conn, "package", "silent", protocol="job", token=token)
         passes._bind_round(conn, req["request_id"], pid)
     who = conn.execute("SELECT job_id FROM claims WHERE gen=?", (token,)).fetchone()[0]
-    conn.execute("UPDATE passes SET holder_job=? WHERE pass_id=?", (who, pid))
+    conn.execute("UPDATE passes SET holder_job=?, adopters_json=? WHERE pass_id=?",
+                 (who, json.dumps([who]), pid))
     asks.take_queued(conn, pid)
     return live_job_pass(conn)
 
@@ -1589,11 +1666,13 @@ def _judge(conn, token, p, req):
 
 def _judge_unit(conn, p, req) -> dict:
     p = live_job_pass(conn)                           # re-read: judge_after may have changed
+    j = _step(conn, p, "judge")
     firsts = []
     for r in conn.execute("SELECT doc_ids_json, verdicts_json FROM work_requests WHERE"
                           " pass_id=? AND state='taken' AND kind='handover'", (p["pass_id"],)):
         seen = json.loads(r["verdicts_json"])
-        firsts += [d for d in json.loads(r["doc_ids_json"]) if str(d) not in seen]
+        firsts += [d for d in json.loads(r["doc_ids_json"])
+                   if (seen.get(str(d)) or {}).get("judge") != j["started_seq"]]
     after = json.loads(p["judge_after"]) if p["judge_after"] else None
     return {"unit": "judge", "after": after, "quarter": req["quarter"] if req else None,
             "documents_first": firsts}
@@ -1898,12 +1977,16 @@ git commit -m "feat(s2): batch budget and the work-measure progress the job repo
 
 **Files:**
 - Modify: `server/asks.py` (`job_report`, `mark_reported`)
-- Modify: `server/views.py` (`mark_rendering_delivered` calls `asks.mark_reported`)
+- Modify: `server/views.py` (`mark_rendering_delivered` calls `asks.mark_reported`;
+  `_build_review` gains an in-tx core, `review_in_tx`)
+- Modify: `server/steps.py` (`_claim_sends_tx`, the in-tx body of a sends-only claim)
 - Test: `tests/test_s2_report.py`
 
 **Interfaces:**
-- Consumes: `steps.claim(conn, sends_only=True)` (Task 3), `alerts.pending_rendering`,
-  `views.build_review`, `steps._pairing`.
+- Consumes: `steps._choose(conn, sends_only=True)` (Task 3), `alerts.pending_in_tx`,
+  `steps._pairing`.
+- Produces, in-tx: `steps._claim_sends_tx(conn) -> dict` (`{"continue": …, "_notice": …}`) and
+  `views.review_in_tx(conn, view="status", **kw) -> dict`.
 - Produces: `asks.job_report(conn, job_id=None, status=None) -> {"orphaned": bool,
   "start_job": dict|None, "texts": [{"render_id", "text"}], "speak": dict|None,
   "continue": dict|None, "line": str|None}`.
@@ -1990,55 +2073,94 @@ def _match_job(conn, job_id):
 
 
 def job_report(conn, job_id=None, status=None) -> dict:
-    import alerts, job, steps, views
+    """Spec §6.4: ONE transaction, under the custody lock (taken first: the store's lock
+    order). The orphan handoff, the retry decision, the results, the alerts and the
+    package or delivery recovery see one state and commit together."""
+    import alerts, job, steps
+    if job_id is not None and status not in ("ok", "error"):
+        raise db.Refusal("status is 'ok' or 'error'")
     out = {"orphaned": False, "start_job": None, "texts": [], "speak": None,
            "continue": None, "line": None}
-    with db.tx(conn):
-        if job_id is not None:
-            if status not in ("ok", "error"):
-                raise db.Refusal("status is 'ok' or 'error'")
-            who = _match_job(conn, job_id)
+    with db.custody_lock():
+        with db.tx(conn):
+            if job_id is not None:
+                who = _match_job(conn, job_id)
+                p = job.live_job_pass(conn)
+                drain = conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
+                if who is not None and p is not None and p["holder_job"] == who:
+                    conn.execute("UPDATE passes SET orphaned_by=? WHERE pass_id=?",
+                                 (who, p["pass_id"]))
+                    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain','none')")
+                elif who is not None and drain is not None and drain[0] == who:
+                    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain','none')")
             p = job.live_job_pass(conn)
-            drain = conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
-            if who is not None and p is not None and p["holder_job"] == who:
-                conn.execute("UPDATE passes SET orphaned_by=? WHERE pass_id=?", (who, p["pass_id"]))
-                conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain','none')")
-            elif who is not None and drain is not None and drain[0] == who:
-                conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain','none')")
-        p = job.live_job_pass(conn)
-        drain = (conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone() or ["none"])[0]
-        orphaned = p is not None and p["orphaned_by"] is not None
-        queued = conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL"
-                              " SELECT 1 FROM package_requests WHERE state='queued'").fetchone()
-        out["orphaned"] = orphaned
-        if drain == "none" and (orphaned or queued is not None):
-            out["start_job"] = dict(START)
-            if orphaned:
-                out["line"] = ("The accounting check stopped before it finished — I'm starting "
-                               "it again.")
-        done = conn.execute("SELECT * FROM work_requests WHERE state='done' ORDER BY"
-                            " request_id").fetchall()
-    for r in done:
-        out["texts"].append(_result(conn, r))
-    out["speak"] = alerts.pending_rendering(conn)
-    cont = steps.claim(conn, sends_only=True)
-    out["continue"] = cont.get("continue")
-    if cont.get("speak") and out["speak"] is None:
-        out["speak"] = cont["speak"]
+            drain = (conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
+                     or ["none"])[0]
+            orphaned = p is not None and p["orphaned_by"] is not None
+            queued = conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL"
+                                  " SELECT 1 FROM package_requests WHERE state='queued'"
+                                  ).fetchone()
+            out["orphaned"] = orphaned
+            if drain == "none" and (orphaned or queued is not None):
+                out["start_job"] = dict(START)
+                if orphaned:
+                    out["line"] = ("The accounting check stopped before it finished — I'm "
+                                   "starting it again.")
+            for r in conn.execute("SELECT * FROM work_requests WHERE state='done' ORDER BY"
+                                  " request_id").fetchall():
+                out["texts"].append(_result_tx(conn, r))
+            sends = steps._claim_sends_tx(conn)
+            out["continue"] = sends.get("continue")
+            notice = sends.get("_notice")
+            out["speak"] = alerts.pending_in_tx(conn, must=[notice] if notice else None)
     return out
-```
 
-`_result(conn, r)` returns the request's rendering and creates it at most once:
+
+`_result_tx(conn, r)` (in-tx) returns the request's rendering and creates it at most once:
 - if `r["render_id"]` is set and that rendering is undelivered → `{render_id, text}` from
   `renders`;
-- an operator check whose outcome is `complete`/`interrupted` → `views.build_review(conn,
-  view="status")`; store its `render_id` on the request;
+- an operator check whose outcome is `complete`/`interrupted` → `views.review_in_tx(conn,
+  "status")`; store its `render_id` on the request;
 - an outcome of `stopped` → a rendering of kind `job-stop` whose text is the stop line
   ("The accounting check stopped: <reason>." or, for exhausted adoptions, "The accounting
   check kept stopping — ask again when you want me to retry.");
 - a handover → a rendering of kind `handover`: one line per document from
   `steps._pairing(conn, doc_id)` with the existing case lines of SKILL.md §"a document the
   operator hands over", step 3, keyed by the verdict when the pairing is `unpaired`.
+
+`views.review_in_tx(conn, view, **kw)` is `_build_review`'s body without its own
+`with db.tx(conn):` (`views.py:915`), in a `try/finally` that resets `_NAMES`, as
+`build_review` does. `_build_review` becomes `with db.tx(conn): return
+review_in_tx(conn, …)`.
+
+`steps._claim_sends_tx(conn)` is in-tx and assumes the custody lock is held:
+
+```python
+def _claim_sends_tx(conn) -> dict:
+    """A sends-only claim (S2 §6.4): a stalled staged send, or a buildable or built
+    package request whose lease lapsed. The caller holds the custody lock and the
+    write transaction."""
+    import passes
+    assert conn.in_transaction
+    cand = _choose(conn, sends_only=True)
+    if cand[0] == "delivery":
+        out = _claim_delivery(conn, cand[1])
+    elif cand[0] == "request":
+        out = _claim_request(conn, cand[1])
+    else:
+        return {"continue": None}
+    out["more"] = passes.queued_waiting(conn)
+    _fits(out)
+    return out
+```
+
+`steps.claim(…, sends_only=True)` from Task 3 is not needed; drop that parameter from Task 3.
+Keep `_choose(conn, sends_only=False)`.
+
+Add `test_report_is_one_transaction_under_the_custody_lock` to `tests/test_s2_report.py`.
+With another connection holding `db.custody_lock()` and a short bound,
+`asks.job_report(self.conn)` raises `db.Busy`, and nothing changed: same `render_id`s,
+`drain` and `orphaned_by` as before.
 
 `mark_reported(conn, render_id)` is in-tx:
 `UPDATE work_requests SET state='reported' WHERE render_id=? AND state='done'`.
@@ -2062,7 +2184,8 @@ git commit -m "feat(s2): job_report — orphan handoff by job id, standing retry
 
 **Files:**
 - Modify: `server/sweep.py` (`record_observation` stamps issue gens; `note_confirmed`)
-- Modify: `server/ledger.py:430` (the call passes `conn`)
+- Modify: `server/ledger.py:430` (the call passes `conn`); `server/ledger.py:115–121` (a merge
+  carries the loser's issue generations to the survivor, as it carries their times)
 - Test: `tests/test_s2_notes.py`
 
 **Interfaces:**
@@ -2227,6 +2350,22 @@ def _Z():
   code reads it (`grep -n CEILING_ASSUMED_S server/`).
 
 `ledger.py:430`: pass `conn=conn`.
+
+`ledger.py`, the merge (around line 115): next to the `note_other_issued_at` transfer, add:
+
+```python
+    gens = [g for g in (s["note_other_issued_gen"], lo["note_issued_gen"],
+                        lo["note_other_issued_gen"]) if g is not None]
+    if gens:
+        conn.execute("UPDATE projections SET note_other_issued_gen=? WHERE pid=?",
+                     (max(gens), survivor))
+```
+
+Add `test_a_merge_carries_the_losers_issue_generation` to `tests/test_s2_notes.py`. It builds
+two lineages with `lineage_for`. The loser has `note_issued_gen=2`, `note_issued_seq` ≠ the
+survivor's `note_seq`, and its `note_issued_at` set. It calls `ledger.merge(conn, survivor, loser)` inside `db.tx`, then checks
+that the survivor's `note_confirmed(…)`, with a read under claim 2, is False. Before the change
+the same read is True (Astra's reproduction: 0 → 1 confirmation).
 
 - [ ] **Step 4: Run the tests**
 
