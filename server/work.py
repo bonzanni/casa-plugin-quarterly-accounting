@@ -279,7 +279,8 @@ TRIAGE_LIMIT = 50
 ELLEN_TURNS = 80      # Casa's assistant max_turns (ha-casa-app#1137; operator 2026-10-01)
 TURN_HEAD = 8         # continue_pass, one speak (send + mark delivered), the Gmail probe (2),
                       # and what a package ask does first (begin_pass, its line) and a spare
-TURN_TAIL = 4         # record_step(judge, start), the delegation, record_step(delegated), close
+TURN_TAIL = 5         # the last more_work (the one answering `judge`, issue #31; C1 Terra S1),
+                      # record_step(judge, start), the delegation, record_step(delegated), close
 FILING_HEAD = 2       # a pass's first chunk: the self-addressed search, list_inbound_files
 FILINGS_FIRST = 8     # ... and at most this many files attempted from those two
 FILING_COST = 3       # a file attempted: list + download + ingest (Telegram: share + ingest)

@@ -132,6 +132,7 @@ class StoreCase(TempEnv):
         the judge step, finished whole."""
         import passes
         import steps
+        hand(self.conn, [])         # the continuation's hand-out (here, nothing to search)
         passes.record_probe(self.conn, token, "gmail", gmail_ok)
         steps.start(self.conn, token, "judge", {})
         steps.finish(self.conn, token, "judge", counts={"triage_remaining": triage_remaining})

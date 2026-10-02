@@ -26,7 +26,7 @@ DAY = 24 * 3600
 
 def fits(used):
     """more_work's hand-out at `used` calls (A3, D1): what the caps leave."""
-    return max(0, (work.ELLEN_TURNS - work.TURN_TAIL - 2 - work.MORE_MARGIN - used)
+    return max(0, (work.ELLEN_TURNS - work.TURN_TAIL - 1 - work.MORE_MARGIN - used)
                // work.ITEM_COST)
 
 
@@ -70,6 +70,21 @@ class TestMoreWork(C):
         self.assertEqual(c["next"], "gmail-round")
         self.assertEqual(c["work"]["total"], 20 - len(handed))
         self.assertFalse({i["pid"] for i in c["work"]["triage"]} & handed)
+
+    def test_the_chunk_and_its_last_more_work_fit_the_turn(self):
+        # C1 (Terra S1): the worst-case chunk, the more_work that answers `judge`, and the
+        # judge tail stay within Ellen's turn
+        for first, size in ((True, work.CHUNK_FIRST), (False, work.CHUNK_LATER)):
+            head = work.TURN_HEAD + (work.FILING_HEAD + work.FILINGS_FIRST * work.FILING_COST
+                                     if first else 0)
+            self.assertLessEqual(head + size * work.ITEM_COST + work.TURN_TAIL,
+                                 work.ELLEN_TURNS)
+        # and at more_work's own bound, an honest count ends within the margin
+        for used in range(0, 80):
+            n = fits(used)
+            if n:
+                self.assertLessEqual(used + 1 + n * work.ITEM_COST + work.TURN_TAIL,
+                                     work.ELLEN_TURNS - work.MORE_MARGIN)
 
     def test_the_first_floor_counts_the_chunk(self):
         self.seed(20)
@@ -215,6 +230,16 @@ class TestTheCheckEndsOnlyWhenItsChunkIsJudged(C):
                                            "due"), out)
         c = self.claim()["continue"]
         self.assertEqual(c["next"], "gmail-round")
+
+    def test_a_judgment_never_stands_in_for_the_gmail_round(self):
+        # C1 (Astra S1): a judge started from the sweep's token before the continuation
+        self.seed(5)
+        t = self.begin()
+        self.start(t)
+        self.specialist(t)
+        out = self.text("record_step", pass_token=t, step="judge", action="start")
+        self.assertTrue(out.startswith("refused: the Gmail round comes first"), out)
+        self.assertEqual(self.claim()["continue"]["next"], "gmail-round")
 
     def test_complete_needs_every_owed_search(self):
         # D1 (Astra S1): a chunk closed by a judgment with nothing searched
@@ -444,6 +469,14 @@ class TestForeignCurrency(Check):
         lines = views.evidence(d)
         self.assertIn("The invoice is in USD 11.00; the payment is EUR 9.48.", lines)
         self.assertIn("Not sure — say if it's wrong.", lines)
+        # C1 (Astra S2): competing candidates name their own amounts too
+        cand = {"match_id": 2, "document": {**doc, "doc_id": 2, "number": "B",
+                                            "amount_minor": 1200}}
+        d2 = {**d, "status": "open", "current": None, "candidates": [
+            {"match_id": 1, "document": {**doc, "number": "A"}}, cand]}
+        line = [x for x in views.evidence(d2) if x.startswith("Could be:")][0]
+        self.assertIn("in USD 11.00", line)
+        self.assertIn("in USD 12.00", line)
         self.assertEqual(package._other_currency({"currency": "USD", "amount_minor": 1100},
                                                  {"currency": "EUR"}),
                          ["document in USD 11.00"])

@@ -306,11 +306,20 @@ def evidence(d: dict, cands=None) -> list:
                        f"{_money(d)}.")
     shown = _cands(d, cands)
     if shown:
-        out.append("Could be: " + ", ".join(ident(c["document"]) for c in shown) + ".")
+        out.append("Could be: " + ", ".join(ident(c["document"]) + _fx(c["document"], d)
+                                            for c in shown) + ".")
     if cands is None and len(d["candidates"]) > len(shown):
         out.append(f"{len(d['candidates']) - len(shown)} more could fit — say "
                    f"\"{candidates_phrase(d)}\".")
     return out
+
+
+def _fx(doc: dict, d: dict) -> str:
+    """Issue #30 (C1, Astra S2): a candidate in another currency names its own amount."""
+    if (doc.get("currency") and d.get("currency") and doc["currency"] != d["currency"]
+            and doc.get("amount_minor") is not None):
+        return f" in {amounts.fmt(doc['amount_minor'], doc['currency'])}"
+    return ""
 
 
 def pairings(d: dict, cands=None) -> dict:

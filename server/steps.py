@@ -147,6 +147,11 @@ def start(conn, token, step: str, carry: dict) -> dict:
                 [old["delegation"]] if old.get("delegation") else [])
             if gone:
                 carry = {**carry, "delegations_before": gone}
+        if step == "judge" and "chunk" not in _first_carry(conn, m["pass_id"]) \
+                and _round_due(conn, m["pass_id"]):
+            # C1 (Astra S1): a judgment never stands in for a Gmail round never handed out
+            raise db.Refusal("the Gmail round comes first: call continue_pass and do what it "
+                             "returns (its gmail-round); the judge step follows its chunk")
         if step == "judge":
             # issue #28 (A2): the judgment closes the open Gmail chunk
             first = _first_carry(conn, m["pass_id"])
@@ -735,8 +740,9 @@ def more_work(conn, token, calls_made) -> dict:
         floor = (3 + len(chunk["pids"]) if chunk["calls"] is None
                  else chunk["calls"] + 1 + chunk["more"])
         used = max(calls_made, floor)
-        # -2: this call, and the last more_work — the one that answers `judge` (D1, Terra S2)
-        n = max(0, (work.ELLEN_TURNS - work.TURN_TAIL - 2 - work.MORE_MARGIN - used)
+        # -1: this call; the last more_work, the one that answers `judge`, is in TURN_TAIL
+        # (D1 Terra S2, C1 Terra S1: the chunk's own bound includes it too)
+        n = max(0, (work.ELLEN_TURNS - work.TURN_TAIL - 1 - work.MORE_MARGIN - used)
                 // work.ITEM_COST)
         req = round_request(conn, pass_id)
         shown = []
