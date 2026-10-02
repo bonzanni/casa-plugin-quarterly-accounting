@@ -95,8 +95,9 @@ def _tags_of(r: dict) -> tuple:
 
 
 def end_lineage(conn, pid: int, how: str, snapshot_id=None) -> None:
-    cur = conn.execute("UPDATE projections SET ended=?, ended_at=?, ended_snapshot=? WHERE pid=?"
-                       " AND ended IS NULL", (how, db.now(), snapshot_id, pid))
+    cur = conn.execute("UPDATE projections SET ended=?, ended_at=?, ended_snapshot=?,"
+                       " readback_owed=0 WHERE pid=? AND ended IS NULL",
+                       (how, db.now(), snapshot_id, pid))
     if cur.rowcount == 1:          # a lineage ends once; a second call records nothing
         lineage.add_residue(conn, pid, "ended", how)
 

@@ -145,7 +145,8 @@ def _due(conn) -> list:
         "SELECT pid FROM projections WHERE merged_into IS NULL"
         " AND (ended IS NULL OR ended='vanished')"
         " AND (class_observed_snapshot IS NULL OR class_observed_snapshot < ?"
-        "      OR observed_revision IS NULL OR observed_revision <> revision)"
+        "      OR observed_revision IS NULL OR observed_revision <> revision"
+        "      OR readback_owed = 1)"
         " ORDER BY pid", (lineage.latest_import(conn),))]
 
 
@@ -307,6 +308,7 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
         if proj["ended"] == "erased":
             return _ended_noop(conn, proj)
         if not_found:
+            conn.execute("UPDATE projections SET readback_owed=0 WHERE pid=?", (pid,))
             return _confirm_erased(conn, pid)
         _require_proven_import(conn)
         if write_error:
@@ -315,6 +317,7 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
                           db.canonical({"error": str(write_error)[:200],
                                         "tags": json.loads(proj["observed_tags_json"] or "[]")}),
                           pid))
+            conn.execute("UPDATE projections SET readback_owed=0 WHERE pid=?", (pid,))
             _advance(conn, pid)
             return {"pid": pid, "status": proj["status"], "desired": json.loads(proj["desired_json"]),
                     "instructions": {}, "bank_writes": None, "read_back": False,
@@ -397,6 +400,8 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
                 instructions = {**step, "workflow": gate["workflow"],
                                 "expected_generation": gate["expected_generation"],
                                 "expected_ledger": gate["expected_ledger"]}
+        conn.execute("UPDATE projections SET readback_owed=? WHERE pid=?",
+                     (1 if instructions else 0, pid))
         _advance(conn, pid)
         return {"pid": pid, "status": red.status, "desired": sorted(red.desired),
                 "instructions": instructions,

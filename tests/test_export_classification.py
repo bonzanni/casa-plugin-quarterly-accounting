@@ -168,27 +168,41 @@ class TestTheNoteWindow(Base):
                                         observed_tag_revision=rev)
 
     def test_d1_a_note_write_landing_after_the_confirming_read_is_caught(self):
-        # round D1 (Astra S2): an add_note carried out after a later read confirmed the
-        # note buries it; notes do not move the tag revision
+        # round D1 (Astra S2) / sweep.note_confirmed's own docstring name this case
+        # "an older revision carried out late (round D1)". The original version of
+        # this test injected a write issue_add_note never handed out ("Accounting
+        # revision 0: stale") -- an UNTRACKED write. The store only ever tracks
+        # writes it itself issued (note_issued_at / note_other_issued_at); it never
+        # defends against one it never handed out, by design (sweep.note_confirmed's
+        # docstring). That version only "caught" it because of the bug S2 task 2
+        # fixes: the row wasn't due, so nobody ever read it back, so note_seen never
+        # got set, so the NEXT import always re-derived a write as owed regardless of
+        # the injected text. Restated against only writes the store itself issued,
+        # the real guarantee this round protects: an add_note for an OLDER revision
+        # (A), issued and held, carried out late on top of a newer revision (B) that
+        # was genuinely read back and confirmed in between.
         rids = self.settled()
-        rid = rids[0]
-        with db.tx(self.conn):          # a later decision will change the note: make it due
+        rid, pid = rids[0], self.pid_of(rids[0])
+        with db.tx(self.conn):          # make it due so the first issue is not a no-op
             self.conn.execute("UPDATE projections SET observed_revision=NULL WHERE pid=?",
-                              (self.pid_of(rid),))
-        stale = self.issue_add_note(rid)                    # carried by a delegation...
+                              (pid,))
+        held = self.issue_add_note(rid)                      # revision A, issued, held
+        self.later(20)
+        seq_b = self.new_revision(rid)                        # the decision moves to B
+        ins_b = self.issue_add_note(rid)                      # revision B, issued
+        self.assertIn(f"Accounting revision {seq_b}:", ins_b["add_note"])
+        self.write(rid, ins_b)                                # B written
         self.later(30)
-        self.cycle()                                        # ...while another pass confirms
-        self.bf.call("add_note", row_ids=[rid], note="Accounting revision 0: stale",
-                     author="agent", workflow=stale["workflow"],
-                     expected_generation=stale["expected_generation"],
-                     expected_ledger=stale["expected_ledger"])   # the late write lands
+        self.cycle()              # read-back debt (S2 task 2): re-read B, confirm it for real
+        self.assertEqual(lineage.projection(self.conn, pid)["readback_owed"], 0)
+        self.assertIn(f"Accounting revision {seq_b}:", self.accounting_notes(rid)[-1])
+        self.write(rid, held)                                 # A lands late, on top of B
         self.later(3600)
         self.new_pass()
-        self.assertIn(self.pid_of(rid), self.due())          # the confirmation did not stand
+        self.assertIn(pid, self.due())                        # A's own issue still bounds it
         self.cycle()
         self.assertTrue(self.accounting_notes(rid)[-1].startswith(
-            lineage.note_text(self.conn, self.pid_of(rid))[:22]))
-        self.assertNotIn("stale", self.accounting_notes(rid)[-1])
+            f"Accounting revision {seq_b}:"))                 # B restored, A is not last
 
     def write(self, rid, ins):
         self.bf.call("add_note", row_ids=[rid], note=ins["add_note"], author="agent",
