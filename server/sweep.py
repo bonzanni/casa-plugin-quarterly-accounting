@@ -160,6 +160,12 @@ def _in_quarter(conn, pid: int, quarter: str) -> bool:
     return eff is not None and start <= eff < end
 
 
+def _absent(conn, pid: int) -> bool:
+    """The lineage's row is absent from the latest export (an erase candidate): its
+    observation is an end-check, owed whatever quarter the payment fell in."""
+    return lineage.live_row(conn, lineage.projection(conn, pid)) is None
+
+
 def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
     """The next page of the sweep's cycle: the lineages still due a read since
     the latest import (_due), from the durable cursor, then wrapping to the
@@ -172,7 +178,10 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
     `quarter` (fix wave F, throughput) narrows the page to that quarter's
     payments: a package needs only its own rows fresh, and freshness stays per
     lineage. remaining_in_cycle then counts that quarter's; the cycle itself
-    completes only when no lineage of any quarter is due.
+    completes only when no lineage of any quarter is due. A row absent from the
+    latest export is listed whatever its quarter (S2, Astra plan-r6 S1): it is an
+    end-check, so a package round resumed after a cut between its import and its
+    erase-candidate observations still confirms every one.
 
     Time (issue #2): while a step of the pass runs, the page is capped by what is
     left of steps.SWEEP_STOP_S at steps.ROW_COST_S a row, so the specialist
@@ -188,7 +197,8 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
         cur = _cursor(conn)
         due_all = _due(conn)
         due = due_all if quarter is None else [p for p in due_all
-                                                if _in_quarter(conn, p, quarter)]
+                                                if _in_quarter(conn, p, quarter)
+                                                or _absent(conn, p)]
         allowance = steps.sweep_allowance(conn)
         cap = None if allowance is None else int(allowance // steps.ROW_COST_S)
         if cap is not None and cap < 1 and due:
@@ -196,9 +206,12 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
                     "projections": [], "quarter": quarter, "remaining_in_cycle": len(due),
                     "snapshot_id": lineage.latest_import(conn), "notice": NOTICE,
                     "time_up": True}
-        if not due_all or (quarter is not None and not due):
+        cur_pass = passes.current_pass(conn)
+        package = cur_pass is not None and cur_pass["trigger"] == "package"
+        if not due_all or (quarter is not None and not due and package):
             # the import's sweep is complete (for a package pass, its quarter's): S2 §5.2's
-            # W counts from this first moment, never from the import
+            # W counts from this first moment, never from the import. A quarter's page in
+            # any other pass completes nothing that pass's F rests on
             conn.execute("UPDATE snapshots SET swept_at=coalesce(swept_at, ?)"
                          " WHERE snapshot_id=?", (db.now(), lineage.latest_import(conn)))
         if not due_all:

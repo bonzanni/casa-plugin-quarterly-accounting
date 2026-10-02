@@ -209,7 +209,14 @@ class FreshnessF(Acquisition):
         self.assertIsNone(self.reason())
 
     def test_a_quarters_sweep_completes_its_read_for_a_package(self):
-        import ledger, sweep
+        import asks, db, ledger, passes, sweep
+        # a PACKAGE pass (S2 Task 7): only its quarter's listing completes its read; the
+        # setUp's check pass ends first and the package round takes the marker
+        with db.tx(self.conn):
+            passes._end_pass_tx(self.conn, self.tok, "interrupted", {})
+        asks.request_package(self.conn, "2026-Q3", "telegram")
+        self.pid = self.start_job_pass(self.tok, trigger="package")
+        self.bind_round_and_take(self.pid)
         acq = self.handed()
         self.probes(acq)
         ledger.import_ledger_export(
