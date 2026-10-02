@@ -157,6 +157,33 @@ class TestARejectionSticks(Base):
         self.assertNotIn(rejected, [c["document"]["doc_id"] for c in d["candidates"]])
         self.assertNotIn("REJECTED", " ".join(views.evidence(d)))
 
+    def test_wrong_on_merged_duplicates_sets_them_all_aside(self):
+        # C3 (Astra S1): rejecting the first must not move the revision the second is
+        # bound to — every rejection is recorded, then the payment settles once
+        import fold as F
+        import reply
+        doc = self.doc()
+        first = self.machine(doc)["match_id"]
+        self.row(2)
+        twin = self.lineage_for(2)
+        self.classify(twin, {"software"})
+        self.settle(twin)
+        second = self.machine(doc, pid=twin)["match_id"]       # occupied: conflicted
+        with db.tx(self.conn):
+            ledger.merge(self.conn, self.pid, twin)
+            st = lineage.fold_of(self.conn, self.pid)
+            c = st.cands[first]
+            lineage._record_retirement(self.conn, self.pid,
+                                       F.Retirement(first, c.activation, "conflicted", "test"))
+            lineage.settle(self.conn, self.pid)
+        d = work.describe(self.conn, self.pid)
+        self.assertEqual(sorted(c["match_id"] for c in d["candidates"]), sorted([first, second]))
+        self.show(self.pid)
+        out = reply._set_aside_all(self.conn, work.describe(self.conn, self.pid))
+        self.assertEqual(sorted(out["set_aside"]), sorted([first, second]))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE kind='unpair' AND"
+                                           " author='operator'").fetchone()[0], 2)
+
     def test_the_same_rate_written_differently_is_the_same_evidence(self):
         # C1 (Astra S1)
         self.row(1, fx_rate="1.10", fx_unit="EUR")

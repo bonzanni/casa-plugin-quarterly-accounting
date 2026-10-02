@@ -318,8 +318,14 @@ def reject_in_tx(conn, *, match_id, expected_revision, render_id) -> dict:
     if s["state"] not in ("matched", "proposed", "conflicted"):
         raise db.Refusal("there is no pairing to remove there")
     before = _states(conn, pid)
-    # issue #34 (G1, D1): the rejection is bound to the payment and the document as they
-    # are now — what the operator rejected — recorded on the rejection itself
+    _append_rejection(conn, pid, s, render_id)
+    red = lineage.settle(conn, pid)
+    return _result(conn, pid, red, match_id, _effects(before, _states(conn, pid)))
+
+
+def _append_rejection(conn, pid, s, render_id) -> None:
+    """Issue #34 (G1, D1): the rejection is bound to the payment and the document as they
+    are now — what the operator rejected — recorded on the rejection itself."""
     doc = documents._doc(conn, s["doc_id"])
     proj = lineage.projection(conn, pid)
     row = lineage.live_row(conn, proj)
@@ -327,10 +333,25 @@ def reject_in_tx(conn, *, match_id, expected_revision, render_id) -> dict:
     if row is not None and not proj["ended"]:
         exp = lineage.expectation_for(conn, proj, row, exempt=False)
         snap = payment_snapshot(R.facts_of(row), exp.kind, row_fx(row))
-    lineage.append(conn, pid, "unpair", "operator", match_id=match_id, render_id=render_id,
-                   fp=snap, detail=documents.fingerprint(doc))
-    red = lineage.settle(conn, pid)
-    return _result(conn, pid, red, match_id, _effects(before, _states(conn, pid)))
+    lineage.append(conn, pid, "unpair", "operator", match_id=s["match_id"],
+                   render_id=render_id, fp=snap, detail=documents.fingerprint(doc))
+
+
+def reject_all_in_tx(conn, pid, bound) -> list:
+    """apply_reply's "wrong" over every displayed candidate, inside the caller's
+    transaction, each already checked against the revision the operator was shown: every
+    rejection is recorded, then the payment settles ONCE (C3, Astra S1: settling between
+    them let the store rule retire a merged duplicate of the same document and move the
+    revision the next rejection was bound to). Returns the effects."""
+    pid = _operator_pid(conn, pid)
+    before = _states(conn, pid)
+    for match_id, render_id in bound:
+        s = _state(conn, match_id)
+        if s["state"] not in ("matched", "proposed", "conflicted"):
+            raise db.Refusal("there is no pairing to remove there")
+        _append_rejection(conn, pid, s, render_id)
+    lineage.settle(conn, pid)
+    return _effects(before, _states(conn, pid))
 
 
 def set_exemption(conn, *, pid, exempt, expected_revision, render_id) -> dict:
