@@ -46,7 +46,7 @@ Section numbers below (§4, §5.2, …) are the spec's.
 - **Removed tools (§8):** `begin_pass`, `end_pass`, `continue_pass`, `record_step`,
   `more_work`.
 - **Added tools (§8):** `job_next`, `job_report`, `request_work`, `request_package`,
-  `record_filing`.
+  `record_filing`; and `job_status`, read-only (design delta for ha-casa-app#1180).
 - **Changed tools:** `import_ledger_export` takes `acq`; `record_probe` takes `acq` and
   `absent`.
 - **Bank-feed floor:** unchanged (0.20.0). The §4 chain was traced in 0.22.1.
@@ -299,6 +299,8 @@ class ReadbackDebt(Base):
 
     def test_a_confirming_read_clears_it(self):
         item, snap = self.owed_item()
+        self.observe(item, snap)
+        self.assertEqual(self.debt(item["pid"]), 1)  # set first, so the clear is evidence
         sim.observe_and_repair(self.conn, self.bf, self.token, item, snap)
         self.assertNotIn(item["pid"], sweep._due(self.conn))
         self.assertEqual(self.debt(item["pid"]), 0)
@@ -306,6 +308,7 @@ class ReadbackDebt(Base):
     def test_write_error_clears_it(self):
         item, snap = self.owed_item()
         self.observe(item, snap)
+        self.assertEqual(self.debt(item["pid"]), 1)
         sweep.record_observation(self.conn, pid=item["pid"], token=self.token,
                                  snapshot_id=snap, write_error="refused: test")
         self.assertEqual(self.debt(item["pid"]), 0)
@@ -1353,6 +1356,8 @@ git commit -m "feat(s2): work requests — queued before start_job, taken by the
 
 **Files:**
 - Modify: `server/job.py` (`next_unit`, `_choose`, `_end`)
+- Modify: `server/sweep.py` (`list_projections(quarter=…)` also lists rows absent from the
+  latest export, whatever their quarter: they are end-checks, not the quarter's work)
 - Test: `tests/test_s2_cursor.py`
 
 **Interfaces:**
@@ -1523,6 +1528,35 @@ class CheckPass(StoreCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM work_requests WHERE"
                                            " state='queued'").fetchone()[0], 0)
 
+    def test_the_report_carries_the_classification_queue(self):
+        import asks, json
+        self.drv = JobDriver(self, queue=(4, 1))
+        asks.request_work(self.conn, "check", "operator")
+        self.drv.run_job(A)
+        rep = json.loads(self.conn.execute("SELECT report_json FROM passes ORDER BY rowid"
+                                           " DESC LIMIT 1").fetchone()[0])
+        self.assertEqual(rep["awaiting_classification"], 5)
+
+    def test_a_refused_completion_is_reissued_to_any_fresh_turn(self):
+        """ha-casa-app#1180: emit_completion refused (unread inbound); a fresh batch's
+        job_next answers `complete` again, and a topic turn's job_status says done."""
+        import asks, job
+        asks.request_work(self.conn, "check", "operator")
+        units = self.drv.run_job(A)                       # ends at `complete`
+        self.assertEqual(units[-1]["unit"], "complete")
+        t2 = job.claim(self.conn, A)                       # a fresh batch after the refusal
+        self.assertEqual(job.next_unit(self.conn, t2)["unit"], "complete")
+        self.assertEqual(job.status(self.conn, A), {"done": True,
+                                                     "text": "Accounting work finished."})
+
+    def test_job_status_never_claims_and_says_not_done_while_work_remains(self):
+        import asks, job
+        asks.request_work(self.conn, "check", "operator")
+        self.drv.run_until(A, "sweep")
+        top = self.conn.execute("SELECT max(gen) FROM claims").fetchone()[0]
+        self.assertFalse(job.status(self.conn, A)["done"])
+        self.assertEqual(self.conn.execute("SELECT max(gen) FROM claims").fetchone()[0], top)
+
     def test_a_stopped_gate_ends_the_pass_stopped(self):
         import asks
         self.drv.bankfeed.restore_since_install()        # the ledger was restored
@@ -1542,6 +1576,10 @@ page and `job_next(judged=…)` with that page's `next` and `remaining`.
 - `run_job(job_id)` claims and loops until `complete`, re-claiming on `end-batch`.
 - `fail_next_sync(detail)` makes the next `probes` unit record `bank_sync` with `ok=False`
   and that detail.
+- `JobDriver(..., cut_after_import=True)` stops the first `snapshot` unit right after
+  `import_ledger_export`, before the erase candidates are observed, and ends the claim.
+- The `probes` unit records the sync trailer's `Queue:` counts in the `bank_sync` probe's data
+  as `{"queue": {"workable": w, "parked": k}}`; `JobDriver(queue=(w, k))` sets them.
 - `run_until(job_id, unit)` stops when that unit is handed out (and stores `self.last` and
   `self.token`).
 - `next_until(token, unit)` continues an existing claim.
@@ -1593,7 +1631,7 @@ def _choose(conn, token) -> dict:
             if u is not None:
                 return u
         if not ended:
-            passes._end_pass_tx(conn, token, _outcome(conn, p), _read_age_note(conn, p))
+            passes._end_pass_tx(conn, token, _outcome(conn, p), _report_extras(conn, p))
     # eight passes ended in this call (e.g. eight package asks each stopped at once):
     # their dispositions commit with this answer, and the next batch goes on
     return {"unit": "end-batch"}
@@ -1703,7 +1741,8 @@ def _sweep(conn, token, p, req):
     import steps, sweep
     due = sweep._due(conn)
     if req is not None:
-        due = [x for x in due if sweep._in_quarter(conn, x, req["quarter"])]
+        due = [x for x in due if sweep._in_quarter(conn, x, req["quarter"])
+               or sweep._absent(conn, x)]
     if due:
         return {"unit": "sweep", "quarter": req["quarter"] if req is not None else None}
     row = _step(conn, p, _first(req))
@@ -1806,6 +1845,18 @@ def _judged(conn, token, judged) -> None:
                  " pass_id=?", (p["pass_id"],))
 
 
+def _report_extras(conn, p) -> dict:
+    """What the pass's stored report says beyond the counts: the read's age when W was
+    waived (§5.2), and how many payments await classification (§6; Terra plan-r6 S2)."""
+    out = _read_age_note(conn, p)
+    sync = conn.execute("SELECT data_json FROM probes WHERE kind='bank_sync'").fetchone()
+    q = (json.loads(sync["data_json"] or "{}").get("queue") or {}) if sync else {}
+    n = sum(v for v in (q.get("workable"), q.get("parked")) if isinstance(v, int) and v > 0)
+    if n:
+        out["awaiting_classification"] = n
+    return out
+
+
 def _read_age_note(conn, p) -> dict:
     """Spec §5.2: when W was waived, the report says how old the read the decisions
     rested on was (Astra plan-r4 S2)."""
@@ -1845,6 +1896,20 @@ def record_filing(conn, token) -> dict:
     return {"filed": True}
 
 
+def status(conn, job_id) -> dict:
+    """Read-only, never a claim (ha-casa-app#1180; design delta §3): may this job end now?
+    `done` when no pass is live and nothing is queued — the same condition job_next
+    answers `complete` on. An operator-message turn in the job's topic calls it last, so a
+    completion Casa refused (unread inbound) is re-issued from the store."""
+    if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
+        raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
+    p = live_job_pass(conn)
+    queued = conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL"
+                          " SELECT 1 FROM package_requests WHERE state='queued'").fetchone()
+    done = p is None and queued is None
+    return {"done": done, "text": "Accounting work finished." if done else None}
+
+
 def _account(conn, token, out) -> None:
     out["pass_token"] = token           # Task 9 replaces this with budget, progress and report
 
@@ -1859,6 +1924,20 @@ def _rebase(conn, token) -> None:
     conn.execute("UPDATE claims SET measure_json=? WHERE gen=?",
                  (json.dumps([base[0]] + measure(conn)[1:]), token))
 ```
+
+`sweep._absent(conn, pid)` is `lineage.live_row(conn, lineage.projection(conn, pid)) is None`:
+the row is absent from the latest export, so it is an erase candidate. `sweep.list_projections`
+uses the same filter for its `quarter` argument:
+`due = due_all if quarter is None else [p for p in due_all if _in_quarter(conn, p, quarter) or
+_absent(conn, p)]`. A package round that resumes after a cut between its import and its
+erase-candidate observations therefore still observes every one (Astra plan-r6 S1: 0 → 1 erased
+lineage). Add `test_a_resumed_package_snapshot_still_confirms_an_out_of_quarter_erasure` to
+`tests/test_s2_package_rounds.py`:
+- a Q4 package;
+- one Q3 row deleted from bank-feed before the snapshot;
+- `JobDriver(cut_after_import=True)` ends the snapshot unit right after the import;
+- re-claim and run to completion;
+- assert 1 lineage `ended='erased'` and the request `snapshot-done`.
 
 `steps._finish_tx` returns `(result, refused)` (Task 3). The cursor's finishes never take the
 late-stop branch, because job steps have no clock, so `refused` is always None; the cursor
@@ -2263,6 +2342,8 @@ def job_report(conn, job_id=None, status=None) -> dict:
 - an outcome of `stopped` → a rendering of kind `job-stop` whose text is the stop line
   ("The accounting check stopped: <reason>." or, for exhausted adoptions, "The accounting
   check kept stopping — ask again when you want me to retry.");
+- every rendering's text goes through `views.fit_lines(lines, closing=views.FIT_CLOSING)`, so it
+  is at most `TELEGRAM_LIMIT` whatever the number of documents (Terra plan-r6 S2);
 - a handover → a rendering of kind `handover`: one line per document from
   `steps._pairing(conn, doc_id)` with the existing case lines of SKILL.md §"a document the
   operator hands over", step 3, keyed by the verdict when the pairing is `unpaired`.
@@ -2300,6 +2381,10 @@ Add `test_report_is_one_transaction_under_the_custody_lock` to `tests/test_s2_re
 With another connection holding `db.custody_lock()` and a short bound,
 `asks.job_report(self.conn)` raises `db.Busy`, and nothing changed: same `render_id`s,
 `drain` and `orphaned_by` as before.
+
+`tools._deliverable` also checks every `texts[i].text` of a `job_report` answer. Add
+`test_a_handover_of_200_documents_fits_one_message` to `tests/test_s2_report.py`: every
+`texts[].text` is ≤ `views.TELEGRAM_LIMIT` in UTF-16 units (`views.utf16_len`).
 
 `mark_reported(conn, render_id)` is in-tx:
 `UPDATE work_requests SET state='reported' WHERE render_id=? AND state='done'`.
@@ -2558,7 +2643,7 @@ git commit -m "fix(s2): note confirmation is claim-ordered, Z-gated and waits fo
 - Test: `tests/test_s2_surface.py`
 
 **Interfaces:**
-- Produces, as tools: `job_next(job_id?, pass_token?, judged?)`,
+- Produces, as tools: `job_status(job_id)` (read-only; #1180), `job_next(job_id?, pass_token?, judged?)`,
   `job_report(job_id?, status?)`, `request_work(kind, trigger, doc_ids?)`,
   `request_package(quarter, channel)`, `record_filing(pass_token)`;
   `import_ledger_export` gains `acq`; `record_probe` gains `acq`, `absent`.
@@ -2579,8 +2664,8 @@ class Surface(StoreCase):
         import qa_server, tools  # noqa: F401
         for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work"):
             self.assertNotIn(gone, qa_server.TOOLS)
-        for new in ("job_next", "job_report", "request_work", "request_package",
-                    "record_filing"):
+        for new in ("job_next", "job_status", "job_report", "request_work",
+                    "request_package", "record_filing"):
             self.assertIn(new, qa_server.TOOLS)
 
     def test_the_job_declaration_is_verbatim(self):
@@ -2605,6 +2690,13 @@ class Surface(StoreCase):
         tok = self.pass_("cron")
         self.end_with_counts(tok, "complete", {"read_age_min": 75})
         self.assertIn("bank read from 75 minutes",
+                      views.build_review(self.conn, view="status")["text"])
+
+    def test_payments_awaiting_classification_are_said(self):
+        import views
+        tok = self.pass_("cron")
+        self.end_with_counts(tok, "complete", {"awaiting_classification": 3})
+        self.assertIn("3 payments still await classification",
                       views.build_review(self.conn, view="status")["text"])
 
     def test_a_queued_request_is_visible_in_status(self):
@@ -2641,6 +2733,18 @@ def t_job_next(args):
         _need(args, "job_id")
         tok = job.claim(conn(), args["job_id"])
     return _deliverable("job_next", job.next_unit(conn(), tok, judged=args.get("judged")))
+
+
+@register("job_status",
+          "Read-only, never a claim: may this job end now? In an operator message's turn in the "
+          "job's topic, call it LAST with your brief's `Job id:`; if `done`, call "
+          "report_job_progress(summary=<its text>, progressed=true) then "
+          "emit_completion(status=\"ok\", text=<its text>).",
+          obj({"job_id": S}, ("job_id",)))
+def t_job_status(args):
+    import job
+    _need(args, "job_id")
+    return job.status(conn(), args["job_id"])
 
 
 @register("job_report",
@@ -2710,6 +2814,9 @@ hard-coded, set `acct@0.9.0`.
 - When the last pass's stored report carries `read_age_min` (Task 7's `_read_age_note`; it
   survives `stored_report`, which keeps keys other than the counts), the status head adds
   "These results use a bank read from <n> minutes before they were finished."
+- When the last pass's stored report carries `awaiting_classification` (n > 0), the status
+  head adds "<n> payment(s) still await classification — they're checked again once
+  classified."
 - The status head adds "A check is waiting to start, asked <when>." while a work request is
   `queued` and `meta.drain` is `none`. `<when>` uses the existing "N minutes ago" wording of
   `passes.BUSY`.
@@ -2760,7 +2867,10 @@ Body, in this order:
    - An operator message in the topic (not a batch) → answer it read-only with
      `build_review`/`list_quarter_state`. A verdict ("the X one is wrong") gets the answer
      "Tell me that in the main chat, where you saw the list." **Never call `job_next` in a
-     topic message.**
+     topic message.** Last, always: `job_status(job_id=<the Job id line>)`. If `done`, call
+     `report_job_progress(summary=<its text>, progressed=true)` and `emit_completion(status="ok",
+     text=<its text>)` (ha-casa-app#1180: a completion Casa refused for an unread message is
+     re-issued here).
 2. **"Units"**, one subsection per unit:
    - `probes` — today's "The specialist's pass" step 1, with `record_probe(kind="bank_sync",
      acq=<the unit's acq>, …)`. The `ledger` probe's data adds `missing`: the workflows
@@ -2837,7 +2947,8 @@ Body, in this order:
   - `test_ellen_records_the_ask_before_start_job` (`request_work`/`request_package` appear
     before `start_job` in every flow);
   - `test_ellen_never_relays_a_notification_text`;
-  - `test_the_job_skill_never_calls_job_next_in_a_topic_message`.
+  - `test_the_job_skill_never_calls_job_next_in_a_topic_message`;
+  - `test_a_topic_message_turn_ends_with_job_status` (#1180).
 
 - [ ] **Step 1:** Write the new and repointed tests in `tests/test_skill.py`. Run them: they fail
   (the new skill is missing).
