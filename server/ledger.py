@@ -248,7 +248,7 @@ def _rebind(conn) -> None:
 def import_ledger_export(conn, *, path: str, token, ledger_instance: str, acq=None) -> dict:
     import passes
     if token is None:
-        raise db.Refusal("an import belongs to a pass: pass the pass_token from begin_pass")
+        raise db.Refusal("an import belongs to a pass: pass the pass_token job_next handed out")
     if not isinstance(ledger_instance, str) or not passes.LEDGER_RE.match(ledger_instance):
         raise db.Refusal("pass the export's `Ledger instance:` id as ledger_instance")
     try:

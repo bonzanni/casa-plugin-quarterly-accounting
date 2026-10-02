@@ -452,6 +452,11 @@ def t_job_next(args):
     import job
     tok = _int(args, "pass_token")
     if tok is None:
+        if args.get("judged") is not None:
+            # refused BEFORE the claim: a claim's fresh token must never carry a judge
+            # answer from a turn it superseded (nor bump the generation doing so)
+            raise db.Refusal("judged goes with the pass_token of the turn that judged: "
+                             "call job_next(job_id=…) without it")
         _need(args, "job_id")
         tok = job.claim(conn(), args["job_id"])
     return _deliverable("job_next", job.next_unit(conn(), tok, judged=args.get("judged")))

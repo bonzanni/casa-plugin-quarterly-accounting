@@ -5,6 +5,8 @@ import datetime as _dt
 import json, pathlib, subprocess, sys
 from tests._base import StoreCase, ROOT
 
+A_JOB = "aaaaaaaa-1"
+
 
 class Surface(StoreCase):
     def test_tool_lists_agree_and_old_tools_are_gone(self):
@@ -164,6 +166,59 @@ class ToolLayer(StoreCase):
         self.assertIn("speak` first", rep)
         status = " ".join(qa_server.TOOLS["job_status"]["description"].split())
         self.assertIn("never a claim", status)
+
+
+class SupersededJudgeAnswer(StoreCase):
+    """Fix round 1 (Task 12 review, I1): a judge answer travels only with the pass_token of
+    the turn that judged. `job_next(job_id=…, judged=…)` is refused BEFORE claiming, so a
+    superseded turn cannot launder its answer through a fresh claim's token."""
+    B = "bbbbbbbb-2"
+
+    call = ToolLayer.call
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_tools import _fresh_conn
+        _fresh_conn(self)._CONN = self.conn
+        self.bind()
+        from tests.sim_job import JobDriver
+        self.drv = JobDriver(self)
+
+    def test_judged_without_a_pass_token_is_refused_before_the_claim(self):
+        import asks, job
+        asks.request_work(self.conn, "check", "operator")
+        u = self.drv.run_until(A_JOB, "judge")
+        t1 = self.drv.token
+        judged = self.drv.do(u, t1)
+        job.claim(self.conn, self.B)                     # another job takes the pass
+        self.assertTrue(self.call("job_next", pass_token=t1, judged=judged)
+                        .startswith("refused: "))
+        gen = self.conn.execute("SELECT max(gen) FROM claims").fetchone()[0]
+        marker = self.conn.execute("SELECT generation FROM pass_marker").fetchone()[0]
+        out = self.call("job_next", job_id=A_JOB, judged=judged)
+        self.assertEqual(out, "refused: judged goes with the pass_token of the turn that "
+                              "judged: call job_next(job_id=…) without it")
+        self.assertEqual(self.conn.execute("SELECT max(gen) FROM claims").fetchone()[0], gen)
+        self.assertEqual(self.conn.execute("SELECT generation FROM pass_marker")
+                         .fetchone()[0], marker)
+        row = self.conn.execute("SELECT finished_at FROM pass_steps WHERE step='judge'"
+                                " ORDER BY rowid DESC LIMIT 1").fetchone()
+        self.assertIsNone(row["finished_at"])
+        # the same call without `judged` is a plain claim, and hands the judge step out again
+        again = self.call("job_next", job_id=A_JOB)
+        self.assertGreater(again["pass_token"], gen)
+
+
+class RefusalsNameNoRemovedTool(StoreCase):
+    """Fix round 1 (Task 12 review, M1): a refusal the job can reach names the job's own
+    tools, never a removed one."""
+    def test_an_import_without_a_token_points_at_job_next(self):
+        import db, ledger
+        with self.assertRaises(db.Refusal) as cm:
+            ledger.import_ledger_export(self.conn, path="x.csv", token=None,
+                                        ledger_instance="whatever")
+        self.assertEqual(str(cm.exception), "an import belongs to a pass: pass the "
+                                            "pass_token job_next handed out")
 
 
 class ReportOrder(StoreCase):

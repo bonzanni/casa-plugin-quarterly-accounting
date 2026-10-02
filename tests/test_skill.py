@@ -416,6 +416,26 @@ class TestJob(TempEnv):
         self.assertIn("prints no amount in the payment's currency: `propose_match`", j)
         self.assertIn("A pairing needs the document's amount", j)
 
+    def test_the_judge_keeps_the_three_judgment_rules(self):
+        """Fix round 1 (Task 12 review, M2): restored from the old specialist section."""
+        j = self.judge()
+        self.assertIn("`recipient?` (the document does not name the business in the right "
+                      "role: the recipient of a purchase invoice or a vendor credit note; the "
+                      "issuer of a sales invoice or the business's own credit note)", j)
+        self.assertIn("Where several fit, the closest date, the others as `runners_up` with "
+                      "`guessed`.", j)
+        self.assertIn("Never leave such a document unpaired: the package would list its "
+                      "payment as missing", j)
+
+    def test_a_refusal_in_a_topic_message_is_answered_not_followed_by_job_next(self):
+        """Fix round 1 (Task 12 review, M3): the call-job_next-after-a-refusal rule is a
+        batch's; in a topic message the refusal is answered in the reply."""
+        r = flat(section(JOB, "**Refusals.**", "**An operator message in the job's topic"))
+        self.assertIn("- In a batch: call `job_next(pass_token=…)`", r)
+        self.assertIn("- In a topic message: answer the refusal in your reply, never with "
+                      "`job_next`.", r)
+        self.assertEqual(r.count("`job_next("), 1)
+
     def test_the_specialist_never_binds_and_sets_only_a_vendor_kind(self):
         never = flat(section(JOB, "## Never"))
         self.assertIn("never call `bind_account`,", never)

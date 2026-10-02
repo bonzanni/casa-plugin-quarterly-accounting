@@ -59,8 +59,8 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
             in_chunk = steps.chunk_has(conn, pass_id, pid)
             if effort and not in_chunk:
                 raise db.Refusal(f"payment #{pid} is not in the work you were handed: search "
-                                 "and record only the open Gmail chunk's items (the "
-                                 "continuation's work and more_work's) — nothing was written")
+                                 "and record only the payments job_next hands out in its "
+                                 "Gmail items — nothing was written")
             if in_chunk:
                 steps.chunk_recorded(conn, pass_id, pid)
         state, streak = p["search_state"], p["passes_without_candidate"]

@@ -26,11 +26,13 @@ answer of `job_next` carries `unit`, `progress` and `report`:
   the current one → call `job_next(job_id=…)` once more; if that is refused too, end the turn.
 
 **Refusals.** A tool answer that begins `refused: ` changed nothing: it is the server
-declining a call that would break a rule. Stop that unit — never retry it blindly — and call
-`job_next(pass_token=…)`: it hands out what comes next. If it hands out the same unit again,
-with the same inputs, end the turn. Call again only when the refusal itself says to ask
-again (another session held a lock), and then once. A refusal that says the bank must be
-read again: call `job_next`. An answer that begins `error: ` is a failure, not a verdict.
+declining a call that would break a rule. Stop there — never retry it blindly. Call again
+only when the refusal itself says to ask again (another session held a lock), and then once.
+An answer that begins `error: ` is a failure, not a verdict.
+- In a batch: call `job_next(pass_token=…)` — it hands out what comes next, also after a
+  refusal that says the bank must be read again. If it hands out the same unit again, with
+  the same inputs, end the turn.
+- In a topic message: answer the refusal in your reply, never with `job_next`.
 
 **An operator message in the job's topic** (the turn carries the operator's message, not a
 batch):
@@ -188,12 +190,16 @@ Where several fit, pick the best (payment reference or invoice number first, the
 date) and say so with labels: `guessed` (chose among several; name the others in
 `runners_up`), `no-ref` (repeating equal charges with no number on both sides),
 `partial-search` (a search was cut short or a fetch failed), `recipient?` (the document does
-not name the business in the right role).
+not name the business in the right role: the recipient of a purchase invoice or a vendor
+credit note; the issuer of a sales invoice or the business's own credit note).
 
-A document in another currency that is the vendor's, of the expected kind and dated within
-the window, but prints no amount in the payment's currency: `propose_match`, with a
-`rationale` naming both amounts — the operator confirms it — unless the write is refused
-because the bank's own rate rules its amount out. A pairing the operator rejected is refused
+A document in another currency (a USD invoice for a EUR card charge) that is the vendor's,
+of the expected kind and dated within the vendor's window, but prints no amount in the
+payment's currency: `propose_match`, with a `rationale` naming both amounts — the operator
+confirms it. Where several fit, the closest date, the others as `runners_up` with `guessed`.
+Never leave such a document unpaired: the package would list its payment as missing — unless
+the write is refused because the bank's own rate rules its amount out ("cannot be the …
+payment"): then it is not this payment's. A pairing the operator rejected is refused
 while neither side has changed: leave it, and never propose it again in other words. A
 pairing needs the document's amount: when the filed reading has none, read the total and
 currency and `update_document_metadata(doc_id, amount_minor=…, currency=…, pass_token=…)`
