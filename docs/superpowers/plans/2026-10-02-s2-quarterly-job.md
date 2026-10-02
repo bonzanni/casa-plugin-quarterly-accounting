@@ -1024,6 +1024,8 @@ git commit -m "feat(s2): acquisitions bound by identity; F gates machine decisio
 - Create: `server/asks.py`
 - Modify: `server/passes.py` (`requeue_requests` body; `_end_pass_tx` calls `asks.settle_taken`)
 - Modify: `server/job.py` (`stop_exhausted_pass` closes the package request)
+- Modify: `server/binding.py:136` (`_TABLES_TO_WIPE` gains `claims` and `work_requests`;
+  `reset_store` deletes `meta.drain` in the same transaction)
 - Test: `tests/test_s2_asks.py`
 
 **Interfaces:**
@@ -1116,6 +1118,20 @@ class Requests(StoreCase):
                                            "'package-stopped'").fetchone()[0], 1)
         self.assertEqual(self.conn.execute("SELECT state FROM work_requests").fetchone()[0],
                          "queued")
+
+    def test_reset_fences_every_claim_and_drops_requests(self):
+        import asks, binding, db, job
+        asks.request_work(self.conn, "check", "operator")
+        t = job.claim(self.conn, A)
+        pid = self.start_job_pass(t)
+        with db.tx(self.conn):
+            asks.take_queued(self.conn, pid)
+        binding.reset_store(self.conn)
+        with self.assertRaises(db.Refusal):
+            with db.tx(self.conn):
+                job.check_claim(self.conn, t)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM work_requests").fetchone()[0], 0)
+        self.assertIsNone(self.conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone())
 
     def test_a_handover_is_done_only_after_a_later_whole_judgment_naming_its_docs(self):
         import asks, db, job, steps
@@ -1305,6 +1321,10 @@ def handover_covered(conn, pass_id) -> bool:
 ```
 
 Then:
+- `binding._TABLES_TO_WIPE` gains `"claims"` and `"work_requests"`, and `reset_store` runs
+  `DELETE FROM meta WHERE key='drain'` in its wipe transaction (Astra plan-r3 S1). The
+  `pass_generation` counter is bumped there already, so every new claim's token is above every
+  old one; with `claims` empty, `check_claim` refuses every old token.
 - `passes._terminalize` ends with `asks.requeue_taken(conn, pass_id)` (lazy import), in its
   transaction.
 - In `passes._end_pass_tx`, after the `UPDATE passes SET ended_at…`, call
@@ -1323,7 +1343,7 @@ then the suite. Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add server/asks.py server/passes.py server/job.py tests/_base.py tests/test_s2_asks.py tests/test_s2_fresh.py
+git add server/asks.py server/passes.py server/job.py server/binding.py tests/_base.py tests/test_s2_asks.py tests/test_s2_fresh.py
 git commit -m "feat(s2): work requests — queued before start_job, taken by the live pass, settled at its end"
 ```
 
@@ -1583,6 +1603,7 @@ def _begin_next(conn, token):
     conn.execute("UPDATE passes SET holder_job=?, adopters_json=? WHERE pass_id=?",
                  (who, json.dumps([who]), pid))
     asks.take_queued(conn, pid)
+    _rebase(conn, token)                    # a new pass: a new population (INV-J8)
     return live_job_pass(conn)
 
 
@@ -1683,6 +1704,7 @@ def _gmail(conn, token, p, req):
         return {"unit": "filing", "filed_refs": work.filed_refs(conn)}
     if "chunk" not in carry:
         steps._hand_chunk(conn, p["pass_id"], req, True)
+        _rebase(conn, token)                # the round's population is now known (INV-J8)
         carry, chunk = steps._chunk(conn, p["pass_id"])
     if chunk is not None:
         left = steps._unrecorded(conn, chunk)
@@ -1779,6 +1801,17 @@ def record_filing(conn, token) -> dict:
 
 def _account(conn, token, out) -> None:
     out["pass_token"] = token           # Task 9 replaces this with budget, progress and report
+
+
+def _rebase(conn, token) -> None:
+    """The claim's baseline takes the live pass's population (Astra plan-r3 S1): a pass
+    begun or a round handed out in this claim sets unsearched/pages/due from zero, and
+    that setting is not progress. The requests component is kept: requests done before
+    the rebase still count."""
+    c = conn.execute("SELECT measure_json FROM claims WHERE gen=?", (token,)).fetchone()
+    base = json.loads(c["measure_json"]) if c and c["measure_json"] else measure(conn)
+    conn.execute("UPDATE claims SET measure_json=? WHERE gen=?",
+                 (json.dumps([base[0]] + measure(conn)[1:]), token))
 ```
 
 `steps._finish_tx` returns `(result, refused)` (Task 3). The cursor's finishes never take the
@@ -2002,6 +2035,13 @@ def _summary(unit, now) -> str:
     return WORDS[unit] + (f" · {left} payment{'s' if left != 1 else ''} left to search"
                           if left else "")
 ```
+
+Task 7's `_rebase` keeps the baseline meaningful when a pass begins, or its round is handed
+out, inside a claim. Add `test_the_first_chunk_is_not_progress_but_its_first_search_is` to
+`tests/test_s2_progress.py`:
+- `next_unit` that hands out the first `item` reports `progressed=False`;
+- after its `record_search`, it reports `progressed=True` (Astra: 40 → 39 searchable, compared
+  with the rebased baseline).
 
 Add `test_the_summary_carries_no_machinery_words` to `tests/test_s2_progress.py`. For every
 unit kind, `job._summary(kind, [0, 3, 0, 0])` contains none of `views.FORBIDDEN`.
@@ -2239,7 +2279,9 @@ git commit -m "feat(s2): job_report — orphan handoff by job id, standing retry
 
 **Interfaces:**
 - Produces: `sweep.Z_S = 900`; `sweep.note_confirmed(proj, tag_revision, *, epoch,
-  conn) -> bool`.
+  conn=None) -> bool`. `conn` is needed only when an other-text issue carries a claim
+  generation (an S2 issue). Pre-S2 lineages carry none and keep today's path, with the epoch
+  clause now at Z. A generation present with `conn=None` raises `TypeError`.
 
 The rule, in addition to today's first two clauses (the read saw this note at this tag
 revision):
@@ -2293,7 +2335,8 @@ class NoteConfirmation(StoreCase):
     def proj(self, seen_gen, seen_at, other_gen=1):
         return {"note_body": "x", "note_seq": 2, "note_seen_seq": 2, "note_seen_rev": 7,
                 "note_seen_at": ts(seen_at), "note_seen_gen": seen_gen,
-                "note_issued_seq": 2, "note_issued_gen": 1, "note_other_issued_gen": other_gen}
+                "note_issued_seq": 2, "note_issued_gen": 1, "note_other_issued_gen": other_gen,
+                "note_issued_at": None, "note_other_issued_at": None}
 
     def confirmed(self, proj):
         import sweep
@@ -2354,7 +2397,7 @@ Expected: FAIL.
 Z_S = 900
 
 
-def note_confirmed(proj, tag_revision, *, epoch, conn) -> bool:
+def note_confirmed(proj, tag_revision, *, epoch, conn=None) -> bool:
     import version
     if proj["note_body"] is None:
         return True
@@ -2363,8 +2406,14 @@ def note_confirmed(proj, tag_revision, *, epoch, conn) -> bool:
     if proj["note_seen_rev"] is None or proj["note_seen_rev"] != tag_revision:
         return False
     seen_at = proj["note_seen_at"]
-    if epoch is not None and (seen_at is None
-                              or _parse_ts(seen_at) < _parse_ts(epoch) + _Z()):
+    # today's time clause, with Z for the ceiling: the epoch and every other-text issue
+    # recorded by time (pre-S2 issues carry no generation; S2 issues carry both)
+    others = [proj["note_other_issued_at"], epoch]
+    if proj["note_issued_seq"] != proj["note_seq"]:
+        others.append(proj["note_issued_at"])
+    others = [t for t in others if t is not None]
+    if others and (seen_at is None
+                   or not _parse_ts(seen_at) > max(_parse_ts(t) for t in others) + _Z()):
         return False
     gens = [proj["note_other_issued_gen"]]
     if proj["note_issued_seq"] != proj["note_seq"]:
@@ -2373,6 +2422,8 @@ def note_confirmed(proj, tag_revision, *, epoch, conn) -> bool:
     if not gens:
         return True
     issue = max(gens)
+    if conn is None:
+        raise TypeError("note_confirmed needs conn for a claim-generation issue")
     seen_gen = proj["note_seen_gen"]
     if seen_gen is None or seen_gen <= issue:
         return False                                            # (a)
@@ -2393,8 +2444,20 @@ def _Z():
     return _dt.timedelta(seconds=Z_S)
 ```
 
-- A delegation-protocol issue (gens NULL) falls under the epoch clause, which now also uses Z,
-  as the spec maps it (the migration's `set_epoch`).
+- A delegation-protocol issue (gens NULL) falls under today's clauses: `note_other_issued_at`
+  and `note_issued_at` against `note_seen_at`, now with Z instead of 600 s. The epoch clause
+  also uses Z, as the spec maps it (the migration's `set_epoch`).
+- `tests/test_export_classification.py` calls `note_confirmed` without `conn`, on rule
+  fixtures that carry no generations; those calls stay valid. Its cases that pin the 600 s
+  margin (`grep -n "600\|CEILING" tests/test_export_classification.py`) move to `sweep.Z_S`,
+  citing spec §4. The file joins this task's commit.
+- **`note_seen_at` stays the import time of the read's snapshot, deliberately** (Terra plan-r3
+  S2 is declined and asked back in round 4).
+  - The `get_transaction` read happens before `record_observation` records it, so the record's
+    own time overstates when the row was seen. The Z margin would then be measured from too
+    late a moment, which is the unsafe direction.
+  - The import time always precedes the read. Its only cost is one more read of a note that
+    changed lately, now or at the next pass, which is the cost spec §4 states.
 - Remove the `steps.CEILING_ASSUMED_S` use from `note_confirmed`; keep the constant if other
   code reads it (`grep -n CEILING_ASSUMED_S server/`).
 
@@ -2425,7 +2488,7 @@ Z, citing spec §4.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add server/sweep.py server/ledger.py tests/test_sweep_real.py tests/test_s2_notes.py
+git add server/sweep.py server/ledger.py tests/test_sweep_real.py tests/test_s2_notes.py tests/test_export_classification.py
 git commit -m "fix(s2): note confirmation is claim-ordered, Z-gated and waits for the mint's registration (spec §4)"
 ```
 
