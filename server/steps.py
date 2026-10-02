@@ -543,7 +543,15 @@ def _claim_pass(conn, m, step) -> dict:
             c["request"] = {"id": req["request_id"], "quarter": req["quarter"],
                             "channel": req["channel"], "round": req["round"] + 1}
         another = _another_chunk(conn, m["pass_id"], req, step)
-        if another:
+        if round_owed(conn, m["pass_id"]) == "due":
+            # C3 (Astra S1): the round became due after this judgment started (a late
+            # import, can_run back): its continuation hands out the first chunk
+            can_run = binding.check_setup(conn)["can_run"]
+            c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req, True),
+                     judge_due=(len(work.judge_due_state(conn, req["quarter"]))
+                                if req is not None else work.judge_due(conn)),
+                     filed_refs=work.filed_refs(conn), next="gmail-round")
+        elif another:
             # issue #17 (#21 for a check): the next Gmail chunk of this pass, then another
             # judgment
             can_run = binding.check_setup(conn)["can_run"]
@@ -669,17 +677,37 @@ def _probe(conn, pass_id):
     return bool(row["ok"])
 
 
+def round_owed(conn, pass_id):
+    """C2–C3 (Astra S1 ×3, one predicate for every path): the pass's Gmail round is owed
+    and was never handed out — 'running' while its first step runs, 'due' once that step
+    has ended in a way whose continuation hands one out — else None. A judge start and
+    end_pass refuse while it is owed; a judgment's continuation hands it out."""
+    if "chunk" in _first_carry(conn, pass_id):
+        return None
+    first = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
+                         (pass_id, _first_step(conn, pass_id))).fetchone()
+    if first is None:
+        return None
+    if _ended(first) is None:
+        # owed once the pass has imported (C3, Astra S1): before its import nothing is
+        # due, and ending it then leaves nothing unsearched that the next pass misses
+        imported = conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?",
+                                (pass_id,)).fetchone() is not None
+        return "running" if imported else None
+    return "due" if _round_due(conn, pass_id) else None
+
+
 def _judge_may_start(conn, pass_id) -> bool:
     """A judge step follows the pass's Gmail round: a chunk was handed out, or the first
-    step has ended and its continuation hands out none (stopped, not imported, can_run
-    false). Never while the first step runs, nor with no first step."""
+    step has ended and its continuation hands out none. A pass with no first step has
+    nothing to judge after."""
     if "chunk" in _first_carry(conn, pass_id):
         return True
     first = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
                          (pass_id, _first_step(conn, pass_id))).fetchone()
     if first is None or _ended(first) is None:
-        return False
-    return not _round_due(conn, pass_id)
+        return False            # never while the first step runs, imported or not
+    return round_owed(conn, pass_id) is None
 
 
 def _round_due(conn, pass_id) -> bool:
@@ -700,7 +728,13 @@ def chunk_owed(conn, pass_id):
     """Issue #28 (A6): why the pass may not end yet — its chunk is handed out and not
     judged, and this pass's Gmail probe did not fail — or None."""
     carry, chunk = _chunk(conn, pass_id)
-    if "chunk" not in carry and _round_due(conn, pass_id):
+    owed = round_owed(conn, pass_id)
+    if owed == "running":
+        # C3 (Astra S1): the step that leads to the Gmail round has not ended
+        return ("not ended: the pass's step is still running and its Gmail round follows "
+                "it. Wait for the delegation's notification (or the step's expiry), call "
+                "continue_pass, and do what it returns")
+    if owed == "due":
         # D2: the Gmail round is due and was never handed out — the pass is ended from
         # the step's own token, before its continuation
         return ("not ended: this pass's Gmail round is due and was never handed out. Call "

@@ -276,6 +276,39 @@ class TestTheCheckEndsOnlyWhenItsChunkIsJudged(C):
         self.assertEqual(c["next"], "end-pass")
         self.start(c["pass_token"], step="judge")
 
+    def test_a_pass_is_not_ended_while_its_first_step_runs(self):
+        # C3 (Astra S1): imported and swept, the step unfinished
+        self.seed(5)
+        t = self.begin()
+        self.start(t)
+        self.specialist(t, finish=False)
+        for outcome in ("complete", "interrupted"):
+            out = self.text("end_pass", pass_token=t, outcome=outcome)
+            self.assertTrue(out.startswith("refused: not ended: the pass's step is still "
+                                           "running"), out)
+        self.assertEqual(self.call("end_pass", pass_token=t, outcome="stopped")["outcome"],
+                         "stopped")
+
+    def test_a_round_due_after_the_judgment_started_is_handed_out_by_its_continuation(self):
+        # C3 (Astra S1): the sweep expired before its import; the judgment that followed
+        # saw the import land; its continuation hands out the round instead of looping
+        self.seed(5)
+        t = self.begin()
+        self.start(t)
+        self.clock.advance(steps.STEP_EXPIRY_S)
+        c = self.claim()["continue"]
+        self.assertEqual((c["ended"], c["next"]), ("expired", "end-pass"))
+        t = c["pass_token"]
+        self.start(t, step="judge")
+        self.probe_import(t)
+        self.call("record_step", pass_token=t, step="judge", action="finish",
+                  triage_remaining=0)
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "gmail-round")
+        self.assertEqual(c["work"]["total"], 5)
+        c = self.judged(self.chunk(c))
+        self.assertEqual(c["next"], "gmail-round")
+
     def test_complete_needs_every_owed_search(self):
         # D1 (Astra S1): a chunk closed by a judgment with nothing searched
         self.seed(5)
