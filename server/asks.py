@@ -112,17 +112,18 @@ def record_verdicts(conn, pass_id, documents) -> None:
 
 
 def handover_covered(conn, pass_id) -> bool:
-    """INV-J12: every taken handover has a whole judgment that started after it was asked,
-    and a verdict for each of its documents."""
+    """INV-J12: every taken handover has a whole judgment (work.judge_whole: finished, not
+    failed, stopped or out of time, every triage page seen) that started after it was
+    asked, and a verdict from that judgment for each of its documents."""
+    import work
     assert conn.in_transaction
     j = conn.execute("SELECT started_seq, finished_at, finish_json FROM pass_steps WHERE"
                      " pass_id=? AND step='judge'", (pass_id,)).fetchone()
     for r in conn.execute("SELECT created_seq, doc_ids_json, verdicts_json FROM work_requests"
                           " WHERE pass_id=? AND state='taken' AND kind='handover'",
                           (pass_id,)).fetchall():
-        if j is None or j["finished_at"] is None or j["started_seq"] is None \
-                or j["started_seq"] <= r["created_seq"] \
-                or json.loads(j["finish_json"] or "{}").get("triage_remaining") is None:
+        if not work.judge_whole(j) or j["started_seq"] is None \
+                or j["started_seq"] <= r["created_seq"]:
             return False
         v = json.loads(r["verdicts_json"])
         if any((v.get(str(d)) or {}).get("judge") != j["started_seq"]

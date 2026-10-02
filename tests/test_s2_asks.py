@@ -201,3 +201,39 @@ class Requests(StoreCase):
         self.assertEqual(self.bind_round_and_take(pid), [])
         r = self.conn.execute("SELECT state, pass_id FROM work_requests").fetchone()
         self.assertEqual((r["state"], r["pass_id"]), ("queued", None))
+
+    def _covered_after_judge_finish(self, **finish):
+        """A handover asked, then a judgment started after it that records a verdict for
+        every document and finishes with `finish`: is the handover covered?"""
+        import asks, db, steps
+        t, pid = self._judged_pass()
+        d = self.doc()
+        asks.request_work(self.conn, "handover", "operator", doc_ids=[d])
+        with db.tx(self.conn):
+            asks.take_queued(self.conn, pid)
+        steps.start(self.conn, t, "judge", {})              # started after the ask
+        with db.tx(self.conn):
+            asks.record_verdicts(self.conn, pid, {str(d): "no-payment-yet"})
+        steps.finish(self.conn, t, "judge", **finish)
+        with db.tx(self.conn):
+            return asks.handover_covered(self.conn, pid)
+
+    def test_the_whole_judgment_baseline_covers(self):
+        self.assertTrue(self._covered_after_judge_finish(counts={"triage_remaining": 0}))
+
+    def test_a_judgment_with_triage_left_does_not_cover(self):
+        """INV-J12 / work.judge_whole: every triage page seen."""
+        self.assertFalse(self._covered_after_judge_finish(counts={"triage_remaining": 3}))
+
+    def test_a_stopped_judgment_does_not_cover(self):
+        self.assertFalse(self._covered_after_judge_finish(counts={"triage_remaining": 0},
+                                                          stopped="the ledger changed"))
+
+    def test_an_out_of_time_judgment_does_not_cover(self):
+        """#15/D3: a timed-out judgment covers nothing."""
+        self.assertFalse(self._covered_after_judge_finish(counts={"triage_remaining": 0},
+                                                          out_of_time=True))
+
+    def test_a_failed_judgment_does_not_cover(self):
+        self.assertFalse(self._covered_after_judge_finish(counts={"triage_remaining": 0},
+                                                          failed=True))
