@@ -1476,6 +1476,16 @@ class CheckPass(StoreCase):
         t = self.drv.token
         self.assertEqual(job.next_unit(self.conn, t)["unit"], "probes")
 
+    def test_a_gate_poisoned_after_the_import_stops_the_pass(self):
+        import asks, db, passes
+        asks.request_work(self.conn, "check", "operator")
+        self.drv.run_until(A, "sweep")
+        with db.tx(self.conn):
+            passes.poison(self.conn, "the bank ledger changed during this pass")
+        self.drv.run_job(A)
+        r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
+        self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
+
     def test_two_w_refreshes_import_twice(self):
         import asks, datetime as _dt, db, job
         asks.request_work(self.conn, "check", "operator")
@@ -1571,7 +1581,7 @@ def _choose(conn, token) -> dict:
                 return {"unit": "complete", "text": "Accounting work finished."}
         req = steps.round_request(conn, p["pass_id"])
         ended = False
-        for step in (_acquisition, _sweep, _gmail, _judge):
+        for step in (_poisoned, _acquisition, _sweep, _gmail, _judge):
             u = step(conn, token, p, req)
             if u == "ended":
                 ended = True
@@ -1579,7 +1589,7 @@ def _choose(conn, token) -> dict:
             if u is not None:
                 return u
         if not ended:
-            passes._end_pass_tx(conn, token, _outcome(conn, p), {})
+            passes._end_pass_tx(conn, token, _outcome(conn, p), _read_age_note(conn, p))
     # eight passes ended in this call (e.g. eight package asks each stopped at once):
     # their dispositions commit with this answer, and the next batch goes on
     return {"unit": "end-batch"}
@@ -1614,6 +1624,25 @@ def _first(req):
 def _step(conn, p, name):
     return conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
                         (p["pass_id"], name)).fetchone()
+
+
+def _poisoned(conn, token, p, req):
+    """A bank gate refused after this pass's import (an observation saw the ledger
+    change, passes.poison): the pass ends `stopped` with the gate's reason, never
+    re-handing a sweep the gate will refuse (INV-J6; Astra plan-r4 S1)."""
+    import steps
+    if conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?", (p["pass_id"],)).fetchone() is None:
+        return None                         # before the import, _continue_acquisition decides
+    gate = passes.bank_write_gate(conn)
+    if gate["allowed"]:
+        return None
+    row = _step(conn, p, _first(req))
+    if row["finished_at"] is None:
+        _, refused = steps._finish_tx(conn, token, _first(req), counts={},
+                                      stopped=gate["reason"], by_refusal=True)
+        assert refused is None
+    passes._end_pass_tx(conn, token, "stopped", {})
+    return "ended"
 
 
 def _acquisition(conn, token, p, req):
@@ -1771,6 +1800,19 @@ def _judged(conn, token, judged) -> None:
     assert refused is None
     conn.execute("UPDATE passes SET judge_after=NULL, judge_pages=judge_pages+1 WHERE"
                  " pass_id=?", (p["pass_id"],))
+
+
+def _read_age_note(conn, p) -> dict:
+    """Spec §5.2: when W was waived, the report says how old the read the decisions
+    rested on was (Astra plan-r4 S2)."""
+    if p["w_refreshes"] < W_REFRESH_MAX:
+        return {}
+    s = conn.execute("SELECT swept_at FROM snapshots WHERE pass_id=? ORDER BY snapshot_id DESC"
+                     " LIMIT 1", (p["pass_id"],)).fetchone()
+    if s is None or s["swept_at"] is None:
+        return {}
+    age = int(passes._age_s(s["swept_at"]) // 60)
+    return {"read_age_min": age} if age * 60 >= W_S else {}
 
 
 def _outcome(conn, p) -> str:
@@ -2448,7 +2490,9 @@ def _Z():
   and `note_issued_at` against `note_seen_at`, now with Z instead of 600 s. The epoch clause
   also uses Z, as the spec maps it (the migration's `set_epoch`).
 - `tests/test_export_classification.py` calls `note_confirmed` without `conn`, on rule
-  fixtures that carry no generations; those calls stay valid. Its cases that pin the 600 s
+  fixtures that carry no generations; those calls stay valid once
+  `TestNoteConfirmedRule.proj` gains `"note_issued_gen": None, "note_other_issued_gen": None,
+  "note_seen_gen": None` (the code reads those keys; Astra plan-r4 S1). Its cases that pin the 600 s
   margin (`grep -n "600\|CEILING" tests/test_export_classification.py`) move to `sweep.Z_S`,
   citing spec §4. The file joins this task's commit.
 - **`note_seen_at` stays the import time of the read's snapshot, deliberately** (Terra plan-r3
@@ -2544,6 +2588,13 @@ class Surface(StoreCase):
         text = views.build_review(self.conn, view="status")["text"]
         self.assertIn("isn't connected for the finance specialist", text)
         self.assertNotIn("Re-authorise", text)
+
+    def test_a_waived_freshness_window_is_disclosed(self):
+        import views
+        tok = self.pass_("cron")
+        self.end_with_counts(tok, "complete", {"read_age_min": 75})
+        self.assertIn("bank read from 75 minutes",
+                      views.build_review(self.conn, view="status")["text"])
 
     def test_a_queued_request_is_visible_in_status(self):
         import asks, views
@@ -2645,6 +2696,9 @@ hard-coded, set `acct@0.9.0`.
 `views.py`:
 - `_degraded_block` keeps "Review incomplete - Gmail unavailable." for both cases, and adds the
   absent sentence for `absent`.
+- When the last pass's stored report carries `read_age_min` (Task 7's `_read_age_note`; it
+  survives `stored_report`, which keeps keys other than the counts), the status head adds
+  "These results use a bank read from <n> minutes before they were finished."
 - The status head adds "A check is waiting to start, asked <when>." while a work request is
   `queued` and `meta.drain` is `none`. `<when>` uses the existing "N minutes ago" wording of
   `passes.BUSY`.
