@@ -198,25 +198,62 @@ class Handover(StoreCase):
                          ["I can't find that document in what I've filed — send it again?"])
 
     def test_a_handover_of_200_documents_is_paged_whole(self):
-        import asks, views
+        """Every page within Telegram's limit, every answer within the agent's (issue #3,
+        budget.RESULT_LIMIT): the pages come across calls, the request reported only
+        after the last one is delivered."""
+        import asks, budget, views
         docs = [self.doc() for _ in range(200)]
         self.handover_done(docs)
-        texts = asks.job_report(self.conn)["texts"]
-        self.assertGreater(len(texts), 1)
-        for x in texts:
-            self.assertLessEqual(views.utf16_len(x["text"]), views.TELEGRAM_LIMIT)
-        lines = [ln for x in texts for ln in x["text"].split("\n")]
+        asks.request_work(self.conn, "check", "operator")       # its status view too
+        t, pid = Report.live_pass_of(self, B)
+        import db, passes
+        with db.tx(self.conn):
+            passes._end_pass_tx(self.conn, t, "complete", {})
+        lines, calls, offered = [], 0, []
+        while True:
+            out = asks.job_report(self.conn)
+            calls += 1
+            self.assertLessEqual(budget.size(out), budget.RESULT_LIMIT)
+            if not out["texts"]:
+                self.assertFalse(out["more"])
+                break
+            for x in out["texts"]:
+                self.assertLessEqual(views.utf16_len(x["text"]), views.TELEGRAM_LIMIT)
+                lines += x["text"].split("\n")
+                offered.append(x["render_id"])
+            state = self.conn.execute("SELECT state FROM work_requests WHERE"
+                                      " kind='handover'").fetchone()[0]
+            if out["more"]:
+                self.assertEqual(state, "done")
+            for x in out["texts"]:
+                views.mark_rendering_delivered(self.conn, x["render_id"])
+            self.assertLess(calls, 50)
+        self.assertGreater(calls, 2)                               # it took several answers
+        self.assertEqual(len(offered), len(set(offered)))         # none offered twice
         self.assertEqual(sum("No payment matches" in ln for ln in lines), 200)
         self.assertFalse(any(ln.endswith(views.CLIP_MARK) for ln in lines))
-        for x in texts[:-1]:
-            views.mark_rendering_delivered(self.conn, x["render_id"])
-        self.assertEqual(self.conn.execute("SELECT state FROM work_requests").fetchone()[0],
-                         "done")
-        self.assertEqual(asks.job_report(self.conn)["texts"], texts[-1:])
-        views.mark_rendering_delivered(self.conn, texts[-1]["render_id"])
-        self.assertEqual(self.conn.execute("SELECT state FROM work_requests").fetchone()[0],
-                         "reported")
-        self.assertEqual(asks.job_report(self.conn)["texts"], [])
+        self.assertEqual([r[0] for r in self.conn.execute("SELECT state FROM work_requests")],
+                         ["reported", "reported", "reported"])
+
+    def test_pages_left_out_of_an_answer_are_offered_next(self):
+        import asks, budget
+        docs = [self.doc() for _ in range(200)]
+        self.handover_done(docs)
+        first = asks.job_report(self.conn)
+        self.assertTrue(first["more"])
+        self.assertLessEqual(budget.size(first), budget.RESULT_LIMIT)
+        again = asks.job_report(self.conn)                        # nothing delivered yet
+        self.assertEqual(first["texts"], again["texts"])
+        total = len(self.conn.execute("SELECT render_ids_json FROM work_requests"
+                                      ).fetchone()[0].split(","))
+        self.assertLess(len(first["texts"]), total)
+
+    def test_an_answer_with_everything_says_no_more(self):
+        import asks
+        d = self.doc()
+        self.handover_done([d])
+        out = asks.job_report(self.conn)
+        self.assertEqual((len(out["texts"]), out["more"]), (1, False))
 
 
 class StoppedResult(StoreCase):

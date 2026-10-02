@@ -164,7 +164,7 @@ def job_report(conn, job_id=None, status=None) -> dict:
     if conn.in_transaction:
         raise RuntimeError("job_report opens its own transaction")
     out = {"orphaned": False, "start_job": None, "texts": [], "speak": None,
-           "continue": None, "line": None}
+           "continue": None, "line": None, "more": False}
     with db.custody_lock():
         with db.tx(conn):
             if job_id is not None:
@@ -195,18 +195,33 @@ def job_report(conn, job_id=None, status=None) -> dict:
                 out["start_job"] = dict(START)
                 if orphaned:
                     out["line"] = ORPHANED
-            seen, made = set(), {}
+            seen, made, pages = set(), {}, []
             for (rid,) in conn.execute("SELECT request_id FROM work_requests WHERE"
                                        " state='done' ORDER BY request_id").fetchall():
                 for page in _result_tx(conn, rid, made):    # a list of pages
                     if page["render_id"] not in seen:
                         seen.add(page["render_id"])
-                        out["texts"].append(page)
+                        pages.append(page)
             sends = steps._claim_sends_tx(conn)
             out["continue"] = sends.get("continue")
             notice = sends.get("_notice")
             out["speak"] = alerts.pending_in_tx(conn, must=[notice] if notice else None)
+            _bounded(out, pages)
     return out
+
+
+def _bounded(out, pages) -> None:
+    """The answer within budget.RESULT_LIMIT (issue #3), measured whole — start_job,
+    line, continue and speak included: the pages in order while they fit, always the
+    first. A page left out stays undelivered, so the next call offers it (`more`)."""
+    import budget
+    out["more"] = True                      # measured as the longer of its two values
+    for i, page in enumerate(pages):
+        out["texts"].append(page)
+        if i > 0 and budget.size(out) > budget.RESULT_LIMIT:
+            out["texts"].pop()
+            break
+    out["more"] = len(out["texts"]) < len(pages)
 
 
 def mark_reported(conn, render_id) -> None:
