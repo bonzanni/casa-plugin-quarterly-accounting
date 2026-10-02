@@ -50,6 +50,9 @@ Section numbers below (§4, §5.2, …) are the spec's.
 - **Changed tools:** `import_ledger_export` takes `acq`; `record_probe` takes `acq` and
   `absent`.
 - **Bank-feed floor:** unchanged (0.20.0). The §4 chain was traced in 0.22.1.
+- **Casa floor: ≥ 0.337.0** (S1 v0.336.0: `"session": "fresh"` and the `Job id:` line; S1b
+  v0.337.0: `"host": "specialist"`). Below it, the job would run on Ellen without bank-feed or
+  Gmail. README's install section says so.
 - **Ellen-side scope guard (§1):** no guarantee may depend on a rule Ellen carries out
   carefully. Ellen's skill only asks, relays verbatim, and sends.
 - **Operator-facing text:**
@@ -125,7 +128,8 @@ class Schema10(StoreCase):
                          "acq",
                          "acq_gen", "read_seq", "w_refreshes", "judge_after", "judge_pages"}
                         <= self.cols("passes"))
-        self.assertTrue({"protocol", "started_seq"} <= self.cols("pass_steps"))
+        self.assertTrue({"protocol", "started_seq", "started_gen"} <= self.cols("pass_steps"))
+        self.assertIn("w_pending", self.cols("passes"))
         self.assertTrue({"job_id", "read_seq", "acq", "export_ref", "swept_at"}
                         <= self.cols("snapshots"))
         self.assertTrue({"readback_owed", "note_issued_gen", "note_other_issued_gen",
@@ -182,6 +186,8 @@ In `server/db.py`:
         "ALTER TABLE passes ADD COLUMN judge_pages INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE pass_steps ADD COLUMN protocol TEXT NOT NULL DEFAULT 'delegation'",
         "ALTER TABLE pass_steps ADD COLUMN started_seq INTEGER",
+        "ALTER TABLE pass_steps ADD COLUMN started_gen INTEGER",
+        "ALTER TABLE passes ADD COLUMN w_pending INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE snapshots ADD COLUMN job_id TEXT",
         "ALTER TABLE snapshots ADD COLUMN read_seq INTEGER",
         "ALTER TABLE snapshots ADD COLUMN acq INTEGER",
@@ -446,8 +452,8 @@ def start_pass(conn, trigger: str, reply: str, *, protocol="delegation", token=N
 `steps`:
 - `_start_tx` and `_finish_tx` hold the current bodies of `start`/`finish` inside their
   `with db.tx(conn):` (they assert `conn.in_transaction`). The INSERT of a new step row adds
-  `protocol` (from `passes.protocol_of`) and `started_seq = db.next_seq(conn)`; a judge
-  restart also sets `started_seq`.
+  `protocol` (from `passes.protocol_of`), `started_seq = db.next_seq(conn)` and
+  `started_gen = int(token)` (design §8); a judge restart also sets both.
 - `start`/`finish` become `with db.tx(conn): return _start_tx(...)` (`finish` keeps its
   raise-after-commit for a refused stop: `_finish_tx` returns `(result, refused)` and `finish`
   raises after the `with`).
@@ -913,6 +919,8 @@ def hand_acquisition(conn, token, pass_id) -> int:
 ```
 
 `ledger.import_ledger_export` and `ledger._import`:
+- Add `import os` and `import pathlib` at the top of `server/ledger.py` (neither is imported
+  today).
 - The public function takes `acq=None`. After `casa_handoff.capture(path)` succeeds, it
   computes `export_ref = pathlib.Path(os.path.realpath(path)).parent.name`. `capture` has
   already proved the layout `<root>/<producer>/<id>/<filename>`, so this is the handoff id. It
@@ -1448,6 +1456,30 @@ class CheckPass(StoreCase):
         t = self.drv.token
         self.assertEqual(job.next_unit(self.conn, t)["unit"], "probes")
 
+    def test_two_w_refreshes_import_twice(self):
+        import asks, datetime as _dt, db, job
+        asks.request_work(self.conn, "check", "operator")
+        self.drv.run_until(A, "judge")
+        n0 = self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0]
+        for k in (1, 2):
+            later = db._clock() + _dt.timedelta(seconds=job.W_S * 2 * k)
+            with self.patch_clock(later):
+                t = job.claim(self.conn, A)
+                self.drv.next_until(t, "judge")         # a refresh, then judging again
+        n = self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0]
+        self.assertEqual(n - n0, 2)
+        self.assertEqual(self.conn.execute("SELECT w_refreshes, w_pending FROM passes"
+                                           " ORDER BY rowid DESC LIMIT 1").fetchone()[:], (2, 0))
+
+    def test_a_failed_sync_stops_the_pass_with_its_reason(self):
+        import asks
+        self.drv.fail_next_sync("bank unreachable")
+        asks.request_work(self.conn, "check", "operator")
+        self.drv.run_job(A)
+        r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
+        self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0], 0)
+
     def test_eight_asks_that_each_stop_at_once_all_get_dispositions(self):
         import asks
         self.drv.bankfeed.restore_since_install()        # every pass stops at its probes
@@ -1478,6 +1510,8 @@ job skill will say: `probes` through `tests/bankfeed.py` (`sync`, `list_accounts
 no messages; `filing` → `record_filing(token)`; `judge` → one `list_quarter_state(triage=True)`
 page and `job_next(judged=…)` with that page's `next` and `remaining`.
 - `run_job(job_id)` claims and loops until `complete`, re-claiming on `end-batch`.
+- `fail_next_sync(detail)` makes the next `probes` unit record `bank_sync` with `ok=False`
+  and that detail.
 - `run_until(job_id, unit)` stops when that unit is handed out (and stores `self.last` and
   `self.token`).
 - `next_until(token, unit)` continues an existing claim.
@@ -1562,30 +1596,45 @@ def _step(conn, p, name):
 
 
 def _acquisition(conn, token, p, req):
+    """Spec §5.2. An acquisition this claim started is finished before F is consulted
+    (INV-J4; Astra plan-r2 S1). A W refresh is counted when its import lands, never when
+    handed out, so a refresh cut short and handed again is charged once."""
     import binding, steps
     if _step(conn, p, _first(req)) is None:
         steps._start_tx(conn, token, _first(req), {})
-    why = fresh_reason(conn)
-    if why is None or why == UNSWEPT:
-        return None
     q = req["quarter"] if req is not None else None
     imported = p["acq"] is not None and conn.execute(
         "SELECT 1 FROM snapshots WHERE acq=?", (p["acq"],)).fetchone() is not None
-    if p["acq"] is None or p["acq_gen"] != token or imported:
-        if why == STALE:
-            conn.execute("UPDATE passes SET w_refreshes=w_refreshes+1 WHERE pass_id=?",
-                         (p["pass_id"],))
-        return {"unit": "probes", "acq": hand_acquisition(conn, token, p["pass_id"]),
-                "quarter": q}
-    sync = conn.execute("SELECT ok, gen, data_json FROM probes WHERE kind='bank_sync'").fetchone()
+    if imported and p["w_pending"]:
+        conn.execute("UPDATE passes SET w_refreshes=w_refreshes+1, w_pending=0 WHERE pass_id=?",
+                     (p["pass_id"],))
+        p = live_job_pass(conn)
+    if p["acq"] is not None and not imported and p["acq_gen"] == token:
+        return _continue_acquisition(conn, token, p, req, q)
+    why = fresh_reason(conn)
+    if why is None or why == UNSWEPT:
+        return None
+    if why == STALE:
+        conn.execute("UPDATE passes SET w_pending=1 WHERE pass_id=?", (p["pass_id"],))
+    return {"unit": "probes", "acq": hand_acquisition(conn, token, p["pass_id"]), "quarter": q}
+
+
+def _continue_acquisition(conn, token, p, req, q):
+    import binding, steps
+    sync = conn.execute("SELECT ok, gen, detail, data_json FROM probes WHERE"
+                        " kind='bank_sync'").fetchone()
     led = conn.execute("SELECT gen FROM probes WHERE kind='ledger'").fetchone()
     if (sync is None or sync["gen"] != token
             or json.loads(sync["data_json"] or "{}").get("acq") != p["acq"]
             or led is None or led["gen"] != token):
         return {"unit": "probes", "acq": p["acq"], "quarter": q}
     setup, gate = binding.check_setup(conn), passes.bank_write_gate(conn)
-    if not setup["can_run"] or not gate["allowed"]:
+    reason = None
+    if not sync["ok"]:                      # Astra plan-r2 S2: a failed sync stops the pass
+        reason = "the bank sync failed: " + (sync["detail"] or "no detail")
+    elif not setup["can_run"] or not gate["allowed"]:
         reason = gate["reason"] or "; ".join(setup.get("conditions") or []) or "cannot run"
+    if reason is not None:
         row = _step(conn, p, _first(req))
         if row["finished_at"] is None:
             _, refused = steps._finish_tx(conn, token, _first(req), counts={}, stopped=reason,
@@ -2174,7 +2223,7 @@ the suite. Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add server/asks.py server/views.py tests/_base.py tests/test_s2_report.py
+git add server/asks.py server/views.py server/steps.py tests/_base.py tests/test_s2_report.py
 git commit -m "feat(s2): job_report — orphan handoff by job id, standing retry, results shown at least once, send recovery"
 ```
 
