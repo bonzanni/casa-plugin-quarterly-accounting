@@ -141,19 +141,31 @@ def begin_pass(conn, trigger: str, reply=None, quarter=None, channel=None) -> di
         return out
 
 
-def start_pass(conn, trigger: str, reply: str) -> tuple:
+def start_pass(conn, trigger: str, reply: str, *, protocol="delegation", token=None) -> tuple:
     """A new live pass (the caller checked none is live): its marker, with the claim
     columns cleared, and its row. Returns (token, pass_id). Inside the caller's write
-    transaction: begin_pass, and a claim that starts a queued package round."""
-    gen = rotate(conn)
+    transaction: begin_pass, a claim that starts a queued package round, and the job
+    cursor — whose pass runs under its claim's token (no rotation, S2 §3)."""
+    if protocol == "job":
+        if token is None:
+            raise RuntimeError("a job pass starts under its claim's token")
+        gen, pass_id = token, f"j{token}.{db.next_seq(conn)}"
+    else:
+        gen = rotate(conn)
+        pass_id = f"p{gen}"
     now = db.now()
-    pass_id = f"p{gen}"
     conn.execute("INSERT OR REPLACE INTO pass_marker(id, generation, live, pass_id, trigger,"
                  " started_at, claimed_step, lease_at) VALUES (1, ?, 1, ?, ?, ?, NULL, NULL)",
                  (gen, pass_id, trigger, now))
-    conn.execute("INSERT INTO passes(pass_id, generation, trigger, started_at, reply)"
-                 " VALUES (?, ?, ?, ?, ?)", (pass_id, gen, trigger, now, reply))
+    conn.execute("INSERT INTO passes(pass_id, generation, trigger, started_at, reply, protocol)"
+                 " VALUES (?, ?, ?, ?, ?, ?)", (pass_id, gen, trigger, now, reply, protocol))
     return gen, pass_id
+
+
+def protocol_of(conn, pass_id) -> str:
+    """The pass's protocol: 'job' or 'delegation' (a missing row is 'delegation')."""
+    row = conn.execute("SELECT protocol FROM passes WHERE pass_id=?", (pass_id,)).fetchone()
+    return row[0] if row is not None and row[0] is not None else "delegation"
 
 
 def _open_request(conn, quarter, channel) -> dict:
@@ -387,28 +399,7 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
     if token is None:
         raise db.Refusal("ending a pass needs its pass_token")
     with db.tx(conn):
-        check_token(conn, token)
-        m = _marker(conn)
-        if outcome in ("complete", "interrupted"):
-            import steps
-            owed = steps.chunk_owed(conn, m["pass_id"])     # issue #28 (A6)
-            if owed is not None:
-                raise db.Refusal(owed)
-            _round_judged(conn, m["pass_id"])
-        if outcome == "complete":
-            _judgment_owed(conn, m["pass_id"])
-        full = {**stored_report(conn, m["pass_id"], report),
-                **throughput(conn, m["pass_id"])}
-        if outcome == "complete" and full.get("not_searched"):
-            # D1 (Astra S1): a check is complete only when it searched what it owes
-            n = full["not_searched"]
-            raise db.Refusal(f"not complete: {n} payment{'s' if n > 1 else ''} this check owes "
-                             f"{'were' if n > 1 else 'was'} not searched — end it interrupted")
-        conn.execute("UPDATE passes SET ended_at=?, outcome=?, report_json=? WHERE pass_id=?",
-                     (db.now(), outcome, db.canonical(full), m["pass_id"]))
-        conn.execute("UPDATE pass_marker SET live=0, claimed_step=NULL, lease_at=NULL"
-                     " WHERE id=1")
-        handed = _hand_over(conn, m["pass_id"], outcome)
+        out = _end_pass_tx(conn, token, outcome, report)
     # The pass ended in the commit above. The reap is housekeeping: another session
     # holding the documents lock past the bound must not make this answer "NOT
     # applied — ask again" (fix wave F); the next pass's end reaps instead.
@@ -416,15 +407,49 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
         documents.reap_orphans(conn)
     except db.Busy:
         pass
-    notice = handed.pop("_notice") if handed else None
-    out = {"ended": m["pass_id"], "outcome": outcome, "report": full, **(handed or {})}
+    notice = out.pop("_notice", None)
     # issue #15: a queued package request follows this pass — continue_pass starts it
     out["more"] = queued_waiting(conn)
     # the notices this pass raised — its request's, its import's revocations — are
     # always in this rendering (older alerts may wait)
-    owed = ([notice] if notice is not None else []) + alerts.pass_notices(conn, m["pass_id"])
+    owed = ([notice] if notice is not None else []) + alerts.pass_notices(conn, out["ended"])
     out["speak"] = alerts.pending_rendering(conn, must=owed)
     return out
+
+
+def _end_pass_tx(conn, token, outcome: str, report: dict) -> dict:
+    """end_pass's transaction body, inside the caller's write transaction (end_pass's
+    own, or the job cursor's): the pass is ended and its request handed over. Returns
+    {ended, outcome, report, **handed} — `_notice` stays inside `handed` — with no reap
+    and no rendering (end_pass adds those after its commit)."""
+    assert conn.in_transaction, "a pass is ended inside the write transaction"
+    if outcome not in OUTCOMES:
+        raise db.Refusal(f"outcome is one of {', '.join(OUTCOMES)}")
+    if token is None:
+        raise db.Refusal("ending a pass needs its pass_token")
+    check_token(conn, token)
+    m = _marker(conn)
+    if outcome in ("complete", "interrupted"):
+        import steps
+        owed = steps.chunk_owed(conn, m["pass_id"])     # issue #28 (A6)
+        if owed is not None:
+            raise db.Refusal(owed)
+        _round_judged(conn, m["pass_id"])
+    if outcome == "complete":
+        _judgment_owed(conn, m["pass_id"])
+    full = {**stored_report(conn, m["pass_id"], report),
+            **throughput(conn, m["pass_id"])}
+    if outcome == "complete" and full.get("not_searched"):
+        # D1 (Astra S1): a check is complete only when it searched what it owes
+        n = full["not_searched"]
+        raise db.Refusal(f"not complete: {n} payment{'s' if n > 1 else ''} this check owes "
+                         f"{'were' if n > 1 else 'was'} not searched — end it interrupted")
+    conn.execute("UPDATE passes SET ended_at=?, outcome=?, report_json=? WHERE pass_id=?",
+                 (db.now(), outcome, db.canonical(full), m["pass_id"]))
+    conn.execute("UPDATE pass_marker SET live=0, claimed_step=NULL, lease_at=NULL"
+                 " WHERE id=1")
+    handed = _hand_over(conn, m["pass_id"], outcome)
+    return {"ended": m["pass_id"], "outcome": outcome, "report": full, **(handed or {})}
 
 
 def _round_judged(conn, pass_id: str) -> None:
@@ -448,6 +473,29 @@ def _round_judged(conn, pass_id: str) -> None:
                          "pass after it")
 
 
+def _judgment_uncovered(conn, pass_id: str) -> tuple:
+    """(how many payments judge-due now are not covered by a finished judgment of this
+    pass, the pass's judge step row or None). Nothing is owed by a pass with no sweep."""
+    import work
+    steps = {r["step"]: r for r in conn.execute(
+        "SELECT step, finished_at, carry_json FROM pass_steps WHERE pass_id=?", (pass_id,))}
+    if "sweep" not in steps:
+        return 0, steps.get("judge")
+    due = work.judge_due_state(conn)
+    judge = steps.get("judge")
+    if judge is not None and judge["finished_at"] is not None:
+        # covered: due when the judgment started, in exactly the state it saw (C7)
+        seen = json.loads(judge["carry_json"] or "{}").get("due_at_start", {})
+        due = {p: v for p, v in due.items() if seen.get(str(p)) != v}
+    return len(due), judge
+
+
+def judgment_gap(conn, pass_id: str) -> int:
+    """The count _judgment_owed refuses on: judge-due payments not covered by a finished
+    judgment of this pass (the job cursor reads it instead of a refusal's text)."""
+    return _judgment_uncovered(conn, pass_id)[0]
+
+
 def _judgment_owed(conn, pass_id: str) -> None:
     """A pass that swept is `complete` only if every payment judge-due at its end
     (work.judge_due_pids, checked live in end_pass's own transaction) was covered by a
@@ -459,20 +507,9 @@ def _judgment_owed(conn, pass_id: str) -> None:
     yet, Ellen runs it; otherwise (a judge step expired, or the payment reopened after
     it started) the pass is `interrupted` and the next pass judges it. Never asks for a
     second judge step, so it cannot loop."""
-    import work
-    steps = {r["step"]: r for r in conn.execute(
-        "SELECT step, finished_at, carry_json FROM pass_steps WHERE pass_id=?", (pass_id,))}
-    if "sweep" not in steps:
+    n, judge = _judgment_uncovered(conn, pass_id)
+    if not n:
         return
-    due = work.judge_due_state(conn)
-    judge = steps.get("judge")
-    if judge is not None and judge["finished_at"] is not None:
-        # covered: due when the judgment started, in exactly the state it saw (C7)
-        seen = json.loads(judge["carry_json"] or "{}").get("due_at_start", {})
-        due = {p: v for p, v in due.items() if seen.get(str(p)) != v}
-    if not due:
-        return
-    n = len(due)
     what = (f"{n} payment{'s' if n > 1 else ''} with a filed document that may fit "
             f"{'were' if n > 1 else 'was'} not judged in this pass")
     if judge is None:

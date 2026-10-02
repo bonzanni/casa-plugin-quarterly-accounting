@@ -2,6 +2,7 @@
 fresh data dir, handoff folder and outbox, and os.environ restored after."""
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 import sys
@@ -55,6 +56,17 @@ class StoreCase(TempEnv):
             self.conn.execute("UPDATE binding SET watermark=?", (watermark,))
 
     LEDGER = "a" * 32             # the bank-feed ledger instance id the fixtures bind to
+
+    @contextlib.contextmanager
+    def patch_clock(self, at):
+        """db._clock returns `at` inside the block; the real clock is restored after."""
+        import db
+        real = db._clock
+        db._clock = lambda: at
+        try:
+            yield at
+        finally:
+            db._clock = real
 
     def handed(self, *pids):
         """Put payments in the live pass's open Gmail chunk (issue #26, A4: a search is
