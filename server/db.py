@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -150,7 +150,8 @@ CREATE TABLE IF NOT EXISTS bank_rows (
   currency TEXT NOT NULL, direction TEXT NOT NULL, status TEXT,
   counterparty TEXT, remittance TEXT, state TEXT NOT NULL,
   superseded_by INTEGER, needs_review INTEGER NOT NULL DEFAULT 0,
-  review_reason TEXT, snapshot_id INTEGER NOT NULL);
+  review_reason TEXT, snapshot_id INTEGER NOT NULL,
+  fx_rate TEXT, fx_unit TEXT);   -- the bank's exchange rate and its unit (issue #35), verbatim
 
 CREATE TABLE IF NOT EXISTS projections (
   pid INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -383,6 +384,10 @@ MIGRATIONS: dict[int, list[str]] = {
     7: ["""CREATE TABLE IF NOT EXISTS operator_refs (
   ref TEXT PRIMARY KEY, source TEXT NOT NULL, doc_id INTEGER NOT NULL, filed_at TEXT NOT NULL)""",
         "CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at)"],
+    # 8 -> 9 (issue #35): a payment's exchange rate, from bank-feed 0.22.0's export. Rows
+    # imported before it carry none until the next import.
+    8: ["ALTER TABLE bank_rows ADD COLUMN fx_rate TEXT",
+        "ALTER TABLE bank_rows ADD COLUMN fx_unit TEXT"],
 }
 
 

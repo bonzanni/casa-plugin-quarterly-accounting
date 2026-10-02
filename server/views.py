@@ -301,9 +301,13 @@ def evidence(d: dict, cands=None) -> list:
                 and doc.get("amount_minor") is not None):
             # issue #30: a document in another currency (a USD invoice for a EUR card
             # charge) shows both amounts, so the operator can judge the pairing
+            import fx
+            at = fx.expected(d.get("fx"), d["amount_minor"], d["currency"], doc["currency"])
+            bank = (f" ({amounts.fmt(at, doc['currency'])} at the bank's rate)"
+                    if at is not None else "")             # issue #35 (R4)
             out.append(f"The {KIND_WORD.get(doc['kind'], 'document')} is in "
                        f"{amounts.fmt(doc['amount_minor'], doc['currency'])}; the payment is "
-                       f"{_money(d)}.")
+                       f"{_money(d)}{bank}.")
     shown = _cands(d, cands)
     if shown:
         out.append("Could be: " + ", ".join(ident(c["document"]) + _fx(c["document"], d)

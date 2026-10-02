@@ -56,7 +56,7 @@ class TestSchema(TempEnv):
     def _assert_current_behaviour(self, c, old_seq: int, deliveries=1, first_sent=False):
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
-        self.assertEqual(db.SCHEMA_VERSION, 8)
+        self.assertEqual(db.SCHEMA_VERSION, 9)
         # the migrated store has every column and index a fresh store has
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
@@ -125,7 +125,7 @@ class TestSchema(TempEnv):
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)
         self.assertEqual(c2.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "8")
+                         .fetchone()[0], "9")
 
     def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
         # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
@@ -250,7 +250,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "8")
+                         .fetchone()[0], "9")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -271,7 +271,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "8")
+                         .fetchone()[0], "9")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -283,6 +283,25 @@ class TestSchema(TempEnv):
         self.assertEqual(cols(c), cols(fresh))
         self.assertEqual(c.execute("SELECT COUNT(*) FROM operator_refs").fetchone()[0], 0)
         self.assertIsNone(db.epoch(c))
+
+    def test_a_v0_7_0_schema_8_store_migrates_with_no_exchange_rates(self):
+        # schema 8 as v0.7.0 shipped it (7406c98). Issue #35: the rows carry no rate until
+        # the next import of bank-feed 0.22.0's export
+        from tests.schema_history import DDL_V8
+        self.assertNotIn("fx_rate", DDL_V8)
+        old = self._released_store(DDL_V8, 8)
+        old.close()
+        c = db.open_store()
+        self.addCleanup(c.close)
+        self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
+                         .fetchone()[0], "9")
+        fresh = sqlite3.connect(":memory:")
+        self.addCleanup(fresh.close)
+        for stmt in db._statements(db.DDL):
+            fresh.execute(stmt)
+        cols = lambda conn: sorted(r[1] for r in conn.execute("PRAGMA table_info(bank_rows)"))
+        self.assertEqual(cols(c), cols(fresh))
+        self.assertIn("fx_rate", cols(c))
 
     def test_a_staged_path_is_unique_in_a_fresh_store(self):
         c = db.open_store()

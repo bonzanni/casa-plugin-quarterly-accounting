@@ -22,6 +22,7 @@ import re
 
 import casa_handoff
 import db
+import fx
 import lineage
 import reducer as R
 
@@ -63,6 +64,10 @@ def parse(name: str, data: bytes) -> list:
             clean[k] = v
         clean["needs_review"] = clean["needs_review"] or 0
         clean["tags"], clean["tag_revision"] = _tags_of(r)
+        # issue #35: bank-feed 0.22.0's exchange rate, kept only as a valid pair; an
+        # export without the columns (an older bank-feed) carries none
+        clean["fx_rate"], clean["fx_unit"] = fx.pair(
+            r.get("exchange_rate"), r.get("exchange_unit_currency")) or (None, None)
         out.append(clean)
     return out
 
@@ -318,11 +323,13 @@ def _import(conn, rows, token, ledger_instance) -> dict:
             conn.execute("INSERT INTO bank_rows(row_id, account_id, first_seen, booking_date,"
                          " value_date, amount_minor, currency, direction, status, counterparty,"
                          " remittance, state, superseded_by, needs_review, review_reason,"
-                         " snapshot_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         " snapshot_id, fx_rate, fx_unit)"
+                         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (r["row_id"], r["account_id"], r["first_seen"], r["booking_date"],
                           r["value_date"], r["amount_minor"], r["currency"], r["direction"],
                           r["status"], r["counterparty"], r["remittance"], r["state"],
-                          r["superseded_by"], r["needs_review"], r["review_reason"], sid))
+                          r["superseded_by"], r["needs_review"], r["review_reason"], sid,
+                          r.get("fx_rate"), r.get("fx_unit")))
         conn.execute("UPDATE binding SET row_high_water=max(row_high_water, ?)", (max_id,))
         conn.execute("UPDATE passes SET snapshot_id=? WHERE pass_id=?",
                      (sid, cur_pass["pass_id"]))

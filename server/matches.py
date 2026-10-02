@@ -11,6 +11,7 @@ import json
 import authorship
 import db
 import documents
+import fx
 import kb
 import lineage
 import reducer as R
@@ -72,6 +73,40 @@ def _effects(before: dict, after: dict) -> list:
         elif before.get(mid) in ("matched", "proposed") and st == "conflicted":
             out.append(f"set aside {mid}")
     return out
+
+
+def payment_snapshot(facts, kind, fx_pair) -> str | None:
+    """Issue #34 (G1, D1): what an operator's rejection is bound to on the payment's side —
+    its facts and expected kind as they were when the operator rejected, and the bank's
+    exchange rate (a corrected rate is new evidence, #35)."""
+    if facts is None:
+        return None
+    return db.canonical({"pairing": R.fingerprint(facts, kind),
+                         "fx": fx.canonical(fx_pair)})
+
+
+def row_fx(row):
+    return ({"rate": row["fx_rate"], "unit": row["fx_unit"]}
+            if row is not None and row.get("fx_rate") else None)
+
+
+def rejected_by_operator(conn, pid, doc, facts, kind, fx_pair):
+    """Issue #34 (G2, D1): the time of the operator's rejection that blocks a machine
+    pairing of document `doc` with payment `pid`, or None. The operator's latest verdict on
+    that document in this lineage — over every pairing id it holds, a merge's too — is a
+    rejection, made against the payment and the document exactly as they are now. A
+    rejection from before 0.8.0 recorded neither: it does not block (0.7.0's behaviour —
+    the operator is asked again, and that answer sticks)."""
+    r = conn.execute("SELECT l.kind, l.fp, l.detail, l.created_at FROM log l JOIN matches m"
+                     " ON m.match_id=l.match_id WHERE l.pid=? AND m.doc_id=?"
+                     " AND l.author='operator' AND l.kind IN ('pair', 'unpair')"
+                     " ORDER BY l.seq DESC LIMIT 1", (pid, doc["doc_id"])).fetchone()
+    if r is None or r["kind"] != "unpair" or r["fp"] is None or r["detail"] is None:
+        return None
+    if (r["fp"] == payment_snapshot(facts, kind, fx_pair)
+            and r["detail"] == documents.fingerprint(doc)):
+        return r["created_at"]
+    return None
 
 
 def _why_not_kind(conn, proj, row, exp, doc) -> str:
@@ -149,6 +184,22 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
             raise db.Refusal("the row changed since this pass's snapshot (or row_digest is not the item's value "
                              "from list_quarter_state): re-read the item with list_quarter_state(pid=…) and "
                              "pass its row_digest, or re-import before matching")
+        if doc["currency"] and doc["currency"] != row["currency"]:
+            # issue #35 (R3): the bank's own rate rules out an amount it cannot give
+            why = fx.screen({"rate": row["fx_rate"], "unit": row["fx_unit"]}
+                            if row.get("fx_rate") else None, row["amount_minor"],
+                            row["currency"], doc["amount_minor"], doc["currency"])
+            if why is not None:
+                raise db.Refusal(why + " — not paired")
+        # C1 (Terra S1, Astra S1): the document as this write leaves it — a date read on it
+        # in this call is a corrected fact, and may lift a rejection
+        effective = dict(doc, document_date=document_date) if document_date else doc
+        rejected = rejected_by_operator(conn, pid, effective, R.facts_of(row), exp.kind,
+                                        row_fx(row))
+        if rejected is not None:
+            raise db.Refusal(f"the operator rejected this pairing ({rejected[:10]}); it is not "
+                             "proposed again unless the payment or the document changes — "
+                             "leave it")
         if kind == "pair" and documents.collisions(conn, doc_id):
             raise db.Refusal("another document carries the same issuer and number: propose it "
                              "instead, or resolve the duplicate first")
@@ -267,9 +318,40 @@ def reject_in_tx(conn, *, match_id, expected_revision, render_id) -> dict:
     if s["state"] not in ("matched", "proposed", "conflicted"):
         raise db.Refusal("there is no pairing to remove there")
     before = _states(conn, pid)
-    lineage.append(conn, pid, "unpair", "operator", match_id=match_id, render_id=render_id)
+    _append_rejection(conn, pid, s, render_id)
     red = lineage.settle(conn, pid)
     return _result(conn, pid, red, match_id, _effects(before, _states(conn, pid)))
+
+
+def _append_rejection(conn, pid, s, render_id) -> None:
+    """Issue #34 (G1, D1): the rejection is bound to the payment and the document as they
+    are now — what the operator rejected — recorded on the rejection itself."""
+    doc = documents._doc(conn, s["doc_id"])
+    proj = lineage.projection(conn, pid)
+    row = lineage.live_row(conn, proj)
+    snap = None
+    if row is not None and not proj["ended"]:
+        exp = lineage.expectation_for(conn, proj, row, exempt=False)
+        snap = payment_snapshot(R.facts_of(row), exp.kind, row_fx(row))
+    lineage.append(conn, pid, "unpair", "operator", match_id=s["match_id"],
+                   render_id=render_id, fp=snap, detail=documents.fingerprint(doc))
+
+
+def reject_all_in_tx(conn, pid, bound) -> list:
+    """apply_reply's "wrong" over every displayed candidate, inside the caller's
+    transaction, each already checked against the revision the operator was shown: every
+    rejection is recorded, then the payment settles ONCE (C3, Astra S1: settling between
+    them let the store rule retire a merged duplicate of the same document and move the
+    revision the next rejection was bound to). Returns the effects."""
+    pid = _operator_pid(conn, pid)
+    before = _states(conn, pid)
+    for match_id, render_id in bound:
+        s = _state(conn, match_id)
+        if s["state"] not in ("matched", "proposed", "conflicted"):
+            raise db.Refusal("there is no pairing to remove there")
+        _append_rejection(conn, pid, s, render_id)
+    lineage.settle(conn, pid)
+    return _effects(before, _states(conn, pid))
 
 
 def set_exemption(conn, *, pid, exempt, expected_revision, render_id) -> dict:

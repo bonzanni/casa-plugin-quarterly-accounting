@@ -749,10 +749,7 @@ def _set_aside_all(conn, d) -> dict:
             rid, rev = _bind_match(conn, d, c["match_id"])
             authorship.require_match_shown(conn, d["pid"], c["match_id"], rid, rev)
             bound.append((c["match_id"], rid, rev))
-        effects = []
-        for mid, rid, rev in bound:
-            effects += matches.reject_in_tx(conn, match_id=mid, expected_revision=rev,
-                                            render_id=rid)["effects"]
+        effects = matches.reject_all_in_tx(conn, d["pid"], [(mid, rid) for mid, rid, _ in bound])
         return {"set_aside": [b[0] for b in bound], "effects": effects}
 
 

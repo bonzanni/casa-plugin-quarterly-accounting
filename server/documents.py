@@ -229,6 +229,16 @@ def read_document(conn, doc_id: int):
             "blob": base64.b64encode(data).decode("ascii")}}])
 
 
+FP_FIELDS = ("kind", "amount_minor", "currency", "document_date", "issuer", "counterparty",
+             "document_number", "recipient")
+
+
+def fingerprint(doc) -> str:
+    """Issue #34 (G1): the document facts a judgment reads, as one canonical string — what
+    an operator's rejection is bound to on the document's side (not date_read_at)."""
+    return db.canonical({k: doc[k] for k in FP_FIELDS})
+
+
 def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict:
     import lineage
     import passes

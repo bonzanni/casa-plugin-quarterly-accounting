@@ -247,6 +247,9 @@ def describe(conn, pid: int) -> dict:
         # live row): pass it back verbatim as row_snapshot. get_transaction's text
         # cannot rebuild it (signed decimals, fenced text, labels). None: no live row.
         "row_snapshot": R.facts_of(live) if live is not None else None,
+        # issue #35: the bank's rate for a foreign-currency payment, when it gave one
+        "fx": ({"rate": live["fx_rate"], "unit": live["fx_unit"]}
+               if live is not None and live.get("fx_rate") else None),
     }
 
 
@@ -519,30 +522,48 @@ def judge_due_state(conn, quarter=None) -> dict:
     judgment are that judgment's to see, or the next pass's — as before issue #3
     (code round C8: the bar issue #3 must meet is no regression, not a guarantee
     against every concurrent edit)."""
-    docs = {(r["kind"], r["amount_minor"], r["currency"]) for r in conn.execute(
-        "SELECT d.kind, d.amount_minor, d.currency FROM documents d JOIN document_status s"
-        " ON s.doc_id=d.doc_id WHERE s.status='unmatched' AND d.irrelevant=0"
-        " AND d.amount_minor IS NOT NULL")}
-    # D5 (Astra S2): a document in another currency (a USD invoice for a EUR charge) fits
-    # by its vendor window, not its amount — the judge proposes it (issue #30)
-    fx = [(r["kind"], r["currency"], r["document_date"]) for r in conn.execute(
-        "SELECT d.kind, d.currency, d.document_date FROM documents d JOIN document_status s"
-        " ON s.doc_id=d.doc_id WHERE s.status='unmatched' AND d.irrelevant=0"
-        " AND d.amount_minor IS NOT NULL AND d.currency IS NOT NULL"
-        " AND d.document_date IS NOT NULL")]
+    import matches
+    docs = [dict(r) for r in conn.execute(
+        "SELECT d.* FROM documents d JOIN document_status s ON s.doc_id=d.doc_id"
+        " WHERE s.status='unmatched' AND d.irrelevant=0 AND d.amount_minor IS NOT NULL")]
     out = {}
     for d in triage(conn):
         if not d["fresh"] or d["pending"] or (quarter and d["quarter"] != quarter):
             continue
         k, a = d["expectation"]["kind"], d["amount_minor"]
-        if (k, a, d["currency"]) in docs or (k, a, None) in docs or _fx_fits(d, fx):
+        for doc in docs:
+            if doc["kind"] != k:
+                continue
+            exact = doc["amount_minor"] == a and doc["currency"] in (d["currency"], None)
+            # D5 (Astra S2): a document in another currency (a USD invoice for a EUR
+            # charge) fits by its vendor window, and the bank's rate when known (#35)
+            if not exact and not _fx_fits(d, doc):
+                continue
+            # issue #34 (G3): a pairing the operator rejected, unchanged, is not due
+            if matches.rejected_by_operator(conn, d["pid"], doc, d["row_snapshot"],
+                                            k, d.get("fx")) is not None:
+                continue
             out[d["pid"]] = d["revision"]
+            break
     return out
 
 
-def _fx_fits(d: dict, fx: list) -> bool:
-    if not d["date"]:
+def _fx_fits(d: dict, doc: dict) -> bool:
+    """A document in another currency than the payment's, dated within the payment's
+    vendor window — and, when the bank gave the payment's rate, of an amount that rate
+    allows (issue #35, R3)."""
+    import fx
+    if (not d["date"] or not doc.get("currency") or not doc.get("document_date")
+            or doc["currency"] == d["currency"]):
         return False
+    try:
+        gap = abs((dates.parse_day(doc["document_date"][:10]) - dates.parse_day(d["date"])).days)
+    except (ValueError, db.Refusal):
+        return False
+    if gap > (d["window_days"] or 10):
+        return False
+    return fx.screen(d.get("fx"), d["amount_minor"], d["currency"], doc["amount_minor"],
+                     doc["currency"]) is None
     day = dates.parse_day(d["date"])
     for kind, cur, when in fx:
         if kind != d["expectation"]["kind"] or cur == d["currency"]:
