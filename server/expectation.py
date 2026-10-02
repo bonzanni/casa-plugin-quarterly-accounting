@@ -100,8 +100,17 @@ def _make(kind: str, tier: str | None, row: int) -> Expectation:
     return Expectation(kind, None if kind == "none" else tier, row)
 
 
+def _zero(e: Expectation, zero: bool) -> Expectation:
+    """Issue #36: a 0.00 row (a card authorisation) moves no money. A classification-derived
+    expectation that names a document wants it optionally: the kind stays (a real 0.00
+    document still pairs), the tier is optional, so it is never MISSING."""
+    if zero and e.kind in KINDS and e.tier == "required":
+        return Expectation(e.kind, "optional", e.row, e.conflict)
+    return e
+
+
 def derive(direction: str, tags, *, exempt: bool = False,
-           counterparty_override=None, chain_overrides=()) -> Expectation:
+           counterparty_override=None, chain_overrides=(), zero: bool = False) -> Expectation:
     if exempt:                                                   # row 1
         return Expectation("none", None, 1)
     if counterparty_override is not None:                        # row 2
@@ -109,8 +118,8 @@ def derive(direction: str, tags, *, exempt: bool = False,
         return _make(kind, tier, 2)
     state = classification_state(tags)
     if state == "terminal":                                      # row 3
-        return Expectation("invoice" if direction == "DBIT" else "sales-invoice",
-                           "required", 3)
+        return _zero(Expectation("invoice" if direction == "DBIT" else "sales-invoice",
+                                 "required", 3), zero)
     if state in ("parked", "workable"):                          # row 4
         return Expectation(None, "required", 4)
     chosen = decisive(tags, direction)
@@ -127,7 +136,7 @@ def derive(direction: str, tags, *, exempt: bool = False,
         if best is None or rank > best[0]:
             best = (rank, kind, tier)
     kind, tier = (best[1], best[2]) if best else DEFAULTS[row]
-    return _make(kind, tier, row)
+    return _zero(_make(kind, tier, row), zero)
 
 
 def _reject_colliding_scopes(chain_overrides) -> None:

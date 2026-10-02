@@ -136,7 +136,10 @@ exemption or instruction about the accounting ("all good", "the Zapier one is wr
 180.00 one needs no invoice", "no invoices ever for X", "stop chasing Q2", "start from Q2",
 "call the zips X", "rebuild it", "send it again", "the bank ledger was reset") or contains the
 word "accounting", call `apply_reply(text)` with the operator's words exactly as written. A
-question ("is the Zapier one right?") is not a reply — answer it with a view.
+question ("is the Zapier one right?") is not a reply — answer it with a view. A verdict
+on a pairing (`apply_reply`, `confirm_match`, `reject_match`) is only ever the operator's
+own words in this conversation — never your own judgment, never a verdict they gave on an
+earlier view repeated for a pairing shown again: show it, and let them answer.
 
 `apply_reply` returns:
 - `receipt_pages` — send EVERY page, in order, each verbatim as its own message (`receipt`
@@ -481,7 +484,12 @@ named in your context. Your one expectation write is in step 6.
    in the payment's currency: `propose_match`, with a `rationale` naming both amounts — the
    operator confirms it. Where several fit, the closest date, the others as `runners_up`
    with `guessed`. Never leave such a document unpaired: the package would list its
-   payment as missing.
+   payment as missing — unless the write is refused because the bank's own rate rules
+   its amount out ("cannot be the … payment"): then it is not this payment's.
+
+   A pairing the operator rejected is refused while neither the payment nor the document
+   has changed ("the operator rejected this pairing"): leave it, and never propose it
+   again in other words.
 
    A pairing needs the document's amount: when the filed reading has none, read the total
    and currency on the document and `update_document_metadata(doc_id, amount_minor=…,

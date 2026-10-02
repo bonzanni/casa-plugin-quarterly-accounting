@@ -107,7 +107,8 @@ def expectation_for(conn, proj, row, exempt: bool) -> ex.Expectation:
     cp = kb.counterparty_for(conn, row["counterparty"])
     return ex.derive(row["direction"], tags, exempt=exempt,
                      counterparty_override=kb.override_of(cp),
-                     chain_overrides=kb.chain_overrides(conn))
+                     chain_overrides=kb.chain_overrides(conn),
+                     zero=row.get("amount_minor") == 0)
 
 
 def _occupied(conn, pid):
