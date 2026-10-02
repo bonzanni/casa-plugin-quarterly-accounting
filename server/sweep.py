@@ -461,8 +461,11 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
                                      " THEN note_other_issued_gen ELSE"
                                      " max(coalesce(note_other_issued_gen, 0), note_issued_gen)"
                                      " END WHERE pid=?", (pid,))
+                    # a delegation issue (gen NULL) keeps the claim an earlier issue was
+                    # made under: of the same text, that held write may still land later
+                    # on another revision (Task 11 review round 1)
                     conn.execute("UPDATE projections SET note_issued_at=?, note_issued_seq=?,"
-                                 " note_issued_gen=? WHERE pid=?",
+                                 " note_issued_gen=coalesce(?, note_issued_gen) WHERE pid=?",
                                  (db.now(), proj["note_seq"], gen, pid))
                 instructions = {**step, "workflow": gate["workflow"],
                                 "expected_generation": gate["expected_generation"],

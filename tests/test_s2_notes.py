@@ -170,3 +170,52 @@ class LegacyIssue(RealBase):
         self.later(60)
         self.job_pass(t1)
         self.assertIn(survivor, sweep._due(self.conn))      # 0 confirmations
+
+    def test_a_delegation_reissue_keeps_the_job_issue_generation(self):
+        # review round 1 (Task 11): a delegation re-issue of the SAME text must not erase
+        # the job claim an earlier issue of it was made under, or that held write, landing
+        # on a later revision, finds the lineage confirmed (INV-J11)
+        import db, job, lineage, sweep
+        from tests import sim
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        rid = self.rid()
+        self.new_pass()
+        self.cycle()                    # mints the workflow's registration
+        pid = self.pid_of(rid)
+        self.later(3600)
+        t1 = job.claim(self.conn, self.JOB)
+        self.job_pass(t1)
+        seq_a = self.new_note_revision(pid)
+        tags, _notes, first_seen, rev = sim._read(self.bf, rid)
+        held = sweep.record_observation(self.conn, pid=pid, token=t1, snapshot_id=self.snap_id,
+                                        observed_tags=tags, observed_notes=[],
+                                        observed_first_seen=first_seen,
+                                        observed_tag_revision=rev)["instructions"]
+        self.assertIn(f"Accounting revision {seq_a}:", held["add_note"])   # issued, held
+        self.assertEqual(lineage.projection(self.conn, pid)["note_issued_gen"], t1)
+        self.later(60)
+        self.new_pass()                 # a delegation pass re-issues A, writes and reads it
+        self.cycle()
+        p = lineage.projection(self.conn, pid)
+        self.assertEqual((p["note_issued_seq"], p["note_issued_gen"]), (seq_a, t1))
+        self.later(800)
+        seq_b = self.new_note_revision(pid)
+        t2 = job.claim(self.conn, self.JOB)
+        self.job_pass(t2)
+        self.cycle()                    # B issued, written and read under t2
+        self.assertTrue(self.bf.notes(rid)[-1].startswith(f"Accounting revision {seq_b}:"))
+        self.later(200)                 # past the delegation issue + Z, inside t2 + Z
+        self.job_pass(t2)
+        self.cycle()                    # re-read under t2
+        self.later(1)
+        self.job_pass(t2)
+        self.assertIn(pid, sweep._due(self.conn))           # 0 confirmations
+        self.bf.call("add_note", row_ids=[rid], note=held["add_note"], author="agent",
+                     workflow=held["workflow"], expected_generation=held["expected_generation"],
+                     expected_ledger=held["expected_ledger"])
+        self.assertTrue(self.bf.notes(rid)[-1].startswith(f"Accounting revision {seq_a}:"))
+        self.later(60)
+        self.job_pass(t2)
+        self.assertIn(pid, sweep._due(self.conn))           # still due after the late write
+        self.cycle()
+        self.assertTrue(self.bf.notes(rid)[-1].startswith(f"Accounting revision {seq_b}:"))
