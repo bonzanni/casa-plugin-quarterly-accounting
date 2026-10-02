@@ -267,8 +267,8 @@ git commit -m "feat(s2): schema 10 — claims, work requests, job columns; upgra
 ```python
 # tests/test_s2_readback.py
 """The sweep's read-back debt (spec §5.3), against the REAL bank-feed."""
-from tests import sim
-from tests.test_sweep_real import Base
+from tests.test_sweep_real import Base     # first: tests._base puts server/ on sys.path
+from tests import sim                      # noqa: E402  (sim imports sweep)
 import sweep  # noqa: E402
 
 
@@ -1694,7 +1694,9 @@ def _poisoned(conn, token, p, req):
         _, refused = steps._finish_tx(conn, token, _first(req), counts={},
                                       stopped=gate["reason"], by_refusal=True)
         assert refused is None
-    passes._end_pass_tx(conn, token, "stopped", {})
+    # the reason is kept in the pass's stored report (Astra plan-r8 S2): the probe that
+    # carried it is overwritten by the next acquisition, and the result must still say it
+    passes._end_pass_tx(conn, token, "stopped", {"stopped_reason": reason})
     return "ended"
 
 
@@ -2347,7 +2349,7 @@ def job_report(conn, job_id=None, status=None) -> dict:
                                    "starting it again.")
             for r in conn.execute("SELECT * FROM work_requests WHERE state='done' ORDER BY"
                                   " request_id").fetchall():
-                out["texts"].append(_result_tx(conn, r))
+                out["texts"].extend(_result_tx(conn, r))     # a list of pages
             sends = steps._claim_sends_tx(conn)
             out["continue"] = sends.get("continue")
             notice = sends.get("_notice")
@@ -2361,9 +2363,15 @@ concatenation, in order:
 - if `r["render_ids_json"]` is non-empty → its undelivered renderings, from `renders`;
 - an operator check whose outcome is `complete`/`interrupted` → `views.review_in_tx(conn,
   "status")`; store `[render_id]` on the request;
-- an outcome of `stopped` → a rendering of kind `job-stop` whose text is the stop line
-  ("The accounting check stopped: <reason>." or, for exhausted adoptions, "The accounting
-  check kept stopping — ask again when you want me to retry.");
+- an outcome of `stopped` → a rendering of kind `job-stop` whose text is the stop line:
+  - "The accounting check stopped: <reason>.", where `<reason>` is the `stopped_reason` in the
+    request's pass's stored report (`_stop` writes it; `stored_report` keeps keys other than the
+    counts). With no `stopped_reason` there, "The accounting check stopped.";
+  - for exhausted adoptions (`adoptions_exhausted` in that report), "The accounting check kept
+    stopping — ask again when you want me to retry.".
+  Add `test_a_refresh_sync_failure_keeps_its_reason` to `tests/test_s2_report.py`: an initial
+  sweep, a second check, then its refresh's sync failed. One stopped result names the reason,
+  even after a later successful sync.
 - every rendering's text is at most `TELEGRAM_LIMIT` (Terra plan-r6 S2). A result whose lines
   do not fit one message is **paged, never clipped** (Terra plan-r7 S2: clipping 200 case lines
   kept 54).
@@ -2834,8 +2842,9 @@ def t_record_filing(args):
 `plugin.json`:
 - version `0.9.0`;
 - add `casa.jobs` (verbatim, Global Constraints);
-- in `provides_tools` and `resultContract.tools`, remove the five old tools and add the five
-  new ones, each `{"result": "safe"}`.
+- in `provides_tools` and `resultContract.tools`, remove the five old tools and add the SIX
+  new ones (`job_next`, `job_status`, `job_report`, `request_work`, `request_package`,
+  `record_filing`), each `{"result": "safe"}`.
 
 `server/version.py`: `WORKFLOW` follows the manifest. Check how it reads the version; if it is
 hard-coded, set `acct@0.9.0`.
