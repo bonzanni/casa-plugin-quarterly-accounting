@@ -40,6 +40,17 @@ def _marker(conn):
     return conn.execute("SELECT * FROM pass_marker WHERE id=1").fetchone()
 
 
+def close_delegation_pass_on_upgrade(conn) -> None:
+    """Schema 10 (spec §8): a live delegation-protocol pass is ended `interrupted`
+    through _terminalize, and the marker goes dead, so every old token is refused by
+    check_token. Inside migrate's transaction."""
+    m = _marker(conn)
+    if m is None or not m["live"]:
+        return
+    _terminalize(conn, m["pass_id"])
+    conn.execute("UPDATE pass_marker SET live=0, claimed_step=NULL, lease_at=NULL WHERE id=1")
+
+
 def current_pass(conn):
     m = _marker(conn)
     if m is None or not m["live"]:

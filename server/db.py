@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -54,6 +54,23 @@ def data_dir() -> pathlib.Path:
     return pathlib.Path(d)
 
 
+# The job protocol's own tables (spec §4, §5, §6), module constants so a fresh store's
+# DDL and MIGRATIONS[9] create byte-identical tables.
+CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
+  gen INTEGER PRIMARY KEY, job_id TEXT NOT NULL, at TEXT NOT NULL,
+  spent INTEGER NOT NULL DEFAULT 0, measure_json TEXT, reported INTEGER NOT NULL DEFAULT 0);"""
+
+WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
+  request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK (kind IN ('check', 'handover')),
+  trigger TEXT NOT NULL CHECK (trigger IN ('cron', 'operator')),
+  doc_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_seq INTEGER NOT NULL, created_at TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued', 'taken', 'done', 'reported')),
+  pass_id TEXT, outcome TEXT,
+  render_ids_json TEXT NOT NULL DEFAULT '[]',
+  verdicts_json TEXT NOT NULL DEFAULT '{}');"""
+
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
@@ -86,7 +103,19 @@ CREATE TABLE IF NOT EXISTS passes (
   snapshot_id INTEGER,
   gate_json TEXT,                -- this pass's bank-write verdict, decided once (sticky refusal)
   report_json TEXT,
-  reply TEXT NOT NULL DEFAULT 'telegram');   -- where a continuation reports: telegram | silent
+  reply TEXT NOT NULL DEFAULT 'telegram',   -- where a continuation reports: telegram | silent
+  protocol TEXT NOT NULL DEFAULT 'delegation',   -- 'delegation' (pre-S2) | 'job' (spec §3)
+  holder_job TEXT,               -- the job run id that holds this pass (job protocol)
+  orphaned_by TEXT,               -- the job run id that adopted this pass's work, if orphaned
+  adoptions INTEGER NOT NULL DEFAULT 0,          -- adoptions spent (at most 2 per pass, §6.3)
+  adopters_json TEXT NOT NULL DEFAULT '[]',      -- job run ids that adopted this pass's work
+  acq INTEGER,                    -- the bank-feed acquisition id this pass last imported under
+  acq_gen INTEGER,                -- that acquisition's restore generation
+  read_seq INTEGER,               -- the store sequence this pass's read-back is owed from
+  w_refreshes INTEGER NOT NULL DEFAULT 0,        -- W-refreshes spent (at most 2 per pass, §5.2)
+  judge_after TEXT,               -- the import's sweep-completion time W is counted from (§5.2)
+  judge_pages INTEGER NOT NULL DEFAULT 0,
+  w_pending INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS pass_steps (
   pass_id TEXT NOT NULL,
   step TEXT NOT NULL CHECK (step IN ('sweep', 'judge', 'handover', 'snapshot')),
@@ -95,6 +124,9 @@ CREATE TABLE IF NOT EXISTS pass_steps (
   finished_by TEXT CHECK (finished_by IN ('specialist', 'resident')),
   finish_json TEXT,              -- counts, stopped (clipped), failed
   carry_json TEXT NOT NULL DEFAULT '{}',   -- doc_ids / report: ids and counts only
+  protocol TEXT NOT NULL DEFAULT 'delegation',
+  started_seq INTEGER,            -- the store sequence this step started at (job protocol)
+  started_gen INTEGER,            -- the pass generation this step started under (job protocol)
   PRIMARY KEY (pass_id, step));
 CREATE TABLE IF NOT EXISTS package_requests (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,7 +147,8 @@ CREATE TABLE IF NOT EXISTS package_requests (
 CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state);
 CREATE TABLE IF NOT EXISTS probes (
   kind TEXT PRIMARY KEY, ok INTEGER NOT NULL, detail TEXT, data_json TEXT,
-  observed_at TEXT NOT NULL, pass_id TEXT, failing_since TEXT);
+  observed_at TEXT NOT NULL, pass_id TEXT, failing_since TEXT,
+  gen INTEGER);                  -- the pass generation this probe was recorded under (job protocol)
 
 CREATE TABLE IF NOT EXISTS documents (
   doc_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,7 +176,14 @@ CREATE TABLE IF NOT EXISTS chain_overrides (
 CREATE TABLE IF NOT EXISTS snapshots (
   snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT, pass_id TEXT,
   imported_at TEXT NOT NULL, rows INTEGER NOT NULL, max_row_id INTEGER NOT NULL,
-  bank_through TEXT);            -- the date bank data is known good through (sync ok this pass)
+  bank_through TEXT,             -- the date bank data is known good through (sync ok this pass)
+  job_id TEXT,                   -- the job run id this import belongs to (job protocol)
+  read_seq INTEGER,              -- the store sequence this import's read-back is owed from
+  acq INTEGER,                   -- the bank-feed acquisition id this import ran under
+  export_ref TEXT,               -- the export's own ref (idempotency: at most one import per ref)
+  swept_at TEXT);                -- when the sweep this import belongs to completed (§5.2's W)
+CREATE UNIQUE INDEX IF NOT EXISTS ux_snapshots_export_ref ON snapshots(export_ref)
+  WHERE export_ref IS NOT NULL;
 CREATE TABLE IF NOT EXISTS bank_rows (
   row_id INTEGER PRIMARY KEY, account_id TEXT NOT NULL, first_seen TEXT,
   booking_date TEXT, value_date TEXT, amount_minor INTEGER NOT NULL,
@@ -175,6 +215,10 @@ CREATE TABLE IF NOT EXISTS projections (
   note_issued_at TEXT,           -- when an add_note was last returned to the specialist
   note_issued_seq INTEGER,       -- the note_seq that add_note carried (issue #14)
   note_other_issued_at TEXT,     -- the latest add_note of any OTHER note_seq (issue #14)
+  readback_owed INTEGER NOT NULL DEFAULT 0,  -- a read confirms a note only after it (job protocol)
+  note_issued_gen INTEGER,       -- the pass generation add_note was last issued under
+  note_other_issued_gen INTEGER, -- the pass generation any OTHER note_seq was last issued under
+  note_seen_gen INTEGER,         -- the pass generation a read last saw the note under
   read_snapshot INTEGER,         -- the snapshot the sweep's latest READ belongs to
   last_facts_json TEXT,          -- the destination row's facts when last seen (names an erased row)
   note_seq INTEGER, note_body TEXT,
@@ -267,7 +311,7 @@ CREATE TABLE IF NOT EXISTS operator_refs (
   -- mail, a Telegram file) by its own ref, once filed, so a pass's capped filing skips it
   ref TEXT PRIMARY KEY, source TEXT NOT NULL, doc_id INTEGER NOT NULL, filed_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at);
-"""
+""" + CLAIMS_DDL + "\n" + WORK_REQUESTS_DDL + "\n"
 
 # Migrations from version N to N+1, appended when the schema changes. Each is
 # a list of statements applied inside the migrating transaction.
@@ -388,6 +432,36 @@ MIGRATIONS: dict[int, list[str]] = {
     # imported before it carry none until the next import.
     8: ["ALTER TABLE bank_rows ADD COLUMN fx_rate TEXT",
         "ALTER TABLE bank_rows ADD COLUMN fx_unit TEXT"],
+    # 9 -> 10 (S2): the job protocol. Job passes, claims, requests, acquisitions,
+    # the sweep's read-back debt and claim-ordered note issues (spec §4, §5, §6).
+    9: ["ALTER TABLE passes ADD COLUMN protocol TEXT NOT NULL DEFAULT 'delegation'",
+        "ALTER TABLE passes ADD COLUMN holder_job TEXT",
+        "ALTER TABLE passes ADD COLUMN orphaned_by TEXT",
+        "ALTER TABLE passes ADD COLUMN adoptions INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE passes ADD COLUMN adopters_json TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE passes ADD COLUMN acq INTEGER",
+        "ALTER TABLE passes ADD COLUMN acq_gen INTEGER",
+        "ALTER TABLE passes ADD COLUMN read_seq INTEGER",
+        "ALTER TABLE passes ADD COLUMN w_refreshes INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE passes ADD COLUMN judge_after TEXT",
+        "ALTER TABLE passes ADD COLUMN judge_pages INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE pass_steps ADD COLUMN protocol TEXT NOT NULL DEFAULT 'delegation'",
+        "ALTER TABLE pass_steps ADD COLUMN started_seq INTEGER",
+        "ALTER TABLE pass_steps ADD COLUMN started_gen INTEGER",
+        "ALTER TABLE passes ADD COLUMN w_pending INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE snapshots ADD COLUMN job_id TEXT",
+        "ALTER TABLE snapshots ADD COLUMN read_seq INTEGER",
+        "ALTER TABLE snapshots ADD COLUMN acq INTEGER",
+        "ALTER TABLE snapshots ADD COLUMN export_ref TEXT",
+        "ALTER TABLE snapshots ADD COLUMN swept_at TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_snapshots_export_ref ON snapshots(export_ref)"
+        " WHERE export_ref IS NOT NULL",
+        "ALTER TABLE projections ADD COLUMN readback_owed INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE projections ADD COLUMN note_issued_gen INTEGER",
+        "ALTER TABLE projections ADD COLUMN note_other_issued_gen INTEGER",
+        "ALTER TABLE projections ADD COLUMN note_seen_gen INTEGER",
+        "ALTER TABLE probes ADD COLUMN gen INTEGER",
+        CLAIMS_DDL, WORK_REQUESTS_DDL],
 }
 
 
@@ -425,6 +499,10 @@ def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:
                 conn.execute(stmt)
         if current < 6:
             set_epoch(conn)
+        if current < 10:
+            set_epoch(conn)     # §4: a read confirms a note only >= Z after the migration
+            import passes       # lazy: passes imports db
+            passes.close_delegation_pass_on_upgrade(conn)
         conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
 
 

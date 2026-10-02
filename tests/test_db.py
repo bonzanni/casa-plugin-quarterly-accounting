@@ -56,7 +56,7 @@ class TestSchema(TempEnv):
     def _assert_current_behaviour(self, c, old_seq: int, deliveries=1, first_sent=False):
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
-        self.assertEqual(db.SCHEMA_VERSION, 9)
+        self.assertEqual(db.SCHEMA_VERSION, 10)
         # the migrated store has every column and index a fresh store has
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
@@ -125,7 +125,7 @@ class TestSchema(TempEnv):
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)
         self.assertEqual(c2.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "9")
+                         .fetchone()[0], "10")
 
     def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
         # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
@@ -164,11 +164,16 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self._assert_current_behaviour(c, old_seq=0, deliveries=2, first_sent=True)
-        # the live pass keeps its token; nothing is claimed; its reply defaults
+        # Task 1 (S2, schema 10): the migration closes this live delegation pass
+        # (close_delegation_pass_on_upgrade) — its marker goes dead, and its own row
+        # is ended `interrupted`; its reply still defaults
         m = c.execute("SELECT * FROM pass_marker").fetchone()
         self.assertEqual((m["generation"], m["live"], m["claimed_step"], m["lease_at"]),
-                         (5, 1, None, None))
-        self.assertEqual(c.execute("SELECT reply FROM passes").fetchone()[0], "telegram")
+                         (5, 0, None, None))
+        self.assertEqual(c.execute("SELECT outcome FROM passes WHERE pass_id='p5'").fetchone()[0],
+                         "interrupted")
+        self.assertEqual(c.execute("SELECT reply FROM passes WHERE pass_id='p5'").fetchone()[0],
+                         "telegram")
         self.assertEqual(c.execute("SELECT count(*) FROM pass_steps").fetchone()[0], 0)
         self.assertEqual(c.execute("SELECT count(*) FROM package_requests").fetchone()[0], 0)
         # two sends that shared one outbox name: the newest keeps it, the older is
@@ -238,8 +243,10 @@ class TestSchema(TempEnv):
 
     def test_a_v0_5_0_schema_6_store_migrates_with_every_document_date_unread(self):
         # schema 6 as v0.5.0 shipped it (02c02c2). Issue #22: no earlier version marked a
-        # date read on the document, so every filed document starts unread; the upgrade
-        # is not an epoch (0.5.0 already records note issues by revision)
+        # date read on the document, so every filed document starts unread. Task 1 (S2,
+        # schema 10): every migration to schema 10 is an epoch (spec §4: a read confirms a
+        # note only Z seconds after the migration under the job protocol), regardless of
+        # whether the source schema already recorded note issues by revision
         from tests.schema_history import DDL_V6
         self.assertNotIn("date_read_at", DDL_V6)
         old = self._released_store(DDL_V6, 6)
@@ -250,7 +257,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "9")
+                         .fetchone()[0], "10")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -259,11 +266,12 @@ class TestSchema(TempEnv):
         self.assertEqual(cols(c), cols(fresh))
         self.assertEqual(tuple(c.execute("SELECT document_date, date_read_at FROM documents")
                                .fetchone()), ("2026-05-20", None))
-        self.assertIsNone(db.epoch(c))
+        self.assertIsNotNone(db.epoch(c))
 
     def test_a_v0_6_0_schema_7_store_migrates_with_no_operator_refs(self):
         # schema 7 as v0.6.0 shipped it (847cee7). Issue #24 (D5): no earlier version kept
-        # the operator's files by their own ref, so the table starts empty
+        # the operator's files by their own ref, so the table starts empty. Task 1 (S2,
+        # schema 10): the upgrade to schema 10 is an epoch regardless (see the schema-6 test)
         from tests.schema_history import DDL_V7
         self.assertNotIn("operator_refs", DDL_V7)
         old = self._released_store(DDL_V7, 7)
@@ -271,7 +279,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "9")
+                         .fetchone()[0], "10")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -282,7 +290,7 @@ class TestSchema(TempEnv):
         cols = lambda conn: sorted(r[1] for r in conn.execute("PRAGMA table_info(operator_refs)"))
         self.assertEqual(cols(c), cols(fresh))
         self.assertEqual(c.execute("SELECT COUNT(*) FROM operator_refs").fetchone()[0], 0)
-        self.assertIsNone(db.epoch(c))
+        self.assertIsNotNone(db.epoch(c))
 
     def test_a_v0_7_0_schema_8_store_migrates_with_no_exchange_rates(self):
         # schema 8 as v0.7.0 shipped it (7406c98). Issue #35: the rows carry no rate until
@@ -294,7 +302,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "9")
+                         .fetchone()[0], "10")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
