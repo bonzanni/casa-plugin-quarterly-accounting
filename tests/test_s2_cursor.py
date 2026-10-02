@@ -182,3 +182,85 @@ class CheckPass(StoreCase):
         import asks, job
         asks.request_work(self.conn, "check", "operator")      # queued, no pass yet
         self.assertEqual(job.status(self.conn, A), {"done": False, "text": None})
+
+
+class HandoverMidJudgment(StoreCase):
+    """Fix round 1 (ruling on the Task 7 review): spec §5.2 — taking a handover restarts
+    the pass's judge step at once; a `judged` answers only the judge unit it echoes
+    (`judgment`, `after`), so a repeated or older answer is refused (INV-J4, INV-J12)."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        self.drv = JobDriver(self, payments=10)        # two triage pages of 8
+
+    def judge_row(self):
+        return self.conn.execute("SELECT started_seq, finished_at FROM pass_steps WHERE"
+                                 " step='judge'").fetchone()
+
+    def judge_after(self):
+        return self.conn.execute("SELECT judge_after FROM passes ORDER BY rowid DESC"
+                                 " LIMIT 1").fetchone()[0]
+
+    def test_the_reviewers_sequence_completes_only_on_a_judgment_after_the_handover(self):
+        import asks, db, job
+        asks.request_work(self.conn, "check", "cron")
+        u1 = self.drv.run_until(A, "judge")             # judgment S handed out, then cut
+        doc = self.doc()
+        rid = asks.request_work(self.conn, "handover", "operator", doc_ids=[doc])["request_id"]
+        created = self.conn.execute("SELECT created_seq FROM work_requests WHERE"
+                                    " request_id=?", (rid,)).fetchone()[0]
+        t2 = job.claim(self.conn, A)
+        u2 = self.drv.next_until(t2, "judge")
+        self.assertGreater(u2["judgment"], created)
+        self.assertNotEqual(u2["judgment"], u1["judgment"])
+        self.assertEqual(u2["documents_first"], [doc])
+        stale = self.drv.do(u1, t2)                     # the old unit's answer, replayed
+        with self.assertRaises(db.Refusal) as cm:
+            job.next_unit(self.conn, t2, judged=stale)
+        self.assertIn("another judge step", str(cm.exception))
+        judged = self.drv.do(u2, t2)
+        job.next_unit(self.conn, t2, judged=judged)
+        with self.assertRaises(db.Refusal):             # the same answer twice
+            job.next_unit(self.conn, t2, judged=judged)
+        self.drv.next_until(t2, "complete")
+        r = self.conn.execute("SELECT state, outcome, verdicts_json FROM work_requests WHERE"
+                              " request_id=?", (rid,)).fetchone()
+        self.assertEqual((r["state"], r["outcome"]), ("done", "complete"))
+        import json
+        v = json.loads(r["verdicts_json"])[str(doc)]
+        self.assertGreater(v["judge"], created)
+
+    def test_taking_a_handover_mid_judgment_restarts_it_at_once(self):
+        import asks, job
+        asks.request_work(self.conn, "check", "cron")
+        u1 = self.drv.run_until(A, "judge")
+        u = job.next_unit(self.conn, self.drv.token, judged=self.drv.do(u1, self.drv.token))
+        self.assertEqual(u["unit"], "judge")
+        self.assertIsNotNone(self.judge_after())         # page 2 is next
+        doc = self.doc()
+        asks.request_work(self.conn, "handover", "operator", doc_ids=[doc])
+        job.next_unit(self.conn, self.drv.token)        # takes it: a refresh is handed out
+        row = self.judge_row()
+        self.assertNotEqual(row["started_seq"], u1["judgment"])
+        self.assertIsNone(row["finished_at"])
+        self.assertIsNone(self.judge_after())
+        nxt = self.drv.next_until(self.drv.token, "judge")
+        self.assertEqual((nxt["judgment"], nxt["after"], nxt["documents_first"]),
+                         (row["started_seq"], None, [doc]))
+
+    def test_a_judged_with_a_wrong_or_missing_echo_is_refused(self):
+        import asks, db, job
+        asks.request_work(self.conn, "check", "cron")
+        u = self.drv.run_until(A, "judge")
+        good = self.drv.do(u, self.drv.token)
+        for bad in ({k: v for k, v in good.items() if k != "judgment"},
+                    {k: v for k, v in good.items() if k != "after"},
+                    {**good, "judgment": u["judgment"] + 1},
+                    {**good, "after": [1]}):
+            with self.assertRaises(db.Refusal):
+                job.next_unit(self.conn, self.drv.token, judged=bad)
+        self.assertIsNone(self.judge_row()["finished_at"])
+        self.assertIsNone(self.judge_after())
+        job.next_unit(self.conn, self.drv.token, judged=good)     # the right echo is taken
+        self.assertIsNotNone(self.judge_after())

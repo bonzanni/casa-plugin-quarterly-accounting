@@ -229,6 +229,7 @@ class JobDriver:
                                        limit=8, after=u["after"])
         if u["quarter"] is not None and page["next"] is None:
             work.list_quarter_state(self.conn, quarter=u["quarter"], unread_dates=True, limit=8)
-        return {"page_next": page["next"], "triage_remaining": page["remaining"],
+        return {"judgment": u["judgment"], "after": u["after"],
+                "page_next": page["next"], "triage_remaining": page["remaining"],
                 "documents": {str(d): "no-payment-yet" for d in u["documents_first"]}}
 

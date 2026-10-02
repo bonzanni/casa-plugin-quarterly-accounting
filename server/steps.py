@@ -121,10 +121,12 @@ def start(conn, token, step: str, carry: dict) -> dict:
         return _start_tx(conn, token, step, carry)
 
 
-def _start_tx(conn, token, step: str, carry: dict) -> dict:
+def _start_tx(conn, token, step: str, carry: dict, *, restart_running=False) -> dict:
     """start's body, inside the caller's write transaction (start's own, or the job
     cursor's). A new step row records its pass's protocol, and the store sequence and
-    generation it started at (S2 §8); a judge restart re-stamps both."""
+    generation it started at (S2 §8); a judge restart re-stamps both. `restart_running`
+    (the job cursor only, S2 §5.2): a job pass's RUNNING judgment is restarted too — a
+    handover taken mid-judgment is served only by a judgment started after it."""
     assert conn.in_transaction, "a step is started inside the write transaction"
     carry = _start_args(step, token, carry)
     passes.check_token(conn, token)
@@ -144,7 +146,9 @@ def _start_tx(conn, token, step: str, carry: dict) -> dict:
     restart = (prior is not None and step == "judge"
                and (_ended(prior) == "finished"
                     or (_ended(prior) in ("errored", "expired")
-                        and _chunk(conn, m["pass_id"])[1] is not None)))
+                        and _chunk(conn, m["pass_id"])[1] is not None)
+                    or (restart_running and prior["protocol"] == "job"
+                        and _ended(prior) is None)))
     if prior is not None and not restart:
         raise db.Refusal(f"the {step} step was already started in this pass")
     now = db._clock().replace(microsecond=0)

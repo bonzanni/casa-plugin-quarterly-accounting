@@ -163,7 +163,7 @@ def _choose(conn, token) -> dict:
     for _ in range(8):                      # passes may end and the next begin in one call
         p = live_job_pass(conn)
         if p is not None and p["trigger"] != "package":
-            asks.take_queued(conn, p["pass_id"])
+            _take(conn, token, p)
             p = live_job_pass(conn)
         if p is None:
             p = _begin_next(conn, token)
@@ -184,6 +184,23 @@ def _choose(conn, token) -> dict:
     # eight passes ended in this call (e.g. eight package asks each stopped at once):
     # their dispositions commit with this answer, and the next batch goes on
     return {"unit": "end-batch"}
+
+
+def _take(conn, token, p) -> None:
+    """The live pass takes the queued requests (INV-J9). A handover taken while the
+    pass's judge step runs restarts that judgment now (spec §5.2, fix round 1): a new
+    started_seq and started_gen, the page cursor reset, so no verdict of the judgment
+    that started before the handover can cover it."""
+    import asks, steps
+    ids = asks.take_queued(conn, p["pass_id"])
+    if not ids or conn.execute(
+            "SELECT 1 FROM work_requests WHERE pass_id=? AND kind='handover' AND request_id IN"
+            " (%s)" % ",".join("?" * len(ids)), (p["pass_id"], *ids)).fetchone() is None:
+        return
+    j = _step(conn, p, "judge")
+    if j is not None and j["finished_at"] is None:
+        # take_queued has already reset judge_after (the page cursor) for a handover
+        steps._start_tx(conn, token, "judge", {}, restart_running=True)
 
 
 def _begin_next(conn, token):
@@ -373,8 +390,8 @@ def _judge_unit(conn, p, req) -> dict:
         firsts += [d for d in json.loads(r["doc_ids_json"])
                    if (seen.get(str(d)) or {}).get("judge") != j["started_seq"]]
     after = json.loads(p["judge_after"]) if p["judge_after"] else None
-    return {"unit": "judge", "after": after, "quarter": req["quarter"] if req else None,
-            "documents_first": firsts}
+    return {"unit": "judge", "judgment": j["started_seq"], "after": after,
+            "quarter": req["quarter"] if req else None, "documents_first": firsts}
 
 
 def _judged(conn, token, judged) -> None:
@@ -385,6 +402,15 @@ def _judged(conn, token, judged) -> None:
     j = _step(conn, p, "judge") if p is not None else None
     if j is None or j["finished_at"] is not None:
         raise db.Refusal("no judge step is running: call job_next without judged")
+    # the answer names the unit it answers (fix round 1, INV-J4): its judgment and its
+    # page cursor, as handed out. A repeated answer, or one for an older judgment, is
+    # refused, so it can never finish a judgment it did not see
+    after = json.loads(p["judge_after"]) if p["judge_after"] else None
+    if ("judgment" not in judged or "after" not in judged
+            or isinstance(judged["judgment"], bool)
+            or judged["judgment"] != j["started_seq"] or judged["after"] != after):
+        raise db.Refusal("this answer is for another judge step: call job_next and judge "
+                         "the page it hands out")
     asks.record_verdicts(conn, p["pass_id"], judged.get("documents") or {})
     nxt = judged.get("page_next")
     if nxt:
