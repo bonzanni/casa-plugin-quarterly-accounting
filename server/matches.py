@@ -121,6 +121,7 @@ def _why_not_kind(conn, proj, row, exp, doc) -> str:
 
 def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runners_up,
              resolves, row_snapshot, token, row_digest=None, document_date=None):
+    import job
     import passes
     if token is None:
         raise db.Refusal("a machine pairing is written during a pass: pass the pass_token")
@@ -128,6 +129,7 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
         documents._validate({"document_date": document_date})
     with db.tx(conn):
         passes.check_token(conn, token)
+        job.require_fresh(conn)          # INV-J10: F, decided in this write's transaction
         pid = lineage.resolve_pid(conn, pid)
         proj = lineage.projection(conn, pid)
         if proj["revision"] != expected_revision:
@@ -371,11 +373,13 @@ def set_exemption(conn, *, pid, exempt, expected_revision, render_id) -> dict:
 
 
 def relabel_match(conn, *, match_id, labels, rationale=None, runners_up=None, token) -> dict:
+    import job
     import passes
     if token is None:
         raise db.Refusal("relabelling is a pass's work: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
+        job.require_fresh(conn)          # INV-J10
         s = _state(conn, match_id)
         if s["state"] not in ("matched", "proposed"):
             # spec §Tool surface: relabel_match "re-labels an accepted match". A

@@ -254,6 +254,46 @@ class StoreCase(TempEnv):
         return casa_handoff.publish("bank-feed", "ledger-export-test.csv",
                                     data=buf.getvalue().encode())["path"]
 
+    def sweep_to_zero(self):
+        """List and observe the live pass's sweep until nothing is due, each read showing
+        the row's desired tags and its note (no write owed). The last listing finds
+        nothing due, so the cycle is complete and the import's sweep is stamped."""
+        import sweep
+        token = self.conn.execute("SELECT generation FROM pass_marker").fetchone()[0]
+        for _ in range(50):
+            page = sweep.list_projections(self.conn, token=token)
+            if not page["projections"] and page["remaining_in_cycle"] == 0:
+                return
+            for item in page["projections"]:
+                first_seen = self.conn.execute("SELECT first_seen FROM aliases WHERE row_id=?",
+                                               (item["row_id"],)).fetchone()[0]
+                out = sweep.record_observation(
+                    self.conn, pid=item["pid"], token=token, snapshot_id=page["snapshot_id"],
+                    observed_tags=item["desired"],
+                    observed_notes=[item["note"]] if item["note"] else [],
+                    observed_first_seen=first_seen, observed_tag_revision=0)
+                assert not out.get("instructions"), out
+        raise AssertionError("the sweep did not reach zero")
+
+    def only_pid(self):
+        """The single live lineage's pid."""
+        import lineage
+        (pid,) = lineage.live_pids(self.conn)
+        return pid
+
+    def machine_match(self, pid, doc_id, token):
+        """A machine pairing of `doc_id` with payment `pid`, as triage makes one: the
+        item's row_digest and revision from list_quarter_state, the document's date."""
+        import matches
+        import work
+        item = work.list_quarter_state(self.conn, pid=pid)["item"]
+        date = self.conn.execute("SELECT document_date FROM documents WHERE doc_id=?",
+                                 (doc_id,)).fetchone()[0]
+        return matches.record_match(self.conn, pid=pid, doc_id=doc_id, author="auto",
+                                    expected_revision=item["revision"],
+                                    row_digest=item["row_digest"], document_date=date,
+                                    token=token)
+
     def show(self, *pids):
         """What build_review + a successful send + mark_rendering_delivered
         leave behind (Task 16 builds the real path; this fixture writes the

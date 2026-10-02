@@ -196,6 +196,11 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
                     "projections": [], "quarter": quarter, "remaining_in_cycle": len(due),
                     "snapshot_id": lineage.latest_import(conn), "notice": NOTICE,
                     "time_up": True}
+        if not due_all or (quarter is not None and not due):
+            # the import's sweep is complete (for a package pass, its quarter's): S2 §5.2's
+            # W counts from this first moment, never from the import
+            conn.execute("UPDATE snapshots SET swept_at=coalesce(swept_at, ?)"
+                         " WHERE snapshot_id=?", (db.now(), lineage.latest_import(conn)))
         if not due_all:
             if cur["cycle_started_at"]:
                 conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=NULL,"

@@ -18,6 +18,8 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
+import pathlib
 import re
 
 import casa_handoff
@@ -236,7 +238,7 @@ def _rebind(conn) -> None:
                  " row_high_water=0 WHERE id=1")
 
 
-def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dict:
+def import_ledger_export(conn, *, path: str, token, ledger_instance: str, acq=None) -> dict:
     import passes
     if token is None:
         raise db.Refusal("an import belongs to a pass: pass the pass_token from begin_pass")
@@ -246,6 +248,9 @@ def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dic
         name, data = casa_handoff.capture(path)
     except casa_handoff.HandoffError as exc:
         raise db.Refusal(f"that is not a handoff file ({exc.kind}): {exc}")
+    # capture proved the layout <root>/<producer>/<id>/<filename>: the parent is the
+    # handoff id, the export's identity (S2 §5.2: an export is importable once)
+    export_ref = pathlib.Path(os.path.realpath(path)).parent.name
     rows = parse(name, data)
     # The custody lock is taken BEFORE any transaction (lock order: custody, then the
     # SQLite write lock — as ingest, reset_store, reap_orphans, the package build and
@@ -255,10 +260,10 @@ def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dic
     if conn.in_transaction:
         raise RuntimeError("import_ledger_export takes the custody lock before its transaction")
     with db.custody_lock(bound_s=db.LOCK_BOUND_S):
-        return _import(conn, rows, token, ledger_instance)
+        return _import(conn, rows, token, ledger_instance, acq=acq, export_ref=export_ref)
 
 
-def _import(conn, rows, token, ledger_instance) -> dict:
+def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) -> dict:
     import binding
     import delivery
     import passes
@@ -272,6 +277,24 @@ def _import(conn, rows, token, ledger_instance) -> dict:
     with db.tx(conn):
         passes.check_token(conn, token)
         cur_pass = passes.current_pass(conn)
+        job_pass = cur_pass is not None and cur_pass["protocol"] == "job"
+        if job_pass:
+            # INV-J14 (S2 §5.2): the import is bound to the pass's latest acquisition, by
+            # identity — its bank_sync recorded under this same claim — and once per export
+            if acq is None or cur_pass["acq"] != acq:
+                raise db.Refusal("this import is not for the pass's current bank read: call "
+                                 "job_next and do the bank read it hands out")
+            if cur_pass["acq_gen"] != int(token):
+                raise db.Refusal("this bank read belongs to an earlier turn: call job_next")
+            sync = conn.execute("SELECT ok, gen, data_json FROM probes WHERE kind='bank_sync'"
+                                ).fetchone()
+            if (sync is None or not sync["ok"] or sync["gen"] != int(token)
+                    or json.loads(sync["data_json"] or "{}").get("acq") != acq):
+                raise db.Refusal("record this bank read's sync first (record_probe "
+                                 "kind=\"bank_sync\" with its acq), then export and import")
+            if conn.execute("SELECT 1 FROM snapshots WHERE export_ref=?",
+                            (export_ref,)).fetchone():
+                raise db.Refusal("this export was imported already — export again")
         b = binding.get(conn)
         if b is None:
             raise db.Refusal("no account is bound yet")
@@ -316,9 +339,13 @@ def _import(conn, rows, token, ledger_instance) -> dict:
                         and sync["pass_id"] == cur_pass["pass_id"]
                         else (prev["bank_through"] if prev else None))
         sid = conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
-                           " bank_through) VALUES (?,?,?,?,?)",
-                           (cur_pass["pass_id"], db.now(), len(mine), max_id,
-                            bank_through)).lastrowid
+                           " bank_through, job_id, read_seq, acq, export_ref)"
+                           " VALUES (?,?,?,?,?,?,?,?,?)",
+                           (cur_pass["pass_id"], db.now(), len(mine), max_id, bank_through,
+                            cur_pass["holder_job"] if job_pass else None,
+                            cur_pass["read_seq"] if job_pass else None,
+                            acq if job_pass else None,
+                            export_ref if job_pass else None)).lastrowid
         conn.execute("DELETE FROM bank_rows")
         for r in mine:
             conn.execute("INSERT INTO bank_rows(row_id, account_id, first_seen, booking_date,"

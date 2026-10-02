@@ -541,9 +541,30 @@ def _hand_over(conn, pass_id: str, outcome: str):
             "_notice": notice}
 
 
-def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None) -> dict:
+def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None, *,
+                 acq=None, absent=False) -> dict:
+    """What the specialist saw, stored under the claim that saw it (`gen`, S2 §5.2). A
+    `bank_sync` carries the acquisition it belongs to (`acq`); a `gmail` probe that
+    failed because finance has no Gmail tools at all says `absent` (S2 §6.4); a `ledger`
+    probe may carry `missing`, the workflows list_backups marks FILE MISSING (S2 §4)."""
     if kind not in PROBE_KINDS:
         raise db.Refusal(f"probe kind must be one of {', '.join(PROBE_KINDS)}")
+    if absent:
+        if kind != "gmail":
+            raise db.Refusal("absent goes only with the gmail probe")
+        if ok:
+            raise db.Refusal("absent=true records that Gmail is not connected: pass ok=false")
+        data = {**(data or {}), "absent": True}
+    if acq is not None:
+        if kind != "bank_sync":
+            raise db.Refusal("acq goes only with the bank_sync probe")
+        if isinstance(acq, bool) or not isinstance(acq, int):
+            raise db.Refusal("acq is the number job_next handed out with the bank read")
+        data = {**(data or {}), "acq": acq}
+    if kind == "ledger" and data is not None and "missing" in data:
+        missing = data["missing"]
+        if not isinstance(missing, list) or not all(isinstance(w, str) for w in missing):
+            raise db.Refusal("the ledger probe's missing is a list of workflow names")
     import binding
     with db.tx(conn):
         check_token(conn, token)
@@ -559,9 +580,10 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None) 
                                                       and prev["failing_since"]) \
                 else f"{now}#{db.next_seq(conn)}"
         conn.execute("INSERT OR REPLACE INTO probes(kind, ok, detail, data_json, observed_at,"
-                     " pass_id, failing_since) VALUES (?,?,?,?,?,?,?)",
+                     " pass_id, failing_since, gen) VALUES (?,?,?,?,?,?,?,?)",
                      (kind, 1 if ok else 0, detail, db.canonical(data) if data is not None
-                      else None, now, pass_id, failing_since))
+                      else None, now, pass_id, failing_since,
+                      int(token) if token is not None else None))
         if kind == "bank_accounts" and ok and data is not None:
             accounts = data.get("accounts") or []
             b = binding.get(conn)

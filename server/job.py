@@ -12,6 +12,13 @@ import passes
 
 JOB_ID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 ADOPTIONS_MAX = 2
+W_S = 1800                 # W (spec §5.2): counted from the import's sweep completion
+W_REFRESH_MAX = 2          # W-refreshes per pass; after them W is waived for the pass
+NOT_READ = "the bank was not read in this pass yet"
+OTHER_JOB = "the bank was read by another job"
+LATE_ASK = "a check was asked after the bank was read"
+UNSWEPT = "the bank read's sweep is not finished"
+STALE = f"the bank read is older than {W_S // 60} minutes"
 
 
 def live_job_pass(conn):
@@ -96,3 +103,43 @@ def measure(conn) -> list:
 def _stamp_measure(conn, token) -> None:
     conn.execute("UPDATE claims SET measure_json=? WHERE gen=?",
                  (json.dumps(measure(conn)), token))
+
+
+def hand_acquisition(conn, token, pass_id) -> int:
+    """A new bank read for the pass (spec §5.2): its id and its request watermark,
+    owned by this claim alone."""
+    acq, read_seq = db.next_seq(conn), db.next_seq(conn)
+    conn.execute("UPDATE passes SET acq=?, acq_gen=?, read_seq=? WHERE pass_id=?",
+                 (acq, token, read_seq, pass_id))
+    return acq
+
+
+def fresh_reason(conn):
+    """F (spec §5.2): None when the live job pass may decide on its latest import, else
+    why not. Conditions 1 and 2 are never waived; 3 is waived after W_REFRESH_MAX."""
+    p = live_job_pass(conn)
+    if p is None:
+        return None
+    s = conn.execute("SELECT * FROM snapshots WHERE pass_id=? ORDER BY snapshot_id DESC"
+                     " LIMIT 1", (p["pass_id"],)).fetchone()
+    if s is None:
+        return NOT_READ
+    if s["job_id"] != p["holder_job"]:
+        return OTHER_JOB
+    late = conn.execute("SELECT max(created_seq) FROM work_requests WHERE pass_id=? AND"
+                        " state='taken'", (p["pass_id"],)).fetchone()[0]
+    if late is not None and (s["read_seq"] is None or late >= s["read_seq"]):
+        return LATE_ASK
+    if s["swept_at"] is None:
+        return UNSWEPT
+    if p["w_refreshes"] < W_REFRESH_MAX and passes._age_s(s["swept_at"]) >= W_S:
+        return STALE
+    return None
+
+
+def require_fresh(conn) -> None:
+    """INV-J10: a machine pairing, proposal or relabel commits only while F holds, decided
+    in the write's own transaction. A no-op outside a live job pass."""
+    why = fresh_reason(conn)
+    if why is not None:
+        raise db.Refusal(f"{why}: the bank must be read again: call job_next")
