@@ -82,7 +82,7 @@ def payment_snapshot(facts, kind, fx_pair) -> str | None:
     if facts is None:
         return None
     return db.canonical({"pairing": R.fingerprint(facts, kind),
-                         "fx": [fx_pair["rate"], fx_pair["unit"]] if fx_pair else None})
+                         "fx": fx.canonical(fx_pair)})
 
 
 def row_fx(row):
@@ -191,7 +191,11 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
                             row["currency"], doc["amount_minor"], doc["currency"])
             if why is not None:
                 raise db.Refusal(why + " — not paired")
-        rejected = rejected_by_operator(conn, pid, doc, R.facts_of(row), exp.kind, row_fx(row))
+        # C1 (Terra S1, Astra S1): the document as this write leaves it — a date read on it
+        # in this call is a corrected fact, and may lift a rejection
+        effective = dict(doc, document_date=document_date) if document_date else doc
+        rejected = rejected_by_operator(conn, pid, effective, R.facts_of(row), exp.kind,
+                                        row_fx(row))
         if rejected is not None:
             raise db.Refusal(f"the operator rejected this pairing ({rejected[:10]}); it is not "
                              "proposed again unless the payment or the document changes — "

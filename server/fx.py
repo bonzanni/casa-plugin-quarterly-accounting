@@ -28,6 +28,17 @@ def pair(rate, unit):
     return rate, unit
 
 
+def canonical(fx):
+    """The pair compared as evidence (C1, Astra S1): the rate by its value, so `1.10` and
+    `1.100` are the same rate; the stored rate stays verbatim."""
+    if not fx:
+        return None
+    with decimal.localcontext() as ctx:
+        ctx.prec = 80
+        value = format(decimal.Decimal(fx["rate"]).normalize(), "f")
+    return [value, fx["unit"]]
+
+
 def expected(fx, pay_minor: int, pay_cur: str, doc_cur: str):
     """The document's amount, in its currency's minor units, that the bank's rate gives
     for the payment (R2), or None when there is no rate or it converts neither way."""

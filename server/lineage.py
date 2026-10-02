@@ -158,6 +158,33 @@ def _holds(st: F.FoldState, r: F.Retirement) -> bool:
     return c is not None and c.activation == r.activation and c.state == r.to
 
 
+def _fx_seen(row):
+    """Issue #35 (C1, Astra S1): the bank's rate is review evidence (the converted amount
+    is shown), so a changed rate moves the revisions; absent, no digest changes."""
+    import fx
+    import matches
+    return fx.canonical(matches.row_fx(row))
+
+
+def _operator_rejections(conn, pid, proj, st, exp, row) -> list:
+    """Issue #34 (C1, Astra S1): a machine pairing that an operator's unchanged rejection
+    covers — another id for the same document, a merge's — is retired, so the operator is
+    never asked the same question again."""
+    import documents
+    import matches
+    if proj["ended"] or row is None or exp.unknown:
+        return []
+    out = []
+    for c in st.active():
+        if c.author != "auto":
+            continue
+        doc = documents._doc(conn, c.doc_id)
+        if matches.rejected_by_operator(conn, pid, doc, R.facts_of(row), exp.kind,
+                                        matches.row_fx(row)) is not None:
+            out.append(F.Retirement(c.match_id, c.activation, "rejected", "operator-rejected"))
+    return out
+
+
 def _record_retirement(conn, pid, r: F.Retirement) -> None:
     append(conn, pid, "retire", "store", match_id=r.match_id, retire_activation=r.activation,
            retire_to=r.to, cause=r.cause)
@@ -232,7 +259,8 @@ def settle(conn, pid: int) -> R.Reduction:
                     if e.kind == "retire"}
         new, seen = [], set()
         produced = [r for r in st.produced if _holds(st, r)]
-        for r in produced + _store_rules(proj, st, exp, kinds):
+        for r in produced + _store_rules(proj, st, exp, kinds) + _operator_rejections(
+                conn, pid, proj, st, exp, row):
             key = (r.match_id, r.activation, r.to)
             if key in recorded or key in seen:
                 continue
@@ -271,6 +299,7 @@ def settle(conn, pid: int) -> R.Reduction:
             # still agree with its fingerprint (round p2, Astra S1: €100 -> €90 -> €80
             # kept one revision, so a confirmation shown at €90 committed at €80)
             "facts": inp.facts if live else None,
+            **({"fx": _fx_seen(row)} if (live and _fx_seen(row)) else {}),
             "exp": [exp.kind, exp.tier] if live else None,
             "payee": kb.display_name(conn, row["counterparty"]) if (live and row) else None,
             "state": c.state, "author": c.author, "activation": c.activation, "fp": c.fp,
@@ -288,6 +317,7 @@ def settle(conn, pid: int) -> R.Reduction:
         "status": red.status, "desired": sorted(red.desired), "current": red.current,
         "reasons": list(red.reasons), "exempt": st.exemption is not None,
         "cands": match_digests, "facts": inp.facts,
+        **({"fx": _fx_seen(row)} if _fx_seen(row) else {}),
         "exp": [exp.kind, exp.tier, exp.row, exp.conflict], "ended": proj["ended"],
         "search_state": proj["search_state"], "identity": proj["identity_question"],
         # what the KB makes visible on the line (round p6, Astra S2: a renamed payee

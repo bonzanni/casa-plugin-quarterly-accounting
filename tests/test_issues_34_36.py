@@ -110,6 +110,62 @@ class TestARejectionSticks(Base):
             self.conn, twin, documents._doc(self.conn, doc), R.facts_of(row), "invoice",
             matches.row_fx(row)))
 
+    def test_a_date_read_in_the_same_call_lifts_it(self):
+        # C1 (Terra S1, Astra S1): the specialist's documented calling pattern
+        doc = self.doc(document_date="2026-07-02")
+        self.reject(self.machine(doc)["match_id"])
+        with self.assertRaises(db.Refusal):
+            self.machine(doc)
+        out = matches.propose_match(self.conn, pid=self.pid, doc_id=doc,
+                                    expected_revision=self.rev(self.pid),
+                                    row_snapshot=self.snapshot(self.pid), token=self.token,
+                                    document_date="2026-07-03")
+        self.assertEqual(out["state"], "proposed")
+
+    def test_a_merge_does_not_bring_back_a_rejected_pairing(self):
+        # C1 (Astra S1): the twin's machine proposal for the rejected document is retired
+        doc = self.doc()
+        self.reject(self.machine(doc)["match_id"])
+        self.row(2)
+        twin = self.lineage_for(2)
+        self.classify(twin, {"software"})
+        self.settle(twin)
+        mid = self.machine(doc, pid=twin)["match_id"]
+        with db.tx(self.conn):
+            ledger.merge(self.conn, twin, self.pid)
+            lineage.settle(self.conn, twin)
+        self.assertEqual(self.conn.execute("SELECT state FROM match_state WHERE match_id=?",
+                                           (mid,)).fetchone()[0], "rejected")
+        self.assertNotEqual(lineage.projection(self.conn, twin)["status"], "proposed")
+
+    def test_the_same_rate_written_differently_is_the_same_evidence(self):
+        # C1 (Astra S1)
+        self.row(1, fx_rate="1.10", fx_unit="EUR")
+        self.settle(self.pid)
+        doc = self.doc(currency="USD", amount_minor=11000)
+        self.reject(self.machine(doc)["match_id"])
+        self.row(1, fx_rate="1.100", fx_unit="EUR")
+        self.settle(self.pid)
+        with self.assertRaises(db.Refusal):
+            self.machine(doc)
+
+    def test_a_changed_rate_moves_the_revisions_an_old_review_binds(self):
+        # C1 (Astra S1): the converted amount is shown, so a new rate is a new question
+        self.row(1, fx_rate="1.10", fx_unit="EUR")
+        self.settle(self.pid)
+        mid = self.machine(self.doc(currency="USD", amount_minor=11000))["match_id"]
+        before = (self.rev(self.pid), self.rev(match_id=mid))
+        self.row(1, fx_rate="1.12", fx_unit="EUR")
+        self.settle(self.pid)
+        after = (self.rev(self.pid), self.rev(match_id=mid))
+        self.assertTrue(after[0] > before[0] and after[1] > before[1], (before, after))
+
+    def test_no_rate_moves_no_revision(self):
+        mid = self.machine(self.doc())["match_id"]
+        before = (self.rev(self.pid), self.rev(match_id=mid))
+        self.settle(self.pid)
+        self.assertEqual((self.rev(self.pid), self.rev(match_id=mid)), before)
+
     def test_a_corrected_exchange_rate_lifts_it(self):
         # D1 (Terra S1): the rate is evidence for #35's screen
         self.row(1, fx_rate="1.10", fx_unit="EUR")
@@ -199,6 +255,24 @@ class TestTheBanksRate(Base):
         self.assertIn("cannot be the EUR 9.52 payment",
                       fx.screen(self.FX, 952, "EUR", 718, "USD"))          # 35% off
         self.assertIsNone(fx.screen(None, 952, "EUR", 718, "USD"))         # no rate
+
+    def test_the_tolerance_boundaries(self):
+        # C1 (Astra: mutants survived): 3% of the expected amount, never less than 0.02
+        fx_ = {"rate": "1.105", "unit": "EUR"}                        # 1000 -> 1105
+        self.assertIsNone(fx.screen(fx_, 1000, "EUR", 1105 + 34, "USD"))
+        self.assertIsNotNone(fx.screen(fx_, 1000, "EUR", 1105 + 35, "USD"))
+        self.assertIsNone(fx.screen(fx_, 1000, "EUR", 1105 - 34, "USD"))
+        small = {"rate": "1", "unit": "EUR"}                          # 30 -> 30
+        self.assertIsNone(fx.screen(small, 30, "EUR", 32, "USD"))
+        self.assertIsNotNone(fx.screen(small, 30, "EUR", 33, "USD"))
+
+    def test_judge_due_follows_the_rate(self):
+        # C1 (Astra: mutant survived): a document the rate rules out makes nothing due
+        self.fx_row()
+        self.doc(amount_minor=718, currency="USD", document_date="2026-07-02")
+        self.assertNotIn(self.pid, work.judge_due_state(self.conn))
+        self.doc(amount_minor=1105, currency="USD", document_date="2026-07-02")
+        self.assertIn(self.pid, work.judge_due_state(self.conn))
 
     def test_the_pair_is_kept_only_valid(self):
         self.assertEqual(fx.pair("1.16", "EUR"), ("1.16", "EUR"))
