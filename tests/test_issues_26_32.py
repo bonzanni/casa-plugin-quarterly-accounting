@@ -86,6 +86,18 @@ class TestMoreWork(C):
                 self.assertLessEqual(used + 1 + n * work.ITEM_COST + work.TURN_TAIL,
                                      work.ELLEN_TURNS - work.MORE_MARGIN)
 
+    def test_the_tail_is_counted_call_by_call(self):
+        # C2 (Terra S2, Astra S2): pinned independently of TURN_TAIL itself — the last
+        # more_work, record_step(judge, start), the delegation, record_step(delegated),
+        # the closing message
+        tail = ["more_work", "record_step start", "delegate_to_agent",
+                "record_step delegated", "close"]
+        self.assertGreaterEqual(work.TURN_TAIL, len(tail))
+        self.seed(20)
+        t = self.chunk(self.swept())
+        # 80 - 5 (tail) - 1 (this call) - 8 (margin) - 34 = 32: two items, never three
+        self.assertEqual(len(self.call("more_work", pass_token=t, calls_made=34)["triage"]), 2)
+
     def test_the_first_floor_counts_the_chunk(self):
         self.seed(20)
         c = self.swept()
@@ -240,6 +252,29 @@ class TestTheCheckEndsOnlyWhenItsChunkIsJudged(C):
         out = self.text("record_step", pass_token=t, step="judge", action="start")
         self.assertTrue(out.startswith("refused: the Gmail round comes first"), out)
         self.assertEqual(self.claim()["continue"]["next"], "gmail-round")
+
+    def test_a_judgment_never_starts_while_the_sweep_runs(self):
+        # C2 (Astra S1): started before the sweep finished, it stood in for the round
+        self.seed(5)
+        t = self.begin()
+        self.start(t)
+        self.specialist(t, finish=False)
+        out = self.text("record_step", pass_token=t, step="judge", action="start")
+        self.assertTrue(out.startswith("refused: the Gmail round comes first"), out)
+        self.call("record_step", pass_token=t, step="sweep", action="finish",
+                  remaining_in_cycle=0, triage_remaining=0)
+        self.assertEqual(self.claim()["continue"]["next"], "gmail-round")
+
+    def test_a_judgment_follows_a_sweep_that_hands_out_no_round(self):
+        # a stopped sweep's pass may still judge (step 5's "anything filed")
+        self.seed(5)
+        t = self.begin()
+        self.start(t)
+        self.call("record_step", pass_token=t, step="sweep", action="finish",
+                  stopped="the ledger changed")
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "end-pass")
+        self.start(c["pass_token"], step="judge")
 
     def test_complete_needs_every_owed_search(self):
         # D1 (Astra S1): a chunk closed by a judgment with nothing searched

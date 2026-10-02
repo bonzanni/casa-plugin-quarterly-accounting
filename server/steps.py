@@ -147,11 +147,13 @@ def start(conn, token, step: str, carry: dict) -> dict:
                 [old["delegation"]] if old.get("delegation") else [])
             if gone:
                 carry = {**carry, "delegations_before": gone}
-        if step == "judge" and "chunk" not in _first_carry(conn, m["pass_id"]) \
-                and _round_due(conn, m["pass_id"]):
-            # C1 (Astra S1): a judgment never stands in for a Gmail round never handed out
-            raise db.Refusal("the Gmail round comes first: call continue_pass and do what it "
-                             "returns (its gmail-round); the judge step follows its chunk")
+        if step == "judge" and not _judge_may_start(conn, m["pass_id"]):
+            # C1, C2 (Astra S1 twice, one shape — generalized): a judgment never stands in
+            # for the Gmail round. It starts only after a chunk was handed out, or once the
+            # pass's first step has ended in a way that hands none out
+            raise db.Refusal("the Gmail round comes first: when the step running now has "
+                             "ended, call continue_pass and do what it returns (its "
+                             "gmail-round); the judge step follows its chunk")
         if step == "judge":
             # issue #28 (A2): the judgment closes the open Gmail chunk
             first = _first_carry(conn, m["pass_id"])
@@ -667,17 +669,27 @@ def _probe(conn, pass_id):
     return bool(row["ok"])
 
 
+def _judge_may_start(conn, pass_id) -> bool:
+    """A judge step follows the pass's Gmail round: a chunk was handed out, or the first
+    step has ended and its continuation hands out none (stopped, not imported, can_run
+    false). Never while the first step runs, nor with no first step."""
+    if "chunk" in _first_carry(conn, pass_id):
+        return True
+    first = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
+                         (pass_id, _first_step(conn, pass_id))).fetchone()
+    if first is None or _ended(first) is None:
+        return False
+    return not _round_due(conn, pass_id)
+
+
 def _round_due(conn, pass_id) -> bool:
     """The pass's first step (a check's sweep, a package round's snapshot) has ended and
     its continuation would hand out a Gmail round (_claim_pass): not stopped, imported,
-    can_run — and no judgment has run since."""
+    can_run."""
     import binding
     first = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
                          (pass_id, _first_step(conn, pass_id))).fetchone()
     if first is None or _ended(first) is None or _finish(first).get("stopped"):
-        return False
-    if conn.execute("SELECT 1 FROM pass_steps WHERE pass_id=? AND step='judge'",
-                    (pass_id,)).fetchone() is not None:
         return False
     if conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?", (pass_id,)).fetchone() is None:
         return False
