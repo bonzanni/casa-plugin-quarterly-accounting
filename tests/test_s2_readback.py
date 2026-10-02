@@ -69,3 +69,25 @@ class ReadbackDebt(Base):
         self.cycle()                     # the row is gone for good: not_found, debt cleared
         self.assertNotIn(pid, sweep._due(self.conn))
         self.assertEqual(self.debt(pid), 0)
+
+    def test_a_lineage_ending_while_it_owes_a_read_back_clears_it(self):
+        # fix round 2 (Important): server/ledger.py's import (lines 374-375) ends a
+        # lineage as 'vanished' unconditionally whenever the row's own `state` flips
+        # to 'vanished' while it is still in the export -- it can fire while
+        # readback_owed=1. Mutant M6 (removing end_lineage's clear) survived round 1's
+        # test_not_found_on_a_vanished_row_clears_it because, there, the debt was
+        # already 0 by the time the lineage vanished; this is the second path the
+        # re-reviewer found for it, reached without any cycle in between.
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")], cap=bankfeed.CAP_UNKNOWN)
+        self.new_pass()
+        rid = self.rid()
+        pid = self.pid_of(rid)
+        out = self.observe({"pid": pid, "row_id": rid}, self.snap_id)
+        self.assertTrue(out["instructions"])            # one write is owed
+        self.assertEqual(self.debt(pid), 1)
+        # the turn is cut here: the write is never made and the row never re-read
+        self.bf.fetch([], cap=bankfeed.CAP_UNKNOWN)
+        imp = self.new_pass()           # the row's state flips to vanished, still exported
+        self.assertIn(pid, imp["ended_vanished"])
+        self.assertEqual(self.debt(pid), 0)
+        self.assertNotIn(pid, sweep._due(self.conn))
