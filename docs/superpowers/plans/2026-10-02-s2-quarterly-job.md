@@ -25,6 +25,11 @@ the thin interim: asking, relaying, and sending packages.
 `rounds-2026-10-02-s2-design/r5/design-frozen.md`, sha256 `0b6f2d3a3b7f08ab86334ed02db10874e675135211b505797bee5d8faf69f584`).
 Section numbers below (§4, §5.2, …) are the spec's.
 
+**Plan review:** CONVERGED at `378e273` (plan round 10: Astra SHIP, Terra SHIP; rounds 1–10
+in `ha-casa-app-docs/specs/rounds-2026-10-02-s2-plan/`, Astra `gpt-6-astra` medium + Terra
+`gpt-5.6-terra` default). The design delta for ha-casa-app#1180 (`job_status`, design §13) was
+reviewed in rounds 7–10.
+
 ## Global Constraints
 
 - **Stdlib only.** No new dependency, in the server or in tests.
