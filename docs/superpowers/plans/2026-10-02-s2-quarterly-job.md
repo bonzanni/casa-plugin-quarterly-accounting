@@ -1689,15 +1689,7 @@ def _poisoned(conn, token, p, req):
     gate = passes.bank_write_gate(conn)
     if gate["allowed"]:
         return None
-    row = _step(conn, p, _first(req))
-    if row["finished_at"] is None:
-        _, refused = steps._finish_tx(conn, token, _first(req), counts={},
-                                      stopped=gate["reason"], by_refusal=True)
-        assert refused is None
-    # the reason is kept in the pass's stored report (Astra plan-r8 S2): the probe that
-    # carried it is overwritten by the next acquisition, and the result must still say it
-    passes._end_pass_tx(conn, token, "stopped", {"stopped_reason": reason})
-    return "ended"
+    return _stop(conn, token, p, req, gate["reason"])
 
 
 def _acquisition(conn, token, p, req):
@@ -1756,7 +1748,10 @@ def _stop(conn, token, p, req, reason) -> str:
         _, refused = steps._finish_tx(conn, token, _first(req), counts={}, stopped=reason,
                                       by_refusal=True)
         assert refused is None
-    passes._end_pass_tx(conn, token, "stopped", {})
+    # the ONE place a pass is ended stopped by the cursor. The reason is kept in the pass's
+    # stored report (Astra plan-r8 S2): the probe that carried it is overwritten by the
+    # next acquisition, and the result must still say it
+    passes._end_pass_tx(conn, token, "stopped", {"stopped_reason": reason})
     return "ended"
 
 
