@@ -97,7 +97,8 @@ Section numbers below (§4, §5.2, …) are the spec's.
     IN ('check','handover')), trigger TEXT NOT NULL CHECK (trigger IN ('cron','operator')),
     doc_ids_json TEXT NOT NULL DEFAULT '[]', created_seq INTEGER NOT NULL, created_at TEXT NOT
     NULL, state TEXT NOT NULL CHECK (state IN ('queued','taken','done','reported')), pass_id
-    TEXT, outcome TEXT, render_id TEXT, verdicts_json TEXT NOT NULL DEFAULT '{}')`;
+    TEXT, outcome TEXT, render_ids_json TEXT NOT NULL DEFAULT '[]', verdicts_json TEXT NOT
+    NULL DEFAULT '{}')`;
   - the columns listed in Step 3;
   - `db.SCHEMA_VERSION == 10`.
 
@@ -120,7 +121,7 @@ class Schema10(StoreCase):
         self.assertTrue({"gen", "job_id", "at", "spent", "measure_json", "reported"}
                         <= self.cols("claims"))
         self.assertTrue({"request_id", "kind", "trigger", "doc_ids_json", "created_seq",
-                         "state", "pass_id", "outcome", "render_id", "verdicts_json"}
+                         "state", "pass_id", "outcome", "render_ids_json", "verdicts_json"}
                         <= self.cols("work_requests"))
 
     def test_new_columns(self):
@@ -1506,6 +1507,14 @@ class CheckPass(StoreCase):
         self.assertEqual(self.conn.execute("SELECT w_refreshes, w_pending FROM passes"
                                            " ORDER BY rowid DESC LIMIT 1").fetchone()[:], (2, 0))
 
+    def test_missing_bank_tools_stop_the_pass(self):
+        import asks
+        self.drv.no_bank_tools()                  # the probes unit records bank_tools=false
+        asks.request_work(self.conn, "check", "operator")
+        self.drv.run_job(A)
+        r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
+        self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
+
     def test_a_failed_sync_stops_the_pass_with_its_reason(self):
         import asks
         self.drv.fail_next_sync("bank unreachable")
@@ -1576,6 +1585,8 @@ page and `job_next(judged=…)` with that page's `next` and `remaining`.
 - `run_job(job_id)` claims and loops until `complete`, re-claiming on `end-batch`.
 - `fail_next_sync(detail)` makes the next `probes` unit record `bank_sync` with `ok=False`
   and that detail.
+- `no_bank_tools()` makes the `probes` unit record `bank_tools` with `ok=False` and stop
+  there, as the skill says ("If bank-feed's tools are not visible to you …").
 - `JobDriver(..., cut_after_import=True)` stops the first `snapshot` unit right after
   `import_ledger_export`, before the erase candidates are observed, and ends the claim.
 - The `probes` unit records the sync trailer's `Queue:` counts in the `bank_sync` probe's data
@@ -1713,6 +1724,11 @@ def _acquisition(conn, token, p, req):
 
 def _continue_acquisition(conn, token, p, req, q):
     import binding, steps
+    tools_ = conn.execute("SELECT ok, gen FROM probes WHERE kind='bank_tools'").fetchone()
+    if tools_ is not None and tools_["gen"] == token and not tools_["ok"]:
+        # no bank-feed tools in this session: nothing more can be probed (Astra plan-r7 S2)
+        return _stop(conn, token, p, req, "bank-feed's tools are not available to the "
+                                          "finance specialist")
     sync = conn.execute("SELECT ok, gen, detail, data_json FROM probes WHERE"
                         " kind='bank_sync'").fetchone()
     led = conn.execute("SELECT gen FROM probes WHERE kind='ledger'").fetchone()
@@ -1727,14 +1743,19 @@ def _continue_acquisition(conn, token, p, req, q):
     elif not setup["can_run"] or not gate["allowed"]:
         reason = gate["reason"] or "; ".join(setup.get("conditions") or []) or "cannot run"
     if reason is not None:
-        row = _step(conn, p, _first(req))
-        if row["finished_at"] is None:
-            _, refused = steps._finish_tx(conn, token, _first(req), counts={}, stopped=reason,
-                                          by_refusal=True)
-            assert refused is None
-        passes._end_pass_tx(conn, token, "stopped", {})
-        return "ended"
+        return _stop(conn, token, p, req, reason)
     return {"unit": "snapshot", "acq": p["acq"], "quarter": q}
+
+
+def _stop(conn, token, p, req, reason) -> str:
+    import steps
+    row = _step(conn, p, _first(req))
+    if row["finished_at"] is None:
+        _, refused = steps._finish_tx(conn, token, _first(req), counts={}, stopped=reason,
+                                      by_refusal=True)
+        assert refused is None
+    passes._end_pass_tx(conn, token, "stopped", {})
+    return "ended"
 
 
 def _sweep(conn, token, p, req):
@@ -2334,17 +2355,22 @@ def job_report(conn, job_id=None, status=None) -> dict:
     return out
 
 
-`_result_tx(conn, r)` (in-tx) returns the request's rendering and creates it at most once:
-- if `r["render_id"]` is set and that rendering is undelivered → `{render_id, text}` from
-  `renders`;
+`_result_tx(conn, r)` (in-tx) returns the request's renderings as a list of pages (each
+`{render_id, text}`) and creates them at most once. `job_report`'s `texts` is the
+concatenation, in order:
+- if `r["render_ids_json"]` is non-empty → its undelivered renderings, from `renders`;
 - an operator check whose outcome is `complete`/`interrupted` → `views.review_in_tx(conn,
-  "status")`; store its `render_id` on the request;
+  "status")`; store `[render_id]` on the request;
 - an outcome of `stopped` → a rendering of kind `job-stop` whose text is the stop line
   ("The accounting check stopped: <reason>." or, for exhausted adoptions, "The accounting
   check kept stopping — ask again when you want me to retry.");
-- every rendering's text goes through `views.fit_lines(lines, closing=views.FIT_CLOSING)`, so it
-  is at most `TELEGRAM_LIMIT` whatever the number of documents (Terra plan-r6 S2);
-- a handover → a rendering of kind `handover`: one line per document from
+- every rendering's text is at most `TELEGRAM_LIMIT` (Terra plan-r6 S2). A result whose lines
+  do not fit one message is **paged, never clipped** (Terra plan-r7 S2: clipping 200 case lines
+  kept 54).
+  - `_pages(lines)` repeatedly takes `views.fit_lines(rest)`'s `whole` leading lines as one page
+    until none are left. A single line that does not fit is clipped by `fit_lines` itself.
+  - Each page is its own rendering. All their ids are stored in order on the request.
+- a handover → renderings of kind `handover`: one line per document from
   `steps._pairing(conn, doc_id)` with the existing case lines of SKILL.md §"a document the
   operator hands over", step 3, keyed by the verdict when the pairing is `unpaired`.
 
@@ -2383,12 +2409,17 @@ With another connection holding `db.custody_lock()` and a short bound,
 `drain` and `orphaned_by` as before.
 
 `tools._deliverable` also checks every `texts[i].text` of a `job_report` answer. Add
-`test_a_handover_of_200_documents_fits_one_message` to `tests/test_s2_report.py`: every
-`texts[].text` is ≤ `views.TELEGRAM_LIMIT` in UTF-16 units (`views.utf16_len`).
+`test_a_handover_of_200_documents_is_paged_whole` to `tests/test_s2_report.py`:
+- every `texts[].text` is ≤ `views.TELEGRAM_LIMIT` in UTF-16 units (`views.utf16_len`);
+- the pages together carry 200 case lines;
+- after all but the last page are marked delivered, the request is still `done`, and the next
+  `job_report` offers the last page only;
+- after the last one, the request is `reported`.
 
-`mark_reported(conn, render_id)` is in-tx:
-`UPDATE work_requests SET state='reported' WHERE render_id=? AND state='done'`.
-`views.mark_rendering_delivered` calls it inside its transaction.
+`mark_reported(conn, render_id)` is in-tx. For each `done` request whose `render_ids_json`
+contains `render_id`, it sets `state='reported'` only when every id in that list has
+`renders.delivered_at` set. `views.mark_rendering_delivered` calls it inside its transaction,
+after stamping the delivery.
 
 - [ ] **Step 4: Run the tests**
 
@@ -2526,7 +2557,13 @@ path, its callers and `TestTheNoteWindow` (`tests/test_export_classification.py:
 - Where `note_issued_at`/`note_issued_seq` are set, also set
   `note_issued_gen = int(token)`.
 - Where `note_other_issued_at` is maxed, set
-  `note_other_issued_gen = max(coalesce(note_other_issued_gen, 0), note_issued_gen)`.
+  `note_other_issued_gen = CASE WHEN note_issued_gen IS NULL THEN note_other_issued_gen ELSE
+  max(coalesce(note_other_issued_gen, 0), note_issued_gen) END`. SQLite's two-argument `max`
+  returns NULL when either argument is NULL, so a pre-upgrade issue (generation NULL) would
+  otherwise erase a merged S2 issue's generation (Astra plan-r7 S1: 1 unsafe confirmation).
+  Add `test_a_legacy_issue_never_erases_a_merged_generation` to `tests/test_s2_notes.py`. It
+  merges an S2 issuer into a survivor holding a pre-upgrade issue, issues and re-reads the
+  survivor's note under the same claim, and asserts 0 confirmations.
 - Where `note_seen_*` is set, also set `note_seen_gen = int(token)` (NULL when cleared).
 
 `note_confirmed(proj, tag_revision, *, epoch, conn)`:
