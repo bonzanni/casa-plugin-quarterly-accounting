@@ -604,9 +604,14 @@ def _hand_chunk(conn, pass_id, req, first) -> dict:
         w = work.work_list(conn, since_seq=carry["since_seq"], owed=carry["owed"],
                            first=first)
     carry["handed"] = w["total"]
-    # issues #26/#28/#31 (A1): the open chunk — what this hand-out gave Ellen's turn
-    carry["chunk"] = {"pids": [i["pid"] for i in w["triage"]], "recorded": [], "open": True,
-                      "calls": None, "more": 0}
+    # issues #26/#28/#31 (A1): the open chunk — what this hand-out gave Ellen's turn. A
+    # re-claim over an open chunk keeps the payments it recorded (D2, Astra S1): their
+    # judgment is still owed, whatever the new hand-out holds
+    old = carry.get("chunk") or {}
+    kept = list(old.get("recorded", [])) if old.get("open") else []
+    pids = [i["pid"] for i in w["triage"]]
+    carry["chunk"] = {"pids": pids + [p for p in kept if p not in pids], "recorded": kept,
+                      "open": True, "calls": None, "more": 0}
     _set_first_carry(conn, pass_id, carry)
     return w
 

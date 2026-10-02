@@ -17,6 +17,7 @@ import lineage  # noqa: E402
 import matches  # noqa: E402
 import package  # noqa: E402
 import passes  # noqa: E402
+import steps  # noqa: E402
 import views  # noqa: E402
 import work  # noqa: E402
 
@@ -170,6 +171,25 @@ class TestTheCheckEndsOnlyWhenItsChunkIsJudged(C):
         self.assertEqual(self.call("end_pass", pass_token=c["pass_token"],
                                    outcome="complete")["outcome"], "complete")
 
+    def test_a_reclaim_keeps_the_judgment_the_recorded_chunk_owes(self):
+        # D2 (Astra S1): the turn recorded its chunk and died before the judgment; the
+        # re-claim's hand-out is empty, and the judgment is still owed
+        self.seed(3)
+        c = self.swept()
+        t = self.chunk(c)
+        recorded = {i["pid"] for i in c["work"]["triage"]}
+        self.clock.advance(steps.LEASE_S)
+        c = self.claim()["continue"]
+        self.assertEqual((c["next"], c["work"]["total"]), ("gmail-round", 0))
+        self.assertEqual(set(self.chunk_of()["recorded"]), recorded)
+        for outcome in ("complete", "interrupted"):
+            out = self.text("end_pass", pass_token=c["pass_token"], outcome=outcome)
+            self.assertTrue(out.startswith("refused: not ended: this Gmail chunk is recorded "
+                                           "but not judged"), out)
+        c = self.judged(c["pass_token"])
+        self.assertEqual(self.call("end_pass", pass_token=c["pass_token"],
+                                   outcome="complete")["outcome"], "complete")
+
     def test_gmail_down_ends_it(self):
         self.seed(5)
         c = self.swept()
@@ -189,9 +209,10 @@ class TestTheCheckEndsOnlyWhenItsChunkIsJudged(C):
         t = self.begin()
         self.start(t)
         self.specialist(t)
-        out = self.text("end_pass", pass_token=t, outcome="interrupted")
-        self.assertTrue(out.startswith("refused: not ended: this pass's Gmail round is due"),
-                        out)
+        for outcome in ("interrupted", "complete"):
+            out = self.text("end_pass", pass_token=t, outcome=outcome)
+            self.assertTrue(out.startswith("refused: not ended: this pass's Gmail round is "
+                                           "due"), out)
         c = self.claim()["continue"]
         self.assertEqual(c["next"], "gmail-round")
 
