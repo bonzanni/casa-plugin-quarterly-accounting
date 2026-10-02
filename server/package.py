@@ -48,9 +48,10 @@ def _slug(s: str) -> str:
 
 
 def doc_filename(doc: dict, used: set, fallback_date: str) -> str:
-    amount = f"{doc['amount_minor'] // 100}.{doc['amount_minor'] % 100:02d}" \
-        if doc.get("amount_minor") is not None else "0.00"
-    base = f"{doc.get('document_date') or fallback_date}_{_slug(doc.get('issuer') or doc.get('counterparty'))}_{amount}"
+    base = f"{doc.get('document_date') or fallback_date}_{_slug(doc.get('issuer') or doc.get('counterparty'))}"
+    if doc.get("amount_minor") is not None:
+        # issue #32: a document with no stored amount is named without one, never "0.00"
+        base += f"_{doc['amount_minor'] // 100}.{doc['amount_minor'] % 100:02d}"
     # `used` holds casefolded names: Adobe_… and ADOBE_… are one file on a
     # case-insensitive filesystem (Windows/macOS extraction), and one would
     # silently replace the other there.
@@ -61,6 +62,15 @@ def doc_filename(doc: dict, used: set, fallback_date: str) -> str:
         name = f"{base}_{doc['sha256'][:8]}{'' if n == 2 else f'-{n - 1}'}.{doc['ext']}"
     used.add(name.casefold())
     return name
+
+
+def _other_currency(doc: dict, r: dict) -> list:
+    """Issue #30: a document in another currency than the payment's says its own amount
+    (a USD invoice for a EUR card charge), so the accountant sees why they differ."""
+    if doc.get("currency") and doc["currency"] != r["currency"] \
+            and doc.get("amount_minor") is not None:
+        return [f"document in {amounts.fmt(doc['amount_minor'], doc['currency'])}"]
+    return []
 
 
 def _place(folder: str, doc: dict, used: set, named: dict, fallback_date: str) -> str:
@@ -163,10 +173,12 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
             confidence = "; ".join(x for x in d["current"]["labels"] if x != "clean")
             if d["current"]["author"] == "operator":
                 notes.append("confirmed by the operator")
+            notes += _other_currency(doc, r)
         elif d is not None and ln["docs"]:
             if unknown and d["status"] == "proposed":
                 notes.append("pairing not yet confirmed")
             for mid, doc in sorted(ln["docs"].items()):
+                notes += _other_currency(doc, r)
                 name = _place("unresolved", doc, used, named, dates.effective_date(r))
                 placed[doc["doc_id"]] = doc
                 files[name] = documents_bytes(doc)

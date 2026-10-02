@@ -124,7 +124,12 @@ def start(conn, token, step: str, carry: dict) -> dict:
         # (issue #21). A judge step whose judgment finished is started again on the same
         # row — the row is always the pass's latest judgment, which is what its check
         # (package_check, _judgment_owed) reads
-        restart = (prior is not None and step == "judge" and _ended(prior) == "finished")
+        # C4 (Astra S1): a failed or expired judgment is restarted too when a chunk handed
+        # out since is open — that chunk is owed its judgment, and nothing else can end it
+        restart = (prior is not None and step == "judge"
+                   and (_ended(prior) == "finished"
+                        or (_ended(prior) in ("errored", "expired")
+                            and _chunk(conn, m["pass_id"])[1] is not None)))
         if prior is not None and not restart:
             raise db.Refusal(f"the {step} step was already started in this pass")
         now = db._clock().replace(microsecond=0)
@@ -147,6 +152,19 @@ def start(conn, token, step: str, carry: dict) -> dict:
                 [old["delegation"]] if old.get("delegation") else [])
             if gone:
                 carry = {**carry, "delegations_before": gone}
+        if step == "judge" and not _judge_may_start(conn, m["pass_id"]):
+            # C1, C2 (Astra S1 twice, one shape — generalized): a judgment never stands in
+            # for the Gmail round. It starts only after a chunk was handed out, or once the
+            # pass's first step has ended in a way that hands none out
+            raise db.Refusal("the Gmail round comes first: when the step running now has "
+                             "ended, call continue_pass and do what it returns (its "
+                             "gmail-round); the judge step follows its chunk")
+        if step == "judge":
+            # issue #28 (A2): the judgment closes the open Gmail chunk
+            first = _first_carry(conn, m["pass_id"])
+            if first.get("chunk", {}).get("open"):
+                first["chunk"]["open"] = False
+                _set_first_carry(conn, m["pass_id"], first)
         if restart:
             conn.execute("UPDATE pass_steps SET started_at=?, finished_at=NULL, finished_by=NULL,"
                          " finish_json=NULL, carry_json=? WHERE pass_id=? AND step=?",
@@ -530,7 +548,15 @@ def _claim_pass(conn, m, step) -> dict:
             c["request"] = {"id": req["request_id"], "quarter": req["quarter"],
                             "channel": req["channel"], "round": req["round"] + 1}
         another = _another_chunk(conn, m["pass_id"], req, step)
-        if another:
+        if round_owed(conn, m["pass_id"]) == "due" and not fin.get("stopped"):
+            # C3 (Astra S1): the round became due after this judgment started (a late
+            # import, can_run back): its continuation hands out the first chunk
+            can_run = binding.check_setup(conn)["can_run"]
+            c.update(can_run=can_run, work=_hand_chunk(conn, m["pass_id"], req, True),
+                     judge_due=(len(work.judge_due_state(conn, req["quarter"]))
+                                if req is not None else work.judge_due(conn)),
+                     filed_refs=work.filed_refs(conn), next="gmail-round")
+        elif another:
             # issue #17 (#21 for a check): the next Gmail chunk of this pass, then another
             # judgment
             can_run = binding.check_setup(conn)["can_run"]
@@ -598,8 +624,191 @@ def _hand_chunk(conn, pass_id, req, first) -> dict:
         w = work.work_list(conn, since_seq=carry["since_seq"], owed=carry["owed"],
                            first=first)
     carry["handed"] = w["total"]
+    # issues #26/#28/#31 (A1): the open chunk — what this hand-out gave Ellen's turn. A
+    # re-claim over an open chunk keeps the payments it recorded (D2, Astra S1): their
+    # judgment is still owed, whatever the new hand-out holds
+    old = carry.get("chunk") or {}
+    kept = list(old.get("recorded", [])) if old.get("open") else []
+    pids = [i["pid"] for i in w["triage"]]
+    carry["chunk"] = {"pids": pids + [p for p in kept if p not in pids], "recorded": kept,
+                      "open": True, "calls": None, "more": 0}
     _set_first_carry(conn, pass_id, carry)
     return w
+
+
+# --- the open chunk (issues #26, #28, #31) ---------------------------------------------------
+def _chunk(conn, pass_id):
+    """The pass's open Gmail chunk (its carry and the chunk), or (carry, None)."""
+    carry = _first_carry(conn, pass_id)
+    chunk = carry.get("chunk")
+    return carry, (chunk if chunk is not None and chunk.get("open") else None)
+
+
+def _resolved(conn, pids) -> set:
+    import lineage
+    return {lineage.resolve_pid(conn, p) for p in pids}
+
+
+def chunk_has(conn, pass_id, pid) -> bool:
+    """Is (resolved) payment `pid` one of the open chunk's?"""
+    _, chunk = _chunk(conn, pass_id)
+    return chunk is not None and pid in _resolved(conn, chunk["pids"])
+
+
+def chunk_recorded(conn, pass_id, pid) -> None:
+    carry, chunk = _chunk(conn, pass_id)
+    if chunk is not None and pid not in chunk["recorded"]:
+        chunk["recorded"].append(pid)
+        _set_first_carry(conn, pass_id, carry)
+
+
+def _unrecorded(conn, chunk) -> list:
+    """The open chunk's payments not recorded yet (merges resolved; an ended lineage is
+    owed nothing)."""
+    import lineage
+    done = _resolved(conn, chunk["recorded"])
+    out = []
+    for pid in sorted(_resolved(conn, chunk["pids"])):
+        if pid not in done and not lineage.projection(conn, pid)["ended"]:
+            out.append(pid)
+    return out
+
+
+def _probe(conn, pass_id):
+    """This pass's latest Gmail probe: True ok, False failed, None not made in this pass."""
+    row = conn.execute("SELECT ok, pass_id FROM probes WHERE kind='gmail'").fetchone()
+    if row is None or row["pass_id"] != pass_id:
+        return None
+    return bool(row["ok"])
+
+
+def round_owed(conn, pass_id):
+    """C2–C3 (Astra S1 ×3, one predicate for every path): the pass's Gmail round is owed
+    and was never handed out — 'running' while its first step runs, 'due' once that step
+    has ended in a way whose continuation hands one out — else None. A judge start and
+    end_pass refuse while it is owed; a judgment's continuation hands it out."""
+    if "chunk" in _first_carry(conn, pass_id):
+        return None
+    first = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
+                         (pass_id, _first_step(conn, pass_id))).fetchone()
+    if first is None:
+        return None
+    if _ended(first) is None:
+        # owed once the pass has imported (C3, Astra S1): before its import nothing is
+        # due, and ending it then leaves nothing unsearched that the next pass misses
+        imported = conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?",
+                                (pass_id,)).fetchone() is not None
+        return "running" if imported else None
+    return "due" if _round_due(conn, pass_id) else None
+
+
+def _judge_may_start(conn, pass_id) -> bool:
+    """A judge step follows the pass's Gmail round: a chunk was handed out, or the first
+    step has ended and its continuation hands out none. A pass with no first step has
+    nothing to judge after."""
+    if "chunk" in _first_carry(conn, pass_id):
+        return True
+    first = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
+                         (pass_id, _first_step(conn, pass_id))).fetchone()
+    if first is None or _ended(first) is None:
+        return False            # never while the first step runs, imported or not
+    return round_owed(conn, pass_id) is None
+
+
+def _round_due(conn, pass_id) -> bool:
+    """The pass's first step (a check's sweep, a package round's snapshot) has ended and
+    its continuation would hand out a Gmail round (_claim_pass): not stopped, imported,
+    can_run."""
+    import binding
+    first = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
+                         (pass_id, _first_step(conn, pass_id))).fetchone()
+    if first is None or _ended(first) is None or _finish(first).get("stopped"):
+        return False
+    if conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?", (pass_id,)).fetchone() is None:
+        return False
+    return bool(binding.check_setup(conn)["can_run"])
+
+
+def chunk_owed(conn, pass_id):
+    """Issue #28 (A6): why the pass may not end yet — its chunk is handed out and not
+    judged, and this pass's Gmail probe did not fail — or None."""
+    carry, chunk = _chunk(conn, pass_id)
+    owed = round_owed(conn, pass_id)
+    if owed == "running":
+        # C3 (Astra S1): the step that leads to the Gmail round has not ended
+        return ("not ended: the pass's step is still running and its Gmail round follows "
+                "it. Wait for the delegation's notification (or the step's expiry), call "
+                "continue_pass, and do what it returns")
+    if owed == "due":
+        # D2: the Gmail round is due and was never handed out — the pass is ended from
+        # the step's own token, before its continuation
+        return ("not ended: this pass's Gmail round is due and was never handed out. Call "
+                "continue_pass and do what it returns (its gmail-round), then end the pass "
+                "after the judgment's continuation")
+    if chunk is None or not chunk["pids"] or _probe(conn, pass_id) is False:
+        return None
+    left = _unrecorded(conn, chunk)
+    if left:
+        n = len(left)
+        return (f"not ended: {n} payment{'s' if n > 1 else ''} handed out in this Gmail chunk "
+                f"{'are' if n > 1 else 'is'} not searched and recorded yet ("
+                + ", ".join(f"#{p}" for p in left[:10]) + (" …" if n > 10 else "")
+                + "). Search each and record it (record_search), then start the judge step "
+                "(record_step step=\"judge\") and end the pass after its continuation")
+    return ("not ended: this Gmail chunk is recorded but not judged. Start the judge step "
+            "(record_step step=\"judge\"), delegate it, and end the pass after its "
+            "continuation")
+
+
+def more_work(conn, token, calls_made) -> dict:
+    """Issue #31 (A3): more items for the open chunk's turn, sized by the same caps as the
+    chunk from the calls Ellen says her turn has made — never below what the server knows
+    the turn spent (the floor)."""
+    import work
+    if token is None:
+        raise db.Refusal("more_work belongs to a pass: pass the pass_token")
+    if isinstance(calls_made, bool) or not isinstance(calls_made, int) or calls_made < 0:
+        raise db.Refusal("calls_made is the count of tool calls you made in this turn so far")
+    with db.tx(conn):
+        passes.check_token(conn, token)
+        m = passes._marker(conn)
+        pass_id = m["pass_id"]
+        carry, chunk = _chunk(conn, pass_id)
+        if chunk is None:
+            raise db.Refusal("no Gmail chunk is open in this pass: more_work follows a "
+                             "continuation's gmail-round work, before its judge step")
+        probe = _probe(conn, pass_id)
+        if probe is not True:
+            raise db.Refusal("make the Gmail probe first (record_probe kind=\"gmail\")"
+                             if probe is None else
+                             "the Gmail probe failed in this pass: no more searches — start "
+                             "the judge step if anything was filed, else end the pass")
+        left = _unrecorded(conn, chunk)
+        if left:
+            raise db.Refusal("record every item you were handed first (record_search): "
+                             + ", ".join(f"#{p}" for p in left[:10])
+                             + (" …" if len(left) > 10 else ""))
+        floor = (3 + len(chunk["pids"]) if chunk["calls"] is None
+                 else chunk["calls"] + 1 + chunk["more"])
+        used = max(calls_made, floor)
+        # -1: this call; the last more_work, the one that answers `judge`, is in TURN_TAIL
+        # (D1 Terra S2, C1 Terra S1: the chunk's own bound includes it too)
+        n = max(0, (work.ELLEN_TURNS - work.TURN_TAIL - 1 - work.MORE_MARGIN - used)
+                // work.ITEM_COST)
+        req = round_request(conn, pass_id)
+        shown = []
+        if n:
+            if req is not None:
+                items = work.package_work(conn, req)
+            else:
+                carry["owed"] = work.grow_owed(conn, carry.get("owed", []), carry["since_seq"])
+                items = work.check_work(conn, carry["since_seq"], owed=carry["owed"])
+            shown, _ = work.cut(items, n, leave=_resolved(conn, chunk["pids"]))
+        chunk["pids"] += [i["pid"] for i in shown]
+        chunk["calls"], chunk["more"] = used, len(shown)
+        _set_first_carry(conn, pass_id, carry)
+        return {"triage": shown, "next": "gmail-round" if shown else "judge",
+                "notice": work.NOTICE_TRIAGE}
 
 
 def _check_report(conn, pass_id) -> dict:
@@ -611,6 +820,16 @@ def _check_report(conn, pass_id) -> dict:
     carry["owed"] = work.grow_owed(conn, carry.get("owed", []), carry["since_seq"])
     _set_first_carry(conn, pass_id, carry)
     return work.check_report(conn, carry["owed"], carry["since_seq"])
+
+
+def check_report_of(conn, pass_id) -> dict:
+    """Issue #29: the report a pass stores — a check's own counts when it has a check
+    origin (its Gmail round started), else none."""
+    if round_request(conn, pass_id) is not None:
+        return {}
+    if _first_carry(conn, pass_id).get("since_seq") is None:
+        return {}
+    return _check_report(conn, pass_id)
 
 
 def _another_chunk(conn, pass_id, req, step) -> bool:

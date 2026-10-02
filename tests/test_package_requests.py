@@ -12,7 +12,7 @@ from unittest import mock
 
 from tests._base import StoreCase
 from tests.test_continuation import STALE, Flow
-from tests import sim
+from tests import _base, sim
 import alerts  # noqa: E402
 import db  # noqa: E402
 import delivery  # noqa: E402
@@ -738,8 +738,10 @@ class TestSnapshotFate(Requests):
             # the rest of the round (issue #15), so the check half of the fate is met and
             # this class sees the bank half alone
             self.call("record_probe", pass_token=t, kind="gmail", ok=True)
-            for it in self.call("list_quarter_state", triage=True, quarter="2026-Q3",
-                                pass_token=t)["triage"]:
+            items = self.call("list_quarter_state", triage=True, quarter="2026-Q3",
+                              pass_token=t)["triage"]
+            _base.hand(self.conn, [it["pid"] for it in items])  # issue #26: handed work
+            for it in items:
                 self.call("record_search", pid=it["pid"], pass_token=t, queries=["q"])
             self.start(t, step="judge")
             self.call("record_step", pass_token=t, step="judge", action="finish",

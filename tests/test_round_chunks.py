@@ -34,7 +34,8 @@ class Chunks(Rounds):
         return self.claim()["continue"]
 
     def judge_row(self):
-        return self.conn.execute("SELECT * FROM pass_steps WHERE step='judge'").fetchone()
+        return self.conn.execute("SELECT * FROM pass_steps WHERE step='judge'"
+                                 " ORDER BY rowid DESC LIMIT 1").fetchone()
 
 
 class TestTheRoundInChunks(Chunks):
@@ -74,7 +75,13 @@ class TestTheRoundInChunks(Chunks):
         self.assertEqual((c["next"], c["work"]["total"]), ("gmail-round", 2))
         t = c["pass_token"]
         self.call("record_probe", pass_token=t, kind="gmail", ok=True)
-        self.search(t, first[:3])                            # the first chunk's, again
+        # the first chunk's, again: not the work handed out now (issue #26, A4) — refused,
+        # and nothing recorded is progress
+        for it in first[:3]:
+            out = self.text("record_search", pid=it["pid"], pass_token=t, queries=["q"])
+            self.assertIn("is not in the work you were handed", out)
+        for it in c["work"]["triage"]:
+            self.call("record_search", pid=it["pid"], pass_token=t, incomplete=True)
         c = self.judged(t)
         self.assertEqual(c["next"], "end-pass")
 
@@ -283,6 +290,7 @@ class TestADelegationsEndEndsItsStep(Chunks):
                   delegation_id=D1)
         self.specialist(t)
         c = self.claim()["continue"]
+        self.call("record_probe", pass_token=c["pass_token"], kind="gmail", ok=False)
         self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted")
         twin = D1[:8] + D2[8:]
         t = self.ask()["pass_token"]

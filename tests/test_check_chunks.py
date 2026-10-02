@@ -399,6 +399,7 @@ class TestAChunkTurnFitsEllensTurn(Check):
         with db.tx(self.conn):
             self.conn.execute("UPDATE projections SET passes_without_candidate=? WHERE pid=?",
                               (work.AGE_OUT_PASSES - 1, pid))
+        self.clock.advance(work.AGE_OUT_SPACING_S)       # issue #26: a week after the last
         c = self.swept()
         out = self.call("record_search", pid=pid, pass_token=c["pass_token"], queries=["q"])
         self.assertEqual((out["search_state"], out["passes_without_candidate"]),

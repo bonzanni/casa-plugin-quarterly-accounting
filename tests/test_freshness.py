@@ -16,6 +16,8 @@ import random
 import sqlite3
 import time
 import unittest
+
+from tests import _base
 import zipfile
 
 from tests import test_e2e
@@ -116,8 +118,10 @@ class ToolPass(test_e2e.Base):
             # issue #15: the rest of the round — Ellen's Gmail round (its probe, each of
             # the quarter's items searched) and a whole judge step
             call("record_probe", pass_token=token, kind="gmail", ok=True)
-            for it in call("list_quarter_state", triage=True, quarter="2026-Q3",
-                           pass_token=token)["triage"]:
+            items = call("list_quarter_state", triage=True, quarter="2026-Q3",
+                         pass_token=token)["triage"]
+            _base.hand(self.conn, [it["pid"] for it in items])    # issue #26: handed work
+            for it in items:
                 call("record_search", pid=it["pid"], pass_token=token, queries=["q"])
             call("record_step", pass_token=token, step="judge", action="start")
             call("record_step", pass_token=token, step="judge", action="finish",

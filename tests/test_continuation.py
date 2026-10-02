@@ -81,6 +81,17 @@ class Flow(ToolFlow):
             self.assertTrue(out["finished"], out)
         return remaining
 
+    def worked(self, c, probe=True):
+        """Ellen's Gmail chunk for continuation `c`: the probe, and every handed item
+        searched and recorded (issue #28: a handed chunk is worked before the pass ends).
+        Returns the token."""
+        t = c["pass_token"]
+        self.call("record_probe", pass_token=t, kind="gmail", ok=probe)
+        if probe:
+            for it in (c.get("work") or {}).get("triage", []):
+                self.call("record_search", pid=it["pid"], pass_token=t, queries=["q"])
+        return t
+
     def begin(self, trigger="operator", **kw):
         out = self.call("begin_pass", trigger=trigger, **kw)
         self.assertEqual(out["status"], "started", out)
@@ -138,6 +149,11 @@ class TestPendingThenTheNotice(Flow):
         self.call("record_probe", pass_token=t2, kind="gmail", ok=True)
         for item in c["work"]["triage"]:
             self.call("record_search", pid=item["pid"], pass_token=t2, queries=["adobe"])
+        # issue #28: the chunk is judged before the pass ends
+        self.start(t2, step="judge")
+        self.call("record_step", pass_token=t2, step="judge", action="finish",
+                  triage_remaining=0)
+        t2 = self.claim()["continue"]["pass_token"]
         end = self.call("end_pass", pass_token=t2, outcome="complete",
                         report={"checked": 3, "total": 3, "not_searched": 0})
         self.assertEqual(end["outcome"], "complete")
@@ -194,6 +210,8 @@ class TestTheCeiling(Flow):
                                   snapshot_id=snap, not_found=True).startswith(STALE))
         self.assertTrue(self.text("record_step", pass_token=t1, step="sweep",
                                   action="finish").startswith(STALE))
+        # Gmail down: the handed chunk is not owed its search (issue #28)
+        self.call("record_probe", pass_token=c["pass_token"], kind="gmail", ok=False)
         end = self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted")
         report = json.loads(self.conn.execute("SELECT report_json FROM passes WHERE pass_id=?",
                                               (end["ended"],)).fetchone()[0])
@@ -393,7 +411,8 @@ class TestTheClaimIsExclusive(Flow):
         self.assertEqual(self.claim()["running"]["step"], "judge")
         self.call("record_step", pass_token=b, step="judge", action="finish")
         c = self.claim()["continue"]
-        self.call("end_pass", pass_token=c["pass_token"], outcome="complete")
+        # nothing was searched: a check that owes searches is not complete (D1, A7)
+        self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted")
 
     def test_a_lease_its_holder_keeps_refreshing_is_not_reclaimed(self):
         # (17) held at 599 s with no write, reclaimable at 600 s; a write refreshes it
@@ -534,9 +553,11 @@ class TestReviewC1(Flow):
         self.assertEqual((c["step"], c["next"]), ("sweep", "gmail-round"))
         busy = self.call("begin_pass", trigger="operator")
         self.assertEqual(busy["status"], "busy")
-        self.call("record_probe", pass_token=c["pass_token"], kind="gmail", ok=True)
+        # Gmail down (issue #28: else the handed chunk is owed first); the item it could
+        # not search makes the check interrupted (D1, A7)
+        self.call("record_probe", pass_token=c["pass_token"], kind="gmail", ok=False)
         self.assertEqual(self.call("end_pass", pass_token=c["pass_token"],
-                                   outcome="complete")["outcome"], "complete")
+                                   outcome="interrupted")["outcome"], "interrupted")
 
     def test_an_inline_answer_without_a_finish_is_closed_by_ellens_finish(self):
         # I2: the specialist returned (even with its prefix) but recorded no finish: Ellen

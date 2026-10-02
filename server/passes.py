@@ -189,7 +189,7 @@ def _terminalize(conn, pass_id: str):
     settled by snapshot_fate (outcome `interrupted`), buildable or closed with its
     package notice. Returns (the recovered request's id or None, its notice or None)."""
     now = db.now()
-    report = {"reclaimed": True, **throughput(conn, pass_id)}
+    report = {"reclaimed": True, **stored_report(conn, pass_id), **throughput(conn, pass_id)}
     conn.execute("UPDATE passes SET ended_at=?, outcome='interrupted', report_json=?"
                  " WHERE pass_id=? AND ended_at IS NULL", (now, db.canonical(report), pass_id))
     req = conn.execute("SELECT * FROM package_requests WHERE pass_id=? AND state='snapshot'",
@@ -358,6 +358,16 @@ def throughput(conn, pass_id: str) -> dict:
             "remaining_in_cycle": len(sweep._due(conn)) if imported else None}
 
 
+def stored_report(conn, pass_id: str, report=None) -> dict:
+    """Issue #29: the counts a pass stores are the server's — a check's, over the searches
+    it owes (steps.check_report_of) — never the caller's; a pass with no check origin
+    stores none. The caller's other keys are kept."""
+    import steps
+    out = {k: v for k, v in (report or {}).items() if k not in steps.REPORT_KEYS}
+    out.update(steps.check_report_of(conn, pass_id))
+    return out
+
+
 def end_pass(conn, token, outcome: str, report: dict) -> dict:
     import alerts
     import documents
@@ -369,10 +379,20 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
         check_token(conn, token)
         m = _marker(conn)
         if outcome in ("complete", "interrupted"):
+            import steps
+            owed = steps.chunk_owed(conn, m["pass_id"])     # issue #28 (A6)
+            if owed is not None:
+                raise db.Refusal(owed)
             _round_judged(conn, m["pass_id"])
         if outcome == "complete":
             _judgment_owed(conn, m["pass_id"])
-        full = {**(report or {}), **throughput(conn, m["pass_id"])}
+        full = {**stored_report(conn, m["pass_id"], report),
+                **throughput(conn, m["pass_id"])}
+        if outcome == "complete" and full.get("not_searched"):
+            # D1 (Astra S1): a check is complete only when it searched what it owes
+            n = full["not_searched"]
+            raise db.Refusal(f"not complete: {n} payment{'s' if n > 1 else ''} this check owes "
+                             f"{'were' if n > 1 else 'was'} not searched — end it interrupted")
         conn.execute("UPDATE passes SET ended_at=?, outcome=?, report_json=? WHERE pass_id=?",
                      (db.now(), outcome, db.canonical(full), m["pass_id"]))
         conn.execute("UPDATE pass_marker SET live=0, claimed_step=NULL, lease_at=NULL"
@@ -386,7 +406,7 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
     except db.Busy:
         pass
     notice = handed.pop("_notice") if handed else None
-    out = {"ended": m["pass_id"], "outcome": outcome, **(handed or {})}
+    out = {"ended": m["pass_id"], "outcome": outcome, "report": full, **(handed or {})}
     # issue #15: a queued package request follows this pass — continue_pass starts it
     out["more"] = queued_waiting(conn)
     # the notices this pass raised — its request's, its import's revocations — are

@@ -106,7 +106,20 @@ class TestTheCheckRuns(Rounds):
         self.start(t, step="judge")
         self.call("record_step", pass_token=t, step="judge", action="finish",
                   triage_remaining=0)
-        end = self.end(self.claim()["continue"], "interrupted")
+        c = self.claim()["continue"]
+        # issue #28: the next chunk is handed out and owed — Ellen cannot end the round at
+        # it. Her turn does not reach the item (recorded with no effort), and the judgment
+        # after it finds no progress, so the round ends
+        self.assertEqual(c["next"], "gmail-round")
+        self.assertTrue(self.text("end_pass", pass_token=c["pass_token"], outcome="interrupted")
+                        .startswith("refused: not ended: 1 payment handed out"))
+        t = c["pass_token"]
+        self.call("record_probe", pass_token=t, kind="gmail", ok=True)
+        for it in c["work"]["triage"]:
+            self.call("record_search", pid=it["pid"], pass_token=t, incomplete=True)
+        c = self.judge(t)
+        self.assertEqual(c["next"], "end-pass")
+        end = self.end(c, "interrupted")
         self.assertIsNone(end["next"])
         self.assertNotIn("package_token", end)
         self.assertTrue(end["more"])
@@ -203,7 +216,9 @@ class TestSearchesCountForTheRequest(Rounds):
         self.seed(1)
         pid = self.conn.execute("SELECT pid FROM projections").fetchone()[0]
         t = self.begin("operator")
+        _base.hand(self.conn, [pid])                    # issue #26: handed work
         self.call("record_search", pid=pid, pass_token=t, queries=["before"])
+        _base.close_chunk(self.conn)
         self.call("end_pass", pass_token=t, outcome="interrupted")
         t = self.ask()["pass_token"]
         c = self.snapshot_round(t)

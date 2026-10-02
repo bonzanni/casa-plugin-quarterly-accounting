@@ -19,21 +19,49 @@ class Base(StoreCase):
         self.pid = self.lineage_for(1)
         self.classify(self.pid, {"software"})
         self.settle(self.pid)
+        self.handed(self.pid)
+
+
+class Weekly:
+    """A clock for db._clock that the test moves on (issue #26: the age-out count moves
+    at most once per AGE_OUT_SPACING_S, so fruitless passes are a week apart)."""
+    def __init__(self, start="2026-09-20T08:00:00"):
+        import datetime as _dt
+        self.t = _dt.datetime.fromisoformat(start).replace(tzinfo=_dt.timezone.utc)
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, days=7):
+        import datetime as _dt
+        self.t += _dt.timedelta(days=days)
 
 
 class TestSearchBookkeeping(Base):
-    def test_effort_ages_out_after_fruitless_passes_and_revives(self):
+    def weekly(self):
         from unittest import mock
-        with mock.patch.object(db, "now", lambda: "2026-09-20T08:00:00Z"):
-            for _ in range(work.AGE_OUT_PASSES):
-                work.record_search(self.conn, pid=self.pid, token=self.token,
-                                   queries=["from:adobe"])
-                self.token = self.pass_()
+        clock = Weekly()
+        p = mock.patch.object(db, "_clock", clock)
+        p.start()
+        self.addCleanup(p.stop)
+        return clock
+
+    def next_pass(self, clock, days=7):
+        clock.advance(days)
+        self.token = self.pass_()
+        self.handed(self.pid)
+
+    def test_effort_ages_out_after_fruitless_passes_and_revives(self):
+        clock = self.weekly()
+        for _ in range(work.AGE_OUT_PASSES):
+            work.record_search(self.conn, pid=self.pid, token=self.token,
+                               queries=["from:adobe"])
+            self.next_pass(clock)
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual((p["search_state"], p["status"]), ("aged-out", "open"))
         before = lineage.projection(self.conn, self.pid)["search_json"]
-        with mock.patch.object(db, "now", lambda: "2026-09-27T08:00:00Z"):   # a later moment:
-            work.record_search(self.conn, pid=self.pid, token=None, revive=True)  # a stamped
+        clock.advance(1)                                  # a later moment: a stamped
+        work.record_search(self.conn, pid=self.pid, token=None, revive=True)
         # search would show here (round p9: same-second times hid the p8 regression)
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual(p["search_state"], "active")
@@ -79,10 +107,11 @@ class TestSearchBookkeeping(Base):
         # incomplete pass counts toward age-out exactly like a completed fruitless
         # search (unless it found a candidate), or a payment could sit "incomplete"
         # forever and never be judged. Only the no-query case (above) is free.
+        clock = self.weekly()
         for _ in range(work.AGE_OUT_PASSES):
             work.record_search(self.conn, pid=self.pid, token=self.token,
                                queries=["from:adobe"], incomplete=True)
-            self.token = self.pass_()
+            self.next_pass(clock)
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual((p["search_state"], p["status"]), ("aged-out", "open"))
         self.assertEqual(json.loads(p["search_json"])["queries"], ["from:adobe"])

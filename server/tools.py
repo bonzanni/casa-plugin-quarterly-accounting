@@ -608,6 +608,17 @@ def t_search(args):
                               **_pick(args, ("queries",)), **flags)
 
 
+@register("more_work",
+          "After every item of the Gmail chunk you were handed is recorded: more items for this "
+          "turn, if they still fit. calls_made = every tool call you made in this turn so far "
+          "(failed ones too), not counting this one. Work what it hands out the same way, then "
+          "call it again; when it hands out none (next: judge), start the judge step.",
+          obj({"pass_token": TOKEN, "calls_made": I}, ("pass_token", "calls_made")))
+def t_more_work(args):
+    _need(args, "pass_token", "calls_made")
+    return steps.more_work(conn(), _int(args, "pass_token"), _int(args, "calls_made"))
+
+
 @register("stop_chasing",
           "'stop chasing Q2': that quarter's missing items stay listed and ship as MISSING but "
           "are never searched again.",

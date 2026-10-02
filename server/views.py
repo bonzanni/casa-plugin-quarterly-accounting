@@ -297,13 +297,29 @@ def evidence(d: dict, cands=None) -> list:
                        f"{field(doc.get('recipient')) or 'someone else'}, not the business.")
         if d["status"] == "proposed" and len(out) == 1:
             out.append("Not sure — say if it's wrong.")
+        if (doc.get("currency") and d.get("currency") and doc["currency"] != d["currency"]
+                and doc.get("amount_minor") is not None):
+            # issue #30: a document in another currency (a USD invoice for a EUR card
+            # charge) shows both amounts, so the operator can judge the pairing
+            out.append(f"The {KIND_WORD.get(doc['kind'], 'document')} is in "
+                       f"{amounts.fmt(doc['amount_minor'], doc['currency'])}; the payment is "
+                       f"{_money(d)}.")
     shown = _cands(d, cands)
     if shown:
-        out.append("Could be: " + ", ".join(ident(c["document"]) for c in shown) + ".")
+        out.append("Could be: " + ", ".join(ident(c["document"]) + _fx(c["document"], d)
+                                            for c in shown) + ".")
     if cands is None and len(d["candidates"]) > len(shown):
         out.append(f"{len(d['candidates']) - len(shown)} more could fit — say "
                    f"\"{candidates_phrase(d)}\".")
     return out
+
+
+def _fx(doc: dict, d: dict) -> str:
+    """Issue #30 (C1, Astra S2): a candidate in another currency names its own amount."""
+    if (doc.get("currency") and d.get("currency") and doc["currency"] != d["currency"]
+            and doc.get("amount_minor") is not None):
+        return f" in {amounts.fmt(doc['amount_minor'], doc['currency'])}"
+    return ""
 
 
 def pairings(d: dict, cands=None) -> dict:
@@ -430,7 +446,10 @@ def _lead(conn):
     interrupted = None
     if last is not None and last["outcome"] == "interrupted":
         rep = json.loads(last["report_json"] or "{}")
-        interrupted = (int(rep.get("checked", 0)), int(rep.get("total", 0)))
+        # issue #29: the counts are the server's, and a pass that never reached its Gmail
+        # round stores none — then the block says only that the review was interrupted
+        interrupted = ((int(rep["checked"]), int(rep["total"]))
+                       if "checked" in rep and "total" in rep else ())
     return None, gmail_down, interrupted
 
 
@@ -452,10 +471,12 @@ def _degraded_block(gmail_down, interrupted, missing, unsearched) -> list:
         if unsearched:
             out.append(f"{_plural(len(unsearched), 'new payment')} not searched.")
         out.append("No reply needed; I'll retry next pass.")
-    if interrupted is not None:
+    if interrupted:
         checked, total = interrupted
         out += ["Review interrupted.", f"{checked} of {total} new payments checked.",
                 f"{max(total - checked, 0)} not checked yet. Saved."]
+    elif interrupted is not None:
+        out += ["Review interrupted.", "Saved."]
     return out
 
 
