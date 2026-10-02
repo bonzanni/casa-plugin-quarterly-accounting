@@ -27,7 +27,6 @@ import json
 import db
 import passes
 
-CEILING_ASSUMED_S = 600     # Casa's delegated-turn ceiling, as read (spec: assumption A2)
 SWEEP_STOP_S = 450          # the sweep lists no row after this
 RETURN_BY_S = 510           # wrap_up: the specialist finishes and returns
 STEP_EXPIRY_S = 600         # an unfinished step is over (its stamp precedes Casa's launch)

@@ -17,6 +17,7 @@ import re
 
 import dates
 import db
+import job
 import ledger
 import lineage
 import passes
@@ -71,7 +72,14 @@ def _parse_ts(ts: str) -> _dt.datetime:
     return _dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
 
 
-def note_confirmed(proj, tag_revision, *, epoch) -> bool:
+Z_S = 900      # the late-write margin (spec §4, revision 4): Z = 900 s
+
+
+def _z() -> _dt.timedelta:
+    return _dt.timedelta(seconds=Z_S)
+
+
+def note_confirmed(proj, tag_revision, *, epoch, conn=None) -> bool:
     """Whether the lineage's current accounting note is known visible on its row
     without reading it (issue #1: notes are not in the export). Only a read can
     confirm a note; the confirmation stands while (1) the note is the one that
@@ -79,30 +87,58 @@ def note_confirmed(proj, tag_revision, *, epoch) -> bool:
     erasure strips tags and notes together — and (3) no add_note of ANOTHER note
     text can still land after that read (issue #14). A write of the current text
     landing late leaves the same text on top; a write of another one (an older
-    revision carried out late, round D1, or before a held read, D2) would bury
-    it. Every write is carried out within a delegation's ceiling of its issue or
-    never (steps.CEILING_ASSUMED_S), so the read — dated by the import its
+    revision carried out late, round D1, or before a held read, D2) would bury it.
+
+    (3) by time, for every issue (spec §4): the read — dated by the import its
     snapshot belongs to, which precedes it, never by when it was recorded — must
-    come more than a ceiling after the latest other-text issue and after the
+    come strictly more than Z after the latest other-text issue and after the
     store's epoch (writes an earlier store generation or version handed out).
-    Strictly after: stamps are whole seconds (design round D1, Terra S1)."""
-    import steps
+    Strictly after: stamps are whole seconds (design round D1, Terra S1).
+
+    (3) by claim, for an other-text issue made under a job claim (INV-J11): the
+    read is under a LATER claim than the issue's (a); it is recorded at least Z
+    after the first claim that followed the issue's claim, which is made only after
+    the issuing turn ended (b); and the latest ledger probe, recorded under a claim
+    after the issue, shows version.WORKFLOW registered with its copy present, so a
+    minting write — which no deadline bounds — has committed (c). `conn` reads the
+    claims and the probe; it is needed only when such a generation is present."""
     if proj["note_body"] is None:
         return True
     if proj["note_seen_seq"] is None or proj["note_seen_seq"] != proj["note_seq"]:
         return False
     if proj["note_seen_rev"] is None or proj["note_seen_rev"] != tag_revision:
         return False
+    seen_at = proj["note_seen_at"]
+    other_text = proj["note_issued_seq"] != proj["note_seq"]
     others = [proj["note_other_issued_at"], epoch]
-    if proj["note_issued_seq"] != proj["note_seq"]:
+    if other_text:
         others.append(proj["note_issued_at"])
     others = [t for t in others if t is not None]
-    if others:
-        bound = max(_parse_ts(t) for t in others)
-        if proj["note_seen_at"] is None or not (
-                _parse_ts(proj["note_seen_at"])
-                > bound + _dt.timedelta(seconds=steps.CEILING_ASSUMED_S)):
-            return False
+    if others and (seen_at is None
+                   or not _parse_ts(seen_at) > max(_parse_ts(t) for t in others) + _z()):
+        return False
+    gens = [proj["note_other_issued_gen"]]
+    if other_text:
+        gens.append(proj["note_issued_gen"])
+    gens = [g for g in gens if g is not None]
+    if not gens:
+        return True
+    if conn is None:
+        raise TypeError("note_confirmed needs conn for an issue made under a job claim")
+    issue = max(gens)
+    seen_gen = proj["note_seen_gen"]
+    if seen_gen is None or seen_gen <= issue or seen_at is None:
+        return False                                            # (a)
+    first = conn.execute("SELECT at FROM claims WHERE gen > ? ORDER BY gen LIMIT 1",
+                         (issue,)).fetchone()
+    if first is None or _parse_ts(seen_at) < _parse_ts(first["at"]) + _z():
+        return False                                            # (b)
+    led = conn.execute("SELECT gen, data_json FROM probes WHERE kind='ledger'").fetchone()
+    data = json.loads(led["data_json"] or "{}") if led is not None else {}
+    if (led is None or led["gen"] is None or led["gen"] <= issue
+            or version.WORKFLOW not in (data.get("registered") or {})
+            or version.WORKFLOW in (data.get("missing") or [])):
+        return False                                            # (c)
     return True
 
 
@@ -389,14 +425,20 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
         # A note seen visible is remembered with the read's tag revision and the import
         # its snapshot belongs to (issue #1; rounds D1, D2): an import re-checks it only
         # when the tags moved or an issued note write may have landed after this read.
+        # The read's time stays the import's, deliberately: the read happened before this
+        # record, so the record's own time would measure Z from too late a moment (§4).
         seen_at = conn.execute("SELECT imported_at FROM snapshots WHERE snapshot_id=?",
                                (lineage.latest_import(conn),)).fetchone()[0]
+        # Under a job pass a read and an issue carry the claim they were made under
+        # (INV-J11); a delegation-protocol one is under no claim and carries none.
+        gen = int(token) if job.live_job_pass(conn) is not None else None
         if note is not None and note_visible:
-            conn.execute("UPDATE projections SET note_seen_seq=?, note_seen_rev=?, note_seen_at=?"
-                         " WHERE pid=?", (proj["note_seq"], observed_tag_revision, seen_at, pid))
+            conn.execute("UPDATE projections SET note_seen_seq=?, note_seen_rev=?, note_seen_at=?,"
+                         " note_seen_gen=? WHERE pid=?",
+                         (proj["note_seq"], observed_tag_revision, seen_at, gen, pid))
         else:
             conn.execute("UPDATE projections SET note_seen_seq=NULL, note_seen_rev=NULL,"
-                         " note_seen_at=NULL WHERE pid=?", (pid,))
+                         " note_seen_at=NULL, note_seen_gen=NULL WHERE pid=?", (pid,))
         gate = passes.bank_write_gate(conn)
         # ONE write per observation (round p5, Terra S1): the specialist makes it,
         # re-reads the row and records it before the next, so a ledger that changes
@@ -408,13 +450,20 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
                 if "add_note" in step:
                     # the previous issue, if it carried another text, becomes an "other"
                     # (issue #14); the max keeps a later one a merge brought in (D1)
+                    # and so does its claim: SQLite's max() is NULL when either side is,
+                    # so a pre-upgrade issue (no generation) keeps the generation a merge
+                    # brought in instead of erasing it (Astra plan-r7 S1)
                     if proj["note_issued_at"] is not None and \
                             proj["note_issued_seq"] != proj["note_seq"]:
                         conn.execute("UPDATE projections SET note_other_issued_at="
-                                     "max(coalesce(note_other_issued_at, ''), note_issued_at)"
-                                     " WHERE pid=?", (pid,))
-                    conn.execute("UPDATE projections SET note_issued_at=?, note_issued_seq=?"
-                                 " WHERE pid=?", (db.now(), proj["note_seq"], pid))
+                                     "max(coalesce(note_other_issued_at, ''), note_issued_at),"
+                                     " note_other_issued_gen=CASE WHEN note_issued_gen IS NULL"
+                                     " THEN note_other_issued_gen ELSE"
+                                     " max(coalesce(note_other_issued_gen, 0), note_issued_gen)"
+                                     " END WHERE pid=?", (pid,))
+                    conn.execute("UPDATE projections SET note_issued_at=?, note_issued_seq=?,"
+                                 " note_issued_gen=? WHERE pid=?",
+                                 (db.now(), proj["note_seq"], gen, pid))
                 instructions = {**step, "workflow": gate["workflow"],
                                 "expected_generation": gate["expected_generation"],
                                 "expected_ledger": gate["expected_ledger"]}

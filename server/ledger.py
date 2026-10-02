@@ -122,6 +122,13 @@ def merge(conn, survivor: int, loser: int) -> None:
     if others:
         conn.execute("UPDATE projections SET note_other_issued_at=? WHERE pid=?",
                      (max(others), survivor))
+    # and so do their claims (INV-J11): a read under the loser's issuing claim must not
+    # confirm the survivor's note
+    gens = [g for g in (s["note_other_issued_gen"], lo["note_issued_gen"],
+                        lo["note_other_issued_gen"]) if g is not None]
+    if gens:
+        conn.execute("UPDATE projections SET note_other_issued_gen=? WHERE pid=?",
+                     (max(gens), survivor))
     if lo["search_state"] == "accepted-missing":
         conn.execute("UPDATE projections SET search_state='accepted-missing' WHERE pid=?",
                      (survivor,))
@@ -455,7 +462,8 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         for pid, r in stamped:
             p = lineage.projection(conn, pid)
             owed = sweep.owed_write(conn, pid, r["tags"],
-                                    sweep.note_confirmed(p, r["tag_revision"], epoch=epoch))
+                                    sweep.note_confirmed(p, r["tag_revision"], epoch=epoch,
+                                                      conn=conn))
             conn.execute("UPDATE projections SET observed_revision=? WHERE pid=?",
                          (p["revision"] if owed is None else None, pid))
         passes.remember_ledger(conn, cur_pass["pass_id"])   # identity proved above

@@ -18,7 +18,6 @@ import db  # noqa: E402
 import ledger  # noqa: E402
 import lineage  # noqa: E402
 import passes  # noqa: E402
-import steps  # noqa: E402
 import sweep  # noqa: E402
 
 T0 = dt.datetime(2026, 9, 1, 8, 0, tzinfo=dt.timezone.utc)
@@ -234,7 +233,7 @@ class TestTheNoteWindow(Base):
         self.assertIn(f"Accounting revision {seq_b}:", ins["add_note"])
         self.write(rid, ins)
         text = self.bf.call("get_transaction", row_id=rid)  # read inside the window
-        self.later(steps.CEILING_ASSUMED_S + 100)            # recorded after it
+        self.later(sweep.Z_S + 100)                          # recorded after it (spec §4: Z)
         self.assertEqual(self.record_read(rid, text)["instructions"], {})
         p = lineage.projection(self.conn, pid)
         # NULL-safe (design round D2, Terra S1): A's issue is kept as the "other" one
@@ -296,7 +295,8 @@ class TestNoteConfirmedRule(unittest.TestCase):
     def proj(self, **over):
         p = {"note_body": "b", "note_seq": 7, "note_seen_seq": 7, "note_seen_rev": 3,
              "note_seen_at": "2026-09-02T10:00:00Z", "note_issued_at": "2026-09-02T10:05:00Z",
-             "note_issued_seq": 7, "note_other_issued_at": None}
+             "note_issued_seq": 7, "note_other_issued_at": None,
+             "note_issued_gen": None, "note_other_issued_gen": None, "note_seen_gen": None}
         p.update(over)
         return p
 
@@ -307,10 +307,12 @@ class TestNoteConfirmedRule(unittest.TestCase):
         self.assertTrue(self.ok())
 
     def test_another_texts_issue_bounds_it_strictly(self):
+        # the margin is Z = sweep.Z_S = 900 s (spec §4), no longer the 600 s ceiling
+        self.assertEqual(sweep.Z_S, 900)
         self.assertFalse(self.ok(note_other_issued_at="2026-09-02T09:50:00Z"))
-        self.assertFalse(self.ok(note_other_issued_at="2026-09-02T09:50:00Z",
-                                 note_seen_at="2026-09-02T10:00:00Z"))   # exactly +600: not yet
-        self.assertTrue(self.ok(note_other_issued_at="2026-09-02T09:49:59Z"))
+        self.assertFalse(self.ok(note_other_issued_at="2026-09-02T09:45:00Z",
+                                 note_seen_at="2026-09-02T10:00:00Z"))   # exactly +Z: not yet
+        self.assertTrue(self.ok(note_other_issued_at="2026-09-02T09:44:59Z"))
 
     def test_an_issue_of_an_older_text_is_another_texts(self):
         # the last issue carried seq 6, the current note is 7
