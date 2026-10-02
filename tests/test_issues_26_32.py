@@ -335,6 +335,32 @@ class TestTheCheckEndsOnlyWhenItsChunkIsJudged(C):
                 self.assertEqual(self.call("end_pass", pass_token=c["pass_token"],
                                            outcome="complete")["outcome"], "complete")
 
+    def test_the_failed_judgments_token_and_notice_never_close_the_restarted_one(self):
+        # C5 (Terra S1, refuted): only the latest continuation's token finishes it
+        self.seed(3)
+        t = self.begin()
+        self.start(t)
+        self.clock.advance(steps.STEP_EXPIRY_S)
+        t1 = self.claim()["continue"]["pass_token"]
+        self.start(t1, step="judge")
+        self.call("record_step", pass_token=t1, step="judge", action="delegated",
+                  delegation_id="aaaaaaaa-0000-0000-0000-000000000001")
+        self.probe_import(t1)
+        self.call("record_step", pass_token=t1, step="judge", action="finish", failed=True)
+        c = self.claim()["continue"]
+        t2 = self.worked(c)
+        self.start(t2, step="judge")
+        self.call("record_step", pass_token=t2, step="judge", action="delegated",
+                  delegation_id="bbbbbbbb-0000-0000-0000-000000000002")
+        out = self.text("record_step", pass_token=t1, step="judge", action="finish",
+                        triage_remaining=0)
+        self.assertTrue(out.startswith("refused: this pass is no longer the current one"), out)
+        late = self.call("continue_pass", delegation_id="aaaaaaaa", delegation_status="ok")
+        self.assertEqual(late["running"]["step"], "judge")         # still running
+        row = self.conn.execute("SELECT finished_at FROM pass_steps WHERE step='judge'"
+                                " ORDER BY rowid DESC LIMIT 1").fetchone()
+        self.assertIsNone(row[0])
+
     def test_a_stopped_judgment_hands_out_nothing(self):
         self.seed(3)
         t = self.begin()
