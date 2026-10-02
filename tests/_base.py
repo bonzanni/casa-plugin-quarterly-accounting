@@ -93,6 +93,22 @@ class StoreCase(TempEnv):
                                   "instance": instance or self.LEDGER})
         return token
 
+    def start_job_pass(self, token, trigger="operator"):
+        """A job pass started under claim `token` (S2 §3), held by that claim's job id —
+        as the job cursor's _begin_next starts one. Returns its pass_id."""
+        import db
+        import json
+        import passes
+        with db.tx(self.conn):
+            _, pass_id = passes.start_pass(self.conn, trigger,
+                                           "silent" if trigger == "cron" else "telegram",
+                                           protocol="job", token=token)
+            job_id = self.conn.execute("SELECT job_id FROM claims WHERE gen=?",
+                                       (token,)).fetchone()[0]
+            self.conn.execute("UPDATE passes SET holder_job=?, adopters_json=? WHERE pass_id=?",
+                              (job_id, json.dumps([job_id]), pass_id))
+        return pass_id
+
     def end_live_pass(self):
         """End the live pass, if any, with its current token (the marker's: a claim
         rotates it past the pass's own generation)."""
