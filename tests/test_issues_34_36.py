@@ -138,6 +138,25 @@ class TestARejectionSticks(Base):
                                            (mid,)).fetchone()[0], "rejected")
         self.assertNotEqual(lineage.projection(self.conn, twin)["status"], "proposed")
 
+    def test_a_merge_does_not_offer_a_rejected_document_as_a_candidate(self):
+        # C2 (Astra S1): the collision makes it conflicted before the rule looks
+        rejected = self.doc(document_number="REJECTED")
+        self.reject(self.machine(rejected)["match_id"])
+        self.machine(self.doc(document_number="OTHER"))
+        self.row(2)
+        twin = self.lineage_for(2)
+        self.classify(twin, {"software"})
+        self.settle(twin)
+        mid = self.machine(rejected, pid=twin)["match_id"]
+        with db.tx(self.conn):
+            ledger.merge(self.conn, twin, self.pid)
+            lineage.settle(self.conn, twin)
+        self.assertEqual(self.conn.execute("SELECT state FROM match_state WHERE match_id=?",
+                                           (mid,)).fetchone()[0], "rejected")
+        d = work.describe(self.conn, twin)
+        self.assertNotIn(rejected, [c["document"]["doc_id"] for c in d["candidates"]])
+        self.assertNotIn("REJECTED", " ".join(views.evidence(d)))
+
     def test_the_same_rate_written_differently_is_the_same_evidence(self):
         # C1 (Astra S1)
         self.row(1, fx_rate="1.10", fx_unit="EUR")

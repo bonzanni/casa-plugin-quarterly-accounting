@@ -175,8 +175,10 @@ def _operator_rejections(conn, pid, proj, st, exp, row) -> list:
     if proj["ended"] or row is None or exp.unknown:
         return []
     out = []
-    for c in st.active():
-        if c.author != "auto":
+    # a conflicted candidate too (C2, Astra S1): a merge's collision makes it one before
+    # this rule looks, and the review would still offer it
+    for c in st.cands.values():
+        if c.author != "auto" or c.state not in F.ACTIVE + ("conflicted",):
             continue
         doc = documents._doc(conn, c.doc_id)
         if matches.rejected_by_operator(conn, pid, doc, R.facts_of(row), exp.kind,
