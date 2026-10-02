@@ -1546,9 +1546,13 @@ page and `job_next(judged=…)` with that page's `next` and `remaining`.
   `self.token`).
 - `next_until(token, unit)` continues an existing claim.
 
+Also write `tests/test_s2_package_rounds.py` now, exactly as listed under Task 8 (Astra
+plan-r5 S2: Task 7's cursor already implements package rounds, so their red checkpoint
+belongs here).
+
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `python3 -m unittest tests.test_s2_cursor -v`
+Run: `python3 -m unittest tests.test_s2_cursor tests.test_s2_package_rounds -v`
 Expected: FAIL (`next_unit` is missing).
 
 - [ ] **Step 3: Implement** in `server/job.py`:
@@ -1867,13 +1871,17 @@ Run: `python3 -m unittest tests.test_s2_cursor -v`, then the suite. Expected: PA
 - [ ] **Step 5: Commit**
 
 ```bash
-git add server/job.py tests/sim_job.py tests/test_s2_cursor.py
+git add server/job.py tests/sim_job.py tests/test_s2_cursor.py tests/test_s2_package_rounds.py
 git commit -m "feat(s2): job_next's cursor for a check pass — acquisition, sweep, Gmail chunks, judge, end"
 ```
 
 ---
 
-### Task 8: The cursor, part 2 — package rounds in the job
+### Task 8: Package rounds — FOLDED INTO TASK 7
+
+**Folded into Task 7 (Astra plan-r5 S2).** The tests below are written in Task 7's Step 1 and
+pass with Task 7's code. The text below documents them; Task 8 has no steps of its own. Skip
+to Task 9.
 
 **Files:**
 - Modify: `server/job.py`
@@ -2426,7 +2434,10 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-`record_observation`:
+`record_observation`, **only when the live pass is a job pass** (`job.live_job_pass(conn)
+is not None`). A delegation-protocol observation leaves every generation NULL, so the existing
+path, its callers and `TestTheNoteWindow` (`tests/test_export_classification.py:229`, no
+`conn`) are unchanged (Terra plan-r5 S1):
 - Where `note_issued_at`/`note_issued_seq` are set, also set
   `note_issued_gen = int(token)`.
 - Where `note_other_issued_at` is maxed, set
@@ -2703,19 +2714,16 @@ hard-coded, set `acct@0.9.0`.
   `queued` and `meta.drain` is `none`. `<when>` uses the existing "N minutes ago" wording of
   `passes.BUSY`.
 
-- [ ] **Step 4: Run the tests**
+- [ ] **Step 4: Run the tests (not the whole suite yet)**
 
-Run: `python3 -m unittest tests.test_s2_surface tests.test_tools tests.test_alerts tests.test_views -v`,
-then the suite. Expected: PASS. `tests/test_tools.py` tests that called the removed tools
+Run: `python3 -m unittest tests.test_s2_surface tests.test_tools tests.test_alerts tests.test_views -v`.
+Expected: PASS. **Do not run the whole suite or commit here.** Removing the old tools leaves
+`tests/test_skill.py`'s skill-contract tests red until Task 13 rewrites the skills (Astra
+plan-r5 S1). Tasks 12 and 13 are one checkpoint: continue with Task 13. `tests/test_tools.py` tests that called the removed tools
 through the tool layer are changed to call the internal functions (`passes.begin_pass` etc.),
 or deleted when they test only the tool wrapper. Name each in the commit.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add server/tools.py server/alerts.py server/views.py server/binding.py server/version.py .claude-plugin/plugin.json tests/test_s2_surface.py tests/test_tools.py
-git commit -m "feat(s2): the job tool surface and casa.jobs; no-Gmail wording; a waiting check is visible"
-```
+- [ ] **Step 5: No commit here** (see Step 4). Task 13's commit includes this task's files.
 
 ---
 
@@ -2842,9 +2850,12 @@ Body, in this order:
 - [ ] **Step 5: Commit**
 
 ```bash
-git add skills/ tests/test_skill.py README.md
-git commit -m "feat(s2): the job's own skill; Ellen's skill keeps only asking, relaying and sending"
+git add server/tools.py server/alerts.py server/views.py server/binding.py server/version.py .claude-plugin/plugin.json tests/test_s2_surface.py tests/test_tools.py skills/ tests/test_skill.py README.md
+git commit -m "feat(s2): the job tool surface and casa.jobs, the job's own skill, Ellen's thin interim; no-Gmail wording; a waiting check is visible"
 ```
+
+This one commit covers Tasks 12 and 13 (Astra plan-r5 S1): the suite is green at it and at no
+point in between.
 
 ---
 
