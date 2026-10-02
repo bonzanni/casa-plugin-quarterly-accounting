@@ -10,7 +10,7 @@ import unittest
 import zipfile
 
 from tests._base import StoreCase
-from tests import bankfeed, sim
+from tests import _base, bankfeed, sim
 import binding  # noqa: E402
 import db  # noqa: E402
 import documents  # noqa: E402
@@ -485,8 +485,10 @@ class ToolFlow(Base):
         # issue #15: the rest of the round — the Gmail round's probe, the quarter's items
         # searched, a whole judge step
         self.call("record_probe", pass_token=token, kind="gmail", ok=True)
-        for it in self.call("list_quarter_state", triage=True, quarter="2026-Q3",
-                            pass_token=token)["triage"]:
+        items = self.call("list_quarter_state", triage=True, quarter="2026-Q3",
+                          pass_token=token)["triage"]
+        _base.hand(self.conn, [it["pid"] for it in items])     # issue #26: handed work
+        for it in items:
             self.call("record_search", pid=it["pid"], pass_token=token, queries=["q"])
         self.call("record_step", pass_token=token, step="judge", action="start")
         self.call("record_step", pass_token=token, step="judge", action="finish",

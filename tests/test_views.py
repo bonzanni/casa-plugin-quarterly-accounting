@@ -40,6 +40,7 @@ class Base(StoreCase):
                               (observed, pid))
         self.settle(pid)
         if searched:                # the pass looked; a never-searched item is not `missing`
+            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=self.token, queries=["x"])
         return pid
 
@@ -194,7 +195,7 @@ class TestSheet(Base):
         self.assertNotIn("New1", text)
         self.assertNotIn("not checked yet", text)    # could not look is not "not reached"
         self.assertIn("3 transactions, 1 missing a document.", flat(text))
-        passes.end_pass(self.conn, self.token, "interrupted", {"checked": 18, "total": 30})
+        self.end_with_counts(self.token, "interrupted", {"checked": 18, "total": 30})
         text = self.render()["text"]
         self.assertIn("Review interrupted.\n18 of 30 new payments checked.\n12 not checked yet. Saved.",
                       text)
@@ -406,7 +407,7 @@ class TestSheet(Base):
     def test_an_interrupted_pass_says_not_checked_once(self):
         self.add(counterparty="Seen")
         self.add(counterparty="Unreached", searched=False)
-        passes.end_pass(self.conn, self.token, "interrupted", {"checked": 1, "total": 2})
+        self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 2})
         text = self.render()["text"]
         self.assertIn("Review interrupted.\n1 of 2 new payments checked.\n1 not checked yet. Saved.",
                       text)
@@ -417,7 +418,7 @@ class TestSheet(Base):
         # erase what the interrupted review still owes the operator.
         self.add(counterparty="Seen")
         self.add(counterparty="Unreached", searched=False)
-        passes.end_pass(self.conn, self.token, "interrupted", {"checked": 1, "total": 2})
+        self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 2})
         for trigger in ("package", "handover"):
             tok = self.pass_(trigger=trigger)
             passes.end_pass(self.conn, tok, "complete", {})
@@ -440,7 +441,7 @@ class TestSheet(Base):
         for i in range(3):
             self._older(f"OldNew{i}", searched=False)
         self.add(counterparty="NowSeen", tags=("internal-transfer",))
-        passes.end_pass(self.conn, self.token, "interrupted", {"checked": 1, "total": 4})
+        self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 4})
         text = self.render()["text"]
         self.assertIn('+3 older not searched yet (Q2) — say "show older"', flat(text))
         older = self.render("older")["text"]

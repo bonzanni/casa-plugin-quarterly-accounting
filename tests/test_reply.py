@@ -46,6 +46,7 @@ class Base(StoreCase):
             # searched", not "missing", and a status/missing sheet counts it
             # without printing it (Task 16, spec §Weekly pass "four states stay
             # distinct"). These fixtures mean a MISSING line the operator saw.
+            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=self.token, queries=[cp])
         if paired:
             d = self.doc(counterparty=cp, issuer=cp, amount_minor=amount, document_date=day)

@@ -16,6 +16,13 @@ import lineage
 import reducer as R
 
 AGE_OUT_PASSES = 3
+# issue #26: the count moves at most once per this many seconds (the weekly cron's cadence,
+# with slack), so back-to-back checks — honest or replayed — never age a payment out
+AGE_OUT_SPACING_S = 6 * 24 * 3600
+# issue #26 (D1, Terra S1): age-out is a back-off, never terminal — an aged-out payment is
+# searched again this long after its last counted search, so no record (replayed or not)
+# can take it out of the search for good
+AGE_OUT_REARM_S = 28 * 24 * 3600
 QUERY_CLIP = 200           # one recorded search query (issue #3: the record is bounded)
 
 
@@ -44,6 +51,18 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
         search = json.loads(p["search_json"] or "{}")
         cur = passes.current_pass(conn)
         pass_id = cur["pass_id"] if cur else None
+        if token is not None and pass_id is not None:
+            # issue #26/#28 (A4): a search is recorded only for the work handed out — the
+            # open chunk's payments. A call without effort (an identity question, a bare
+            # incomplete, a quiet revive) is accepted anywhere, as before
+            import steps
+            in_chunk = steps.chunk_has(conn, pass_id, pid)
+            if effort and not in_chunk:
+                raise db.Refusal(f"payment #{pid} is not in the work you were handed: search "
+                                 "and record only the open Gmail chunk's items (the "
+                                 "continuation's work and more_work's) — nothing was written")
+            if in_chunk:
+                steps.chunk_recorded(conn, pass_id, pid)
         state, streak = p["search_state"], p["passes_without_candidate"]
         if revive:
             state, streak = "active", 0
@@ -52,10 +71,19 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
             # No search effort was spent here: a quiet revive (state/streak above), an
             # identity-only call, and/or an incomplete-only call (the pass never reached
             # this item) move nothing else.
-            conn.execute("UPDATE projections SET search_state=?, passes_without_candidate=?,"
-                         " identity_question=? WHERE pid=?", (state, streak, identity, pid))
+            if identity_unknown and token is not None:
+                # issue #27: the payee is unknown — this check (or package round) asked,
+                # and does not hand the item out again; the next one does
+                search["identity_seq"] = db.next_seq(conn)
+                live = lineage.live_row(conn, p)
+                search["identity_fp"] = (db.canonical(R.facts_of(live))
+                                         if live is not None else None)
+            conn.execute("UPDATE projections SET search_json=?, search_state=?,"
+                         " passes_without_candidate=?, identity_question=? WHERE pid=?",
+                         (db.canonical(search), state, streak, identity, pid))
             lineage.settle(conn, pid)
             return {"pid": pid, "search_state": state, "passes_without_candidate": streak}
+        may_count = _may_count(search)         # before this search's own stamps
         if queries:
             had = search.get("queries", [])
             new = []
@@ -80,9 +108,12 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
             pass
         elif found_candidate:
             streak = 0
-        elif not revive and pass_id and search.get("last_counted_pass") != pass_id:
+            if state == "aged-out":
+                state = "active"            # B4: a re-armed search that found something
+        elif not revive and pass_id and may_count:
             streak += 1
             search["last_counted_pass"] = pass_id
+            search["last_counted_at"] = db.now()
         if not owed_only and state == "active" and streak >= AGE_OUT_PASSES:
             state = "aged-out"
         conn.execute("UPDATE projections SET search_json=?, search_state=?,"
@@ -90,6 +121,34 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
                      (db.canonical(search), state, streak, identity, pid))
         lineage.settle(conn, pid)
         return {"pid": pid, "search_state": state, "passes_without_candidate": streak}
+
+
+def _counted_age(search: dict):
+    """Seconds since the search's last counted (age-out) search, or None if none. A record
+    from before 0.7.0 (a pass id, no time) is taken as counted at its last search: the
+    conservative reading."""
+    import datetime as _dt
+    at = search.get("last_counted_at")
+    if at is None and search.get("last_counted_pass"):
+        at = search.get("last_searched_at")
+    if at is None:
+        return None
+    then = _dt.datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
+    return (db._clock() - then).total_seconds()
+
+
+def _may_count(search: dict) -> bool:
+    """Issue #26: may a fruitless search move the age-out count now? Only once per
+    AGE_OUT_SPACING_S."""
+    age = _counted_age(search)
+    return age is None or age >= AGE_OUT_SPACING_S
+
+
+def rearmed(search: dict) -> bool:
+    """Issue #26 (B4): an aged-out payment is due a search again AGE_OUT_REARM_S after its
+    last counted search."""
+    age = _counted_age(search)
+    return age is None or age >= AGE_OUT_REARM_S
 
 
 def quarter_pids(conn, quarter: str) -> list:
@@ -195,7 +254,9 @@ def _needs_search(d: dict) -> bool:
     kind = d["expectation"]["kind"]
     if d["ended"] or d["status"] in ("ineligible", "exempt", "no-document") or kind is None:
         return False
-    if kind == "none" or d["search_state"] != "active":
+    if kind == "none" or d["search_state"] == "accepted-missing":
+        return False
+    if d["search_state"] == "aged-out" and not rearmed(d["search"]):
         return False
     cur = d["current"]
     if cur is None:
@@ -223,6 +284,7 @@ FILING_HEAD = 2       # a pass's first chunk: the self-addressed search, list_in
 FILINGS_FIRST = 8     # ... and at most this many files attempted from those two
 FILING_COST = 3       # a file attempted: list + download + ingest (Telegram: share + ingest)
 ITEM_COST = 11        # an item: <= 4 queries, <= 2 tries (list, download, ingest), its record_search
+MORE_MARGIN = 8       # issue #31: more_work's slack against a miscounted calls_made
 
 
 def chunk_size(first: bool) -> int:
@@ -347,6 +409,26 @@ def searched_since(d: dict, seq: int) -> bool:
         and srch.get("facts_fp") == db.canonical(d["row_snapshot"]))
 
 
+def handled_since(d: dict, seq: int) -> bool:
+    """Issue #27: searched since `seq` — or its payee recorded unknown since `seq`, for the
+    payment's facts as they are now: the work has done what it can for it (asked who the
+    payee is), so it is not handed out again and counts as checked."""
+    if searched_since(d, seq):
+        return True
+    srch = d["search"]
+    return (srch.get("identity_seq") or 0) > seq and (
+        d["row_snapshot"] is not None
+        and srch.get("identity_fp") == db.canonical(d["row_snapshot"]))
+
+
+def hand_order(d: dict) -> tuple:
+    """Issue #31: the order work is handed out in — required before optional, then never
+    searched before searched, the longest unsearched first, then pid. A back-to-back
+    check starts where the previous one stopped."""
+    return (d["expectation"]["tier"] != "required", d["search"].get("searched_seq") or 0,
+            d["pid"])
+
+
 def searched_for(d: dict, req) -> bool:
     """Issue #15: a search counts for package request `req` when it was made after the
     request was opened and the payment's facts are the ones searched for."""
@@ -362,7 +444,7 @@ def check_work(conn, since_seq: int, items=None, owed=()) -> list:
     merged one is searched once, under the pid it resolves to."""
     items = triage(conn) if items is None else items
     out = [d for d in items if d["fresh"] and not d["portal"]
-           and not searched_since(d, since_seq)]
+           and not handled_since(d, since_seq)]
     seen = {d["pid"] for d in items}
     for pid in owed:
         rpid = lineage.resolve_pid(conn, pid)
@@ -371,7 +453,7 @@ def check_work(conn, since_seq: int, items=None, owed=()) -> list:
         seen.add(rpid)
         d = describe(conn, rpid)
         if (not d["ended"] and d["fresh"] and not d["portal"]
-                and not searched_since(d, since_seq)):
+                and not handled_since(d, since_seq)):
             out.append(d)
     return out
 
@@ -399,7 +481,7 @@ def check_report(conn, owed: list, since_seq: int) -> dict:
         if d["ended"]:
             continue
         seen.add(rpid)
-        if not searched_since(d, since_seq):
+        if not handled_since(d, since_seq):
             not_searched += 1
     return {"checked": len(seen) - not_searched, "total": len(seen),
             "not_searched": not_searched}
@@ -409,7 +491,7 @@ def package_work(conn, req) -> list:
     """The request's quarter's Gmail work not yet searched for it: fresh triage items
     of the quarter (portals are skipped by the round, as always)."""
     return [d for d in triage(conn) if d["quarter"] == req["quarter"] and d["fresh"]
-            and not d["portal"] and not searched_for(d, req)]
+            and not d["portal"] and not handled_since(d, req["created_seq"])]
 
 
 def judge_due(conn) -> int:
@@ -440,14 +522,37 @@ def judge_due_state(conn, quarter=None) -> dict:
         "SELECT d.kind, d.amount_minor, d.currency FROM documents d JOIN document_status s"
         " ON s.doc_id=d.doc_id WHERE s.status='unmatched' AND d.irrelevant=0"
         " AND d.amount_minor IS NOT NULL")}
+    # D5 (Astra S2): a document in another currency (a USD invoice for a EUR charge) fits
+    # by its vendor window, not its amount — the judge proposes it (issue #30)
+    fx = [(r["kind"], r["currency"], r["document_date"]) for r in conn.execute(
+        "SELECT d.kind, d.currency, d.document_date FROM documents d JOIN document_status s"
+        " ON s.doc_id=d.doc_id WHERE s.status='unmatched' AND d.irrelevant=0"
+        " AND d.amount_minor IS NOT NULL AND d.currency IS NOT NULL"
+        " AND d.document_date IS NOT NULL")]
     out = {}
     for d in triage(conn):
         if not d["fresh"] or d["pending"] or (quarter and d["quarter"] != quarter):
             continue
         k, a = d["expectation"]["kind"], d["amount_minor"]
-        if (k, a, d["currency"]) in docs or (k, a, None) in docs:
+        if (k, a, d["currency"]) in docs or (k, a, None) in docs or _fx_fits(d, fx):
             out[d["pid"]] = d["revision"]
     return out
+
+
+def _fx_fits(d: dict, fx: list) -> bool:
+    if not d["date"]:
+        return False
+    day = dates.parse_day(d["date"])
+    for kind, cur, when in fx:
+        if kind != d["expectation"]["kind"] or cur == d["currency"]:
+            continue
+        try:
+            gap = abs((dates.parse_day(when[:10]) - day).days)
+        except (ValueError, db.Refusal):
+            continue
+        if gap <= (d["window_days"] or 10):
+            return True
+    return False
 
 
 def work_list(conn, req=None, since_seq=None, owed=(), first=True) -> dict:
@@ -463,14 +568,26 @@ def work_list(conn, req=None, since_seq=None, owed=(), first=True) -> dict:
     not_fresh = sum(1 for d in items if not d["fresh"])
     items = [d for d in items if d["fresh"]]
     if req is not None:
-        items = [d for d in items if not d["portal"] and not searched_for(d, req)]
+        items = [d for d in items if not d["portal"]
+                 and not handled_since(d, req["created_seq"])]
     elif since_seq is not None:
         items = check_work(conn, since_seq, items, owed)
-    limit = (TRIAGE_LIMIT if req is None and since_seq is None
-             else chunk_size(first))
-    pg = _paged(items, None, limit, work_item)
-    return {"triage": pg["shown"], "total": len(items), "truncated": pg["remaining"] > 0,
-            "remaining": pg["remaining"], "not_fresh": not_fresh, "notice": NOTICE_TRIAGE}
+    if req is None and since_seq is None:
+        pg = _paged(items, None, TRIAGE_LIMIT, work_item)
+        shown, rest = pg["shown"], pg["remaining"]
+    else:
+        # a chunk is cut in hand-out order (issue #31), not pid order
+        shown, rest = cut(items, chunk_size(first))
+    return {"triage": shown, "total": len(items), "truncated": rest > 0,
+            "remaining": rest, "not_fresh": not_fresh, "notice": NOTICE_TRIAGE}
+
+
+def cut(items: list, limit: int, leave=()) -> tuple:
+    """The next `limit` items of `items` in hand-out order, leaving out the pids in
+    `leave`, within the page budget: (work items, how many were left)."""
+    items = sorted((d for d in items if d["pid"] not in set(leave)), key=hand_order)
+    return budget.page([work_item(d) for d in items], limit,
+                       ident=lambda v: f"payment #{v['pid']}")
 
 
 def dates_unread(d: dict) -> bool:

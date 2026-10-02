@@ -541,5 +541,31 @@ class TestIssues17To19(TempEnv):
         self.assertIn("a judge step's finish without `triage_remaining` is refused", fin)
 
 
+class TestIssues26To32(unittest.TestCase):
+    """The skill half of issues #26–#32 (design 2026-10-02-issues-26-32-design.md)."""
+    def test_only_what_was_run_in_this_turn_is_recorded(self):
+        flat = " ".join(SKILL.split())
+        self.assertIn("`queries` are exactly the queries you ran with `search_emails` for this "
+                      "item in this turn", flat)
+        self.assertIn("Search and record only the items you were handed", flat)
+
+    def test_more_work_fills_the_turn(self):
+        flat = " ".join(SKILL.split())
+        self.assertIn("`more_work(pass_token, calls_made=<every tool call you made in this "
+                      "turn so far", flat)
+        self.assertIn("then `more_work` as there, until it hands out none", flat)
+
+    def test_end_pass_refusals_are_followed_and_counts_are_the_servers(self):
+        flat = " ".join(SKILL.split())
+        self.assertIn("never that payments wait on them because they were not searched", flat)
+        self.assertIn("the pass cannot end while a chunk you were handed is unjudged", flat)
+
+    def test_a_foreign_currency_invoice_is_proposed_and_amounts_are_read(self):
+        flat = " ".join(SKILL.split())
+        self.assertIn("prints the payment's exact amount in the payment's currency", flat)
+        self.assertIn("prints no amount in the payment's currency: `propose_match`", flat)
+        self.assertIn("A pairing needs the document's amount", flat)
+
+
 if __name__ == "__main__":
     unittest.main()

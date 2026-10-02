@@ -56,6 +56,11 @@ class StoreCase(TempEnv):
 
     LEDGER = "a" * 32             # the bank-feed ledger instance id the fixtures bind to
 
+    def handed(self, *pids):
+        """Put payments in the live pass's open Gmail chunk (issue #26, A4: a search is
+        recorded only for handed work), as a continuation's hand-out would."""
+        hand(self.conn, pids)
+
     def pass_(self, trigger="test", generation=0, registered=None, accounts=None,
               instance=None):
         """End any live pass, begin a new one, record the probes a real pass
@@ -82,7 +87,25 @@ class StoreCase(TempEnv):
         import passes
         m = self.conn.execute("SELECT generation, live FROM pass_marker").fetchone()
         if m is not None and m["live"]:
+            close_chunk(self.conn)
             passes.end_pass(self.conn, m["generation"], "complete", {})
+
+    def end_with_counts(self, token, outcome, counts):
+        """End the live pass and store `counts` as its report, as the server computes them
+        for a check (issue #29: end_pass never stores the caller's) — for a view test that
+        needs an interrupted check's counts without running its Gmail round."""
+        import passes
+        close_chunk(self.conn)
+        out = passes.end_pass(self.conn, token, outcome, {})
+        import db
+        import json
+        with db.tx(self.conn):
+            row = self.conn.execute("SELECT report_json FROM passes WHERE pass_id=?",
+                                    (out["ended"],)).fetchone()
+            rep = {**json.loads(row[0] or "{}"), **counts}
+            self.conn.execute("UPDATE passes SET report_json=? WHERE pass_id=?",
+                              (db.canonical(rep), out["ended"]))
+        return out
 
     def package_token(self, quarter="2026-Q3", channel="telegram"):
         """A package request as the skill makes one — begin_pass(package, quarter,
@@ -236,3 +259,49 @@ class StoreCase(TempEnv):
     def snapshot(self, pid):
         import lineage
         return lineage.live_row(self.conn, lineage.projection(self.conn, pid))
+
+
+def hand(conn, pids):
+    """The open Gmail chunk of the live pass, holding `pids` too (see StoreCase.handed).
+    A pass with no first step gets a finished sweep step to carry it."""
+    import json
+    import db
+    import passes
+    m = passes._marker(conn)
+    first = "snapshot" if conn.execute(
+        "SELECT 1 FROM package_requests WHERE pass_id=? AND state='snapshot'",
+        (m["pass_id"],)).fetchone() else "sweep"
+    with db.tx(conn):
+        row = conn.execute("SELECT carry_json FROM pass_steps WHERE pass_id=? AND step=?",
+                           (m["pass_id"], first)).fetchone()
+        carry = json.loads(row[0] or "{}") if row is not None else {}
+        old = carry.get("chunk") or {}
+        keep = old.get("pids", []) if old.get("open") else []
+        carry["chunk"] = {"pids": sorted(set(keep) | set(pids)), "recorded": [],
+                          "open": True, "calls": None, "more": 0}
+        if row is None:
+            conn.execute("INSERT INTO pass_steps(pass_id, step, started_at, finished_at,"
+                         " finished_by, finish_json, carry_json) VALUES (?,?,?,?,?,?,?)",
+                         (m["pass_id"], first, db.now(), db.now(), "specialist", "{}",
+                          db.canonical(carry)))
+        else:
+            conn.execute("UPDATE pass_steps SET carry_json=? WHERE pass_id=? AND step=?",
+                         (db.canonical(carry), m["pass_id"], first))
+
+
+def close_chunk(conn):
+    """Close the live pass's open Gmail chunk, as a judge start does (test setup only)."""
+    import json
+    import db
+    import passes
+    m = passes._marker(conn)
+    if m is None or not m["live"]:
+        return
+    with db.tx(conn):
+        for r in conn.execute("SELECT step, carry_json FROM pass_steps WHERE pass_id=?"
+                              " AND step IN ('sweep', 'snapshot')", (m["pass_id"],)).fetchall():
+            carry = json.loads(r["carry_json"] or "{}")
+            if carry.get("chunk", {}).get("open"):
+                carry["chunk"]["open"] = False
+                conn.execute("UPDATE pass_steps SET carry_json=? WHERE pass_id=? AND step=?",
+                             (db.canonical(carry), m["pass_id"], r["step"]))

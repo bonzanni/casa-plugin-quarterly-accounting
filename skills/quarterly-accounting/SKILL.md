@@ -287,8 +287,22 @@ pass, whichever comes first:
      pass_token=…)`. Record the item with `record_search(pid, pass_token, queries=[…],
      found_candidate=…, exhausted=…, incomplete=…)`: `exhausted=true` only when the ideas
      ran out, `incomplete=true` when you stopped at the 4 queries. An item may have been
-     paired since it was handed out; search it all the same.
-5. After a chunk with any item in it (the Gmail probe ok), always go on to the judge step.
+     paired since it was handed out; search it all the same. Record only what you did in
+     this turn: `queries` are exactly the queries you ran with `search_emails` for this
+     item in this turn — never one from an earlier turn, pass or list, and never one you
+     planned but did not run. An item you did not search is recorded with no queries and
+     `incomplete=true`. Search and record only the items you were handed (the
+     continuation's `work`, and `more_work`'s): any other is refused. A payee you cannot
+     identify: `record_search(pid, pass_token, identity_unknown=true)`, no queries — it is
+     not handed out again in this check.
+   - **More work.** When every item you were handed is recorded and the probe was ok, call
+     `more_work(pass_token, calls_made=<every tool call you made in this turn so far,
+     failed ones included, not counting this one>)`. Count them from the turn's start; do
+     not guess low. It hands out the items that still fit in your turn: work them the same
+     way, one at a time, then call `more_work` again. When it hands out none (`next:
+     "judge"`), go on to step 5.
+5. After a chunk with any item in it (the Gmail probe ok), always go on to the judge step:
+   the pass cannot end while a chunk you were handed is unjudged.
    Otherwise, only if anything was filed, or the continuation's `finish` says
    `triage_remaining` above 0, or its `judge_due` is above 0, or the sweep ended unfinished
    (`ended` is `expired` or `errored`) — else step 6:
@@ -300,10 +314,13 @@ pass, whichever comes first:
    continuation's `next` is `gmail-round` — the next chunk: steps 4 and 5 again, with ITS
    token and work — or `end-pass` (step 6), with the check's `report`.
 6. `end_pass(pass_token, outcome, report)` by the outcome rule above. If it refuses
-   because a payment was not judged in this pass (`not ended: …`), do what it says:
-   start the judge step (step 5) and end the pass after it, or end it `interrupted`. Report `{checked,
-   total, not_searched}` — after step 5, the continuation's `report` (the server counts the
-   whole check, every chunk; never add to it). If it returns `speak`,
+   (`not ended: …`, `not complete: …`), do what it says: search and record the chunk's
+   items, start the judge step (step 5) and end the pass after its continuation, call
+   `continue_pass` for a Gmail round never handed out, or end it `interrupted`. The pass
+   stores the server's own counts, whatever `report` says: pass the continuation's
+   `report` after step 5 (the server counts the whole check, every chunk; never add to it). Tell the operator only what the answer's
+   `report` and `build_review` say — never that payments wait on them because they were
+   not searched. If it returns `speak`,
    send its text verbatim — a long alert's remainder comes with the next `speak` — call
    `mark_rendering_delivered` with its `render_id`, then output `<silent/>`. If not: on the
    cron, output `<silent/>` and nothing else; for the operator, render and send
@@ -445,7 +462,9 @@ named in your context. Your one expectation write is in step 6.
    - the document is filed, is that kind, and reads as that kind (an invoice, not a quotation
      or order confirmation; a credit note only for a credit-note expectation; for a CRDT, a
      sales invoice the business issued);
-   - the gross amount and currency are exactly equal;
+   - the gross amount and currency are exactly equal — or the document is in another
+     currency and prints the payment's exact amount in the payment's currency (the amount
+     charged, or a total at a printed rate that gives exactly that amount);
    - the document date is within the vendor's window (default 10 days) of the booking date.
 
    Where several fit, pick the best (payment reference or invoice number first, then the
@@ -456,6 +475,18 @@ named in your context. Your one expectation write is in step 6.
    - `recipient?` — the document does not name the business in the right role (the recipient
      of a purchase invoice or a vendor credit note; the issuer of a sales invoice or the
      business's own credit note).
+
+   A document in another currency (a USD invoice for a EUR card charge) that is the
+   vendor's, of the expected kind and dated within the vendor's window, but prints no amount
+   in the payment's currency: `propose_match`, with a `rationale` naming both amounts — the
+   operator confirms it. Where several fit, the closest date, the others as `runners_up`
+   with `guessed`. Never leave such a document unpaired: the package would list its
+   payment as missing.
+
+   A pairing needs the document's amount: when the filed reading has none, read the total
+   and currency on the document and `update_document_metadata(doc_id, amount_minor=…,
+   currency=…, pass_token=…)` first (a pairing without one is refused; the amount names the
+   file in the package).
 
    Only when two candidates are indistinguishable, `propose_match` instead. Pass the item's
    `row_digest` from `list_quarter_state` as `row_digest` (never build one yourself: it
@@ -537,7 +568,8 @@ done, however many rounds that takes; say nothing in between.
      pass's step 4 says: the probe; the filing at the snapshot's continuation only (its
      `step` is `snapshot`; at most 8 files, skipping its `filed_refs`), not at later
      chunks; then ONE ITEM AT A TIME, each recorded before the next, within the per-item
-     limits. Then, always,
+     limits, recording only what you ran in this turn; then `more_work` as there, until it
+     hands out none. Then, always,
      `record_step(pass_token, step="judge", action="start", report={checked,
      total, not_searched})` and delegate "judge the newly filed documents and the payments
      triage did not reach, for <quarter> only", `mode="async"`, with context

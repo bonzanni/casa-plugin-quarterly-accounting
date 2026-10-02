@@ -12,6 +12,8 @@ a match compares are handed out as a digest, and every paged list is a stateless
 cursor over an order that never changes (pids, doc_ids)."""
 import json
 import unittest
+
+from tests import _base
 from unittest import mock
 
 from tests.test_continuation import Flow
@@ -51,6 +53,7 @@ class Bounded(Flow):
         self.sweep(self.t1)
         pids = sorted(d["pid"] for d in work.triage(self.conn))
         self.assertEqual(len(pids), N)
+        _base.hand(self.conn, pids)                     # issue #26: handed work only
         for pid in pids:                                # 50 long queries each
             self.call("record_search", pid=pid, pass_token=self.t1,
                       queries=[f"q{j} " + "has:attachment adobe invoice " * 12 for j in range(50)])
@@ -89,6 +92,8 @@ class Bounded(Flow):
         # the new token works: the Gmail round and the end
         self.call("record_search", pid=w["triage"][0]["pid"], pass_token=c["pass_token"],
                   incomplete=True)
+        # issue #28: Gmail down — the chunk is not owed its search and judgment
+        self.call("record_probe", pass_token=c["pass_token"], kind="gmail", ok=False)
         end = self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted",
                         report={"checked": 0, "total": N, "not_searched": N})
         self.assertEqual(end["outcome"], "interrupted")
@@ -323,6 +328,8 @@ class TestJudgeDue(Flow):
         self.start(t1)
         self.specialist(t1)
         t2 = self.claim()["continue"]["pass_token"]
+        # Gmail down (issue #28: otherwise the handed chunk is owed first)
+        self.call("record_probe", pass_token=t2, kind="gmail", ok=False)
         out = self.text("end_pass", pass_token=t2, outcome="complete")
         self.assertTrue(out.startswith("refused: not ended: 1 payment with a filed document"),
                         out)
@@ -334,7 +341,7 @@ class TestJudgeDue(Flow):
         t1 = self.begin()
         self.start(t1)
         self.specialist(t1)
-        t2 = self.claim()["continue"]["pass_token"]
+        t2 = self.worked(self.claim()["continue"])
         self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
         self.specialist(t2, step="judge")
         t3 = self.claim()["continue"]["pass_token"]
@@ -347,7 +354,7 @@ class TestJudgeDue(Flow):
         t1 = self.begin()
         self.start(t1)
         self.specialist(t1)
-        t2 = self.claim()["continue"]["pass_token"]
+        t2 = self.worked(self.claim()["continue"])
         self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
         self.clock.advance(3600)                       # the judge delegation never answers
         c = self.claim()["continue"]
@@ -364,7 +371,7 @@ class TestJudgeDue(Flow):
         t1 = self.begin()
         self.start(t1)
         self.specialist(t1)
-        t2 = self.claim()["continue"]["pass_token"]
+        t2 = self.worked(self.claim()["continue"])
         self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
         due = set(work.judge_due_pids(self.conn))
         self.assertEqual(len(due), 1)
@@ -384,7 +391,7 @@ class TestJudgeDue(Flow):
         t1 = self.begin()
         self.start(t1)
         self.specialist(t1)
-        t2 = self.claim()["continue"]["pass_token"]
+        t2 = self.worked(self.claim()["continue"])
         self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
         return t2
 

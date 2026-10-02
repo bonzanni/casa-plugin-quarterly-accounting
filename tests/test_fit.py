@@ -105,6 +105,7 @@ class Base(StoreCase):
                                  expected_revision=self.rev(pid), row_snapshot=self.snapshot(pid),
                                  token=self.token, labels=("guessed",))
         else:
+            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=self.token, queries=[cp])
         return pid
 

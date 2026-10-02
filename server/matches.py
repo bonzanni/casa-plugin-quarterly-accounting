@@ -130,6 +130,12 @@ def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runn
                 lineage.add_residue(conn, pid, "exempt-doc", detail)
             return {"applied": False, "refused": "the operator exempted this payment; a document "
                                                  "that turned up for it is shown as residue"}
+        if doc["amount_minor"] is None:
+            # issue #32: the bar compares amounts, so a document whose amount was never
+            # read cannot be shown to meet it (and its package file would carry none)
+            raise db.Refusal("this document's amount was never read: read its amount and "
+                             "currency on the document, update_document_metadata(doc_id, "
+                             "amount_minor=…, currency=…, pass_token=…), then pair it")
         if row["status"] != "BOOK":
             raise db.Refusal("a pending payment is not matched automatically")
         if (row_snapshot is None) == (row_digest is None):

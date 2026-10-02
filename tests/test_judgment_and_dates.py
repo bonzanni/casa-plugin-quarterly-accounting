@@ -12,6 +12,8 @@ from tests.test_package_rounds import Rounds
 import db  # noqa: E402
 
 NOT_JUDGED = "refused: not ended: this package round has not judged its quarter"
+# issue #28 (A6): a round whose Gmail chunk was worked is asked for its judgment first
+CHUNK_NOT_JUDGED = "refused: not ended: this Gmail chunk is recorded but not judged"
 
 
 class TestJudgeFinish(Rounds):
@@ -24,7 +26,8 @@ class TestJudgeFinish(Rounds):
         return t
 
     def judge_row(self):
-        return self.conn.execute("SELECT * FROM pass_steps WHERE step='judge'").fetchone()
+        return self.conn.execute("SELECT * FROM pass_steps WHERE step='judge'"
+                                 " ORDER BY rowid DESC LIMIT 1").fetchone()
 
     def test_a_finish_with_counts_but_no_triage_remaining_is_refused_and_leaves_it_open(self):
         # the issue's call: record_step(judge, finish, remaining_in_cycle=0)
@@ -82,7 +85,7 @@ class TestARoundIsJudged(Rounds):
         self.search(t, c["work"]["triage"])
         for outcome in ("complete", "interrupted"):
             self.assertTrue(self.text("end_pass", pass_token=t, outcome=outcome)
-                            .startswith(NOT_JUDGED), outcome)
+                            .startswith(CHUNK_NOT_JUDGED), outcome)
         self.assertEqual(self.request()["state"], "snapshot")        # nothing changed
         self.start(t, step="judge")
         self.call("record_step", pass_token=t, step="judge", action="finish",
@@ -119,13 +122,25 @@ class TestARoundIsJudged(Rounds):
         self.assertEqual(self.request()["state"], "stopped", out)
 
     def test_a_cron_pass_is_not_asked_for_a_judge_step(self):
+        # with Gmail down (issue #28: a handed, searchable chunk is owed its judgment, in
+        # a check as in a package round) a check ends without one
         self.seed(1)
         t = self.begin("operator")
         self.start(t)
         self.specialist(t)
         c = self.claim()["continue"]
+        self.call("record_probe", pass_token=c["pass_token"], kind="gmail", ok=False)
         out = self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted")
         self.assertEqual(out["outcome"], "interrupted")
+
+    def test_a_round_without_a_chunk_still_asks_for_its_judge_step(self):
+        # _round_judged keeps its own refusal where no chunk was handed out (Gmail down)
+        self.seed(1)
+        c = self.snapshot_round(self.ask()["pass_token"])
+        t = c["pass_token"]
+        self.call("record_probe", pass_token=t, kind="gmail", ok=False)
+        self.assertTrue(self.text("end_pass", pass_token=t, outcome="interrupted")
+                        .startswith(NOT_JUDGED))
 
 
 class TestTheDateReadOnTheDocument(Rounds):

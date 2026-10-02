@@ -275,9 +275,28 @@ def continue_earlier(conn) -> list:
         if c is None:
             return ended
         if "pass_token" in c:
-            ended.append(passes.end_pass(conn, c["pass_token"], outcome(c), {}))
+            ended.append(passes.end_pass(conn, no_mailbox_round(conn, c)["pass_token"],
+                                         outcome(c), {}))
         elif c["next"] is not None:
             raise AssertionError(f"the sim does not model a package request's {c['next']}")
+
+
+def no_mailbox_round(conn, c) -> dict:
+    """The sim has no mailbox: when a continuation hands out a Gmail chunk, Ellen probes
+    (ok), records each handed item as not reached (no effort: its search state is
+    untouched), and the judge step runs with nothing new — so the chunk is judged and the
+    pass may end (issue #28: a handed, unjudged chunk is never ended). Returns the
+    judgment's continuation, or `c` when nothing was handed out."""
+    import steps
+    while c.get("next") == "gmail-round":
+        token = c["pass_token"]
+        passes.record_probe(conn, token, "gmail", True)
+        for item in c["work"]["triage"]:
+            work.record_search(conn, pid=item["pid"], token=token, queries=["sim"])
+        steps.start(conn, token, "judge", {})
+        steps.finish(conn, token, "judge", counts={"triage_remaining": 0})
+        c = _continue(conn)
+    return c
 
 
 def _continue(conn) -> dict:
@@ -344,7 +363,8 @@ def run_pass(conn, bf, trigger="cron", sync=None, sweep_budget=None) -> dict:
     # Ellen, the delegation having answered in her turn: her own finish (a no-op here)
     assert steps.finish(conn, token, "sweep", counts={})["already"]
     c = _continue(conn)
-    end = passes.end_pass(conn, c["pass_token"], outcome(c, remaining), {})
+    end = passes.end_pass(conn, no_mailbox_round(conn, c)["pass_token"],
+                          outcome(c, remaining), {})
     out = {"token": token, "import": imp, "gate": gate, "triage": tri, "end": end}
     if remaining:
         out["remaining"] = remaining
