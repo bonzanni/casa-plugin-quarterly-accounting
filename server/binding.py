@@ -137,7 +137,7 @@ _TABLES_TO_WIPE = ("binding", "passes", "probes", "documents", "counterparties",
                    "chain_overrides", "snapshots", "bank_rows", "projections", "aliases",
                    "matches", "log", "match_state", "residue", "renders", "render_items",
                    "shown", "packages", "deliveries", "delivered_rows", "alerts", "pass_steps",
-                   "package_requests", "operator_refs")
+                   "package_requests", "operator_refs", "claims", "work_requests")
 
 
 ERASE_REPORT_KEEPS = (
@@ -171,6 +171,9 @@ def reset_store(conn) -> dict:
             # reset may still land with a text the new store will issue again (#14)
             db.set_epoch(conn)
             conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
+            # S2 §6.3 (Astra plan-r3 S1): with `claims` empty every old job token is refused
+            # (check_claim), and the drain names no job of the wiped store
+            conn.execute("DELETE FROM meta WHERE key='drain'")
             # the marker row carries the last pass's trigger, id and start time —
             # operator data (fix wave B, Astra S2); the monotonic generation that
             # fences a running pass lives in counters, bumped above

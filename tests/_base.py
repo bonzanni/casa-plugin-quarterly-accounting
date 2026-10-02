@@ -109,6 +109,22 @@ class StoreCase(TempEnv):
                               (job_id, json.dumps([job_id]), pass_id))
         return pass_id
 
+    def bind_round_and_take(self, pass_id):
+        """The queued package request's round runs in `pass_id` (passes._bind_round), and
+        the pass takes what it may (asks.take_queued) — as the job cursor starts a round."""
+        import asks
+        import db
+        import passes
+        with db.tx(self.conn):
+            rid = self.conn.execute("SELECT request_id FROM package_requests WHERE"
+                                    " state='queued' ORDER BY request_id").fetchone()[0]
+            passes._bind_round(self.conn, rid, pass_id)
+            return asks.take_queued(self.conn, pass_id)
+
+    def hand_empty_chunk(self):
+        """The live pass's continuation hands out an empty Gmail chunk (nothing to search)."""
+        hand(self.conn, [])
+
     def end_live_pass(self):
         """End the live pass, if any, with its current token (the marker's: a claim
         rotates it past the pass's own generation)."""

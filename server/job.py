@@ -72,8 +72,10 @@ def claim(conn, job_id) -> int:
 
 
 def stop_exhausted_pass(conn, token, pass_id) -> None:
-    """The adoption budget is spent (spec §6.3): the pass ends `stopped`, and Task 6
-    gives its requests their dispositions in this same transaction."""
+    """The adoption budget is spent (spec §6.3): the pass ends `stopped` through
+    _end_pass_tx, which dispositions what it serves in this same transaction — its work
+    requests `done`/`stopped` (asks.settle_taken), its package request closed `stopped`
+    with its package-stopped notice (_hand_over → _close)."""
     conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
     passes._end_pass_tx(conn, token, "stopped", {"adoptions_exhausted": True})
 

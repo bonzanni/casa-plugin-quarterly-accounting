@@ -1,16 +1,8 @@
 """S2 Task 5 (spec §5.2, INV-J10, INV-J14): an import is bound to its acquisition by
 identity, and F gates every machine decision of a live job pass."""
-import importlib.util
-import unittest
-
 from tests._base import StoreCase
 
 A = "aaaaaaaa-1"
-
-
-def _has(m):
-    """Whether the server module `m` exists yet (Task 6 adds `asks`)."""
-    return importlib.util.find_spec(m) is not None
 
 
 class Acquisition(StoreCase):
@@ -171,7 +163,6 @@ class FreshnessF(Acquisition):
         self.tok = job.claim(self.conn, "bbbbbbbb-2")    # adoption by another job
         self.assertIn("another job", self.reason())
 
-    @unittest.skipUnless(_has("asks"), "Task 6")
     def test_condition_2_a_request_after_the_watermark(self):
         import asks
         self.imported()

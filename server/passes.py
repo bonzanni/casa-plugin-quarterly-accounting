@@ -217,11 +217,15 @@ def _terminalize(conn, pass_id: str):
                  " WHERE pass_id=? AND ended_at IS NULL", (now, db.canonical(report), pass_id))
     req = conn.execute("SELECT * FROM package_requests WHERE pass_id=? AND state='snapshot'",
                        (pass_id,)).fetchone()
-    if req is None:
-        return None, None
-    # recovered with no token and a lapsed lease: the next continue_pass claims it
-    _, notice = settle_snapshot_request(conn, req, "interrupted", token=None)
-    return req["request_id"], notice
+    recovered, notice = None, None
+    if req is not None:
+        # recovered with no token and a lapsed lease: the next continue_pass claims it
+        _, notice = settle_snapshot_request(conn, req, "interrupted", token=None)
+        recovered = req["request_id"]
+    # S2 §6.2: the work requests it had taken go back to the queue, in this transaction
+    import asks
+    asks.requeue_taken(conn, pass_id)
+    return recovered, notice
 
 
 def snapshot_fate(conn, pass_id: str, outcome: str) -> tuple:
@@ -446,6 +450,8 @@ def _end_pass_tx(conn, token, outcome: str, report: dict) -> dict:
                          f"{'were' if n > 1 else 'was'} not searched — end it interrupted")
     conn.execute("UPDATE passes SET ended_at=?, outcome=?, report_json=? WHERE pass_id=?",
                  (db.now(), outcome, db.canonical(full), m["pass_id"]))
+    import asks
+    asks.settle_taken(conn, m["pass_id"], outcome)      # S2 §6.2: every taken request is done
     conn.execute("UPDATE pass_marker SET live=0, claimed_step=NULL, lease_at=NULL"
                  " WHERE id=1")
     handed = _hand_over(conn, m["pass_id"], outcome)
@@ -529,7 +535,9 @@ def _hand_over(conn, pass_id: str, outcome: str):
                        (pass_id,)).fetchone()
     if req is None:
         return None
-    token = rotate(conn)
+    # a job pass's request is settled with no token and no lease (S2 §6.4): job_report
+    # claims a buildable one at once
+    token = None if protocol_of(conn, pass_id) == "job" else rotate(conn)
     state, notice = settle_snapshot_request(conn, req, outcome, token=token)
     if state == "queued":           # another round follows: continue_pass starts it
         return {"next": None, "request": {"id": req["request_id"], "quarter": req["quarter"],
