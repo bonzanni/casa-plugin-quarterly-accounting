@@ -12,6 +12,9 @@ import passes
 
 JOB_ID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 ADOPTIONS_MAX = 2
+TURNS_PER_BATCH, BATCH_RESERVE = 80, 10
+UNIT_COST = {"probes": 12, "snapshot": 6, "sweep": 10, "gmail-probe": 3, "filing": 28,
+             "item": 11, "judge": 24}
 W_S = 1800                 # W (spec §5.2): counted from the import's sweep completion
 W_REFRESH_MAX = 2          # W-refreshes per pass; after them W is waived for the pass
 NOT_READ = "the bank was not read in this pass yet"
@@ -493,7 +496,37 @@ def status(conn, job_id) -> dict:
 
 
 def _account(conn, token, out) -> None:
-    out["pass_token"] = token           # Task 9 replaces this with budget, progress and report
+    """Mutates `out` in place: next_unit returns the same dict."""
+    c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
+    cost = UNIT_COST.get(out["unit"], 0)
+    if cost and c["spent"] > 0 and c["spent"] + cost > TURNS_PER_BATCH - BATCH_RESERVE:
+        out.clear()
+        out["unit"] = "end-batch"           # the unit is handed again next batch (INV-J4)
+        cost = 0
+    conn.execute("UPDATE claims SET spent=spent+? WHERE gen=?", (cost, token))
+    now = measure(conn)
+    progressed = now < json.loads(c["measure_json"])
+    ending = out["unit"] in ("end-batch", "complete")
+    report = ending or (progressed and not c["reported"])
+    if report:
+        conn.execute("UPDATE claims SET reported=1 WHERE gen=?", (token,))
+    out["progress"] = {"summary": _summary(out["unit"], now), "progressed": progressed,
+                       "done": None, "remaining": now[1] or None}
+    out["report"] = report
+    out["pass_token"] = token
+
+
+WORDS = {"probes": "Reading the bank", "snapshot": "Importing the bank read",
+         "sweep": "Bringing the bank ledger up to date", "gmail-probe": "Checking Gmail",
+         "filing": "Filing emailed documents", "item": "Searching Gmail for an invoice",
+         "judge": "Matching documents to payments", "end-batch": "Batch done",
+         "complete": "All accounting work done"}
+
+
+def _summary(unit, now) -> str:
+    left = now[1]
+    return WORDS[unit] + (f" · {left} payment{'s' if left != 1 else ''} left to search"
+                          if left else "")
 
 
 def _rebase(conn, token) -> None:
