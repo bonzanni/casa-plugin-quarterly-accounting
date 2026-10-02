@@ -171,6 +171,24 @@ class StoreCase(TempEnv):
         self.check_round(token)
         return passes.end_pass(self.conn, token, "complete", {})["package_token"]
 
+    def package_built_unsent(self, quarter="2026-Q3", channel="telegram"):
+        """A package request whose package was built and never staged, its holder gone:
+        package_token(), build_quarterly_package under it (state `built`), then the
+        request's lease set to a lapsed time, so a sends claim may take it (S2 §6.4)."""
+        import datetime as _dt
+        import db
+        import package
+        import steps
+        if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
+            self.bind()                     # a build needs the bound account
+        token = self.package_token(quarter, channel)
+        package.build_quarterly_package(self.conn, quarter, token)
+        lapsed = steps._stamp(db._clock() - _dt.timedelta(seconds=steps.LEASE_S + 60))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE package_requests SET lease_at=? WHERE state='built'",
+                              (lapsed,))
+        return token
+
     def check_round(self, token, gmail_ok=True, triage_remaining=0):
         """The rest of a package round (issue #15): Ellen's Gmail round (its probe) and
         the judge step, finished whole."""

@@ -130,3 +130,269 @@ def handover_covered(conn, pass_id) -> bool:
                for d in json.loads(r["doc_ids_json"])):
             return False
     return True
+
+
+# --- the relay: job_report (spec §6.3–§6.4) ------------------------------------------
+ORPHANED = "The accounting check stopped before it finished — I'm starting it again."
+KEPT_STOPPING = "The accounting check kept stopping — ask again when you want me to retry."
+STOPPED = "The accounting check stopped"
+NOT_FOUND = "I can't find that document in what I've filed — send it again?"
+NOT_AN_INVOICE = "Filed. It doesn't look like an invoice for any payment — say if it is one."
+NEXT_CHECK = "Filed. I'll match it at the next check."
+
+
+def _match_job(conn, job_id):
+    """The one recorded job id that starts with `job_id` (≥ 8 characters, a prefix no
+    other recorded job id shares: the #17 rule), or None."""
+    ids = {r[0] for r in conn.execute("SELECT DISTINCT job_id FROM claims")}
+    if job_id in ids:
+        return job_id
+    hits = [i for i in ids if i.startswith(job_id)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def job_report(conn, job_id=None, status=None) -> dict:
+    """Spec §6.4: ONE transaction, under the custody lock (taken first: the store's lock
+    order). The orphan handoff, the retry decision, the results, the alerts and the
+    package or delivery recovery see one state and commit together."""
+    import alerts, job, steps
+    if job_id is not None:
+        if not isinstance(job_id, str) or len(job_id) < 8:
+            raise db.Refusal("job_id is the id the notification names")
+        if status not in ("ok", "error"):
+            raise db.Refusal("status is 'ok' or 'error'")
+    if conn.in_transaction:
+        raise RuntimeError("job_report opens its own transaction")
+    out = {"orphaned": False, "start_job": None, "texts": [], "speak": None,
+           "continue": None, "line": None}
+    with db.custody_lock():
+        with db.tx(conn):
+            if job_id is not None:
+                who = _match_job(conn, job_id)
+                p = job.live_job_pass(conn)          # an ended pass is never live
+                drain = conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
+                if who is not None and p is not None and p["holder_job"] == who:
+                    # the job holding the live pass ended: the pass is orphaned, stays
+                    # adoptable, its requests stay taken, and the drain is cleared
+                    conn.execute("UPDATE passes SET orphaned_by=? WHERE pass_id=?",
+                                 (who, p["pass_id"]))
+                    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
+                                 " ('drain','none')")
+                elif who is not None and drain is not None and drain[0] == who:
+                    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
+                                 " ('drain','none')")
+                # any other id (a late or replayed notice): nothing changes
+            p = job.live_job_pass(conn)
+            drain = (conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
+                     or ["none"])[0]
+            orphaned = p is not None and p["orphaned_by"] is not None
+            queued = conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL"
+                                  " SELECT 1 FROM package_requests WHERE state='queued'"
+                                  ).fetchone()
+            out["orphaned"] = orphaned
+            # the standing retry (Astra r3 S1): offered on every report while it holds
+            if drain == "none" and (orphaned or queued is not None):
+                out["start_job"] = dict(START)
+                if orphaned:
+                    out["line"] = ORPHANED
+            seen, made = set(), {}
+            for (rid,) in conn.execute("SELECT request_id FROM work_requests WHERE"
+                                       " state='done' ORDER BY request_id").fetchall():
+                for page in _result_tx(conn, rid, made):    # a list of pages
+                    if page["render_id"] not in seen:
+                        seen.add(page["render_id"])
+                        out["texts"].append(page)
+            sends = steps._claim_sends_tx(conn)
+            out["continue"] = sends.get("continue")
+            notice = sends.get("_notice")
+            out["speak"] = alerts.pending_in_tx(conn, must=[notice] if notice else None)
+    return out
+
+
+def mark_reported(conn, render_id) -> None:
+    """A done request is reported once every rendering of its result was delivered
+    (spec §6.4: consumed only when shown). Inside mark_rendering_delivered's
+    transaction, after it stamped the delivery."""
+    assert conn.in_transaction
+    for r in conn.execute("SELECT request_id, render_ids_json FROM work_requests WHERE"
+                          " state='done'").fetchall():
+        ids = json.loads(r["render_ids_json"])
+        if render_id in ids and not _undelivered(conn, ids):
+            conn.execute("UPDATE work_requests SET state='reported' WHERE request_id=?",
+                         (r["request_id"],))
+
+
+def _undelivered(conn, ids) -> list:
+    if not ids:
+        return []
+    rows = {x["render_id"]: x for x in conn.execute(
+        "SELECT render_id, text, delivered_at FROM renders WHERE render_id IN (%s)"
+        % ",".join("?" * len(ids)), ids)}
+    return [{"render_id": i, "text": rows[i]["text"]} for i in ids
+            if i in rows and rows[i]["delivered_at"] is None]
+
+
+def _result_class(r):
+    """What the done request's result is: a stop line, the status view, the handover's
+    case lines, or nothing (a cron check served: `speak` says the rest)."""
+    if r["outcome"] in ("stopped", "failed"):
+        return "stop"
+    if r["outcome"] in ("complete", "interrupted"):
+        if r["kind"] == "handover":
+            return "handover"
+        if r["trigger"] == "operator":
+            return "status"
+    return None
+
+
+def _result_tx(conn, request_id, made=None) -> list:
+    """The done request's result, as pages ({render_id, text}) still to be shown. The
+    renderings are created once and stored on the request, in order. Requests the same
+    pass served with the same stop line or status view share its renderings, and so do
+    operator checks given their status view in the same call (`made`: one state, one
+    view). A request with nothing left to show is reported."""
+    made = {} if made is None else made
+    assert conn.in_transaction
+    r = conn.execute("SELECT * FROM work_requests WHERE request_id=?",
+                     (request_id,)).fetchone()
+    if r is None or r["state"] != "done":
+        return []
+    ids = json.loads(r["render_ids_json"])
+    if not ids:
+        cls = _result_class(r)
+        ids = ((_sibling_ids(conn, r, cls) or (made.get(cls) if cls == "status" else None)
+                or _render_result(conn, r, cls)) if cls else [])
+        if cls == "status":
+            made.setdefault(cls, ids)
+        if ids:
+            conn.execute("UPDATE work_requests SET render_ids_json=? WHERE request_id=?",
+                         (json.dumps(ids), request_id))
+    pages = _undelivered(conn, ids)
+    if not pages:
+        conn.execute("UPDATE work_requests SET state='reported' WHERE request_id=?",
+                     (request_id,))
+    return pages
+
+
+def _sibling_ids(conn, r, cls):
+    if cls not in ("stop", "status") or r["pass_id"] is None:
+        return None
+    for s in conn.execute("SELECT * FROM work_requests WHERE pass_id=? AND request_id<>? AND"
+                          " state IN ('done', 'reported') ORDER BY request_id",
+                          (r["pass_id"], r["request_id"])).fetchall():
+        ids = json.loads(s["render_ids_json"])
+        if ids and _result_class(s) == cls:
+            return ids
+    return None
+
+
+def _render_result(conn, r, cls) -> list:
+    import views
+    if cls == "status":
+        return [views.review_in_tx(conn, "status")["render_id"]]
+    if cls == "stop":
+        return [_insert(conn, "job-stop", t, r) for t in _pages([_stop_line(conn, r)])]
+    return [_insert(conn, "handover", t, r) for t in _pages(_case_lines(conn, r))]
+
+
+def _insert(conn, kind, text, r) -> str:
+    rid = f"r{db.next_seq(conn)}"
+    conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
+                 " membership_json) VALUES (?,?,?,?,?, '[]')",
+                 (rid, kind, db.canonical({"work_request": r["request_id"]}), db.now(), text))
+    return rid
+
+
+def _pages(lines) -> list:
+    """Every line, paged, never clipped (Terra plan-r7 S2): each page is fit_lines's
+    whole leading lines; a single line that does not fit is clipped by fit_lines."""
+    import views
+    rest, out = list(lines), []
+    while rest:
+        page, whole = views.fit_lines(rest)
+        out.append("\n".join(page))
+        rest = rest[max(whole, 1):]
+    return out
+
+
+def _stop_line(conn, r) -> str:
+    """The reason is the pass's stored report's (job._stop keeps it there): the probe
+    that carried it is overwritten by the next acquisition."""
+    p = conn.execute("SELECT report_json FROM passes WHERE pass_id=?",
+                     (r["pass_id"],)).fetchone()
+    rep = json.loads((p["report_json"] if p else None) or "{}")
+    if rep.get("adoptions_exhausted"):
+        return KEPT_STOPPING
+    reason = str(rep.get("stopped_reason") or "").strip().rstrip(".")
+    return f"{STOPPED}: {reason}." if reason else f"{STOPPED}."
+
+
+def _case_lines(conn, r) -> list:
+    """One line per handed-over document, from its recorded pairing (steps._pairing) and,
+    when unpaired, the judge's verdict — the cases of SKILL.md's handover section."""
+    import steps
+    docs = json.loads(r["doc_ids_json"])
+    verdicts = json.loads(r["verdicts_json"])
+    lines = []
+    for d in docs:
+        doc = conn.execute("SELECT * FROM documents WHERE doc_id=?", (d,)).fetchone()
+        line = _case(steps._pairing(conn, d), (verdicts.get(str(d)) or {}).get("verdict"),
+                     doc)
+        lines.append(f"{_doc_label(d, doc)}: {line}" if len(docs) > 1 else line)
+    return lines
+
+
+def _amount(minor, currency):
+    import amounts
+    if minor is None or not currency:
+        return None
+    return amounts.fmt(abs(int(minor)), currency)
+
+
+def _case(pairing, verdict, doc) -> str:
+    import dates
+    kind = pairing["pairing"]
+    if kind == "unknown":
+        return NOT_FOUND
+    if kind == "matched":
+        p = pairing["payment"]
+        amt = _amount(p["amount_minor"], p["currency"]) or "matching"
+        if not p["date"]:
+            return f"Matched to the {amt} payment."
+        q = dates.parse_quarter(dates.quarter_of(p["date"]))[1]
+        return f"Matched to the {amt} payment of {dates.short_day(p['date'])}. Q{q}."
+    if kind == "proposed":
+        return "Filed. It could fit more than one payment — it's in 'anything I should check?'."
+    if kind == "irrelevant" or verdict == "irrelevant":
+        return NOT_AN_INVOICE
+    amt = _amount(doc["amount_minor"], doc["currency"]) if doc is not None else None
+    if verdict == "no-payment-yet":
+        return (f"Filed. No payment matches {amt or 'it'} yet — the charge may not have posted. "
+                "It'll match when it appears.")
+    if verdict == "clash":
+        return (f"Filed. I see {'a ' + amt + ' payment' if amt else 'a payment'} it fits, but "
+                "it's already matched to another document. Which one is right?")
+    if verdict == "unreadable":
+        return ("Filed, but I can't read an amount from it — "
+                + (f"is it {amt}?" if amt else "what is the amount?"))
+    if verdict == "out-of-range":
+        day = doc["document_date"] if doc is not None else None
+        q = dates.quarter_of(day) if day else (doc["ingest_quarter"] if doc is not None else None)
+        where = f"in {dates.quarter_label(q)}" if q else "in this quarter"
+        return (f"Filed. Nothing {where} is close to {amt or 'it'}. Is this for a different "
+                "quarter?")
+    return NEXT_CHECK
+
+
+def _doc_label(doc_id, doc) -> str:
+    """How a line names its document when the handover held several."""
+    import dates, views
+    if doc is None:
+        return f"Document {doc_id}"
+    who = doc["issuer"] or doc["counterparty"]
+    parts = [views.field(who)] if who else []
+    parts.append(views.KIND_WORD.get(doc["kind"], "document"))
+    if doc["document_number"]:
+        parts.append(views.field(doc["document_number"]))
+    label = " ".join(parts)
+    return f"{label} ({dates.short_day(doc['document_date'])})" if doc["document_date"] else label

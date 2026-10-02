@@ -97,12 +97,15 @@ class Undeliverable(RuntimeError):
 def _deliverable(tool: str, out):
     """The final invariant (fix wave D round 2): every operator-facing text a
     tool returns — a view's `text`, end_pass's `speak.text`, apply_reply's
-    `receipt` and each of its `receipt_pages` — is at most TELEGRAM_LIMIT
-    UTF-16 units; otherwise the call fails loudly (isError)."""
+    `receipt` and each of its `receipt_pages`, job_report's `texts[i].text` — is at
+    most TELEGRAM_LIMIT UTF-16 units; otherwise the call fails loudly (isError)."""
     if not isinstance(out, dict):
         return out
     texts = [("text", out.get("text")), ("receipt", out.get("receipt"))]
     texts += [(f"receipt_pages[{i}]", t) for i, t in enumerate(out.get("receipt_pages") or [])]
+    # job_report's results (S2 §6.4): every page is a message of its own
+    texts += [(f"texts[{i}].text", t.get("text") if isinstance(t, dict) else t)
+              for i, t in enumerate(out.get("texts") or [])]
     speak = out.get("speak")
     if isinstance(speak, dict):
         texts.append(("speak.text", speak.get("text")))

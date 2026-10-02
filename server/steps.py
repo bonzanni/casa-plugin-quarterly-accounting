@@ -546,6 +546,23 @@ def claim(conn, delegation_id=None, delegation_status=None) -> dict:
                   "— ask again")
 
 
+def _claim_sends_tx(conn) -> dict:
+    """A sends-only claim (S2 §6.4): a stalled staged send, or a buildable or built
+    package request whose lease lapsed. The caller holds the custody lock and the
+    write transaction."""
+    assert conn.in_transaction
+    cand = _choose(conn, sends_only=True)
+    if cand[0] == "delivery":
+        out = _claim_delivery(conn, cand[1])
+    elif cand[0] == "request":
+        out = _claim_request(conn, cand[1])
+    else:
+        return {"continue": None}
+    out["more"] = passes.queued_waiting(conn)
+    _fits(out)
+    return out
+
+
 class Oversized(RuntimeError):
     """A claim's answer over budget.RESULT_LIMIT (issue #3). A bug: raised inside the
     claiming transaction, so it rolls back and nothing is claimed — the rotated token
