@@ -124,7 +124,12 @@ def start(conn, token, step: str, carry: dict) -> dict:
         # (issue #21). A judge step whose judgment finished is started again on the same
         # row — the row is always the pass's latest judgment, which is what its check
         # (package_check, _judgment_owed) reads
-        restart = (prior is not None and step == "judge" and _ended(prior) == "finished")
+        # C4 (Astra S1): a failed or expired judgment is restarted too when a chunk handed
+        # out since is open — that chunk is owed its judgment, and nothing else can end it
+        restart = (prior is not None and step == "judge"
+                   and (_ended(prior) == "finished"
+                        or (_ended(prior) in ("errored", "expired")
+                            and _chunk(conn, m["pass_id"])[1] is not None)))
         if prior is not None and not restart:
             raise db.Refusal(f"the {step} step was already started in this pass")
         now = db._clock().replace(microsecond=0)
@@ -543,7 +548,7 @@ def _claim_pass(conn, m, step) -> dict:
             c["request"] = {"id": req["request_id"], "quarter": req["quarter"],
                             "channel": req["channel"], "round": req["round"] + 1}
         another = _another_chunk(conn, m["pass_id"], req, step)
-        if round_owed(conn, m["pass_id"]) == "due":
+        if round_owed(conn, m["pass_id"]) == "due" and not fin.get("stopped"):
             # C3 (Astra S1): the round became due after this judgment started (a late
             # import, can_run back): its continuation hands out the first chunk
             can_run = binding.check_setup(conn)["can_run"]

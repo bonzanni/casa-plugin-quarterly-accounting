@@ -309,6 +309,47 @@ class TestTheCheckEndsOnlyWhenItsChunkIsJudged(C):
         c = self.judged(self.chunk(c))
         self.assertEqual(c["next"], "gmail-round")
 
+    def test_a_failed_or_expired_judgment_hands_out_a_round_it_can_judge(self):
+        # C4 (Astra S1): the round owed after the judgment is judged by a restarted one
+        for how in ("failed", "expired"):
+            with self.subTest(how=how):
+                self.doCleanups()
+                self.setUp()
+                self.seed(3)
+                t = self.begin()
+                self.start(t)
+                self.clock.advance(steps.STEP_EXPIRY_S)
+                t = self.claim()["continue"]["pass_token"]
+                self.start(t, step="judge")
+                self.probe_import(t)
+                if how == "failed":
+                    self.call("record_step", pass_token=t, step="judge", action="finish",
+                              failed=True)
+                else:
+                    self.clock.advance(steps.STEP_EXPIRY_S)
+                c = self.claim()["continue"]
+                self.assertEqual(c["next"], "gmail-round")
+                t = self.chunk(c)
+                c = self.judged(t)                       # the judgment restarts
+                self.assertEqual(c["next"], "end-pass")
+                self.assertEqual(self.call("end_pass", pass_token=c["pass_token"],
+                                           outcome="complete")["outcome"], "complete")
+
+    def test_a_stopped_judgment_hands_out_nothing(self):
+        self.seed(3)
+        t = self.begin()
+        self.start(t)
+        self.clock.advance(steps.STEP_EXPIRY_S)
+        t = self.claim()["continue"]["pass_token"]
+        self.start(t, step="judge")
+        self.probe_import(t)
+        self.call("record_step", pass_token=t, step="judge", action="finish",
+                  stopped="the ledger changed", triage_remaining=0)
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "end-pass")
+        self.assertEqual(self.call("end_pass", pass_token=c["pass_token"],
+                                   outcome="stopped")["outcome"], "stopped")
+
     def test_complete_needs_every_owed_search(self):
         # D1 (Astra S1): a chunk closed by a judgment with nothing searched
         self.seed(5)
@@ -507,6 +548,26 @@ class TestPackageRounds(Rounds):
         self.assertEqual(len(out["triage"]), fits(20))
         self.assertFalse({i["pid"] for i in out["triage"]}
                          & {i["pid"] for i in c["work"]["triage"]})
+
+    def test_a_failed_judgment_in_a_round_hands_out_a_chunk_it_can_judge(self):
+        # C4 (Astra S1), the package round's case
+        self.seed(3)
+        t = self.ask()["pass_token"]
+        self.start(t, step="snapshot")
+        self.clock.advance(steps.STEP_EXPIRY_S)
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "end-pass")
+        t = c["pass_token"]
+        self.start(t, step="judge")
+        self.probe_import(t)
+        self.call("record_step", pass_token=t, step="judge", action="finish", failed=True)
+        c = self.claim()["continue"]
+        self.assertEqual(c["next"], "gmail-round")
+        t = c["pass_token"]
+        self.call("record_probe", pass_token=t, kind="gmail", ok=True)
+        self.search(t, c["work"]["triage"])
+        c = self.judge(t)
+        self.assertNotIn("refused", json.dumps(self.end(c, "interrupted")))
 
     def test_a_package_round_owes_its_handed_chunk(self):
         self.seed(3)
