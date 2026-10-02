@@ -152,7 +152,7 @@ def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_toke
         # issue #15 (D3): a package built for a request is first sent only through that
         # request while it still owns it — never once the request went back to its check
         raise db.Refusal("this package is no longer the one its request will send — call "
-                         "continue_pass: the package you asked for follows its check")
+                         "job_report: the package you asked for follows its check")
     if req is not None and req["state"] == "built":
         import package as _package
         if _package.stale_check(conn, req["request_id"], package_token):   # before an import
@@ -479,7 +479,7 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
             raise db.Refusal(f"there is no delivery #{delivery_id}")
         if d["revoked_at"] is not None:
             raise db.Refusal("the bank was re-read before this was sent — nothing was recorded; "
-                             "call continue_pass (a package you asked for follows its check)")
+                             "call job_report (a package you asked for follows its check)")
         if d["status"] == "delivered":
             return {"delivery_id": delivery_id, "status": "delivered", "already": True}
         req = conn.execute("SELECT * FROM package_requests WHERE delivery_id=?",

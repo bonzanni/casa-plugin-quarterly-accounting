@@ -388,9 +388,9 @@ class ToolFlow(Base):
     @staticmethod
     def call(name, **args):
         import json
-        import qa_server
-        out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                "params": {"name": name, "arguments": args}})
+        from tests import legacy_tools
+        out = legacy_tools.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                   "params": {"name": name, "arguments": args}})
         text = out["result"]["content"][0]["text"]
         try:
             return json.loads(text)

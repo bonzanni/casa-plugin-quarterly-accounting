@@ -195,7 +195,8 @@ class Handover(StoreCase):
         self.handover_done([987654])
         texts = asks.job_report(self.conn)["texts"]
         self.assertEqual([x["text"] for x in texts],
-                         ["I can't find that document in what I've filed — send it again?"])
+                         ["I can't find that document in what I've filed — please send the "
+                          "file once more."])
 
     def test_a_handover_of_200_documents_is_paged_whole(self):
         """Every page within Telegram's limit, every answer within the agent's (issue #3,

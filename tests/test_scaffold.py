@@ -15,8 +15,9 @@ class TestScaffold(TempEnv):
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
         self.assertEqual(m["name"], "quarterly-accounting")
         casa = m["casa"]
+        # S2: `jobs` is declared now (the finance job, spec §3); test_s2_surface pins it
         for forbidden in ("setupTool", "setupProvides", "callbacks", "triggers",
-                          "jobs", "systemRequirements", "eraseDataOnlyTool", "dropOffs"):
+                          "systemRequirements", "eraseDataOnlyTool", "dropOffs"):
             self.assertNotIn(forbidden, casa, forbidden)
         mcp = json.loads((ROOT / ".mcp.json").read_text())
         server = mcp["mcpServers"]["quarterly-accounting"]

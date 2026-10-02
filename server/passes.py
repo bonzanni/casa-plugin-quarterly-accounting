@@ -64,6 +64,13 @@ def _age_s(started_at: str) -> float:
     return (db._clock() - started).total_seconds()
 
 
+def ago(at: str) -> str:
+    """How long ago `at` was, in BUSY's words ("12 minutes ago")."""
+    minutes = int(_age_s(at) // 60)
+    return ("a minute ago" if minutes <= 1 else f"{minutes} minutes ago"
+            if minutes < 90 else f"{round(minutes / 60)} hours ago")
+
+
 def rotate(conn) -> int:
     """The next token: the one monotonic counter every token is drawn from
     (begin_pass, a claim, a package hand-over). Inside the caller's write
@@ -117,11 +124,8 @@ def begin_pass(conn, trigger: str, reply=None, quarter=None, channel=None) -> di
                     return {"status": "queued", "request": req,
                             "text": f"A check is running — the {label} package follows "
                                     "when it ends."}
-                minutes = int(age // 60)
-                when = ("a minute ago" if minutes <= 1 else f"{minutes} minutes ago"
-                        if minutes < 90 else f"{round(minutes / 60)} hours ago")
                 return {"status": "busy", "started_at": m["started_at"],
-                        "text": BUSY.format(when=when)}
+                        "text": BUSY.format(when=ago(m["started_at"]))}
             reclaimed = True
             displaced = m["pass_id"]
             recovered, notice = _terminalize(conn, displaced)
@@ -351,7 +355,7 @@ def check_package_token(conn, request_id, token):
     req = open_request(conn, request_id)
     if token is None:
         raise db.Refusal("this package belongs to a package request: pass the package_token "
-                         "end_pass or continue_pass gave you")
+                         "job_report's `continue` gave you")
     if req is None or req["token"] is None or int(token) != req["token"] \
             or req["state"] in ("superseded", "withdrawn"):
         raise db.Refusal("this package request has been taken over by a later turn — stop, "

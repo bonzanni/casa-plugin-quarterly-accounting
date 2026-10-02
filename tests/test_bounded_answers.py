@@ -249,9 +249,9 @@ class Bounded(Flow):
         self.finish()
         before = self.digest()
         with mock.patch.object(budget, "RESULT_LIMIT", 200):
-            import qa_server
-            out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                    "params": {"name": "continue_pass", "arguments": {}}})
+            from tests import legacy_tools
+            out = legacy_tools.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                       "params": {"name": "continue_pass", "arguments": {}}})
         self.assertTrue(out["result"].get("isError"), out)
         self.assertIn("nothing was claimed", out["result"]["content"][0]["text"])
         self.assertEqual(self.digest(), before)         # rolled back: no rotation, no lease

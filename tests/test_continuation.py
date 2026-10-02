@@ -41,9 +41,9 @@ class Flow(ToolFlow):
         self.addCleanup(p.stop)
 
     def text(self, name, **args):
-        import qa_server
-        out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                "params": {"name": name, "arguments": args}})
+        from tests import legacy_tools
+        out = legacy_tools.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                   "params": {"name": name, "arguments": args}})
         return out["result"]["content"][0]["text"]
 
     def seed(self, n=3, documents=0):

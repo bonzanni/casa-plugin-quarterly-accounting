@@ -110,8 +110,13 @@ def check_setup(conn) -> dict:
     gmail = probes.get("gmail")
     searching = gmail is None or gmail["ok"]
     if gmail is not None and not gmail["ok"]:
-        conditions.append("Gmail isn't reachable — matching runs on documents already held; "
-                          "searching is off.")
+        if (gmail["data"] or {}).get("absent"):
+            # S2 §6.4: finance has no Gmail tools — not connected, nothing to re-authorise
+            conditions.append("Gmail isn't connected for the finance specialist — invoices "
+                              "aren't being searched.")
+        else:
+            conditions.append("Gmail isn't reachable — matching runs on documents already "
+                              "held; searching is off.")
     gate = passes.bank_write_gate(conn)
     header = "Not set up yet."
     ledger_read = (probes.get("ledger") or {}).get("this_pass")

@@ -180,8 +180,8 @@ class TestEndPass(ToolCase):
         self.token = self.pass_()
 
     def test_the_outcome_vocabulary_includes_stopped_and_is_validated(self):
-        import qa_server
-        self.assertIn("stopped", qa_server.TOOLS["end_pass"]["description"])
+        # S2: end_pass is no longer a tool (tests/legacy_tools.py drives it); the
+        # description assertion went with the tool
         res = _text("end_pass", pass_token=self.token, outcome="done")
         self.assertTrue(res.startswith("refused: outcome is one of"), res)
         import passes

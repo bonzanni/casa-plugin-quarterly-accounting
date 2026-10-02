@@ -136,7 +136,8 @@ def handover_covered(conn, pass_id) -> bool:
 ORPHANED = "The accounting check stopped before it finished — I'm starting it again."
 KEPT_STOPPING = "The accounting check kept stopping — ask again when you want me to retry."
 STOPPED = "The accounting check stopped"
-NOT_FOUND = "I can't find that document in what I've filed — send it again?"
+# never an offer phrase reply.py parses ("send it again" is a package resend)
+NOT_FOUND = "I can't find that document in what I've filed — please send the file once more."
 NOT_AN_INVOICE = "Filed. It doesn't look like an invoice for any payment — say if it is one."
 NEXT_CHECK = "Filed. I'll match it at the next check."
 
@@ -195,13 +196,17 @@ def job_report(conn, job_id=None, status=None) -> dict:
                 out["start_job"] = dict(START)
                 if orphaned:
                     out["line"] = ORPHANED
-            seen, made, pages = set(), {}, []
-            for (rid,) in conn.execute("SELECT request_id FROM work_requests WHERE"
-                                       " state='done' ORDER BY request_id").fetchall():
-                for page in _result_tx(conn, rid, made):    # a list of pages
+            seen, made, pages, views_last = set(), {}, [], []
+            for r in conn.execute("SELECT * FROM work_requests WHERE state='done'"
+                                  " ORDER BY request_id").fetchall():
+                # the operator's reply binds to the LAST rendering delivered
+                # (db.last_delivered): a status view goes after every handover and stop page
+                into = views_last if _result_class(r) == "status" else pages
+                for page in _result_tx(conn, r["request_id"], made):   # a list of pages
                     if page["render_id"] not in seen:
                         seen.add(page["render_id"])
-                        pages.append(page)
+                        into.append(page)
+            pages += views_last
             sends = steps._claim_sends_tx(conn)
             out["continue"] = sends.get("continue")
             notice = sends.get("_notice")
