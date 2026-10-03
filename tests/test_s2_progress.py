@@ -60,6 +60,7 @@ class Progress(StoreCase):
         pid = u["item"]["pid"]
         key = self.conn.execute("SELECT key, gen FROM credits WHERE key LIKE ?",
                                 (f"search:%:{pid}:1",)).fetchone()
+        self.assertIsNotNone(key)
         self.assertEqual(key["gen"], t)
         u = job.next_unit(self.conn, t)
         self.assertTrue(u["progress"]["progressed"])

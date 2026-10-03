@@ -411,7 +411,9 @@ class ManyPasses(StoreCase):
             flags, last, _ = run_batches(self, drv, job_id=job_id, batches_max=30)
             runs.append(flags)
             self.assertEqual(last["unit"], "complete", flags)
-            self.assertTrue(_no_three_false(flags), (k, flags))
+            # every batch ends a package round and starts the next: credits earned in a
+            # pass that ended inside the batch count (no batch here is without them)
+            self.assertTrue(all(flags), (k, flags))
             self.assertLessEqual(self.conn.execute("SELECT count(*) FROM passes").fetchone()[0]
                                  - passes_before, job.MAX_PASSES_PER_JOB)
             if not self.conn.execute("SELECT 1 FROM package_requests WHERE state='queued'"
