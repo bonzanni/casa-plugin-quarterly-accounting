@@ -23,7 +23,7 @@ LATE_TAKES_MAX = 2         # requests a live pass takes after it began (each nee
 MAX_PASSES_PER_JOB = 4     # passes one Casa job run begins; past it the run completes
 K_STATES = 32              # distinct settled states credited per (pass, acquisition, payment)
 K_SEARCH = 4               # recorded searches credited per (pass, acquisition, payment)
-TURNS_PER_BATCH, BATCH_RESERVE = 80, 10
+TURNS_PER_BATCH, BATCH_RESERVE = 80, 10     # turnsPerBatch: the manifest's casa.jobs
 UNIT_COST = {"probes": 12, "snapshot": 6, "sweep": 10, "gmail-probe": 3, "filing": 28,
              "item": 11, "judge": 24}
 W_S = 1800                 # W (spec §5.2): counted from the import's sweep completion
@@ -88,14 +88,19 @@ def claim(conn, job_id) -> int:
 def _batch_of(conn, job_id, token, holder_changed) -> int:
     """The batch claim `token` belongs to (design r6, round 5): a new one — named by this
     claim's own gen — iff it is the job id's first claim, or that job id's latest claim
-    belongs to a batch answered `end-batch` or `complete`, or the live pass's holder
-    changes with it; otherwise the latest claim's batch (a re-claim inside one batch)."""
+    belongs to a batch answered `end-batch` or `complete`, or already holding
+    TURNS_PER_BATCH claims, or the live pass's holder changes with it; otherwise the
+    latest claim's batch (a re-claim inside one batch). The claim count (coordinator's
+    ruling on the j8-credits report, concern 1): a turn makes one claim and a Casa batch
+    has at most turnsPerBatch turns, so the window is bounded even when every Casa batch
+    is cut before an `end-batch` answer."""
     prev = conn.execute("SELECT batch FROM claims WHERE job_id=? ORDER BY gen DESC LIMIT 1",
                         (job_id,)).fetchone()
-    if prev is None or holder_changed or conn.execute(
-            "SELECT 1 FROM claims WHERE batch=? AND closed=1", (prev["batch"],)).fetchone():
+    if prev is None or holder_changed:
         return token
-    return prev["batch"]
+    closed, n = conn.execute("SELECT max(closed), count(*) FROM claims WHERE batch=?",
+                             (prev["batch"],)).fetchone()
+    return token if closed or n >= TURNS_PER_BATCH else prev["batch"]
 
 
 def stop_exhausted_pass(conn, token, pass_id) -> None:

@@ -28,6 +28,8 @@ class Surface(StoreCase):
             "batches": "unlimited", "turnsPerBatch": 80, "session": "fresh",
             "host": "specialist"}])
         self.assertEqual(m["version"], "0.9.0")
+        import job                  # the batch budget and the batch window's claim count
+        self.assertEqual(job.TURNS_PER_BATCH, m["casa"]["jobs"][0]["turnsPerBatch"])
 
     def test_gmail_absent_says_not_connected_not_reauthorise(self):
         import alerts, passes, views

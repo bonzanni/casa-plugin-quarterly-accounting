@@ -661,3 +661,59 @@ class BatchIdentity(StoreCase):
         self.assertEqual(self.batch(tB), tB)
         tB2 = job.claim(self.conn, B)                   # B's re-claim: B's batch
         self.assertEqual(self.batch(tB2), tB)
+
+
+class CutBatches(StoreCase):
+    """The coordinator's ruling on concern 1: a batch also closes once it holds
+    turnsPerBatch claims. A Casa batch cut by max_turns before it is answered `end-batch`
+    is merged with the next one's claims; the window still closes, so a pass that never
+    finishes still reaches three consecutive no-progress reports."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+
+    def test_a_never_finishing_pass_with_every_batch_cut_still_settles(self):
+        """Under sim_job: a judgment that never comes out whole, every Casa batch one judge
+        unit and then cut — an `end-batch` answer, if one comes, is never consumed (the
+        turn has already ended). Each batch's report is the last answer it received."""
+        import asks, job
+        drv = JobDriver(self, payments=2)
+        asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
+        drv.run_until(A, "judge")
+        reports = []
+        for _ in range(3 * job.TURNS_PER_BATCH):
+            t = job.claim(self.conn, A)                 # the Casa batch's one turn
+            u = job.next_unit(self.conn, t)
+            if u["unit"] == "judge":
+                u = job.next_unit(self.conn, t, judged=misreported(drv)(u, t)[0])
+            elif u["unit"] not in ("end-batch", "complete"):
+                drv.do(u, t)
+                u = job.next_unit(self.conn, t)
+            reports.append(u["progress"]["progressed"])  # then cut, whatever u is
+            if _three_false(reports):
+                break
+        self.assertTrue(_three_false(reports), reports)
+        self.assertIsNotNone(job.live_job_pass(self.conn))   # the pass never finished
+
+    def test_a_window_closes_at_turns_per_batch_claims(self):
+        """Claims that charge the batch nothing (a turn ended between its claim and its
+        first unit) close no window by the budget; the claim count does."""
+        import asks, job
+        drv = JobDriver(self, payments=2)
+        asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
+        drv.run_until(A, "judge")
+        first = job.claim(self.conn, A)                 # opens a window: the last run's
+        batch = lambda t: self.conn.execute("SELECT batch FROM claims WHERE gen=?",
+                                            (t,)).fetchone()[0]
+        window = batch(first)
+        n = self.conn.execute("SELECT count(*) FROM claims WHERE batch=?",
+                              (window,)).fetchone()[0]
+        tokens = [job.claim(self.conn, A) for _ in range(job.TURNS_PER_BATCH - n)]
+        self.assertEqual({batch(t) for t in tokens}, {window})
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM claims WHERE batch=?",
+                                           (window,)).fetchone()[0], job.TURNS_PER_BATCH)
+        nxt = job.claim(self.conn, A)                   # the window is full: a new batch
+        self.assertEqual(batch(nxt), nxt)
+        u = job.next_unit(self.conn, nxt)
+        self.assertFalse(u["progress"]["progressed"])   # the window's credits stay there
