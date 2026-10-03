@@ -44,17 +44,15 @@ def _misreported(drv):
 
 
 def _settled(flags):
-    """Once a batch reports no progress, every later one does too; at least three do."""
-    if False not in flags:
-        return False                                # every batch claimed progress
-    first = flags.index(False)
-    return flags[first:] == [False] * (len(flags) - first) and len(flags) - first >= 3
+    """The job ends on Casa's guard: its last three batches report no progress."""
+    return len(flags) >= 3 and flags[-3:] == [False, False, False]
 
 
 class NeverCovered(StoreCase):
-    """FW-I1 (a): INV-J8's third component is the CURRENT judgment's unfinished pages,
-    so a judgment started again forever reports no progress and Casa's guard ends the
-    job after three batches (INV-BGJOB-002)."""
+    """FW-I1 (a), with the coordinator's ruling: INV-J8's third component is the pass's
+    judge-page high-water mark since the last handover take, so a judgment started
+    again forever reports no progress and Casa's guard ends the job after three batches
+    (INV-BGJOB-002)."""
 
     def test_one_page_judgment_restarted_forever(self):
         import asks
@@ -76,6 +74,38 @@ class NeverCovered(StoreCase):
         flags, last = _loop(self, drv, _misreported(drv))
         self.assertEqual(last["unit"], "end-batch")
         self.assertTrue(_settled(flags), flags)
+
+    def test_three_page_judgment_restarted_forever(self):
+        """The coordinator's ruling (high-water mark): a judgment of three pages, two
+        judge units a batch, restarted forever. Its pages fall in some batches and rise
+        in others; counted per judgment, a batch reached past its start every third
+        batch, so three no-progress batches never came in a row. Against the pass's
+        high-water mark nothing falls once the judgment reached its last page."""
+        import asks
+        self.bind()
+        drv = JobDriver(self, payments=20)              # three triage pages of 8
+        asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
+        flags, last = _loop(self, drv, _misreported(drv), batches_max=12)
+        self.assertEqual(last["unit"], "end-batch")
+        self.assertIn(True, flags)                      # the work before the loop
+        tail = len(flags) - 1 - max(i for i, f in enumerate(flags) if f)
+        self.assertGreaterEqual(tail, 6, flags)         # never progress again
+        self.assertTrue(_settled(flags), flags)
+
+    def test_a_handover_taken_earns_fresh_credit(self):
+        """Taking a handover resets the high-water mark: the loop's judgment, started
+        again for the new documents, is progress again until it reaches the mark."""
+        import asks
+        self.bind()
+        drv = JobDriver(self, payments=20)
+        asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
+        flags, _ = _loop(self, drv, _misreported(drv), batches_max=10)
+        self.assertTrue(_settled(flags), flags)
+        asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
+        flags, last = _loop(self, drv, _misreported(drv), batches_max=8)
+        self.assertEqual(last["unit"], "end-batch")
+        self.assertIn(True, flags)                      # fresh credit for the new ask
+        self.assertTrue(_settled(flags), flags)         # and it settles again
 
     def test_a_page_lowers_the_measure_and_a_restart_raises_it(self):
         import asks, db, job

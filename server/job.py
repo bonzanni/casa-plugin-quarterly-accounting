@@ -86,12 +86,14 @@ def stop_exhausted_pass(conn, token, pass_id) -> None:
 def measure(conn) -> list:
     """INV-J8: the work measure, compared lexicographically; a fall is progress. A
     refresh raises only the last component (rows due a read). The third is the pass's
-    unfinished judge pages: the CURRENT judgment's, counted down from its start
-    (`judge_pages` counts the pages it judged, and is set back to 0 whenever a judgment
-    starts or restarts), so judging a page lowers it and a restart raises it again. A
-    judgment's total is not known ahead, so it is measured as minus the pages judged —
-    the same order within a judgment, and a batch that judges a judgment to its end and
-    restarts it ends where it began: no progress (final review FW-I1)."""
+    judge pages as a HIGH-WATER mark (coordinator ruling on the final review): minus the
+    most pages any judgment of the pass has reached since a handover was last taken
+    (`judge_high`). It falls only when a judgment gets further than every judgment
+    before it, so a judgment started again forever — however its pages fall across
+    batches — stops counting as progress once it has reached its high-water mark, and
+    Casa ends the job after three batches (spec §5). A restart does not lower the mark;
+    taking a handover resets it to 0 (bounded by the requests: its documents earn fresh
+    credit). Beginning a judgment is still progress: its first page beats a mark of 0."""
     import steps, sweep, work
     open_requests = (conn.execute("SELECT count(*) FROM work_requests WHERE state IN"
                                   " ('queued','taken')").fetchone()[0]
@@ -108,7 +110,7 @@ def measure(conn) -> list:
         unsearched = len(work.check_work(conn, carry["since_seq"], owed=carry.get("owed", [])))
     else:
         unsearched = 0
-    return [open_requests, unsearched, -p["judge_pages"], len(sweep._due(conn))]
+    return [open_requests, unsearched, -p["judge_high"], len(sweep._due(conn))]
 
 
 def _stamp_measure(conn, token) -> None:
@@ -206,6 +208,8 @@ def _take(conn, token, p) -> None:
             "SELECT 1 FROM work_requests WHERE pass_id=? AND kind='handover' AND request_id IN"
             " (%s)" % ",".join("?" * len(ids)), (p["pass_id"], *ids)).fetchone() is None:
         return
+    # a handover taken: its documents earn fresh judge credit (INV-J8's high-water mark)
+    conn.execute("UPDATE passes SET judge_high=0 WHERE pass_id=?", (p["pass_id"],))
     j = _step(conn, p, "judge")
     if j is not None and j["finished_at"] is None:
         _start_judgment(conn, token, p, restart_running=True)
@@ -388,8 +392,8 @@ def _judge(conn, token, p, req):
 
 
 def _start_judgment(conn, token, p, restart_running=False) -> None:
-    """A judgment starts, or starts again: its page cursor and its judged-page count
-    (INV-J8's unfinished judge pages) go back to the start."""
+    """A judgment starts, or starts again: its page cursor and its judged-page count go
+    back to the start. The pass's high-water mark (judge_high) is kept."""
     import steps
     steps._start_tx(conn, token, "judge", {}, restart_running=restart_running)
     conn.execute("UPDATE passes SET judge_after=NULL, judge_pages=0 WHERE pass_id=?",
@@ -425,6 +429,10 @@ def _doc_key(k) -> str:
         return str(int(k)) if not isinstance(k, bool) else str(k)
     except (TypeError, ValueError):
         return str(k)
+
+
+# a page judged: the running judgment's count, and the pass's high-water mark (INV-J8)
+PAGE_JUDGED = "judge_pages=judge_pages+1, judge_high=max(judge_high, judge_pages+1)"
 
 
 def _judged(conn, token, judged) -> None:
@@ -464,8 +472,8 @@ def _judged(conn, token, judged) -> None:
                 f"{theirs} under documents. Nothing was recorded")
     asks.record_verdicts(conn, p["pass_id"], documents)
     if nxt:
-        conn.execute("UPDATE passes SET judge_after=?, judge_pages=judge_pages+1 WHERE"
-                     " pass_id=?", (json.dumps(nxt), p["pass_id"]))
+        conn.execute("UPDATE passes SET judge_after=?, " + PAGE_JUDGED + " WHERE pass_id=?",
+                     (json.dumps(nxt), p["pass_id"]))
         return
     n = judged.get("triage_remaining")
     if isinstance(n, bool) or not isinstance(n, int) or n < 0:
@@ -473,8 +481,8 @@ def _judged(conn, token, judged) -> None:
                          "was judged)")
     _, refused = steps._finish_tx(conn, token, "judge", counts={"triage_remaining": n})
     assert refused is None
-    conn.execute("UPDATE passes SET judge_after=NULL, judge_pages=judge_pages+1 WHERE"
-                 " pass_id=?", (p["pass_id"],))
+    conn.execute("UPDATE passes SET judge_after=NULL, " + PAGE_JUDGED + " WHERE pass_id=?",
+                 (p["pass_id"],))
 
 
 def _report_extras(conn, p) -> dict:

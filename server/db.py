@@ -114,8 +114,9 @@ CREATE TABLE IF NOT EXISTS passes (
   read_seq INTEGER,               -- the store sequence this pass's read-back is owed from
   w_refreshes INTEGER NOT NULL DEFAULT 0,        -- W-refreshes spent (at most 2 per pass, §5.2)
   judge_after TEXT,               -- the import's sweep-completion time W is counted from (§5.2)
-  judge_pages INTEGER NOT NULL DEFAULT 0,
-  w_pending INTEGER NOT NULL DEFAULT 0);
+  judge_pages INTEGER NOT NULL DEFAULT 0,       -- pages the running judgment judged
+  w_pending INTEGER NOT NULL DEFAULT 0,
+  judge_high INTEGER NOT NULL DEFAULT 0);        -- most pages a judgment reached (INV-J8)
 CREATE TABLE IF NOT EXISTS pass_steps (
   pass_id TEXT NOT NULL,
   step TEXT NOT NULL CHECK (step IN ('sweep', 'judge', 'handover', 'snapshot')),
@@ -449,6 +450,7 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE pass_steps ADD COLUMN started_seq INTEGER",
         "ALTER TABLE pass_steps ADD COLUMN started_gen INTEGER",
         "ALTER TABLE passes ADD COLUMN w_pending INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE passes ADD COLUMN judge_high INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE snapshots ADD COLUMN job_id TEXT",
         "ALTER TABLE snapshots ADD COLUMN read_seq INTEGER",
         "ALTER TABLE snapshots ADD COLUMN acq INTEGER",

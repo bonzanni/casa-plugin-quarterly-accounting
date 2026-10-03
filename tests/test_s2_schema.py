@@ -19,7 +19,8 @@ class Schema10(StoreCase):
     def test_new_columns(self):
         self.assertTrue({"protocol", "holder_job", "orphaned_by", "adoptions", "adopters_json",
                          "acq",
-                         "acq_gen", "read_seq", "w_refreshes", "judge_after", "judge_pages"}
+                         "acq_gen", "read_seq", "w_refreshes", "judge_after", "judge_pages",
+                         "judge_high"}
                         <= self.cols("passes"))
         self.assertTrue({"protocol", "started_seq", "started_gen"} <= self.cols("pass_steps"))
         self.assertIn("w_pending", self.cols("passes"))
