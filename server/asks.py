@@ -203,16 +203,15 @@ def job_report(conn, job_id=None, status=None) -> dict:
                 drain = conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
                 drain = drain[0] if drain is not None else "none"
                 if status == "cancelled":
-                    # #38 (R7-2): the operator's cancel acts whenever no OTHER job holds the
-                    # drain — after an `error` notice cleared it too — once per job id (a
-                    # replayed notice changes nothing). It revokes the job (R7-1)
-                    # R8-1: an id no claim matches (the job was cancelled before its first
-                    # claim) acts too while no job holds the drain: the id as the notice
-                    # names it is recorded, and a later claim matching it is refused
+                    # #38 (round 9, generalized): the operator's cancel acts on the STORE's
+                    # open work, not on the cancelled id's — whenever no OTHER job holds
+                    # the drain (it is `none`, or the cancelled job's), whoever holds or
+                    # orphaned the live pass, and whether or not a claim matches the id (a
+                    # job cancelled before its first claim). It records the id, so the job
+                    # is revoked (R7-1, R8-1); a replayed notice changes nothing
                     target = who if who is not None else job_id
                     if drain in ("none", who) and not _cancel_recorded(conn, target):
-                        _withdraw(conn, p if who is not None and p is not None
-                                  and p["holder_job"] == who else None)
+                        _withdraw(conn, p)
                         conn.execute("INSERT INTO meta(key, value) VALUES (?,?)",
                                      (passes.cancelled_key(target), db.now()))
                         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
@@ -282,29 +281,30 @@ def _cancel_recorded(conn, job_id) -> bool:
 
 
 def _withdraw(conn, p) -> None:
-    """#38: the operator's /cancel ended a job while no other job holds the drain; `p` is
-    the live pass it holds (orphaned by an earlier error notice, or not), or None. Unlike
-    an error, nothing restarts:
-    the pass ends `stopped` through the pass-ending path, and every open ask — queued, or
-    taken by `p`; work or package — is withdrawn as `stopped`. The work requests share
-    ONE stop rendering, relayed through `texts` and consumed by mark_rendering_delivered
-    as every result is; a package request gets its package-stopped notice (`speak`). No
-    job claim made this, so no INV-J8 credit is earned."""
+    """#38: the operator's /cancel, while no other job holds the drain, withdraws the
+    store's open work, whoever's it is (round 9: scoping it by job id missed work three
+    times). `p` is the live job pass or None — held or orphaned by any job. Unlike an
+    error, nothing restarts: the pass ends `stopped` through the pass-ending path, and
+    every open ask — queued or taken; work, or a package not yet checked (`queued`,
+    `snapshot`) — is withdrawn as `stopped`. A package past its check (snapshot-done,
+    built, staged) is not an open ask and goes on (operator ruling). The work requests
+    share ONE stop rendering, relayed through `texts` and consumed by
+    mark_rendering_delivered as every result is; a package request gets its
+    package-stopped notice (`speak`). No job claim made this, so no INV-J8 credit."""
     assert conn.in_transaction
-    pid = p["pass_id"] if p is not None else None
     ids = [r[0] for r in conn.execute(
-        "SELECT request_id FROM work_requests WHERE state='queued' OR (state='taken' AND"
-        " pass_id IS ?) ORDER BY request_id", (pid,))]
-    for req in conn.execute("SELECT * FROM package_requests WHERE state='queued' OR"
-                            " (state='snapshot' AND pass_id IS ?) ORDER BY request_id",
-                            (pid,)).fetchall():
+        "SELECT request_id FROM work_requests WHERE state IN ('queued', 'taken')"
+        " ORDER BY request_id")]
+    for req in conn.execute("SELECT * FROM package_requests WHERE state IN ('queued',"
+                            " 'snapshot') ORDER BY request_id").fetchall():
         passes._close(conn, req, "stopped", "stopped", reason=CANCEL_REASON)
     if p is not None:
         gen = passes._marker(conn)["generation"]
         passes._end_pass_tx(conn, gen, "stopped", {"stopped_reason": CANCEL_REASON},
                             credit=False)
+    # what the pass's end did not settle (queued; any taken it did not hold) is withdrawn
     conn.execute("UPDATE work_requests SET state='done', outcome='stopped' WHERE"
-                 " state='queued'")
+                 " state IN ('queued', 'taken')")
     if ids:
         rid = _insert(conn, "job-stop", CANCELLED, {"request_id": ids[0]})
         conn.execute("UPDATE work_requests SET render_ids_json=? WHERE request_id IN (%s)"

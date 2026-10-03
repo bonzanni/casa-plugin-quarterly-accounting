@@ -705,3 +705,84 @@ class CancelBeforeClaim(StoreCase):
         import asks, db
         with self.assertRaises(db.Refusal):
             asks.job_report(self.conn, job_id="aaaa", status="cancelled")
+
+
+class CancelActsOnTheStore(StoreCase):
+    """#38 round 9 (Astra): a cancel acts on the store's open work, not the cancelled
+    id's. A claims a check, error(A) offers recovery, then cancelled(B) arrives before B's
+    first claim: A's orphaned pass survived, the ask stayed taken, and C adopted it."""
+    LINE = Cancelled.LINE
+    REASON = Cancelled.REASON
+
+    def live_pass_of(self, job_id):
+        return Report.live_pass_of(self, job_id)
+
+    def drain(self):
+        return Report.drain(self)
+
+    def work(self):
+        return Cancelled.work(self)
+
+    def assert_nothing_restarts(self, out, pid):
+        import asks, db, job, json
+        self.assertIsNone(out["start_job"])
+        self.assertIsNone(out["line"])
+        self.assertFalse(out["orphaned"])
+        row = self.conn.execute("SELECT outcome, report_json FROM passes WHERE pass_id=?",
+                                (pid,)).fetchone()
+        self.assertEqual(row["outcome"], "stopped")
+        self.assertEqual(json.loads(row["report_json"])["stopped_reason"], self.REASON)
+        self.assertIsNone(asks.job_report(self.conn)["start_job"])
+        with self.assertRaises(db.Refusal):
+            job.claim(self.conn, B)                                 # B is revoked
+        t = job.claim(self.conn, C)                                 # C adopts nothing
+        self.assertEqual(job.next_unit(self.conn, t)["unit"], "complete")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM passes").fetchone()[0], 1)
+
+    def test_cancelling_the_unclaimed_recovery_job_stops_the_orphaned_pass(self):
+        import asks
+        _, pid = self.live_pass_of(A)
+        err = asks.job_report(self.conn, job_id=A[:8], status="error")
+        self.assertTrue(err["orphaned"])
+        out = asks.job_report(self.conn, job_id=B, status="cancelled")
+        self.assertEqual([x["text"] for x in out["texts"]], [self.LINE])
+        self.assertEqual(self.work(), [("done", "stopped")])
+        self.assert_nothing_restarts(out, pid)
+
+    def test_cancelling_the_unclaimed_recovery_job_closes_a_package_round(self):
+        import asks, db, job, passes
+        asks.request_package(self.conn, "2026-Q3", "telegram")
+        t = job.claim(self.conn, A)
+        with db.tx(self.conn):
+            _, pid = passes.start_pass(self.conn, "package", "silent", protocol="job",
+                                       token=t)
+            self.conn.execute("UPDATE passes SET holder_job=? WHERE pass_id=?", (A, pid))
+        self.bind_round_and_take(pid)
+        asks.job_report(self.conn, job_id=A[:8], status="error")
+        out = asks.job_report(self.conn, job_id=B, status="cancelled")
+        pkg = self.conn.execute("SELECT state, reason FROM package_requests").fetchone()
+        self.assertEqual(tuple(pkg), ("stopped", self.REASON))
+        self.assertIn(self.REASON, out["speak"]["text"])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM credits").fetchone()[0], 0)
+        self.assert_nothing_restarts(out, pid)
+
+    def test_a_package_past_its_check_is_not_withdrawn(self):
+        """Operator ruling: snapshot-done / built / staged packages go on."""
+        import asks
+        self.package_built_unsent()
+        asks.request_work(self.conn, "check", "operator")
+        asks.job_report(self.conn, job_id=B, status="cancelled")
+        self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
+                         "built")
+        self.assertEqual(self.work(), [("done", "stopped")])
+
+    def test_an_error_only_crash_still_restarts(self):
+        import asks, job
+        _, pid = self.live_pass_of(A)
+        out = asks.job_report(self.conn, job_id=A[:8], status="error")
+        self.assertTrue(out["orphaned"])
+        self.assertIsNotNone(out["start_job"])
+        job.claim(self.conn, C)
+        self.assertEqual(self.conn.execute("SELECT holder_job FROM passes WHERE pass_id=?",
+                                           (pid,)).fetchone()[0], C)
+        self.assertEqual(self.work(), [("taken", None)])
