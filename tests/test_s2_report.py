@@ -304,9 +304,11 @@ class Handover(StoreCase):
 
 
 class StoppedResult(StoreCase):
-    def test_a_refresh_sync_failure_keeps_its_reason(self):
-        """An initial sweep, a second check, then its refresh's sync failed. One stopped
-        result names the reason, even after a later successful sync overwrote the probe."""
+    def test_a_refresh_stop_keeps_its_reason(self):
+        """An initial sweep, a second check, then its refresh found no bank tools. One
+        stopped result names the reason, even after a later successful probe overwrote
+        the one that carried it. (Was: a refresh's failed sync — PLAY T7 F1: a failed sync
+        no longer stops a pass, so the missing tools carry the stop here.)"""
         import asks
         from tests.sim_job import JobDriver
         self.bind()
@@ -314,16 +316,17 @@ class StoppedResult(StoreCase):
         asks.request_work(self.conn, "check", "operator")
         drv.run_until(A, "gmail-probe")                          # the initial sweep is done
         asks.request_work(self.conn, "check", "operator")        # a second check: a refresh
-        drv.fail_next_sync("bank unreachable")
+        drv.no_bank_tools()
         drv.next_until(drv.token, "complete")                    # the refresh stops the pass
+        drv._no_tools = False
         asks.request_work(self.conn, "check", "operator")
-        drv.run_job(A)                                           # a later sync succeeds
-        sync = self.conn.execute("SELECT ok FROM probes WHERE kind='bank_sync'").fetchone()
-        self.assertEqual(sync[0], 1)
+        drv.run_job(A)                                           # a later read succeeds
+        tools = self.conn.execute("SELECT ok FROM probes WHERE kind='bank_tools'").fetchone()
+        self.assertEqual(tools[0], 1)
         texts = [x["text"] for x in asks.job_report(self.conn)["texts"]]
         stops = [x for x in texts if x.startswith("The accounting check stopped")]
-        self.assertEqual(stops, ["The accounting check stopped: the bank sync failed: "
-                                 "bank unreachable."])
+        self.assertEqual(stops, ["The accounting check stopped: bank-feed's tools are not "
+                                 "available to the finance specialist."])
 
     def test_a_stop_without_a_reason_says_only_that(self):
         import asks, db, passes

@@ -373,21 +373,19 @@ def _continue_acquisition(conn, token, p, req, q):
         # no bank-feed tools in this session: nothing more can be probed (Astra plan-r7 S2)
         return _stop(conn, token, p, req, "bank-feed's tools are not available to the "
                                           "finance specialist")
-    sync = conn.execute("SELECT ok, gen, detail, data_json FROM probes WHERE"
-                        " kind='bank_sync'").fetchone()
+    sync = conn.execute("SELECT gen, data_json FROM probes WHERE kind='bank_sync'").fetchone()
     led = conn.execute("SELECT gen FROM probes WHERE kind='ledger'").fetchone()
     if (sync is None or sync["gen"] != token
             or json.loads(sync["data_json"] or "{}").get("acq") != p["acq"]
             or led is None or led["gen"] != token):
         return {"unit": "probes", "acq": p["acq"], "quarter": q}
+    # a failed sync never stops the pass (PLAY T7, as v0.8.0): the import reads bank-feed's
+    # cached ledger and leaves bank_through where it was; the bank_sync alert says the
+    # connection stopped, and the views say how far the bank was checked
     setup, gate = binding.check_setup(conn), passes.bank_write_gate(conn)
-    reason = None
-    if not sync["ok"]:                      # Astra plan-r2 S2: a failed sync stops the pass
-        reason = "the bank sync failed: " + (sync["detail"] or "no detail")
-    elif not setup["can_run"] or not gate["allowed"]:
-        reason = gate["reason"] or "; ".join(setup.get("conditions") or []) or "cannot run"
-    if reason is not None:
-        return _stop(conn, token, p, req, reason)
+    if not setup["can_run"] or not gate["allowed"]:
+        return _stop(conn, token, p, req, gate["reason"] or "; ".join(
+            setup.get("conditions") or []) or "cannot run")
     return {"unit": "snapshot", "acq": p["acq"], "quarter": q}
 
 

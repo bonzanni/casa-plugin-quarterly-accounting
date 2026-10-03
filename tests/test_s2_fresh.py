@@ -15,14 +15,16 @@ class Acquisition(StoreCase):
         self.tok = job.claim(self.conn, A)
         self.pid = self.start_job_pass(self.tok)
 
-    def probes(self, acq):
+    def probes(self, acq, sync_ok=True):
         import passes
         b = self.conn.execute("SELECT account_id FROM binding").fetchone()[0]
         passes.record_probe(self.conn, self.tok, "bank_tools", True)
         passes.record_probe(self.conn, self.tok, "bank_accounts", True,
                             data={"accounts": [{"account_id": b, "category": "company",
                                                 "label": "Zakelijk"}]})
-        passes.record_probe(self.conn, self.tok, "bank_sync", True, acq=acq)
+        passes.record_probe(self.conn, self.tok, "bank_sync", sync_ok,
+                            "" if sync_ok else "HTTP 404 not_found; cached data unchanged",
+                            acq=acq)
         passes.record_probe(self.conn, self.tok, "ledger", True,
                             data={"generation": 0, "registered": {}, "instance": self.LEDGER,
                                   "missing": []})
@@ -98,6 +100,29 @@ class Acquisition(StoreCase):
         import db
         acq = self.handed()
         self.probes(acq)
+        with db.tx(self.conn):                          # unreachable through record_probe
+            self.conn.execute("UPDATE probes SET gen=gen-1 WHERE kind='bank_sync'")
+        self.assertIn("record this bank read's sync", self.refusal(acq))
+
+    # PLAY T7 F1: a failed sync binds the import as a successful one does (v0.8.0 never
+    # required a successful sync); the identity checks are unchanged
+    def test_a_failed_sync_of_this_acquisition_under_this_claim_binds_the_import(self):
+        import ledger
+        acq = self.handed()
+        self.probes(acq, sync_ok=False)
+        out = ledger.import_ledger_export(self.conn, path=self.export([{"row_id": 1}]),
+                                          token=self.tok, ledger_instance=self.LEDGER, acq=acq)
+        self.assertEqual(out["rows"], 1)
+
+    def test_a_failed_sync_of_another_acquisition_is_refused(self):
+        acq = self.handed()
+        self.probes(acq - 1, sync_ok=False)              # a failed sync, not this read's
+        self.assertIn("record this bank read's sync", self.refusal(acq))
+
+    def test_a_failed_sync_recorded_under_another_claim_is_refused(self):
+        import db
+        acq = self.handed()
+        self.probes(acq, sync_ok=False)
         with db.tx(self.conn):                          # unreachable through record_probe
             self.conn.execute("UPDATE probes SET gen=gen-1 WHERE kind='bank_sync'")
         self.assertIn("record this bank read's sync", self.refusal(acq))

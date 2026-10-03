@@ -81,14 +81,16 @@ class CheckPass(StoreCase):
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
         self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
 
-    def test_a_failed_sync_stops_the_pass_with_its_reason(self):
+    def test_a_failed_sync_does_not_stop_the_pass(self):
+        """PLAY T7 F1 (as v0.8.0): a failed sync imports bank-feed's cached ledger and the
+        pass goes on (tests/test_s2_t7.py has the whole case)."""
         import asks
         self.drv.fail_next_sync("bank unreachable")
         asks.request_work(self.conn, "check", "operator")
         self.drv.run_job(A)
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0], 0)
+        self.assertEqual((r["state"], r["outcome"]), ("done", "complete"))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0], 1)
 
     def test_eight_asks_that_each_stop_at_once_all_get_dispositions(self):
         import asks, job

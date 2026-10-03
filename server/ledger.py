@@ -287,7 +287,9 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         job_pass = cur_pass is not None and cur_pass["protocol"] == "job"
         if job_pass:
             # INV-J14 (S2 §5.2): the import is bound to the pass's latest acquisition, by
-            # identity — its bank_sync recorded under this same claim — and once per export
+            # identity — its bank_sync recorded under this same claim — and once per export.
+            # The sync may have failed (PLAY T7, as v0.8.0): the export is bank-feed's
+            # cached ledger, imported with bank_through not advanced (below)
             if acq is None or cur_pass["acq"] != acq:
                 raise db.Refusal("this import is not for the pass's current bank read: call "
                                  "job_next and do the bank read it hands out")
@@ -295,7 +297,7 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
                 raise db.Refusal("this bank read belongs to an earlier turn: call job_next")
             sync = conn.execute("SELECT ok, gen, data_json FROM probes WHERE kind='bank_sync'"
                                 ).fetchone()
-            if (sync is None or not sync["ok"] or sync["gen"] != int(token)
+            if (sync is None or sync["gen"] != int(token)
                     or json.loads(sync["data_json"] or "{}").get("acq") != acq):
                 raise db.Refusal("record this bank read's sync first (record_probe "
                                  "kind=\"bank_sync\" with its acq), then export and import")
