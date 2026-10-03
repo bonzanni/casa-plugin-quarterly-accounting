@@ -31,6 +31,11 @@ revision 11, CONVERGED. The reviewed text is the frozen copy
 it only in status lines and the §19 prerequisites. Section numbers below (§4, §7.6, …) are
 the spec's. Parent: `2026-10-02-specialist-front-desk-and-job-offload-design.md` §3.4, §3.6.
 
+**Plan review:** CONVERGED at `7d02a3c` (plan round 5: Astra `gpt-6-astra` medium SHIP,
+Terra `gpt-5.6-terra` medium SHIP; frozen `rounds-2026-10-03-s7-plan/r5/plan.md`, sha256
+`945c549e310500de2729c067ec7e78b3dbbb2d8a24c2ff46a833fb46fd9b7d29`). The 5 rounds are in
+`ha-casa-app-docs/specs/rounds-2026-10-03-s7-plan/`, and `status.md` there is the round table.
+
 **Bases:**
 - Plugin: `main` at `2d8a802` (v0.9.0, schema 10).
 - Casa: `a83d6aa8` (v0.344.2), with S6 (v0.343.0) and S7a (v0.344.0) shipped. The review
