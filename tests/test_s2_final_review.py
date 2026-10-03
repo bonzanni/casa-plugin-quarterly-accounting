@@ -45,6 +45,8 @@ def _misreported(drv):
 
 def _settled(flags):
     """Once a batch reports no progress, every later one does too; at least three do."""
+    if False not in flags:
+        return False                                # every batch claimed progress
     first = flags.index(False)
     return flags[first:] == [False] * (len(flags) - first) and len(flags) - first >= 3
 
