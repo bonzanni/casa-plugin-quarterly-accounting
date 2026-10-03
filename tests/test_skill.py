@@ -285,8 +285,8 @@ class TestJob(TempEnv):
         for phrase in ("call `job_next(pass_token=…)` again",
                        "`report: true` → `report_job_progress` with its `progress` verbatim",
                        '`end-batch` → end the turn',
-                       '`complete` → `report_job_progress` with its `progress`, then '
-                       '`emit_completion(status="ok", text=<its text>)`',
+                       '`complete` → `report_job_progress` with its `progress` only if '
+                       '`report` is true, then `emit_completion(status="ok", text=<its text>)`',
                        "call `job_next(job_id=…)` once more; if that is refused too, end the "
                        "turn"):
             self.assertIn(phrase, turn, phrase)

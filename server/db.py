@@ -69,7 +69,8 @@ CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (
   PRIMARY KEY (pass_id, key));"""
 CREDITS_GEN_DDL = "CREATE INDEX IF NOT EXISTS ix_credits_gen ON credits(gen);"
 RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
-  job_id TEXT PRIMARY KEY, passes INTEGER NOT NULL DEFAULT 0);"""
+  job_id TEXT PRIMARY KEY, passes INTEGER NOT NULL DEFAULT 0,
+  completed INTEGER NOT NULL DEFAULT 0);   -- job_next answered this run `complete` once"""
 
 WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,

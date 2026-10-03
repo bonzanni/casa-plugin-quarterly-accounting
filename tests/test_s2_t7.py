@@ -194,3 +194,35 @@ class RunEnd(StoreCase):
         with db.tx(self.conn):
             passes._end_pass_tx(self.conn, t, "stopped", rep)
         self.assert_operator_text(job.status(self.conn, A)["text"])
+
+
+class Recompletion(StoreCase):
+    """F4: a `complete` answer reports progress only the first time its run is answered
+    `complete`; a re-issue after Casa refused the completion only completes."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+
+    def test_two_completes_in_a_row_report_true_then_false(self):
+        import asks, job
+        drv = JobDriver(self)
+        asks.request_work(self.conn, "check", "operator")
+        first = drv.run_job(A)[-1]
+        self.assertEqual((first["unit"], first["report"]), ("complete", True))
+        again = job.next_unit(self.conn, job.claim(self.conn, A))    # Casa refused it
+        self.assertEqual((again["unit"], again["report"]), ("complete", False))
+        self.assertEqual((again["text"], again["progress"]["summary"]), FINISHED)
+        third = job.next_unit(self.conn, job.claim(self.conn, A))
+        self.assertFalse(third["report"])
+        self.assertEqual(self.conn.execute("SELECT completed FROM runs WHERE job_id=?",
+                                           (A,)).fetchone()[0], 1)
+
+    def test_another_run_reports_its_own_first_complete(self):
+        import job
+        u = job.next_unit(self.conn, job.claim(self.conn, A))   # nothing queued, no pass
+        self.assertEqual((u["unit"], u["report"]), ("complete", True))
+        u = job.next_unit(self.conn, job.claim(self.conn, B))
+        self.assertEqual((u["unit"], u["report"]), ("complete", True))
+        u = job.next_unit(self.conn, job.claim(self.conn, A))
+        self.assertEqual((u["unit"], u["report"]), ("complete", False))
