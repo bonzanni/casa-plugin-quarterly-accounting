@@ -24,7 +24,10 @@ def request_work(conn, kind, trigger, doc_ids=None) -> dict:
     if kind == "handover" and (not ids or not all(isinstance(i, int) and not isinstance(i, bool)
                                                   for i in ids)):
         raise db.Refusal("a handover names the documents you just filed: doc_ids=[…]")
-    with db.tx(conn):
+    import job
+    with db.tx(conn), job.adding_work(conn, job.current_batch(conn), "request"):
+        # INV-J8 (diff round 3, R8): a request recorded while a job batch runs is work
+        # added to it, never a loss of that batch's progress
         # a handover names documents that are filed (final review FW-I1): an id the
         # judge can never find would leave the handover owed a verdict forever
         unknown = [i for i in ids if conn.execute("SELECT 1 FROM documents WHERE doc_id=?",
@@ -50,7 +53,8 @@ def request_package(conn, quarter, channel) -> dict:
         raise db.Refusal("a package is asked for with its channel: 'telegram' or 'email'")
     dates.parse_quarter(quarter)
     label = dates.quarter_label(quarter)
-    with db.tx(conn):
+    import job
+    with db.tx(conn), job.adding_work(conn, job.current_batch(conn), "request"):
         open_ = conn.execute("SELECT request_id FROM package_requests WHERE quarter=? AND"
                              " state IN ('queued', 'snapshot')", (quarter,)).fetchone()
         if open_ is not None:

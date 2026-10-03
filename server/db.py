@@ -574,8 +574,13 @@ def tx(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S):
     if conn.in_transaction:
         raise RuntimeError("tx() does not nest; the caller already holds the write lock")
     _retry_locked(lambda: conn.execute("BEGIN IMMEDIATE"), bound_s)
+    hook, state = _TX_HOOK, None
     try:
+        if hook is not None:
+            state = hook[0](conn)          # in the transaction, before its writes
         yield conn
+        if hook is not None:
+            hook[1](conn, state)           # in the same transaction, after them
     except BaseException:
         _rollback_if_open(conn)
         raise
@@ -587,6 +592,24 @@ def tx(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S):
     except BaseException:
         _rollback_if_open(conn)
         raise
+
+
+# INV-J8 (diff round 3, R8): a call made outside the job (job.outside_writes) routes
+# every write transaction it opens through job.work_added — measured inside that same
+# transaction, before and after its writes, so no other session's write is counted.
+_TX_HOOK = None
+
+
+@contextlib.contextmanager
+def tx_hook(begin, commit):
+    """`begin(conn)` right after BEGIN and `commit(conn, its result)` right before COMMIT,
+    for every tx() opened in the body. Not nested: an inner hook replaces the outer."""
+    global _TX_HOOK
+    saved, _TX_HOOK = _TX_HOOK, (begin, commit)
+    try:
+        yield
+    finally:
+        _TX_HOOK = saved
 
 
 def next_seq(conn: sqlite3.Connection) -> int:

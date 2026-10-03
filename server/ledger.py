@@ -494,8 +494,6 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
             conn.execute("UPDATE projections SET observed_revision=? WHERE pid=?",
                          (p["revision"] if owed is None else None, pid))
         passes.remember_ledger(conn, cur_pass["pass_id"])   # identity proved above
-        if job_pass:
-            job.work_added(conn, token, "bank-read", pre)
         out["delivered_changes"] = check_delivered_bank_half(conn, by_id)
         out["delivered_changes"] += len(_kind_changes(conn, _latest_delivered(conn)))
         # 7. an unsent first send staged under an earlier snapshot is revoked in this
@@ -510,6 +508,10 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         # every revoked delivery whose bytes are still there is withdrawn now; one that
         # cannot be refuses the whole import, which rolls back (round E7)
         delivery.withdraw_revoked(conn)
+        if job_pass:
+            # last, so the import's whole change is the event's — the package requests
+            # a revoked first send puts back in the queue included (diff round 3, R8)
+            job.work_added(conn, token, "bank-read", pre)
         return out
 
 

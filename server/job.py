@@ -440,6 +440,12 @@ BOUNDED = {
                     "still to search falls strictly: finitely many per pass",
     "handover-take": "one per handover request",
     "first-judgment": "once per pass",
+    "request": "a check, handover or package ask recorded by Ellen (request_work, "
+               "request_package): one per operator's ask or cron run",
+    "outside": "any other write made outside the job (a tool call without a pass_token: "
+               "the operator's decisions through Ellen, Ellen's package build, send and "
+               "relay): one per call Ellen makes, on an operator's message or a "
+               "notification",
 }
 UNBOUNDED = {
     "not-whole": "the judgment did not come out whole (triage_remaining > 0): the same "
@@ -478,11 +484,41 @@ def work_added(conn, token, cause, pre) -> None:
 
 @contextlib.contextmanager
 def adding_work(conn, token, cause):
-    """work_added around the event in the `with` body."""
-    pre = measure(conn) if bounded(cause) else None
+    """work_added around the event in the `with` body (inside its transaction). A no-op
+    when `token` is None (no batch to move)."""
+    pre = measure(conn) if token is not None and bounded(cause) else None
     yield
     if pre is not None:
         work_added(conn, token, cause, pre)
+
+
+def current_batch(conn):
+    """The claim whose batch is running now — the newest — while a job pass is live;
+    else None (nothing to move: the next claim stamps its own baseline)."""
+    assert conn.in_transaction
+    if live_job_pass(conn) is None:
+        return None
+    return conn.execute("SELECT max(gen) FROM claims").fetchone()[0]
+
+
+@contextlib.contextmanager
+def outside_writes(store, cause="outside"):
+    """Every write transaction the body opens on the store (`store(conn)` is true for the
+    accounting store's connection; another database's transactions are left alone) is
+    work added for `cause`, measured inside that transaction (db.tx_hook): it moves the
+    running batch's baseline by exactly what it changed. For writes made outside the
+    job, which no unit of the job can be credited or blamed for."""
+    def begin(conn):
+        if not store(conn):
+            return None
+        tok = current_batch(conn)
+        return (tok, measure(conn)) if tok is not None else None
+
+    def commit(conn, state):
+        if state is not None:
+            work_added(conn, state[0], cause, state[1])
+    with db.tx_hook(begin, commit):
+        yield
 
 
 def _judge_unit(conn, p, req) -> dict:
