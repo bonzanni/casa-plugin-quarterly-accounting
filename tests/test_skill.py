@@ -301,10 +301,17 @@ class TestJob(TempEnv):
     def test_a_topic_message_turn_ends_with_job_status(self):
         topic = self.topic()
         order = ["Last, always: `job_status(job_id=<the Job id line of your brief>)`",
-                 "If `done`, call `report_job_progress(summary=<its text>, progressed=true)`",
-                 '`emit_completion(status="ok", text=<its text>)`']
+                 'If `done`, call `emit_completion(status="ok", text=<its text>)` and nothing '
+                 'else']
         pos = [topic.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
+
+    def test_a_done_job_status_completes_without_reporting_progress_again(self):
+        """PLAY T7 F3: the batch that answered `complete` already reported; a second
+        report_job_progress would show Casa's batch line twice."""
+        rule = flat(section(JOB, "- Last, always: `job_status(", "**The completion turn**"))
+        self.assertIn('`emit_completion(status="ok", text=<its text>)`', rule)
+        self.assertNotIn("report_job_progress", rule)
 
     def test_the_specialist_order_matches_the_design(self):
         units = section(JOB, "## Units", "## Never")

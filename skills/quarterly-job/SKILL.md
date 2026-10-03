@@ -42,8 +42,8 @@ batch):
   "Tell me that in the main chat, where you saw the list."
 - **Never call `job_next` in a topic message.**
 - Last, always: `job_status(job_id=<the Job id line of your brief>)`. If `done`, call
-  `report_job_progress(summary=<its text>, progressed=true)`, then
-  `emit_completion(status="ok", text=<its text>)`.
+  `emit_completion(status="ok", text=<its text>)` and nothing else: the batch that
+  answered `complete` already reported its progress.
 
 **The completion turn**, if Casa runs one: nothing to do.
 
