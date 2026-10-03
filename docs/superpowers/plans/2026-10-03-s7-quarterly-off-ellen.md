@@ -3106,12 +3106,21 @@ class Posts(StoreCase):
 
     def test_the_budget_spent_with_asks_waiting_posts_the_left_line(self):
         import asks, job
-        for _ in range(job.MAX_PASSES_PER_JOB + 1):
-            asks.request_package(self.conn, f"2026-Q{1 + _ % 3}")     # distinct quarters
+        quarters = ["2025-Q1", "2025-Q2", "2025-Q3", "2025-Q4", "2026-Q1"]   # five distinct
+        self.assertGreater(len(quarters), job.MAX_PASSES_PER_JOB)
+        for q in quarters:
+            asks.request_package(self.conn, q)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM package_requests WHERE"
+                                           " state='queued'").fetchone()[0], 5)
         units = self.drive(A, deliver=True)
         texts = [self.conn.execute("SELECT text FROM renders WHERE render_id=?", (rid,))
                  .fetchone()[0] for u in units if u["unit"] == "post" for rid in u["render_ids"]]
         self.assertIn(job.LEFT_WAITING, texts)
+        self.assertGreaterEqual(self.conn.execute(
+            "SELECT count(*) FROM package_requests WHERE state='queued'").fetchone()[0], 1)
+        left = self.conn.execute("SELECT delivered_at FROM renders WHERE kind='job-left'"
+                                 ).fetchone()
+        self.assertIsNotNone(left[0])
 
     def test_post_results_joins_and_skips_the_delivered(self):
         import posting, views
@@ -3254,22 +3263,63 @@ def _posts(conn, job_id):
         chosen.append(rid)
         size += n + (2 if len(chosen) > 1 else 0)
     if chosen:
-        for rid in chosen:
-            _offer(conn, rid, job_id)
         return {"unit": "post", "render_ids": chosen}
     for rid in status:
         n = offers(conn, rid, job_id)
         if not _undelivered(conn, rid) or n >= OFFER_MAX:
             continue
-        _offer(conn, rid, job_id)
         text = conn.execute("SELECT text FROM renders WHERE render_id=?", (rid,)).fetchone()[0]
         if n == 0 and views.fits_proposal(text):
             return {"unit": "view", "render_id": rid}
         return {"unit": "post", "render_ids": [rid]}
     if _accounts_owed(conn, job_id):
-        _offer(conn, "accounts", job_id)
         return {"unit": "view", "accounts": True}
     return None
+
+
+def _record_offers(conn, out, job_id) -> None:
+    """A hand-out is counted only when it is HANDED OUT: called by next_unit after _account,
+    whose batch budget may replace the unit with end-batch (plan round 3, Astra S2: an
+    offer counted for a unit the budget swapped out was a hand-out that never happened)."""
+    if out.get("unit") == "post":
+        for rid in out["render_ids"]:
+            _offer(conn, rid, job_id)
+    elif out.get("unit") == "view":
+        _offer(conn, "accounts" if out.get("accounts") else out["render_id"], job_id)
+```
+
+`next_unit` becomes:
+
+```python
+def next_unit(conn, token, judged=None) -> dict:
+    with db.tx(conn):
+        check_claim(conn, token)
+        if judged is not None:
+            _judged(conn, token, judged)
+        out = _choose(conn, token)
+        _account(conn, token, out)
+        job_id = conn.execute("SELECT job_id FROM claims WHERE gen=?", (token,)).fetchone()[0]
+        _record_offers(conn, out, job_id)
+        return out
+```
+
+`_posts` writes no offer itself. The view-or-post choice for a status rendering reads the
+offers already recorded (`n`), so its first hand-out is a `view` and its second a `post`, as
+before. Add to this task's tests:
+
+```python
+    def test_a_unit_the_budget_swaps_for_end_batch_is_not_counted_as_offered(self):
+        """Plan round 3, Astra S2."""
+        import asks, db, job
+        asks.request_work(self.conn, "check", "operator")
+        units = self.drive(A, deliver=False, spend_before_posts=job.TURNS_PER_BATCH)
+        self.assertEqual(units[-1]["unit"], "complete")
+        self.assertTrue(any(u["unit"] == "view" for u in units))     # still handed out later
+```
+
+`spend_before_posts=n` makes the simulator raise the batch's `claims.spent` to `n −
+BATCH_RESERVE − 1` before the first `post`/`view` hand-out, so `_account` swaps it for
+`end-batch` exactly once.
 
 
 def _accounts_owed(conn, job_id) -> bool:
