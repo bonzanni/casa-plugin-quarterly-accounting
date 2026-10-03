@@ -1152,3 +1152,50 @@ class TestIntegration(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnderstood(Base):
+    """#39: `understood` says whether anything in the message was read as a reply, so
+    Ellen can answer a message that is not one as conversation instead of relaying "I
+    didn't understand". It changes nothing apply_reply commits."""
+
+    def test_a_message_that_is_not_a_reply_is_not_understood(self):
+        z = self.item("Zapier", 9900, "2026-09-17")
+        self.deliver()
+        for text in ("thanks, talk tomorrow about the accounting stuff",
+                     "12 eggs",                                   # a numbered-lines lookalike
+                     "is the Zapier one right?"):                 # a question
+            out = reply.apply_reply(self.conn, text)
+            self.assertFalse(out["understood"], text)
+            self.assertEqual(out["applied"], [], text)
+        self.assertEqual(self.author(z)[0], "auto")
+        self.assertEqual(self.operator_entries(), 0)
+
+    def test_a_reply_with_one_clause_read_is_understood(self):
+        v = self.item("Vercel", 1210, "2026-09-18")
+        self.deliver()
+        out = reply.apply_reply(self.conn, "the Vercel one is wrong. and blah blah")
+        self.assertTrue(out["understood"])
+        self.assertIn("didn't understand", out["receipt"])        # the rest is still said
+        self.assertIsNone(self.author(v))
+
+    def test_a_verdict_that_did_not_apply_is_still_understood(self):
+        self.item("Zapier", 9900, "2026-09-17")
+        self.deliver()
+        with mock.patch.object(matches, "reject_match", side_effect=db.Refusal("no")):
+            out = reply.apply_reply(self.conn, "the Zapier one is wrong")
+        self.assertTrue(out["understood"])
+        self.assertIn("not applied", out["receipt"])
+
+    def test_naming_payments_without_a_verdict_is_understood(self):
+        self.item("Zapier", 9900, "2026-09-17")
+        self.deliver()
+        out = reply.apply_reply(self.conn, "Zapier")
+        self.assertTrue(out["understood"])
+        self.assertIn("are they wrong or good?", out["receipt"])
+
+    def test_all_good_and_instructions_are_understood(self):
+        self.item("Zapier", 9900, "2026-09-17")
+        self.deliver()
+        self.assertTrue(reply.apply_reply(self.conn, "send it again")["understood"])
+        self.assertTrue(reply.apply_reply(self.conn, "all good")["understood"])

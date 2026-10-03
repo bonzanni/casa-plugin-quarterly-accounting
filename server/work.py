@@ -59,10 +59,12 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
             in_chunk = steps.chunk_has(conn, pass_id, pid)
             if effort and not in_chunk:
                 raise db.Refusal(f"payment #{pid} is not in the work you were handed: search "
-                                 "and record only the open Gmail chunk's items (the "
-                                 "continuation's work and more_work's) — nothing was written")
+                                 "and record only the payments job_next hands out in its "
+                                 "Gmail items — nothing was written")
             if in_chunk:
                 steps.chunk_recorded(conn, pass_id, pid)
+                import job
+                job.credit_search(conn, token, pid)     # INV-J8: a search item recorded
         state, streak = p["search_state"], p["passes_without_candidate"]
         if revive:
             state, streak = "active", 0
@@ -672,6 +674,17 @@ def list_quarter_state(conn, quarter=None, triage_only=False, fresh_only=True,
                       "never from memory; counts and totals come from build_review."}
 
 
+def judge_whole(judge) -> bool:
+    """THE rule for a judgment that covers anything (issue #15, D3; S2 INV-J12): the judge
+    step row `judge` (with `finished_at` and `finish_json`, or None) finished, not failed,
+    stopped or out of time, with every triage page seen (`triage_remaining` == 0)."""
+    if judge is None or judge["finished_at"] is None:
+        return False
+    fin = json.loads(judge["finish_json"] or "{}")
+    return (not fin.get("failed") and not fin.get("stopped") and not fin.get("out_of_time")
+            and fin.get("triage_remaining") == 0)
+
+
 def package_check(conn, req, pass_id: str) -> dict:
     """What package request `req`'s check still needs after the round in `pass_id`
     (issue #15): `unsearched` — its quarter's work not searched for it (0 when this
@@ -685,10 +698,7 @@ def package_check(conn, req, pass_id: str) -> dict:
     gmail_down = probe is not None and not probe["ok"]
     judge = conn.execute("SELECT finished_at, finish_json, carry_json FROM pass_steps"
                          " WHERE pass_id=? AND step='judge'", (pass_id,)).fetchone()
-    fin = json.loads(judge["finish_json"] or "{}") if judge is not None else {}
-    whole = (judge is not None and judge["finished_at"] is not None and not fin.get("failed")
-             and not fin.get("stopped") and not fin.get("out_of_time")
-             and fin.get("triage_remaining") == 0)
+    whole = judge_whole(judge)
     due = judge_due_state(conn, req["quarter"])
     if whole:
         seen = json.loads(judge["carry_json"] or "{}").get("due_at_start", {})

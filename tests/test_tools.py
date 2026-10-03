@@ -19,12 +19,15 @@ EXPECTED = {
     "record_match", "propose_match", "confirm_match", "reject_match", "relabel_match",
     "set_exemption",
     "import_ledger_export", "list_projections", "record_observation",
-    "begin_pass", "end_pass", "record_probe", "check_setup", "bind_account", "set_watermark",
+    "record_probe", "check_setup", "bind_account", "set_watermark",
     "set_package_name", "reset_store",
     "record_search", "stop_chasing",
     "list_quarter_state", "build_review", "mark_rendering_delivered", "apply_reply",
-    "build_quarterly_package", "stage_for_delivery", "record_delivery",
-    "record_step", "continue_pass", "read_document", "more_work",
+    "build_quarterly_package", "stage_for_delivery", "record_delivery", "read_document",
+    # S2 (spec §8, §13): the job's tools replace begin_pass, end_pass, continue_pass,
+    # record_step and more_work
+    "job_next", "job_status", "job_report", "request_work", "request_package",
+    "record_filing",
 }
 
 
@@ -56,8 +59,9 @@ def _fresh_conn(case):
 
 
 def _tool(name, **args):
-    out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                            "params": {"name": name, "arguments": args}})
+    from tests import legacy_tools
+    out = legacy_tools.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                               "params": {"name": name, "arguments": args}})
     return out["result"]
 
 
@@ -81,14 +85,14 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 37)
+        self.assertEqual(len(EXPECTED), 38)             # S2: 37 - 5 removed + 6 added
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 37)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 38)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
@@ -132,15 +136,19 @@ class TestDeliverableBoundary(TempEnv):
 
     def test_every_operator_text_key_is_checked(self):
         from unittest import mock
+        import asks
         import delivery
-        import passes
         import reply
         import views
         big = "x" * 4097
         cases = [("build_review", views, "build_review", {"render_id": "r1", "text": big},
                   {}),
-                 ("end_pass", passes, "end_pass", {"speak": {"render_id": "r1", "text": big}},
-                  {"pass_token": 1, "outcome": "complete"}),
+                 # S2: job_report's result pages and its speak (end_pass's, before S2)
+                 ("job_report", asks, "job_report",
+                  {"texts": [{"render_id": "r1", "text": "ok"},
+                             {"render_id": "r2", "text": big}], "speak": None}, {}),
+                 ("job_report", asks, "job_report",
+                  {"texts": [], "speak": {"render_id": "r1", "text": big}}, {}),
                  ("apply_reply", reply, "apply_reply",
                   {"receipt": "ok", "receipt_pages": ["ok", big]}, {"text": "all good"}),
                  # fix wave F: the offer an uncertain package send returns
@@ -173,21 +181,22 @@ class ToolCase(StoreCase):
 
 class TestPassTokens(ToolCase):
     def test_end_pass_requires_the_token(self):
-        # D10 gap: end_pass(None) would end whichever pass is live, or crash with none
+        # D10 gap: end_pass(None) would end whichever pass is live, or crash with none.
+        # S2: end_pass is no longer a tool (job_next ends passes); its function still is
+        import passes
         self.bind()
         token = self.pass_()
-        self.assertEqual(_text("end_pass", outcome="complete"),
-                         "refused: missing argument(s): pass_token")
-        import passes
+        with self.assertRaisesRegex(db.Refusal, "ending a pass needs its pass_token"):
+            passes.end_pass(self.conn, None, "complete", {})
         self.assertIsNotNone(passes.current_pass(self.conn))       # the live pass still runs
-        self.assertEqual(_json("end_pass", pass_token=token, outcome="complete")["outcome"],
+        self.assertEqual(passes.end_pass(self.conn, token, "complete", {})["outcome"],
                          "complete")
         self.assertIsNone(passes.current_pass(self.conn))
 
     def test_end_pass_with_no_pass_running_is_a_refusal(self):
-        res = _tool("end_pass", pass_token=5, outcome="complete")
-        self.assertTrue(res["content"][0]["text"].startswith("refused:"), res)
-        self.assertNotIn("isError", res)
+        import passes
+        with self.assertRaises(db.Refusal):
+            passes.end_pass(self.conn, 5, "complete", {})
 
     def test_a_stale_token_is_refused_at_the_delivery_log(self):
         import package
@@ -321,7 +330,9 @@ class TestMachineWritesNeedAPass(ToolCase):
         import tools  # noqa: F401
         optional = [n for n, t in qa_server.TOOLS.items()
                     if "pass_token" in t["schema"]["properties"]
-                    and "pass_token" not in t["schema"]["required"]]
+                    and "pass_token" not in t["schema"]["required"]
+                    # S2: job_next's first call claims with job_id; its token is not a write's
+                    and n != "job_next"]
         self.assertEqual(len(optional), 11, optional)       # + list_quarter_state (the clock)
         for n in optional:
             self.assertIn("During a pass, pass the pass_token.",
@@ -377,13 +388,15 @@ class TestArgumentTypes(ToolCase):
         import tools  # noqa: F401
         bools = [(n, k) for n, t in qa_server.TOOLS.items()
                  for k, v in t["schema"]["properties"].items() if v.get("type") == "boolean"]
-        self.assertEqual(len(bools), 17, bools)  # fix wave F: + fresh_only; + failed; #10: + stopped_by_refusal, out_of_time; #15: + last_built; #22: + dates_unread
+        # fix wave F: + fresh_only; + failed; #10: + stopped_by_refusal, out_of_time; #15: +
+        # last_built; #22: + dates_unread; S2: - record_step's three, + record_probe's absent
+        self.assertEqual(len(bools), 15, bools)
         for n, k in bools:
             res = _tool(n, **{k: "false"})
             text = res["content"][0]["text"]
             if text.startswith("refused: missing argument"):
                 req = qa_server.TOOLS[n]["schema"]["required"]
-                filler = {"pid": 1, "doc_id": 1, "pass_token": 1, "kind": "gmail",
+                filler = {"pid": 1, "doc_id": 1, "pass_token": 1, "kind": "gmail", "ok": False,
                           "expected_revision": 0, "render_id": "r1", "channel": "telegram",
                           "snapshot_id": 1, "step": "sweep", "action": "finish"}
                 res = _tool(n, **{r: filler[r] for r in req if r != k}, **{k: "false"})

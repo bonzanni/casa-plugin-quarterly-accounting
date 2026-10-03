@@ -17,6 +17,7 @@ import re
 
 import dates
 import db
+import job
 import ledger
 import lineage
 import passes
@@ -71,7 +72,14 @@ def _parse_ts(ts: str) -> _dt.datetime:
     return _dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
 
 
-def note_confirmed(proj, tag_revision, *, epoch) -> bool:
+Z_S = 900      # the late-write margin (spec §4, revision 4): Z = 900 s
+
+
+def _z() -> _dt.timedelta:
+    return _dt.timedelta(seconds=Z_S)
+
+
+def note_confirmed(proj, tag_revision, *, epoch, conn=None) -> bool:
     """Whether the lineage's current accounting note is known visible on its row
     without reading it (issue #1: notes are not in the export). Only a read can
     confirm a note; the confirmation stands while (1) the note is the one that
@@ -79,30 +87,58 @@ def note_confirmed(proj, tag_revision, *, epoch) -> bool:
     erasure strips tags and notes together — and (3) no add_note of ANOTHER note
     text can still land after that read (issue #14). A write of the current text
     landing late leaves the same text on top; a write of another one (an older
-    revision carried out late, round D1, or before a held read, D2) would bury
-    it. Every write is carried out within a delegation's ceiling of its issue or
-    never (steps.CEILING_ASSUMED_S), so the read — dated by the import its
+    revision carried out late, round D1, or before a held read, D2) would bury it.
+
+    (3) by time, for every issue (spec §4): the read — dated by the import its
     snapshot belongs to, which precedes it, never by when it was recorded — must
-    come more than a ceiling after the latest other-text issue and after the
+    come strictly more than Z after the latest other-text issue and after the
     store's epoch (writes an earlier store generation or version handed out).
-    Strictly after: stamps are whole seconds (design round D1, Terra S1)."""
-    import steps
+    Strictly after: stamps are whole seconds (design round D1, Terra S1).
+
+    (3) by claim, for an other-text issue made under a job claim (INV-J11): the
+    read is under a LATER claim than the issue's (a); it is recorded at least Z
+    after the first claim that followed the issue's claim, which is made only after
+    the issuing turn ended (b); and the latest ledger probe, recorded under a claim
+    after the issue, shows version.WORKFLOW registered with its copy present, so a
+    minting write — which no deadline bounds — has committed (c). `conn` reads the
+    claims and the probe; it is needed only when such a generation is present."""
     if proj["note_body"] is None:
         return True
     if proj["note_seen_seq"] is None or proj["note_seen_seq"] != proj["note_seq"]:
         return False
     if proj["note_seen_rev"] is None or proj["note_seen_rev"] != tag_revision:
         return False
+    seen_at = proj["note_seen_at"]
+    other_text = proj["note_issued_seq"] != proj["note_seq"]
     others = [proj["note_other_issued_at"], epoch]
-    if proj["note_issued_seq"] != proj["note_seq"]:
+    if other_text:
         others.append(proj["note_issued_at"])
     others = [t for t in others if t is not None]
-    if others:
-        bound = max(_parse_ts(t) for t in others)
-        if proj["note_seen_at"] is None or not (
-                _parse_ts(proj["note_seen_at"])
-                > bound + _dt.timedelta(seconds=steps.CEILING_ASSUMED_S)):
-            return False
+    if others and (seen_at is None
+                   or not _parse_ts(seen_at) > max(_parse_ts(t) for t in others) + _z()):
+        return False
+    gens = [proj["note_other_issued_gen"]]
+    if other_text:
+        gens.append(proj["note_issued_gen"])
+    gens = [g for g in gens if g is not None]
+    if not gens:
+        return True
+    if conn is None:
+        raise TypeError("note_confirmed needs conn for an issue made under a job claim")
+    issue = max(gens)
+    seen_gen = proj["note_seen_gen"]
+    if seen_gen is None or seen_gen <= issue or seen_at is None:
+        return False                                            # (a)
+    first = conn.execute("SELECT at FROM claims WHERE gen > ? ORDER BY gen LIMIT 1",
+                         (issue,)).fetchone()
+    if first is None or _parse_ts(seen_at) < _parse_ts(first["at"]) + _z():
+        return False                                            # (b)
+    led = conn.execute("SELECT gen, data_json FROM probes WHERE kind='ledger'").fetchone()
+    data = json.loads(led["data_json"] or "{}") if led is not None else {}
+    if (led is None or led["gen"] is None or led["gen"] <= issue
+            or version.WORKFLOW not in (data.get("registered") or {})
+            or version.WORKFLOW in (data.get("missing") or [])):
+        return False                                            # (c)
     return True
 
 
@@ -145,7 +181,8 @@ def _due(conn) -> list:
         "SELECT pid FROM projections WHERE merged_into IS NULL"
         " AND (ended IS NULL OR ended='vanished')"
         " AND (class_observed_snapshot IS NULL OR class_observed_snapshot < ?"
-        "      OR observed_revision IS NULL OR observed_revision <> revision)"
+        "      OR observed_revision IS NULL OR observed_revision <> revision"
+        "      OR readback_owed = 1)"
         " ORDER BY pid", (lineage.latest_import(conn),))]
 
 
@@ -157,6 +194,12 @@ def _in_quarter(conn, pid: int, quarter: str) -> bool:
     eff = dates.effective_date(row) if row else None
     start, end = dates.quarter_bounds(quarter)
     return eff is not None and start <= eff < end
+
+
+def _absent(conn, pid: int) -> bool:
+    """The lineage's row is absent from the latest export (an erase candidate): its
+    observation is an end-check, owed whatever quarter the payment fell in."""
+    return lineage.live_row(conn, lineage.projection(conn, pid)) is None
 
 
 def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
@@ -171,7 +214,10 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
     `quarter` (fix wave F, throughput) narrows the page to that quarter's
     payments: a package needs only its own rows fresh, and freshness stays per
     lineage. remaining_in_cycle then counts that quarter's; the cycle itself
-    completes only when no lineage of any quarter is due.
+    completes only when no lineage of any quarter is due. A row absent from the
+    latest export is listed whatever its quarter (S2, Astra plan-r6 S1): it is an
+    end-check, so a package round resumed after a cut between its import and its
+    erase-candidate observations still confirms every one.
 
     Time (issue #2): while a step of the pass runs, the page is capped by what is
     left of steps.SWEEP_STOP_S at steps.ROW_COST_S a row, so the specialist
@@ -187,7 +233,8 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
         cur = _cursor(conn)
         due_all = _due(conn)
         due = due_all if quarter is None else [p for p in due_all
-                                                if _in_quarter(conn, p, quarter)]
+                                                if _in_quarter(conn, p, quarter)
+                                                or _absent(conn, p)]
         allowance = steps.sweep_allowance(conn)
         cap = None if allowance is None else int(allowance // steps.ROW_COST_S)
         if cap is not None and cap < 1 and due:
@@ -195,6 +242,14 @@ def list_projections(conn, *, token, limit: int = PAGE, quarter=None) -> dict:
                     "projections": [], "quarter": quarter, "remaining_in_cycle": len(due),
                     "snapshot_id": lineage.latest_import(conn), "notice": NOTICE,
                     "time_up": True}
+        cur_pass = passes.current_pass(conn)
+        package = cur_pass is not None and cur_pass["trigger"] == "package"
+        if not due_all or (quarter is not None and not due and package):
+            # the import's sweep is complete (for a package pass, its quarter's): S2 §5.2's
+            # W counts from this first moment, never from the import. A quarter's page in
+            # any other pass completes nothing that pass's F rests on
+            conn.execute("UPDATE snapshots SET swept_at=coalesce(swept_at, ?)"
+                         " WHERE snapshot_id=?", (db.now(), lineage.latest_import(conn)))
         if not due_all:
             if cur["cycle_started_at"]:
                 conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=NULL,"
@@ -259,7 +314,7 @@ def _ended_noop(conn, p) -> dict:
             "bank_writes": None, "read_back": False}
 
 
-def _confirm_erased(conn, pid: int) -> dict:
+def _confirm_erased(conn, pid: int, token=None) -> dict:
     cur = passes.current_pass(conn)
     p = lineage.projection(conn, pid)
     if p["ended"] == "erased":
@@ -278,9 +333,11 @@ def _confirm_erased(conn, pid: int) -> dict:
         # set — and it stays `vanished` (a row that vanished is not an erasure).
         conn.execute("UPDATE projections SET class_observed_snapshot=?, observed_revision=?"
                      " WHERE pid=?", (lineage.latest_import(conn), p["revision"], pid))
+        job.credit_sweep(conn, token, pid, "settled")       # INV-J8: a settlement completed
         return _ended_noop(conn, p)
     ledger.end_lineage(conn, pid, "erased", cur["snapshot_id"])
     red = lineage.settle(conn, pid)
+    job.credit_sweep(conn, token, pid, "erased")            # INV-J8: an erasure confirmed
     _advance(conn, pid)
     return {"pid": pid, "status": red.status, "ended": "erased", "desired": [],
             "instructions": {}, "bank_writes": None, "read_back": False}
@@ -307,7 +364,8 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
         if proj["ended"] == "erased":
             return _ended_noop(conn, proj)
         if not_found:
-            return _confirm_erased(conn, pid)
+            conn.execute("UPDATE projections SET readback_owed=0 WHERE pid=?", (pid,))
+            return _confirm_erased(conn, pid, token)
         _require_proven_import(conn)
         if write_error:
             conn.execute("UPDATE projections SET last_error=?, unprojectable=? WHERE pid=?",
@@ -315,6 +373,8 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
                           db.canonical({"error": str(write_error)[:200],
                                         "tags": json.loads(proj["observed_tags_json"] or "[]")}),
                           pid))
+            conn.execute("UPDATE projections SET readback_owed=0 WHERE pid=?", (pid,))
+            job.credit_sweep(conn, token, pid, "refused")       # INV-J8: a refused write
             _advance(conn, pid)
             return {"pid": pid, "status": proj["status"], "desired": json.loads(proj["desired_json"]),
                     "instructions": {}, "bank_writes": None, "read_back": False,
@@ -368,14 +428,20 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
         # A note seen visible is remembered with the read's tag revision and the import
         # its snapshot belongs to (issue #1; rounds D1, D2): an import re-checks it only
         # when the tags moved or an issued note write may have landed after this read.
+        # The read's time stays the import's, deliberately: the read happened before this
+        # record, so the record's own time would measure Z from too late a moment (§4).
         seen_at = conn.execute("SELECT imported_at FROM snapshots WHERE snapshot_id=?",
                                (lineage.latest_import(conn),)).fetchone()[0]
+        # Under a job pass a read and an issue carry the claim they were made under
+        # (INV-J11); a delegation-protocol one is under no claim and carries none.
+        gen = int(token) if job.live_job_pass(conn) is not None else None
         if note is not None and note_visible:
-            conn.execute("UPDATE projections SET note_seen_seq=?, note_seen_rev=?, note_seen_at=?"
-                         " WHERE pid=?", (proj["note_seq"], observed_tag_revision, seen_at, pid))
+            conn.execute("UPDATE projections SET note_seen_seq=?, note_seen_rev=?, note_seen_at=?,"
+                         " note_seen_gen=? WHERE pid=?",
+                         (proj["note_seq"], observed_tag_revision, seen_at, gen, pid))
         else:
             conn.execute("UPDATE projections SET note_seen_seq=NULL, note_seen_rev=NULL,"
-                         " note_seen_at=NULL WHERE pid=?", (pid,))
+                         " note_seen_at=NULL, note_seen_gen=NULL WHERE pid=?", (pid,))
         gate = passes.bank_write_gate(conn)
         # ONE write per observation (round p5, Terra S1): the specialist makes it,
         # re-reads the row and records it before the next, so a ledger that changes
@@ -387,16 +453,32 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
                 if "add_note" in step:
                     # the previous issue, if it carried another text, becomes an "other"
                     # (issue #14); the max keeps a later one a merge brought in (D1)
+                    # and so does its claim: SQLite's max() is NULL when either side is,
+                    # so a pre-upgrade issue (no generation) keeps the generation a merge
+                    # brought in instead of erasing it (Astra plan-r7 S1)
                     if proj["note_issued_at"] is not None and \
                             proj["note_issued_seq"] != proj["note_seq"]:
                         conn.execute("UPDATE projections SET note_other_issued_at="
-                                     "max(coalesce(note_other_issued_at, ''), note_issued_at)"
-                                     " WHERE pid=?", (pid,))
-                    conn.execute("UPDATE projections SET note_issued_at=?, note_issued_seq=?"
-                                 " WHERE pid=?", (db.now(), proj["note_seq"], pid))
+                                     "max(coalesce(note_other_issued_at, ''), note_issued_at),"
+                                     " note_other_issued_gen=CASE WHEN note_issued_gen IS NULL"
+                                     " THEN note_other_issued_gen ELSE"
+                                     " max(coalesce(note_other_issued_gen, 0), note_issued_gen)"
+                                     " END WHERE pid=?", (pid,))
+                    # a delegation issue (gen NULL) keeps the claim an earlier issue was
+                    # made under: of the same text, that held write may still land later
+                    # on another revision (Task 11 review round 1)
+                    conn.execute("UPDATE projections SET note_issued_at=?, note_issued_seq=?,"
+                                 " note_issued_gen=coalesce(?, note_issued_gen) WHERE pid=?",
+                                 (db.now(), proj["note_seq"], gen, pid))
                 instructions = {**step, "workflow": gate["workflow"],
                                 "expected_generation": gate["expected_generation"],
                                 "expected_ledger": gate["expected_ledger"]}
+        conn.execute("UPDATE projections SET readback_owed=? WHERE pid=?",
+                     (1 if instructions else 0, pid))
+        if not instructions:
+            # INV-J8: the lineage owes nothing — observed at the latest import, at its
+            # revision, no read-back owed: a settlement completed, credited by its state
+            job.credit_sweep(conn, token, pid, "settled")
         _advance(conn, pid)
         return {"pid": pid, "status": red.status, "desired": sorted(red.desired),
                 "instructions": instructions,

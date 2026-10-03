@@ -27,6 +27,9 @@ COLLECTION = {
     "bound_account": "The bound account is gone from bank-feed — nothing is being checked "
                      "until it is linked again.",
 }
+# S2 §6.4: a gmail probe recorded `absent` — finance has no Gmail tools at all. Nothing to
+# re-authorise: Gmail is not connected for the finance specialist.
+GMAIL_ABSENT = "Gmail isn't connected for the finance specialist — invoices aren't being searched."
 
 
 def evaluate(conn) -> None:
@@ -34,9 +37,12 @@ def evaluate(conn) -> None:
         p = conn.execute("SELECT * FROM probes WHERE kind=?", (kind,)).fetchone()
         if p is None or p["ok"] or not p["failing_since"]:
             continue
+        detail = {"detail": p["detail"] or ""}
+        if json.loads(p["data_json"] or "{}").get("absent"):
+            detail["absent"] = True
         conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
                      " VALUES (?,?,?,?)", (kind, f"{kind}:{p['failing_since']}",
-                                          db.canonical({"detail": p["detail"] or ""}), db.now()))
+                                          db.canonical(detail), db.now()))
 
 
 # The package notices (issue #2): what a continuation owes the operator about a
@@ -108,10 +114,12 @@ def _units(conn, rows) -> list:
     out = []
     for a in rows:
         if a["kind"] in COLLECTION:
-            detail = views.clip(json.loads(a["detail"])["detail"] or "", DETAIL_MAX)
+            c = json.loads(a["detail"])
+            detail = views.clip(c["detail"] or "", DETAIL_MAX)
             paren = f" ({detail})" if detail else ""
-            out.append((a["alert_id"], None,
-                        views._wrap(COLLECTION[a["kind"]].format(paren=paren))))
+            text = (GMAIL_ABSENT if a["kind"] == "gmail" and c.get("absent")
+                    else COLLECTION[a["kind"]].format(paren=paren))
+            out.append((a["alert_id"], None, views._wrap(text)))
     for a in rows:
         if a["kind"] in PACKAGE or a["kind"] == "package-uncertain":
             c = json.loads(a["detail"])

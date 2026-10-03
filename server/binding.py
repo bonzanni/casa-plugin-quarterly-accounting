@@ -110,8 +110,13 @@ def check_setup(conn) -> dict:
     gmail = probes.get("gmail")
     searching = gmail is None or gmail["ok"]
     if gmail is not None and not gmail["ok"]:
-        conditions.append("Gmail isn't reachable — matching runs on documents already held; "
-                          "searching is off.")
+        if (gmail["data"] or {}).get("absent"):
+            # S2 §6.4: finance has no Gmail tools — not connected, nothing to re-authorise
+            conditions.append("Gmail isn't connected for the finance specialist — invoices "
+                              "aren't being searched.")
+        else:
+            conditions.append("Gmail isn't reachable — matching runs on documents already "
+                              "held; searching is off.")
     gate = passes.bank_write_gate(conn)
     header = "Not set up yet."
     ledger_read = (probes.get("ledger") or {}).get("this_pass")
@@ -137,7 +142,8 @@ _TABLES_TO_WIPE = ("binding", "passes", "probes", "documents", "counterparties",
                    "chain_overrides", "snapshots", "bank_rows", "projections", "aliases",
                    "matches", "log", "match_state", "residue", "renders", "render_items",
                    "shown", "packages", "deliveries", "delivered_rows", "alerts", "pass_steps",
-                   "package_requests", "operator_refs")
+                   "package_requests", "operator_refs", "claims", "work_requests", "credits",
+                   "runs")
 
 
 ERASE_REPORT_KEEPS = (
@@ -171,6 +177,9 @@ def reset_store(conn) -> dict:
             # reset may still land with a text the new store will issue again (#14)
             db.set_epoch(conn)
             conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
+            # S2 §6.3 (Astra plan-r3 S1): with `claims` empty every old job token is refused
+            # (check_claim), and the drain names no job of the wiped store
+            conn.execute("DELETE FROM meta WHERE key='drain'")
             # the marker row carries the last pass's trigger, id and start time —
             # operator data (fix wave B, Astra S2); the monotonic generation that
             # fences a running pass lives in counters, bumped above

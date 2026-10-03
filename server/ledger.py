@@ -18,6 +18,8 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
+import pathlib
 import re
 
 import casa_handoff
@@ -95,8 +97,9 @@ def _tags_of(r: dict) -> tuple:
 
 
 def end_lineage(conn, pid: int, how: str, snapshot_id=None) -> None:
-    cur = conn.execute("UPDATE projections SET ended=?, ended_at=?, ended_snapshot=? WHERE pid=?"
-                       " AND ended IS NULL", (how, db.now(), snapshot_id, pid))
+    cur = conn.execute("UPDATE projections SET ended=?, ended_at=?, ended_snapshot=?,"
+                       " readback_owed=0 WHERE pid=? AND ended IS NULL",
+                       (how, db.now(), snapshot_id, pid))
     if cur.rowcount == 1:          # a lineage ends once; a second call records nothing
         lineage.add_residue(conn, pid, "ended", how)
 
@@ -119,6 +122,13 @@ def merge(conn, survivor: int, loser: int) -> None:
     if others:
         conn.execute("UPDATE projections SET note_other_issued_at=? WHERE pid=?",
                      (max(others), survivor))
+    # and so do their claims (INV-J11): a read under the loser's issuing claim must not
+    # confirm the survivor's note
+    gens = [g for g in (s["note_other_issued_gen"], lo["note_issued_gen"],
+                        lo["note_other_issued_gen"]) if g is not None]
+    if gens:
+        conn.execute("UPDATE projections SET note_other_issued_gen=? WHERE pid=?",
+                     (max(gens), survivor))
     if lo["search_state"] == "accepted-missing":
         conn.execute("UPDATE projections SET search_state='accepted-missing' WHERE pid=?",
                      (survivor,))
@@ -235,16 +245,19 @@ def _rebind(conn) -> None:
                  " row_high_water=0 WHERE id=1")
 
 
-def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dict:
+def import_ledger_export(conn, *, path: str, token, ledger_instance: str, acq=None) -> dict:
     import passes
     if token is None:
-        raise db.Refusal("an import belongs to a pass: pass the pass_token from begin_pass")
+        raise db.Refusal("an import belongs to a pass: pass the pass_token job_next handed out")
     if not isinstance(ledger_instance, str) or not passes.LEDGER_RE.match(ledger_instance):
         raise db.Refusal("pass the export's `Ledger instance:` id as ledger_instance")
     try:
         name, data = casa_handoff.capture(path)
     except casa_handoff.HandoffError as exc:
         raise db.Refusal(f"that is not a handoff file ({exc.kind}): {exc}")
+    # capture proved the layout <root>/<producer>/<id>/<filename>: the parent is the
+    # handoff id, the export's identity (S2 §5.2: an export is importable once)
+    export_ref = pathlib.Path(os.path.realpath(path)).parent.name
     rows = parse(name, data)
     # The custody lock is taken BEFORE any transaction (lock order: custody, then the
     # SQLite write lock — as ingest, reset_store, reap_orphans, the package build and
@@ -254,10 +267,10 @@ def import_ledger_export(conn, *, path: str, token, ledger_instance: str) -> dic
     if conn.in_transaction:
         raise RuntimeError("import_ledger_export takes the custody lock before its transaction")
     with db.custody_lock(bound_s=db.LOCK_BOUND_S):
-        return _import(conn, rows, token, ledger_instance)
+        return _import(conn, rows, token, ledger_instance, acq=acq, export_ref=export_ref)
 
 
-def _import(conn, rows, token, ledger_instance) -> dict:
+def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) -> dict:
     import binding
     import delivery
     import passes
@@ -271,6 +284,26 @@ def _import(conn, rows, token, ledger_instance) -> dict:
     with db.tx(conn):
         passes.check_token(conn, token)
         cur_pass = passes.current_pass(conn)
+        job_pass = cur_pass is not None and cur_pass["protocol"] == "job"
+        if job_pass:
+            # INV-J14 (S2 §5.2): the import is bound to the pass's latest acquisition, by
+            # identity — its bank_sync recorded under this same claim — and once per export.
+            # The sync may have failed (PLAY T7, as v0.8.0): the export is bank-feed's
+            # cached ledger, imported with bank_through not advanced (below)
+            if acq is None or cur_pass["acq"] != acq:
+                raise db.Refusal("this import is not for the pass's current bank read: call "
+                                 "job_next and do the bank read it hands out")
+            if cur_pass["acq_gen"] != int(token):
+                raise db.Refusal("this bank read belongs to an earlier turn: call job_next")
+            sync = conn.execute("SELECT ok, gen, data_json FROM probes WHERE kind='bank_sync'"
+                                ).fetchone()
+            if (sync is None or sync["gen"] != int(token)
+                    or json.loads(sync["data_json"] or "{}").get("acq") != acq):
+                raise db.Refusal("record this bank read's sync first (record_probe "
+                                 "kind=\"bank_sync\" with its acq), then export and import")
+            if conn.execute("SELECT 1 FROM snapshots WHERE export_ref=?",
+                            (export_ref,)).fetchone():
+                raise db.Refusal("this export was imported already — export again")
         b = binding.get(conn)
         if b is None:
             raise db.Refusal("no account is bound yet")
@@ -307,6 +340,27 @@ def _import(conn, rows, token, ledger_instance) -> dict:
                     raise db.Refusal(f"row #{a['row_id']} now names a different transaction "
                                      "than the one this store holds — nothing was imported")
         _require_same_ledger(conn, b, ledger_instance)          # may re-bind (drops aliases)
+        if job_pass:
+            # final review FW-I2: a job pass reads the bank more than once (W refreshes,
+            # a late ask, an adoption), but its gate was decided once, from its first
+            # ledger probe. A later read whose ledger is not that one — restored (a new
+            # restore generation) or another instance — stops the pass here, before
+            # anything of it is imported or remembered; the next pass's own gate then
+            # says what happened ("restored"). poison rolls back this transaction (a
+            # re-bind above included), as for an instance switch
+            led = json.loads(probe["data_json"] or "{}")
+            try:                                 # read as the gate reads it
+                gen = int(led.get("generation", -1))
+            except (TypeError, ValueError):
+                gen = None
+            if (led.get("instance") != gate["expected_ledger"]
+                    or gen != gate["expected_generation"]):
+                passes.poison(conn, "the bank ledger was restored or replaced during this "
+                                    "pass; nothing more is written until a pass proves the "
+                                    "ledger again")
+                raise db.Refusal("the bank ledger is not the one this pass started on (it was "
+                                 "restored or replaced since): nothing was imported, and the "
+                                 "pass stops — call job_next")
         old_facts = {r["row_id"]: dict(r) for r in conn.execute("SELECT * FROM bank_rows")}
         sync = conn.execute("SELECT ok, pass_id FROM probes WHERE kind='bank_sync'").fetchone()
         prev = conn.execute("SELECT bank_through FROM snapshots ORDER BY snapshot_id DESC"
@@ -315,9 +369,13 @@ def _import(conn, rows, token, ledger_instance) -> dict:
                         and sync["pass_id"] == cur_pass["pass_id"]
                         else (prev["bank_through"] if prev else None))
         sid = conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
-                           " bank_through) VALUES (?,?,?,?,?)",
-                           (cur_pass["pass_id"], db.now(), len(mine), max_id,
-                            bank_through)).lastrowid
+                           " bank_through, job_id, read_seq, acq, export_ref)"
+                           " VALUES (?,?,?,?,?,?,?,?,?)",
+                           (cur_pass["pass_id"], db.now(), len(mine), max_id, bank_through,
+                            cur_pass["holder_job"] if job_pass else None,
+                            cur_pass["read_seq"] if job_pass else None,
+                            acq if job_pass else None,
+                            export_ref if job_pass else None)).lastrowid
         conn.execute("DELETE FROM bank_rows")
         for r in mine:
             conn.execute("INSERT INTO bank_rows(row_id, account_id, first_seen, booking_date,"
@@ -427,7 +485,8 @@ def _import(conn, rows, token, ledger_instance) -> dict:
         for pid, r in stamped:
             p = lineage.projection(conn, pid)
             owed = sweep.owed_write(conn, pid, r["tags"],
-                                    sweep.note_confirmed(p, r["tag_revision"], epoch=epoch))
+                                    sweep.note_confirmed(p, r["tag_revision"], epoch=epoch,
+                                                      conn=conn))
             conn.execute("UPDATE projections SET observed_revision=? WHERE pid=?",
                          (p["revision"] if owed is None else None, pid))
         passes.remember_ledger(conn, cur_pass["pass_id"])   # identity proved above

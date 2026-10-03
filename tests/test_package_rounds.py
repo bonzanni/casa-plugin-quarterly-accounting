@@ -296,7 +296,7 @@ class TestTheCheckIsBoundToItsImport(Rounds):
         text = self.text("build_quarterly_package", quarter="2026-Q3",
                          package_token=end["package_token"])
         self.assertEqual(text, "refused: the bank was re-read since the check — the check "
-                               "runs again, and the package follows it; call continue_pass")
+                               "runs again, and the package follows it; call job_report")
         r = self.request()
         self.assertEqual((r["state"], r["token"], r["round"]), ("queued", None, 1))
         self.assertEqual(self.claim()["continue"]["next"], "snapshot")

@@ -140,6 +140,9 @@ class TestARecordBelongsToTheChunk(C):
         for kw in ({"queries": ["q"]}, {"found_candidate": True}, {"exhausted": True}):
             out = self.text("record_search", pid=other, pass_token=t, **kw)
             self.assertIn(f"payment #{other} is not in the work you were handed", out)
+            # Task 12 fix round 1 (M1): said in the job's terms, no removed tool named
+            self.assertIn("search and record only the payments job_next hands out in its "
+                          "Gmail items — nothing was written", out)
         after = lineage.projection(self.conn, other)
         self.assertEqual((after["search_json"], after["passes_without_candidate"]),
                          (before["search_json"], before["passes_without_candidate"]))

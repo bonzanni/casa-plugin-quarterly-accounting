@@ -2,6 +2,7 @@
 fresh data dir, handoff folder and outbox, and os.environ restored after."""
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 import sys
@@ -56,6 +57,17 @@ class StoreCase(TempEnv):
 
     LEDGER = "a" * 32             # the bank-feed ledger instance id the fixtures bind to
 
+    @contextlib.contextmanager
+    def patch_clock(self, at):
+        """db._clock returns `at` inside the block; the real clock is restored after."""
+        import db
+        real = db._clock
+        db._clock = lambda: at
+        try:
+            yield at
+        finally:
+            db._clock = real
+
     def handed(self, *pids):
         """Put payments in the live pass's open Gmail chunk (issue #26, A4: a search is
         recorded only for handed work), as a continuation's hand-out would."""
@@ -80,6 +92,38 @@ class StoreCase(TempEnv):
                             data={"generation": generation, "registered": registered or {},
                                   "instance": instance or self.LEDGER})
         return token
+
+    def start_job_pass(self, token, trigger="operator"):
+        """A job pass started under claim `token` (S2 §3), held by that claim's job id —
+        as the job cursor's _begin_next starts one. Returns its pass_id."""
+        import db
+        import json
+        import passes
+        with db.tx(self.conn):
+            _, pass_id = passes.start_pass(self.conn, trigger,
+                                           "silent" if trigger == "cron" else "telegram",
+                                           protocol="job", token=token)
+            job_id = self.conn.execute("SELECT job_id FROM claims WHERE gen=?",
+                                       (token,)).fetchone()[0]
+            self.conn.execute("UPDATE passes SET holder_job=?, adopters_json=? WHERE pass_id=?",
+                              (job_id, json.dumps([job_id]), pass_id))
+        return pass_id
+
+    def bind_round_and_take(self, pass_id):
+        """The queued package request's round runs in `pass_id` (passes._bind_round), and
+        the pass takes what it may (asks.take_queued) — as the job cursor starts a round."""
+        import asks
+        import db
+        import passes
+        with db.tx(self.conn):
+            rid = self.conn.execute("SELECT request_id FROM package_requests WHERE"
+                                    " state='queued' ORDER BY request_id").fetchone()[0]
+            passes._bind_round(self.conn, rid, pass_id)
+            return asks.take_queued(self.conn, pass_id)
+
+    def hand_empty_chunk(self):
+        """The live pass's continuation hands out an empty Gmail chunk (nothing to search)."""
+        hand(self.conn, [])
 
     def end_live_pass(self):
         """End the live pass, if any, with its current token (the marker's: a claim
@@ -126,6 +170,24 @@ class StoreCase(TempEnv):
         steps.finish(self.conn, token, "snapshot", counts={})
         self.check_round(token)
         return passes.end_pass(self.conn, token, "complete", {})["package_token"]
+
+    def package_built_unsent(self, quarter="2026-Q3", channel="telegram"):
+        """A package request whose package was built and never staged, its holder gone:
+        package_token(), build_quarterly_package under it (state `built`), then the
+        request's lease set to a lapsed time, so a sends claim may take it (S2 §6.4)."""
+        import datetime as _dt
+        import db
+        import package
+        import steps
+        if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
+            self.bind()                     # a build needs the bound account
+        token = self.package_token(quarter, channel)
+        package.build_quarterly_package(self.conn, quarter, token)
+        lapsed = steps._stamp(db._clock() - _dt.timedelta(seconds=steps.LEASE_S + 60))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE package_requests SET lease_at=? WHERE state='built'",
+                              (lapsed,))
+        return token
 
     def check_round(self, token, gmail_ok=True, triage_remaining=0):
         """The rest of a package round (issue #15): Ellen's Gmail round (its probe) and
@@ -225,6 +287,46 @@ class StoreCase(TempEnv):
             w.writerow({k: ("" if full.get(k) is None else full.get(k, "")) for k in self.EXPORT_COLS})
         return casa_handoff.publish("bank-feed", "ledger-export-test.csv",
                                     data=buf.getvalue().encode())["path"]
+
+    def sweep_to_zero(self):
+        """List and observe the live pass's sweep until nothing is due, each read showing
+        the row's desired tags and its note (no write owed). The last listing finds
+        nothing due, so the cycle is complete and the import's sweep is stamped."""
+        import sweep
+        token = self.conn.execute("SELECT generation FROM pass_marker").fetchone()[0]
+        for _ in range(50):
+            page = sweep.list_projections(self.conn, token=token)
+            if not page["projections"] and page["remaining_in_cycle"] == 0:
+                return
+            for item in page["projections"]:
+                first_seen = self.conn.execute("SELECT first_seen FROM aliases WHERE row_id=?",
+                                               (item["row_id"],)).fetchone()[0]
+                out = sweep.record_observation(
+                    self.conn, pid=item["pid"], token=token, snapshot_id=page["snapshot_id"],
+                    observed_tags=item["desired"],
+                    observed_notes=[item["note"]] if item["note"] else [],
+                    observed_first_seen=first_seen, observed_tag_revision=0)
+                assert not out.get("instructions"), out
+        raise AssertionError("the sweep did not reach zero")
+
+    def only_pid(self):
+        """The single live lineage's pid."""
+        import lineage
+        (pid,) = lineage.live_pids(self.conn)
+        return pid
+
+    def machine_match(self, pid, doc_id, token):
+        """A machine pairing of `doc_id` with payment `pid`, as triage makes one: the
+        item's row_digest and revision from list_quarter_state, the document's date."""
+        import matches
+        import work
+        item = work.list_quarter_state(self.conn, pid=pid)["item"]
+        date = self.conn.execute("SELECT document_date FROM documents WHERE doc_id=?",
+                                 (doc_id,)).fetchone()[0]
+        return matches.record_match(self.conn, pid=pid, doc_id=doc_id, author="auto",
+                                    expected_revision=item["revision"],
+                                    row_digest=item["row_digest"], document_date=date,
+                                    token=token)
 
     def show(self, *pids):
         """What build_review + a successful send + mark_rendering_delivered

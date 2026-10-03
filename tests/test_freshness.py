@@ -505,7 +505,7 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
         # issue #15 (design D2): its request goes back to its check; the old build is
         # never sent as a first send again, by any channel (D3)
         self.assertEqual(out, "refused: the bank was re-read since the check — the check "
-                              "runs again, and the package follows it; call continue_pass")
+                              "runs again, and the package follows it; call job_report")
         self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
                          "queued")
         self.assertTrue(_raw("stage_for_delivery", channel="email",
@@ -578,7 +578,7 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
             out = _raw("record_delivery", delivery_id=d["delivery_id"], outcome="delivered",
                        message_id="m-1")
             self.assertEqual(out, "refused: the bank was re-read before this was sent — "
-                                  "nothing was recorded; call continue_pass (a package you "
+                                  "nothing was recorded; call job_report (a package you "
                                   "asked for follows its check)")
         rows = self.conn.execute("SELECT status, revoked_at IS NOT NULL FROM deliveries"
                                  " ORDER BY delivery_id").fetchall()

@@ -367,7 +367,7 @@ def _request_for_build(conn, quarter: str, package_token) -> int:
     import passes
     if package_token is None:
         raise db.Refusal("a package is built for a package request: pass the package_token "
-                         "end_pass or continue_pass gave you")
+                         "job_report's `continue` gave you")
     req = conn.execute("SELECT * FROM package_requests WHERE token=?",
                        (int(package_token),)).fetchone()
     if req is None:
@@ -386,7 +386,7 @@ def _request_for_build(conn, quarter: str, package_token) -> int:
 
 
 RECHECK = ("the bank was re-read since the check — the check runs again, and the package "
-           "follows it; call continue_pass")
+           "follows it; call job_report")
 
 
 def stale_check(conn, request_id, token) -> bool:

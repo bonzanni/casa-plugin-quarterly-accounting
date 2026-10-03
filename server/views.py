@@ -436,12 +436,15 @@ def coverage(conn, members) -> str:
 
 
 def _lead(conn):
-    """(stop lines or None, gmail unavailable, the interrupted pass's report or None)."""
+    """(stop lines or None, gmail unavailable, the interrupted pass's report or None,
+    Gmail not connected for the finance specialist at all — S2's `absent` probe)."""
     setup = binding.check_setup(conn)
     if not setup["can_run"]:
-        return [setup["header"], *setup["conditions"], "Nothing else to do until then."], False, None
+        return ([setup["header"], *setup["conditions"], "Nothing else to do until then."], False,
+                None, False)
     gmail = setup["probes"].get("gmail")
     gmail_down = gmail is not None and not gmail["ok"]
+    absent = gmail_down and bool((gmail["data"] or {}).get("absent"))
     # A package snapshot or a document handover is not a review pass: it must not
     # erase an interrupted review's block (Task 22 review, item 5).
     last = conn.execute("SELECT * FROM passes WHERE ended_at IS NOT NULL"
@@ -454,20 +457,54 @@ def _lead(conn):
         # round stores none — then the block says only that the review was interrupted
         interrupted = ((int(rep["checked"]), int(rep["total"]))
                        if "checked" in rep and "total" in rep else ())
-    return None, gmail_down, interrupted
+    return None, gmail_down, interrupted, absent
+
+
+def _status_notes(conn) -> list:
+    """S2: what the status head adds — how old the bank read the last check's decisions
+    rested on, when its freshness window was waived (§5.2); how many payments still await
+    classification (§6.4); and a check asked for that no job has started yet (§6.3)."""
+    import passes
+    out = []
+    last = conn.execute("SELECT report_json FROM passes WHERE ended_at IS NOT NULL"
+                        " AND trigger NOT IN ('package', 'handover')"
+                        " ORDER BY ended_at DESC, generation DESC LIMIT 1").fetchone()
+    rep = json.loads((last["report_json"] if last else None) or "{}")
+
+    def count(key):
+        v = rep.get(key)
+        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+    if count("read_age_min"):
+        out.append(f"These results use a bank read from {count('read_age_min')} minutes before "
+                   "they were finished.")
+    n = count("awaiting_classification")
+    if n:
+        out.append(f"{_plural(n, 'payment')} still "
+                   + ("awaits classification — it's" if n == 1
+                      else "await classification — they're")
+                   + " checked again once classified.")
+    asked = conn.execute("SELECT min(created_at) FROM work_requests WHERE state='queued'"
+                         ).fetchone()[0]
+    drain = conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
+    if asked is not None and (drain is None or drain[0] == "none"):
+        out.append(f"A check is waiting to start, asked {passes.ago(asked)}.")
+    return out
 
 
 def _plural(n, one, many=None):
     return f"{n} {one if n == 1 else (many or one + 's')}"
 
 
-def _degraded_block(gmail_down, interrupted, missing, unsearched) -> list:
+def _degraded_block(gmail_down, interrupted, missing, unsearched, absent=False) -> list:
     """A degraded pass leads with its own condition, ahead of any accounting
     result, and keeps `missing` apart from `not searched` / `not checked`
     (spec §Weekly pass, "A broken pass must not read as deficient books")."""
     out = []
     if gmail_down:
         out.append("Review incomplete - Gmail unavailable.")
+        if absent:
+            out.append("Gmail isn't connected for the finance specialist — invoices aren't "
+                       "being searched.")
         if missing:
             kinds = {d["expectation"]["kind"] for d in missing}
             word = KIND_WORD.get(kinds.pop(), "document") if len(kinds) == 1 else "document"
@@ -558,7 +595,7 @@ def _compose(conn, view, q, items, members, lead):
     """The parts of a view, before any capping or paging: a head printed on
     every page, the announcement printed once, the sections, and a tail built
     from what was actually printed."""
-    stop, gmail_down, interrupted = lead
+    stop, gmail_down, interrupted, absent = lead
     cur = [d for d in items if d["quarter"] == q]
     # every older open item, searched or not: an older payment nobody has looked
     # for yet is still open work the default quarter must not hide (issue #4)
@@ -587,7 +624,9 @@ def _compose(conn, view, q, items, members, lead):
               "older": "Older, still open",
               "quarter": f"Accounting · {dates.quarter_label(q)}"}
     # the same quarter figure the coverage line prints; older ones have their own line
-    parts["head"] = _degraded_block(gmail_down, interrupted, missing, unsearched)
+    parts["head"] = _degraded_block(gmail_down, interrupted, missing, unsearched, absent)
+    if view in ("status", "all"):
+        parts["head"] += _status_notes(conn)
     if parts["head"]:
         parts["head"].append("")
     parts["head"].append(titles[view])
@@ -892,10 +931,29 @@ def build_review(conn, view="status", quarter=None, pid=None, page=None, after=N
 
 
 def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
+    """review_in_tx under its own write transaction."""
+    with db.tx(conn):
+        return review_in_tx(conn, view, quarter, pid, page, after)
+
+
+def review_in_tx(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
+    """The rendering, inside the caller's write transaction (S2 §6.4: job_report composes
+    a result in its own one transaction). The per-rendering disambiguation (_NAMES) is
+    reset after, as build_review does."""
+    global _NAMES
+    assert conn.in_transaction, "a review is composed inside the write transaction"
+    try:
+        return _review(conn, view, quarter, pid, page, after)
+    finally:
+        _NAMES = None
+
+
+def _review(conn, view, quarter, pid, page, after) -> dict:
     """`page` (1, 2, ...) renders the view uncapped, one message per page, and
     `after` is the cursor the previous page's `next` returned; the `all` view
     is the status view paged. The answer's `next` is the call that the phrase
     the text ends with asks for (`all of them`, `more`), or None."""
+    global _NAMES
     if view not in VIEWS:
         raise db.Refusal(f"view is one of {', '.join(VIEWS)}")
     if view == "item" and pid is None:
@@ -908,97 +966,97 @@ def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=
         raise db.Refusal("after is the cursor a previous page's `next` returned")
     q = quarter or dates.quarter_of(db.now()[:10])
     dates.parse_quarter(q)
-    lead = _lead(conn)                  # may record the pass's gate: outside the read below
+    lead = _lead(conn)                  # may record the pass's gate
     # Compose and persist under ONE write lock, so the revisions recorded are
     # exactly those of the facts the text shows (round p1, Astra S1: a write
     # between composing and recording bound the operator to an unseen document).
-    with db.tx(conn):
-        members, chosen, scope, nxt = [], [], {"quarter": q, "pid": pid}, None
-        items = []
-        if lead[0] is not None:
-            text = fit_message(_text(lead[0]), FIT_CLOSING)
-            scope["stop"] = True
+    # The caller holds it (review_in_tx).
+    members, chosen, scope, nxt = [], [], {"quarter": q, "pid": pid}, None
+    items = []
+    if lead[0] is not None:
+        notes = _status_notes(conn) if view in ("status", "all") else []
+        text = fit_message(_text(lead[0] + notes), FIT_CLOSING)
+        scope["stop"] = True
+    else:
+        members = membership(conn, view, q, pid)
+        items = [work.describe(conn, p) for p in members]
+        # every identity this rendering prints is made distinct before composing
+        _NAMES = names_for(items, None if view == "item" else q)
+        parts = _compose(conn, view, q, items, members, lead)
+        if view == "item":
+            blk, cursor = _item_page(items[0], after)
+            lines, chosen = blk.lines, [blk]
+            text = _text(lines)
+            if cursor is not None:
+                nxt = {"view": "item", "pid": pid, "page": (page or 1) + 1, "after": cursor}
+            scope["page"], scope["after"] = page, after
+            # a later page adds to what the earlier pages of this item bound
+            scope["continues"] = bool(page and page > 1)
+        elif page is not None:
+            lines, chosen, cursor = _page(parts, after, page == 1)
+            text = _text(lines)
+            if cursor is not None:
+                nxt = {"view": view, "quarter": q, "page": page + 1, "after": cursor}
+            scope["page"], scope["after"] = page, after
         else:
-            members = membership(conn, view, q, pid)
-            items = [work.describe(conn, p) for p in members]
-            # every identity this rendering prints is made distinct before composing
-            global _NAMES
-            _NAMES = names_for(items, None if view == "item" else q)
-            parts = _compose(conn, view, q, items, members, lead)
-            if view == "item":
-                blk, cursor = _item_page(items[0], after)
-                lines, chosen = blk.lines, [blk]
+            for cap in range(CAP, -1, -1):
+                lines, chosen = _capped(parts, cap)
                 text = _text(lines)
-                if cursor is not None:
-                    nxt = {"view": "item", "pid": pid, "page": (page or 1) + 1, "after": cursor}
-                scope["page"], scope["after"] = page, after
-                # a later page adds to what the earlier pages of this item bound
-                scope["continues"] = bool(page and page > 1)
-            elif page is not None:
-                lines, chosen, cursor = _page(parts, after, page == 1)
-                text = _text(lines)
-                if cursor is not None:
-                    nxt = {"view": view, "quarter": q, "page": page + 1, "after": cursor}
-                scope["page"], scope["after"] = page, after
-            else:
-                for cap in range(CAP, -1, -1):
-                    lines, chosen = _capped(parts, cap)
-                    text = _text(lines)
-                    if utf16_len(text) <= TELEGRAM_LIMIT:
-                        break
-                if any(len(s.blocks) > sum(1 for c in chosen if c in s.blocks)
-                       for s in parts["sections"]):
-                    nxt = {"view": "all" if view == "status" else view, "quarter": q, "page": 1}
-            # The final text goes through the one fit. If it cut anything, nothing it
-            # prints is bound: the text may not show every block chosen. The closing
-            # line carries the phrase `next` answers, so it is never cut.
-            closing = FIT_CLOSING
-            if nxt is not None:
-                closing = (MORE_LINE if "after" in nxt
-                           else 'The rest did not fit — say "all of them".')
-            body = text.split("\n")
-            out, whole = fit_lines(body, closing)
-            text, cut = "\n".join(out), whole < len(body)
-            if cut:
-                chosen = []
-            if page in (None, 1) and parts["announce"] and not cut \
-                    and parts["announce"][0] in lines:
-                scope["announce_watermark"] = True
-            if view in ("status", "all"):
-                scope["residue"] = [c.residue for c in chosen if c.residue is not None]
-                scope["offers"] = [c.offer for c in chosen if c.offer is not None]
-                if page in (None, 1):
-                    scope["residue_silent"] = parts["silent"]
-        printed = _bindable(chosen, text)
-        if _NAMES is not None:
-            # the generated refs this rendering printed on payments it binds: a reply's
-            # "ref <hex>" is honoured only against these (round 6)
-            # hex -> EVERY payment printed with that ref (round 9: refs are distinct only
-            # within a payee-collision group, so two groups can print the same hex)
-            refs: dict = {}
-            for p in sorted(printed):
-                if _NAMES.pids.get(p):
-                    refs.setdefault(_NAMES.pids[p], []).append(p)
-            if refs:
-                scope["refs"] = refs
-            # the payee name each bound payment was SHOWN as: a reply resolves names
-            # against what the operator saw, as well as the stored names (round 7)
-            by_pid = {d["pid"]: d for d in items}
-            seen = {str(p): field(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
-            if seen:
-                scope["names"] = seen
-        rid = f"r{db.next_seq(conn)}"
-        conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
-                     " membership_json) VALUES (?,?,?,?,?,?)",
-                     (rid, view, db.canonical(scope), db.now(), text, json.dumps(members)))
-        for p, shown_ids in printed.items():
-            prev = conn.execute("SELECT revision FROM projections WHERE pid=?", (p,)).fetchone()[0]
-            mrevs = {str(r[0]): r[1] for r in conn.execute(
-                "SELECT match_id, revision FROM match_state WHERE pid=?", (p,))
-                if r[0] in shown_ids}
-            conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
-                         " match_revisions_json) VALUES (?,?,?,?)",
-                         (rid, p, prev, db.canonical(mrevs)))
+                if utf16_len(text) <= TELEGRAM_LIMIT:
+                    break
+            if any(len(s.blocks) > sum(1 for c in chosen if c in s.blocks)
+                   for s in parts["sections"]):
+                nxt = {"view": "all" if view == "status" else view, "quarter": q, "page": 1}
+        # The final text goes through the one fit. If it cut anything, nothing it
+        # prints is bound: the text may not show every block chosen. The closing
+        # line carries the phrase `next` answers, so it is never cut.
+        closing = FIT_CLOSING
+        if nxt is not None:
+            closing = (MORE_LINE if "after" in nxt
+                       else 'The rest did not fit — say "all of them".')
+        body = text.split("\n")
+        out, whole = fit_lines(body, closing)
+        text, cut = "\n".join(out), whole < len(body)
+        if cut:
+            chosen = []
+        if page in (None, 1) and parts["announce"] and not cut \
+                and parts["announce"][0] in lines:
+            scope["announce_watermark"] = True
+        if view in ("status", "all"):
+            scope["residue"] = [c.residue for c in chosen if c.residue is not None]
+            scope["offers"] = [c.offer for c in chosen if c.offer is not None]
+            if page in (None, 1):
+                scope["residue_silent"] = parts["silent"]
+    printed = _bindable(chosen, text)
+    if _NAMES is not None:
+        # the generated refs this rendering printed on payments it binds: a reply's
+        # "ref <hex>" is honoured only against these (round 6)
+        # hex -> EVERY payment printed with that ref (round 9: refs are distinct only
+        # within a payee-collision group, so two groups can print the same hex)
+        refs: dict = {}
+        for p in sorted(printed):
+            if _NAMES.pids.get(p):
+                refs.setdefault(_NAMES.pids[p], []).append(p)
+        if refs:
+            scope["refs"] = refs
+        # the payee name each bound payment was SHOWN as: a reply resolves names
+        # against what the operator saw, as well as the stored names (round 7)
+        by_pid = {d["pid"]: d for d in items}
+        seen = {str(p): field(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
+        if seen:
+            scope["names"] = seen
+    rid = f"r{db.next_seq(conn)}"
+    conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
+                 " membership_json) VALUES (?,?,?,?,?,?)",
+                 (rid, view, db.canonical(scope), db.now(), text, json.dumps(members)))
+    for p, shown_ids in printed.items():
+        prev = conn.execute("SELECT revision FROM projections WHERE pid=?", (p,)).fetchone()[0]
+        mrevs = {str(r[0]): r[1] for r in conn.execute(
+            "SELECT match_id, revision FROM match_state WHERE pid=?", (p,))
+            if r[0] in shown_ids}
+        conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
+                     " match_revisions_json) VALUES (?,?,?,?)",
+                     (rid, p, prev, db.canonical(mrevs)))
     return {"render_id": rid, "text": text, "printed": len(printed), "next": nxt}
 
 
@@ -1052,8 +1110,14 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
         conn.execute("UPDATE renders SET delivered_at=?, delivered_seq=? WHERE render_id=?",
                      (now, db.next_seq(conn), render_id))
         scope = json.loads(r["scope_json"])
-        for it in conn.execute("SELECT * FROM render_items WHERE render_id=?",
-                               (render_id,)).fetchall():
+        # a NON-binding rendering (handed out last by an operator turn's job_report:
+        # diff round 1, R5) is recorded delivered — db.last_delivered returns it, and a
+        # reply about its contents refuses there (R6) — but it never becomes any
+        # payment's shown revision (`shown`, which named replies and every operator
+        # write bind through)
+        binds = r["binding"] is None or r["binding"] == 1
+        for it in (conn.execute("SELECT * FROM render_items WHERE render_id=?",
+                                (render_id,)).fetchall() if binds else ()):
             mrevs = it["match_revisions_json"]
             if scope.get("continues"):
                 # a later page of one item view: the operator has now been shown the
@@ -1078,4 +1142,6 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
                          (now, render_id, a))
         if scope.get("announce_package_name"):
             conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
+        import asks
+        asks.mark_reported(conn, render_id)     # S2 §6.4: consumed only once shown
         return {"render_id": render_id, "delivered_at": now}

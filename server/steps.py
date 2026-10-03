@@ -27,7 +27,6 @@ import json
 import db
 import passes
 
-CEILING_ASSUMED_S = 600     # Casa's delegated-turn ceiling, as read (spec: assumption A2)
 SWEEP_STOP_S = 450          # the sweep lists no row after this
 RETURN_BY_S = 510           # wrap_up: the specialist finishes and returns
 STEP_EXPIRY_S = 600         # an unfinished step is over (its stamp precedes Casa's launch)
@@ -74,6 +73,8 @@ def _ended(step):
     """'finished' / 'errored' / 'expired', or None while the step runs."""
     if step["finished_at"] is not None:
         return "errored" if _finish(step).get("failed") else "finished"
+    if step["protocol"] == "job":
+        return None         # spec INV-J3: a job step never expires; the cursor resumes it
     if _age(step["started_at"]) >= STEP_EXPIRY_S:
         return "expired"
     return None
@@ -103,81 +104,102 @@ def _carry(step: str, carry: dict) -> dict:
     return given
 
 
-def start(conn, token, step: str, carry: dict) -> dict:
-    """Ellen, just before delegate_to_agent: stamp the step with the token she
-    holds (and passes on to the specialist)."""
+def _start_args(step: str, token, carry: dict) -> dict:
     if step not in STEPS:
         raise db.Refusal("step is sweep, judge, handover or snapshot")
     if token is None:
         raise db.Refusal("a step belongs to a pass: pass the pass_token")
-    carry = _carry(step, carry)
+    return _carry(step, carry)
+
+
+def start(conn, token, step: str, carry: dict) -> dict:
+    """Ellen, just before delegate_to_agent: stamp the step with the token she
+    holds (and passes on to the specialist)."""
+    carry = _start_args(step, token, carry)
     with db.tx(conn):
-        passes.check_token(conn, token)
-        m = passes._marker(conn)
-        if step not in FOR_TRIGGER.get(m["trigger"], ()):
-            raise db.Refusal(f"a {step} step belongs to {BELONGS[step]}, not to this "
-                             f"{m['trigger']} pass")
-        prior = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
-                             (m["pass_id"], step)).fetchone()
-        req = round_request(conn, m["pass_id"])
-        # issue #17: a package round judges after every Gmail chunk, and so does a check
-        # (issue #21). A judge step whose judgment finished is started again on the same
-        # row — the row is always the pass's latest judgment, which is what its check
-        # (package_check, _judgment_owed) reads
-        # C4 (Astra S1): a failed or expired judgment is restarted too when a chunk handed
-        # out since is open — that chunk is owed its judgment, and nothing else can end it
-        restart = (prior is not None and step == "judge"
-                   and (_ended(prior) == "finished"
-                        or (_ended(prior) in ("errored", "expired")
-                            and _chunk(conn, m["pass_id"])[1] is not None)))
-        if prior is not None and not restart:
-            raise db.Refusal(f"the {step} step was already started in this pass")
-        now = db._clock().replace(microsecond=0)
-        if step == "snapshot" and req is None:
-            raise db.Refusal("this package pass holds no package request: ask for the package "
-                             "with begin_pass(trigger=\"package\", quarter, channel)")
-        if step == "judge":
-            # the payments this judgment covers (issue #3, C6): end_pass lets the pass
-            # be complete only if every payment judge-due at its end was due here; a
-            # package round's judgment covers its quarter (issue #15)
-            import work
-            q = req["quarter"] if req is not None else None
-            carry = {**carry, "due_at_start": {str(p): v for p, v in
-                                               work.judge_due_state(conn, q).items()}}
-        if restart:
-            # the delegations this row served before, so a notice naming one of them can
-            # never be read as this judgment's (D2)
-            old = json.loads(prior["carry_json"] or "{}")
-            gone = old.get("delegations_before", []) + (
-                [old["delegation"]] if old.get("delegation") else [])
-            if gone:
-                carry = {**carry, "delegations_before": gone}
-        if step == "judge" and not _judge_may_start(conn, m["pass_id"]):
-            # C1, C2 (Astra S1 twice, one shape — generalized): a judgment never stands in
-            # for the Gmail round. It starts only after a chunk was handed out, or once the
-            # pass's first step has ended in a way that hands none out
-            raise db.Refusal("the Gmail round comes first: when the step running now has "
-                             "ended, call continue_pass and do what it returns (its "
-                             "gmail-round); the judge step follows its chunk")
-        if step == "judge":
-            # issue #28 (A2): the judgment closes the open Gmail chunk
-            first = _first_carry(conn, m["pass_id"])
-            if first.get("chunk", {}).get("open"):
-                first["chunk"]["open"] = False
-                _set_first_carry(conn, m["pass_id"], first)
-        if restart:
-            conn.execute("UPDATE pass_steps SET started_at=?, finished_at=NULL, finished_by=NULL,"
-                         " finish_json=NULL, carry_json=? WHERE pass_id=? AND step=?",
-                         (_stamp(now), db.canonical(carry), m["pass_id"], step))
-            # a claim keys on the step's name: the restarted judgment is unclaimed
-            conn.execute("UPDATE pass_marker SET claimed_step=NULL WHERE id=1")
-        else:
-            conn.execute("INSERT INTO pass_steps(pass_id, step, started_at, carry_json)"
-                         " VALUES (?,?,?,?)",
-                         (m["pass_id"], step, _stamp(now), db.canonical(carry)))
-        return {"step": step, "started_at": _stamp(now),
-                "sweep_stop_at": _stamp(now + _dt.timedelta(seconds=SWEEP_STOP_S)),
-                "return_by": _stamp(now + _dt.timedelta(seconds=RETURN_BY_S))}
+        return _start_tx(conn, token, step, carry)
+
+
+def _start_tx(conn, token, step: str, carry: dict, *, restart_running=False) -> dict:
+    """start's body, inside the caller's write transaction (start's own, or the job
+    cursor's). A new step row records its pass's protocol, and the store sequence and
+    generation it started at (S2 §8); a judge restart re-stamps both. `restart_running`
+    (the job cursor only, S2 §5.2): a job pass's RUNNING judgment is restarted too — a
+    handover taken mid-judgment is served only by a judgment started after it."""
+    assert conn.in_transaction, "a step is started inside the write transaction"
+    carry = _start_args(step, token, carry)
+    passes.check_token(conn, token)
+    m = passes._marker(conn)
+    if step not in FOR_TRIGGER.get(m["trigger"], ()):
+        raise db.Refusal(f"a {step} step belongs to {BELONGS[step]}, not to this "
+                         f"{m['trigger']} pass")
+    prior = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
+                         (m["pass_id"], step)).fetchone()
+    req = round_request(conn, m["pass_id"])
+    # issue #17: a package round judges after every Gmail chunk, and so does a check
+    # (issue #21). A judge step whose judgment finished is started again on the same
+    # row — the row is always the pass's latest judgment, which is what its check
+    # (package_check, _judgment_owed) reads
+    # C4 (Astra S1): a failed or expired judgment is restarted too when a chunk handed
+    # out since is open — that chunk is owed its judgment, and nothing else can end it
+    restart = (prior is not None and step == "judge"
+               and (_ended(prior) == "finished"
+                    or (_ended(prior) in ("errored", "expired")
+                        and _chunk(conn, m["pass_id"])[1] is not None)
+                    or (restart_running and prior["protocol"] == "job"
+                        and _ended(prior) is None)))
+    if prior is not None and not restart:
+        raise db.Refusal(f"the {step} step was already started in this pass")
+    now = db._clock().replace(microsecond=0)
+    if step == "snapshot" and req is None:
+        raise db.Refusal("this package pass holds no package request: ask for the package "
+                         "with begin_pass(trigger=\"package\", quarter, channel)")
+    if step == "judge":
+        # the payments this judgment covers (issue #3, C6): end_pass lets the pass
+        # be complete only if every payment judge-due at its end was due here; a
+        # package round's judgment covers its quarter (issue #15)
+        import work
+        q = req["quarter"] if req is not None else None
+        carry = {**carry, "due_at_start": {str(p): v for p, v in
+                                           work.judge_due_state(conn, q).items()}}
+    if restart:
+        # the delegations this row served before, so a notice naming one of them can
+        # never be read as this judgment's (D2)
+        old = json.loads(prior["carry_json"] or "{}")
+        gone = old.get("delegations_before", []) + (
+            [old["delegation"]] if old.get("delegation") else [])
+        if gone:
+            carry = {**carry, "delegations_before": gone}
+    if step == "judge" and not _judge_may_start(conn, m["pass_id"]):
+        # C1, C2 (Astra S1 twice, one shape — generalized): a judgment never stands in
+        # for the Gmail round. It starts only after a chunk was handed out, or once the
+        # pass's first step has ended in a way that hands none out
+        raise db.Refusal("the Gmail round comes first: when the step running now has "
+                         "ended, call continue_pass and do what it returns (its "
+                         "gmail-round); the judge step follows its chunk")
+    if step == "judge":
+        # issue #28 (A2): the judgment closes the open Gmail chunk
+        first = _first_carry(conn, m["pass_id"])
+        if first.get("chunk", {}).get("open"):
+            first["chunk"]["open"] = False
+            _set_first_carry(conn, m["pass_id"], first)
+    if restart:
+        conn.execute("UPDATE pass_steps SET started_at=?, finished_at=NULL, finished_by=NULL,"
+                     " finish_json=NULL, carry_json=?, started_seq=?, started_gen=?"
+                     " WHERE pass_id=? AND step=?",
+                     (_stamp(now), db.canonical(carry), db.next_seq(conn), int(token),
+                      m["pass_id"], step))
+        # a claim keys on the step's name: the restarted judgment is unclaimed
+        conn.execute("UPDATE pass_marker SET claimed_step=NULL WHERE id=1")
+    else:
+        conn.execute("INSERT INTO pass_steps(pass_id, step, started_at, carry_json,"
+                     " protocol, started_seq, started_gen) VALUES (?,?,?,?,?,?,?)",
+                     (m["pass_id"], step, _stamp(now), db.canonical(carry),
+                      passes.protocol_of(conn, m["pass_id"]), db.next_seq(conn),
+                      int(token)))
+    return {"step": step, "started_at": _stamp(now),
+            "sweep_stop_at": _stamp(now + _dt.timedelta(seconds=SWEEP_STOP_S)),
+            "return_by": _stamp(now + _dt.timedelta(seconds=RETURN_BY_S))}
 
 
 def round_request(conn, pass_id):
@@ -186,10 +208,7 @@ def round_request(conn, pass_id):
                         (pass_id,)).fetchone()
 
 
-def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
-           by_refusal=False, out_of_time=False) -> dict:
-    """The specialist's last action (or Ellen's, when the delegation came back in
-    her turn without one). A superseded specialist is refused here like anywhere."""
+def _finish_args(step: str, token, counts: dict, stopped, by_refusal, out_of_time) -> None:
     if step not in STEPS:
         raise db.Refusal("step is sweep, judge, handover or snapshot")
     if token is None:
@@ -200,64 +219,88 @@ def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
     if out_of_time and (stopped or by_refusal):
         raise db.Refusal("out_of_time=true is a finish without `stopped`: time ran out, "
                          "nothing refused")
+
+
+def finish(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
+           by_refusal=False, out_of_time=False) -> dict:
+    """The specialist's last action (or Ellen's, when the delegation came back in
+    her turn without one). A superseded specialist is refused here like anywhere."""
+    _finish_args(step, token, counts, stopped, by_refusal, out_of_time)
     with db.tx(conn):
-        passes.check_token(conn, token)
-        m = passes._marker(conn)
-        row = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
-                           (m["pass_id"], step)).fetchone()
-        if row is None:
-            raise db.Refusal(f"the {step} step was not started in this pass")
-        if row["finished_at"] is not None:
-            return {"step": step, "finished": True, "already": True}
-        body = {k: v for k, v in counts.items() if v is not None}
-        # issue #18: a judgment is whole only when it says how far triage got. A judge
-        # finish that carries counts carries that one; a countless finish (Ellen's, the
-        # delegation back without one) is accepted and counts as not whole
-        if (step == "judge" and body and not failed and not stopped
-                and body.get("triage_remaining") is None):
-            raise db.Refusal("a judge step's finish carries triage_remaining: the last triage "
-                             "page's `remaining` (0 when every page was judged) — finish "
-                             "again with it")
-        # issue #10: running out of time is not a stop. Once the step's time is up (the
-        # sweep pages `time_up`) after this pass's import, a `stopped` is refused unless
-        # the specialist says a refusal stopped it: a time-out said as a stop is put
-        # right, and a real refusal (the ledger changed, was restored) still stops the
-        # pass. Before the import nothing goes on anyway, so any stop is taken as said.
-        # A refused stop is KEPT on the unfinished step (R2): only a finish that says
-        # `out_of_time=true` clears it (R6: never inferred from who seems to finish), and
-        # a step that expires instead ends stopped — as the stop said
-        late = _age(row["started_at"]) >= SWEEP_STOP_S and conn.execute(
-            "SELECT 1 FROM snapshots WHERE pass_id=?", (m["pass_id"],)).fetchone() is not None
-        if stopped and late and not by_refusal:
-            import views
-            conn.execute("UPDATE pass_steps SET finish_json=? WHERE pass_id=? AND step=?",
-                         (db.canonical({"stopped": views.clip(str(stopped), STOPPED_MAX)}),
-                          m["pass_id"], step))
-            refused = ("your step's time is up, and running out of time is not a stop: "
-                       "finish again with the counts, no `stopped`, and `out_of_time=true` "
-                       "— the pass goes on and a later pass resumes. Only if a refusal "
-                       "stopped you, finish again with `stopped=<the refusal>` and "
-                       "`stopped_by_refusal=true`")
-        else:
-            refused = None
-        if refused is None:
-            if stopped:
-                import views
-                body["stopped"] = views.clip(str(stopped), STOPPED_MAX)
-            if failed:
-                body["failed"] = True
-            if out_of_time:
-                body["out_of_time"] = True   # a timed-out judgment covers nothing (#15, D3)
-            by = "resident" if failed or not body else "specialist"
-            kept = _finish(row).get("stopped")      # an unfinished step holds only a kept stop
-            if kept and not out_of_time and "stopped" not in body:
-                body["stopped"] = kept              # only `out_of_time=true` clears it
-            conn.execute("UPDATE pass_steps SET finished_at=?, finished_by=?, finish_json=?"
-                         " WHERE pass_id=? AND step=?",
-                         (db.now(), by, db.canonical(body), m["pass_id"], step))
+        out, refused = _finish_tx(conn, token, step, counts=counts, stopped=stopped,
+                                  failed=failed, by_refusal=by_refusal,
+                                  out_of_time=out_of_time)
     if refused is not None:
         raise db.Refusal(refused)       # after the commit: the kept stop stays
-    return {"step": step, "finished": True, "already": False}
+    return out
+
+
+def _finish_tx(conn, token, step: str, *, counts: dict, stopped=None, failed=False,
+               by_refusal=False, out_of_time=False) -> tuple:
+    """finish's body, inside the caller's write transaction. Returns (result, refused):
+    a refused late stop is KEPT on the step, and the caller raises `refused` only after
+    its commit (finish does)."""
+    assert conn.in_transaction, "a step is finished inside the write transaction"
+    _finish_args(step, token, counts, stopped, by_refusal, out_of_time)
+    passes.check_token(conn, token)
+    m = passes._marker(conn)
+    row = conn.execute("SELECT * FROM pass_steps WHERE pass_id=? AND step=?",
+                       (m["pass_id"], step)).fetchone()
+    if row is None:
+        raise db.Refusal(f"the {step} step was not started in this pass")
+    if row["finished_at"] is not None:
+        return {"step": step, "finished": True, "already": True}, None
+    body = {k: v for k, v in counts.items() if v is not None}
+    # issue #18: a judgment is whole only when it says how far triage got. A judge
+    # finish that carries counts carries that one; a countless finish (Ellen's, the
+    # delegation back without one) is accepted and counts as not whole
+    if (step == "judge" and body and not failed and not stopped
+            and body.get("triage_remaining") is None):
+        raise db.Refusal("a judge step's finish carries triage_remaining: the last triage "
+                         "page's `remaining` (0 when every page was judged) — finish "
+                         "again with it")
+    # issue #10: running out of time is not a stop. Once the step's time is up (the
+    # sweep pages `time_up`) after this pass's import, a `stopped` is refused unless
+    # the specialist says a refusal stopped it: a time-out said as a stop is put
+    # right, and a real refusal (the ledger changed, was restored) still stops the
+    # pass. Before the import nothing goes on anyway, so any stop is taken as said.
+    # A refused stop is KEPT on the unfinished step (R2): only a finish that says
+    # `out_of_time=true` clears it (R6: never inferred from who seems to finish), and
+    # a step that expires instead ends stopped — as the stop said
+    # A job pass's steps carry no wall clock (S2 INV-J3): the job's turn budget and the
+    # cursor decide its time, and a stop it records is the cursor's own (final review)
+    late = (passes.protocol_of(conn, m["pass_id"]) != "job"
+            and _age(row["started_at"]) >= SWEEP_STOP_S and conn.execute(
+                "SELECT 1 FROM snapshots WHERE pass_id=?", (m["pass_id"],)).fetchone()
+            is not None)
+    if stopped and late and not by_refusal:
+        import views
+        conn.execute("UPDATE pass_steps SET finish_json=? WHERE pass_id=? AND step=?",
+                     (db.canonical({"stopped": views.clip(str(stopped), STOPPED_MAX)}),
+                      m["pass_id"], step))
+        refused = ("your step's time is up, and running out of time is not a stop: "
+                   "finish again with the counts, no `stopped`, and `out_of_time=true` "
+                   "— the pass goes on and a later pass resumes. Only if a refusal "
+                   "stopped you, finish again with `stopped=<the refusal>` and "
+                   "`stopped_by_refusal=true`")
+    else:
+        refused = None
+    if refused is None:
+        if stopped:
+            import views
+            body["stopped"] = views.clip(str(stopped), STOPPED_MAX)
+        if failed:
+            body["failed"] = True
+        if out_of_time:
+            body["out_of_time"] = True   # a timed-out judgment covers nothing (#15, D3)
+        by = "resident" if failed or not body else "specialist"
+        kept = _finish(row).get("stopped")      # an unfinished step holds only a kept stop
+        if kept and not out_of_time and "stopped" not in body:
+            body["stopped"] = kept              # only `out_of_time=true` clears it
+        conn.execute("UPDATE pass_steps SET finished_at=?, finished_by=?, finish_json=?"
+                     " WHERE pass_id=? AND step=?",
+                     (db.now(), by, db.canonical(body), m["pass_id"], step))
+    return {"step": step, "finished": True, "already": False}, refused
 
 
 # --- a delegation's end ends its step (issue #17, D1) --------------------------------------
@@ -363,6 +406,8 @@ def clock(conn, token):
     m = _live_pass(conn)
     if token is None or m is None or int(token) != m["generation"]:
         return None
+    if passes.protocol_of(conn, m["pass_id"]) == "job":
+        return None         # spec INV-J3: a job pass has no clock
     step = _running(conn, m)
     if step is None:
         return None
@@ -372,8 +417,12 @@ def clock(conn, token):
 
 def sweep_allowance(conn):
     """Seconds the sweep may still list rows for: SWEEP_STOP_S minus the running
-    step's elapsed time. None when no step runs (the sweep pages as it always did)."""
-    step = _running(conn)
+    step's elapsed time. None when no step runs (the sweep pages as it always did), and
+    in a job pass, which has no clock (spec INV-J3)."""
+    m = _live_pass(conn)
+    if m is not None and passes.protocol_of(conn, m["pass_id"]) == "job":
+        return None
+    step = _running(conn, m)
     if step is None:
         return None
     return SWEEP_STOP_S - _age(step["started_at"])
@@ -388,13 +437,15 @@ def _lease_fresh(lease_at) -> bool:
     return lease_at is not None and _age(lease_at) < LEASE_S
 
 
-def _choose(conn):
+def _choose(conn, sends_only=False):
     """What a claim would take now: ("pass", marker, step), ("delivery", a stalled
-    staged send), ("request", row), or ("none", answer)."""
+    staged send), ("request", row), ("round", queued request), or ("none", answer).
+    `sends_only` (S2 §6.4, the job's sends-only claim): never the pass or a round —
+    only ("delivery", …), ("request", …) or ("none", …)."""
     m = _live_pass(conn)
     fresh = m is not None and _lease_fresh(m["lease_at"])
     running = None
-    if m is not None:
+    if m is not None and not sends_only:
         step = latest(conn, m["pass_id"])
         if step is not None:
             ended = _ended(step)
@@ -418,7 +469,7 @@ def _choose(conn):
                             " 'built') ORDER BY request_id").fetchall():
         if not _lease_fresh(req["lease_at"]):
             return ("request", req)
-    if m is None:
+    if m is None and not sends_only:
         # issue #15: no pass is live and a package request waits for a round of its check
         req = conn.execute("SELECT * FROM package_requests WHERE state='queued'"
                            " ORDER BY request_id LIMIT 1").fetchone()
@@ -496,6 +547,23 @@ def claim(conn, delegation_id=None, delegation_status=None) -> dict:
             continue
     raise db.Busy("the accounting store kept changing under this call; nothing was claimed "
                   "— ask again")
+
+
+def _claim_sends_tx(conn) -> dict:
+    """A sends-only claim (S2 §6.4): a stalled staged send, or a buildable or built
+    package request whose lease lapsed. The caller holds the custody lock and the
+    write transaction."""
+    assert conn.in_transaction
+    cand = _choose(conn, sends_only=True)
+    if cand[0] == "delivery":
+        out = _claim_delivery(conn, cand[1])
+    elif cand[0] == "request":
+        out = _claim_request(conn, cand[1])
+    else:
+        return {"continue": None}
+    out["more"] = passes.queued_waiting(conn)
+    _fits(out)
+    return out
 
 
 class Oversized(RuntimeError):

@@ -4,7 +4,6 @@ function; nothing here decides anything. Descriptions carry the rules a
 caller must follow — they are what the model reads."""
 from __future__ import annotations
 
-import alerts  # noqa: F401  (registered indirectly through end_pass)
 import binding
 import dates
 import db
@@ -96,13 +95,16 @@ class Undeliverable(RuntimeError):
 
 def _deliverable(tool: str, out):
     """The final invariant (fix wave D round 2): every operator-facing text a
-    tool returns — a view's `text`, end_pass's `speak.text`, apply_reply's
-    `receipt` and each of its `receipt_pages` — is at most TELEGRAM_LIMIT
-    UTF-16 units; otherwise the call fails loudly (isError)."""
+    tool returns — a view's `text`, a `speak.text`, apply_reply's
+    `receipt` and each of its `receipt_pages`, job_report's `texts[i].text` — is at
+    most TELEGRAM_LIMIT UTF-16 units; otherwise the call fails loudly (isError)."""
     if not isinstance(out, dict):
         return out
     texts = [("text", out.get("text")), ("receipt", out.get("receipt"))]
     texts += [(f"receipt_pages[{i}]", t) for i, t in enumerate(out.get("receipt_pages") or [])]
+    # job_report's results (S2 §6.4): every page is a message of its own
+    texts += [(f"texts[{i}].text", t.get("text") if isinstance(t, dict) else t)
+              for i, t in enumerate(out.get("texts") or [])]
     speak = out.get("speak")
     if isinstance(speak, dict):
         texts.append(("speak.text", speak.get("text")))
@@ -156,9 +158,8 @@ B = {"type": "boolean"}
 O = {"type": "object"}
 A = {"type": "array", "items": {"type": "string"}}
 AI = {"type": "array", "items": {"type": "integer"}}
-TOKEN = {"type": "integer", "description": "the pass_token from begin_pass (or the NEW one "
-                                           "continue_pass gave you)"}
-PKG_TOKEN = {"type": "integer", "description": "the package_token end_pass or continue_pass "
+TOKEN = {"type": "integer", "description": "the pass_token job_next gave you in this turn"}
+PKG_TOKEN = {"type": "integer", "description": "the package_token job_report's `continue` "
                                                "gave you"}
 Q = {"type": "string", "description": "YYYY-Qn, e.g. 2026-Q3 (Qn and Qn YYYY accepted)"}
 
@@ -386,13 +387,15 @@ def t_exempt(args):
 @register("import_ledger_export",
           "Import this pass's bank snapshot: the path export_history returned. Admits new "
           "payments, follows supersessions, merges lineages, ends tombstoned ones, and returns "
-          "erase candidates to confirm with get_transaction before triage.",
-          obj({"path": S, "pass_token": TOKEN, "ledger_instance": S},
+          "erase candidates to confirm with get_transaction before triage. acq: the number "
+          "job_next handed out with this bank read.",
+          obj({"path": S, "pass_token": TOKEN, "ledger_instance": S, "acq": I},
               ("path", "pass_token", "ledger_instance")))
 def t_import(args):
     _need(args, "path", "pass_token", "ledger_instance")
     return ledger.import_ledger_export(conn(), path=args["path"], token=_int(args, "pass_token"),
-                                       ledger_instance=args["ledger_instance"])
+                                       ledger_instance=args["ledger_instance"],
+                                       acq=_int(args, "acq"))
 
 
 @register("list_projections",
@@ -434,111 +437,110 @@ def t_observe(args):
                                     observed_tag_revision=args.get("observed_tag_revision"))
 
 
-# --- passes and setup ------------------------------------------------------------
-@register("begin_pass",
-          "Start a pass (trigger: cron, operator, package, handover) — after continue_pass "
-          "found nothing to continue. reply: where its continuation reports (silent for the "
-          "cron, telegram otherwise; that is the default). A package is ASKED for here, "
-          "first, with its quarter and channel ('telegram' or 'email'): the request is kept "
-          "whatever happens next. Returns pass_token; or 'queued' (a pass is running — the "
-          "package follows it), 'already' (that quarter's package is already on its way) or "
-          "'busy', each with the text to say.",
-          obj({"trigger": S, "reply": S, "quarter": Q, "channel": S}, ("trigger",)))
-def t_begin(args):
-    _need(args, "trigger")
-    return passes.begin_pass(conn(), args["trigger"], args.get("reply"),
-                             quarter=_quarter(args), channel=args.get("channel"))
+# --- the job (S2 §3, §5, §6.4, §13) -------------------------------------------------
+@register("job_next",
+          "The job's next step. First call of every job turn: job_next(job_id=<your brief's "
+          "`Job id:` line>) — it gives you a pass_token; then job_next(pass_token=…) after "
+          "each step, with judged={judgment, after, page_next, triage_remaining, documents} "
+          "after a judge step: echo the judge unit's `judgment` and `after` exactly as handed "
+          "out (an answer that does not is refused). Do exactly the unit it returns. When it "
+          "says report=true, call report_job_progress with its `progress` verbatim; at "
+          "end-batch, end your turn; at complete, report_job_progress then "
+          "emit_completion(status=\"ok\", text=<its text>).",
+          obj({"job_id": S, "pass_token": TOKEN, "judged": O}))
+def t_job_next(args):
+    import job
+    tok = _int(args, "pass_token")
+    if tok is None:
+        if args.get("judged") is not None:
+            # refused BEFORE the claim: a claim's fresh token must never carry a judge
+            # answer from a turn it superseded (nor bump the generation doing so)
+            raise db.Refusal("judged goes with the pass_token of the turn that judged: "
+                             "call job_next(job_id=…) without it")
+        _need(args, "job_id")
+        tok = job.claim(conn(), args["job_id"])
+    return _deliverable("job_next", job.next_unit(conn(), tok, judged=args.get("judged")))
 
 
-@register("record_step",
-          "Record a delegated step of the pass (step: sweep, judge, handover, snapshot). Ellen, "
-          "just before delegate_to_agent: action=\"start\" (a handover names doc_ids; a "
-          "judge carries report={checked, total, "
-          "not_searched}), then passes the same pass_token to the specialist. The specialist, "
-          "as its last action: action=\"finish\" with remaining_in_cycle, triage_remaining, "
-          "and stopped=<the refusal> only if a refusal stopped it (running out of time is not "
-          "a stop: finish with the counts; once the step's time is up a stop also needs "
-          "stopped_by_refusal=true, and a finish refused for a stop that was only time "
-          "running out is made again with out_of_time=true). Ellen finishes it herself only when the "
-          "delegation came back in her turn without a finish (failed=true on an error). Right after "
-          "delegate_to_agent answers with a delegation_id: action=\"delegated\" with that "
-          "delegation_id, so the delegation's notification can close the step.",
-          obj({"pass_token": TOKEN, "step": S, "action": S, "quarter": Q, "channel": S,
-               "doc_ids": AI, "report": O, "remaining_in_cycle": I, "triage_remaining": I,
-               "stopped": S, "stopped_by_refusal": B, "out_of_time": B, "failed": B,
-               "delegation_id": S},
-              ("pass_token", "step", "action")))
-def t_step(args):
-    _need(args, "pass_token", "step", "action")
-    token, step, action = _int(args, "pass_token"), args["step"], args["action"]
-    carry = {"quarter": _quarter(args), "channel": args.get("channel"),
-             "doc_ids": args.get("doc_ids"), "report": args.get("report")}
-    fin = {"remaining_in_cycle": _int(args, "remaining_in_cycle"),
-           "triage_remaining": _int(args, "triage_remaining")}
-    if action == "delegated":
-        return steps.delegated(conn(), token, step, args.get("delegation_id"))
-    if args.get("delegation_id") is not None:
-        raise db.Refusal('delegation_id goes with action="delegated"')
-    if action == "start":
-        for k in ("remaining_in_cycle", "triage_remaining", "stopped", "stopped_by_refusal",
-                  "out_of_time", "failed"):
-            if args.get(k) is not None:
-                raise db.Refusal(f'{k} goes with action="finish"')
-        return steps.start(conn(), token, step, carry)
-    if action == "finish":
-        for k, v in carry.items():
-            if v is not None:
-                raise db.Refusal({"doc_ids": "doc_ids go with a handover start",
-                                  "report": "report goes with a judge start",
-                                  "quarter": "a package's quarter goes with begin_pass",
-                                  "channel": "a package's channel goes with begin_pass"}[k])
-        return steps.finish(conn(), token, step, counts=fin, stopped=args.get("stopped"),
-                            failed=_bool(args, "failed", False),
-                            by_refusal=_bool(args, "stopped_by_refusal", False),
-                            out_of_time=_bool(args, "out_of_time", False))
-    raise db.Refusal('action is "start", "delegated" or "finish"')
+@register("job_status",
+          "Read-only, never a claim: may this job end now? In an operator message's turn in the "
+          "job's topic, call it LAST with your brief's `Job id:`; if `done`, call "
+          "report_job_progress(summary=<its text>, progressed=true) then "
+          "emit_completion(status=\"ok\", text=<its text>).",
+          obj({"job_id": S}, ("job_id",)))
+def t_job_status(args):
+    import job
+    _need(args, "job_id")
+    return job.status(conn(), args["job_id"])
 
 
-@register("continue_pass",
-          "Call after every delegation returns in your turn, on every system notification about "
-          "a delegation to finance, and before beginning any check, handover or package. When "
-          "something is due, this claims it for you alone and returns a NEW pass_token (or "
-          "package_token) — use only that one from now on — with the next step, where to report "
-          "(`reply`) and everything the step needs. Otherwise continue is null: write nothing. "
-          "Send any `speak` verbatim, then mark_rendering_delivered. On a notification about a "
-          "delegation, pass the delegation_id it names and delegation_status (ok, or error — "
-          "a failure, time-out or restart orphan).",
-          obj({"delegation_id": S, "delegation_status": S}))
-def t_continue(args):
-    return _deliverable("continue_pass", steps.claim(
-        conn(), delegation_id=args.get("delegation_id"),
-        delegation_status=args.get("delegation_status")))
+@register("job_report",
+          "Ellen: on every notification about the accounting job (pass the id it names and "
+          "status: ok for a clean finish, cancelled when it says \"Cancelled by user\" — "
+          "nothing restarts — error for any other end) and at the end of every accounting "
+          "turn (no arguments) — "
+          "after the operator's message was answered or applied, never before. Send "
+          "`speak` first, then every `texts` entry in the order given, each verbatim and each "
+          "then mark_rendering_delivered (the operator's reply binds to the last one shown). "
+          "With `more: true`, call job_report again after sending what you got: more pages "
+          "wait. Do a `continue` as Packaging step 3 says; if `start_job` is set, call "
+          "start_job with it.",
+          obj({"job_id": S, "status": S}))
+def t_job_report(args):
+    import asks
+    return _deliverable("job_report", asks.job_report(conn(), job_id=args.get("job_id"),
+                                                      status=args.get("status")))
 
 
-@register("end_pass",
-          "End the pass (outcome: complete, interrupted, stopped, failed; report counts: checked, "
-          "total, not_searched — the server adds what the sweep read this pass and what it still "
-          "owes). Returns `speak`: text to send the operator (the only unprompted "
-          "message this plugin has) or null. If you send it, call mark_rendering_delivered.",
-          obj({"pass_token": TOKEN, "outcome": S, "report": O}, ("pass_token", "outcome")))
-def t_end(args):
-    _need(args, "pass_token", "outcome")
-    return _deliverable("end_pass", passes.end_pass(conn(), _int(args, "pass_token"),
-                                                     args["outcome"], args.get("report") or {}))
+@register("request_work",
+          "Ellen: record a check (kind=check, trigger cron|operator) or a handed-over "
+          "document (kind=handover, trigger=operator, doc_ids) BEFORE start_job; then call "
+          "start_job with the returned start_job and say the returned line.",
+          obj({"kind": S, "trigger": S, "doc_ids": AI}, ("kind", "trigger")))
+def t_request_work(args):
+    import asks
+    _need(args, "kind", "trigger")
+    return asks.request_work(conn(), args["kind"], args["trigger"], args.get("doc_ids"))
 
 
+@register("request_package",
+          "Ellen: ask for a quarter's package (channel telegram or email) BEFORE start_job; "
+          "then start_job with the returned start_job, and say the returned line.",
+          obj({"quarter": Q, "channel": S}, ("quarter", "channel")))
+def t_request_package(args):
+    import asks
+    _need(args, "quarter", "channel")
+    return asks.request_package(conn(), _quarter(args), args["channel"])
+
+
+@register("record_filing",
+          "The job's filing unit is done (each attachment was filed with ingest_document and "
+          "its source_ref).",
+          obj({"pass_token": TOKEN}, ("pass_token",)))
+def t_record_filing(args):
+    import job
+    _need(args, "pass_token")
+    return job.record_filing(conn(), _int(args, "pass_token"))
+
+
+# --- probes and setup --------------------------------------------------------------
 @register("record_probe",
           "Record what you actually observed this pass: bank_tools, bank_accounts (data.accounts "
           "from list_accounts: account_id, category, label), bank_sync, ledger (data.generation, "
           "data.registered and data.instance — the `Ledger instance:` id — from list_backups), "
-          "gmail.",
-          obj({"pass_token": TOKEN, "kind": S, "ok": B, "detail": S, "data": O},
+          "gmail. bank_sync carries acq, the number job_next handed out with the bank read; a "
+          "gmail probe with absent=true (and ok=false) says the Gmail tools are not available "
+          "to you at all.",
+          obj({"pass_token": TOKEN, "kind": S, "ok": B, "detail": S, "data": O, "acq": I,
+               "absent": B},
               ("pass_token", "kind", "ok")))
 def t_probe(args):
     _need(args, "pass_token", "kind")
     ok = _bool(args, "ok")
+    absent = _bool(args, "absent", False)
     return passes.record_probe(conn(), _int(args, "pass_token"), args["kind"], ok,
-                               args.get("detail", ""), args.get("data"))
+                               args.get("detail", ""), args.get("data"),
+                               acq=_int(args, "acq"), absent=absent)
 
 
 @register("check_setup",
@@ -608,17 +610,6 @@ def t_search(args):
                               **_pick(args, ("queries",)), **flags)
 
 
-@register("more_work",
-          "After every item of the Gmail chunk you were handed is recorded: more items for this "
-          "turn, if they still fit. calls_made = every tool call you made in this turn so far "
-          "(failed ones too), not counting this one. Work what it hands out the same way, then "
-          "call it again; when it hands out none (next: judge), start the judge step.",
-          obj({"pass_token": TOKEN, "calls_made": I}, ("pass_token", "calls_made")))
-def t_more_work(args):
-    _need(args, "pass_token", "calls_made")
-    return steps.more_work(conn(), _int(args, "pass_token"), _int(args, "calls_made"))
-
-
 @register("stop_chasing",
           "'stop chasing Q2': that quarter's missing items stay listed and ship as MISSING but "
           "are never searched again.",
@@ -675,7 +666,7 @@ def t_review(args):
 
 
 @register("mark_rendering_delivered",
-          "Call right after a rendering (or an end_pass `speak`) was sent successfully. Only this "
+          "Call right after a rendering (or a `speak`, or a job_report text) was sent successfully. Only this "
           "makes it count as shown.",
           obj({"render_id": S}, ("render_id",)))
 def t_delivered(args):
@@ -689,7 +680,9 @@ def t_delivered(args):
           "were shown. Send EVERY entry of receipt_pages, in order, each as its own message "
           "(receipt is the first page). Also returns items to show again (build_review item) "
           "and instructions for you (rebuild, resend, show views; \"show item N\" is "
-          "build_review(view=\"item\", pid=N)).",
+          "build_review(view=\"item\", pid=N)). `understood: false`: nothing in the message "
+          "was read as a reply and nothing applied — unless it was plainly an approval or "
+          "correction, answer it as conversation and send none of it.",
           obj({"text": S}, ("text",)))
 def t_reply(args):
     _need(args, "text")
@@ -699,7 +692,7 @@ def t_reply(args):
 # --- packaging ---------------------------------------------------------------------
 @register("build_quarterly_package",
           "Build the quarter's zip from what is known now (partial while the quarter runs), for "
-          "the package request whose package_token end_pass or continue_pass gave you. Returns "
+          "the package request whose package_token job_report's `continue` gave you. Returns "
           "its path and the caption to send with it.",
           obj({"quarter": Q, "package_token": PKG_TOKEN}, ("quarter", "package_token")))
 def t_build(args):

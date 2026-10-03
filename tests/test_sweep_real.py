@@ -2,7 +2,9 @@
 """The four reproduced failures of spec §"Mirroring decisions", the ended
 lineages and the unknown-expectation rule — each against the REAL
 bank-feed (tag tools, apply_plan, purge), never a double."""
+import datetime as _dt
 import unittest
+from unittest import mock
 
 from tests._base import StoreCase
 from tests import bankfeed, sim
@@ -41,6 +43,39 @@ class Base(StoreCase):
                 sweep.record_observation(self.conn, snapshot_id=self.snap_id, pid=c["pid"], token=self.token,
                                          not_found=True)
         return out
+
+    def job_pass(self, token):
+        """A job pass under claim `token` up to the sweep (S2 §5): the pass started
+        under the claim if none is live, the acquisition the cursor hands out, the
+        probes recorded under the claim, and the import bound to that acquisition."""
+        import job
+        live = job.live_job_pass(self.conn)
+        if live is None:
+            self.end_live_pass()
+            pass_id = self.start_job_pass(token)
+        else:
+            pass_id = live["pass_id"]
+        with db.tx(self.conn):
+            acq = job.hand_acquisition(self.conn, token, pass_id)
+        accounts = [{"account_id": bankfeed.Ledger.ACCOUNT, "category": "company",
+                     "label": "Zakelijk"}]
+        passes.record_probe(self.conn, token, "bank_tools", True)
+        passes.record_probe(self.conn, token, "bank_accounts", True, data={"accounts": accounts})
+        passes.record_probe(self.conn, token, "bank_sync", True, acq=acq)
+        passes.record_probe(self.conn, token, "ledger", True,
+                            data=sim.ledger_state(self.bf.listing()))
+        out = ledger.import_ledger_export(self.conn, path=self.bf.export(), token=token,
+                                          ledger_instance=self.bf.last_export_instance, acq=acq)
+        self.token, self.snap_id = token, out["snapshot"]
+        return out
+
+    def new_note_revision(self, pid):
+        """The lineage's note text changes (a decision moved it): a new note_seq."""
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET note_body='(an older body)',"
+                              " observed_revision=NULL WHERE pid=?", (pid,))
+            lineage.settle(self.conn, pid)
+        return lineage.projection(self.conn, pid)["note_seq"]
 
     def cycle(self):
         return sim.sweep_cycle(self.conn, self.bf, self.token)
@@ -615,6 +650,68 @@ class TestNoteAsRendered(Base):
                                      observed_first_seen=first_seen,
                                      observed_tag_revision=rev)
         self.assertIn("add_note", r["instructions"])
+
+
+class TestNoteClaims(Base):
+    """INV-J11 end to end (spec §4): a note write of another text issued under a claim
+    keeps its lineage due until a read under a LATER claim, recorded at least Z after
+    the first claim that followed the issue's."""
+    JOB = "aaaaaaaa-1"
+    T0 = _dt.datetime(2026, 10, 2, 12, 0, 0, tzinfo=_dt.timezone.utc)
+
+    def setUp(self):
+        super().setUp()
+        self.now = self.T0
+        p = mock.patch.object(db, "_clock", lambda: self.now)
+        p.start()
+        self.addCleanup(p.stop)
+        with db.tx(self.conn):          # a store installed well before these passes
+            self.conn.execute("UPDATE meta SET value=? WHERE key='store_epoch_at'",
+                              ((self.T0 - _dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),))
+
+    def later(self, seconds):
+        self.now += _dt.timedelta(seconds=seconds)
+
+    def test_an_other_text_issue_holds_until_z_after_a_later_claim(self):
+        import job
+        self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
+        rid = self.rid()
+        self.new_pass()
+        self.cycle()                    # a delegation's first write mints the registration
+        self.assertIn(version.WORKFLOW, self.bf.registered())
+        pid = self.pid_of(rid)
+        self.later(3600)
+        t1 = job.claim(self.conn, self.JOB)
+        self.job_pass(t1)
+        self.new_note_revision(pid)
+        self.cycle()                    # revision A: issued, written, re-read under t1
+        seq_b = self.new_note_revision(pid)
+        self.cycle()                    # revision B: issued, written, re-read under t1
+        p = lineage.projection(self.conn, pid)
+        self.assertEqual((p["note_other_issued_gen"], p["note_issued_gen"],
+                          p["note_seen_gen"], p["note_seen_seq"]), (t1, t1, t1, seq_b))
+        self.assertTrue(self.bf.notes(rid)[-1].startswith(f"Accounting revision {seq_b}:"))
+        self.later(sweep.Z_S + 100)
+        self.job_pass(t1)               # an import Z after the issue, still under t1
+        self.cycle()                    # re-read under t1, well past the time margin
+        self.assertEqual(lineage.projection(self.conn, pid)["note_seen_gen"], t1)
+        self.later(3600)
+        self.new_pass()                 # a fresh import, no later claim: still due
+        self.assertIn(pid, sweep._due(self.conn))
+        t2 = job.claim(self.conn, self.JOB)
+        claimed = self.now
+        self.later(sweep.Z_S - 1)
+        self.job_pass(t2)
+        self.cycle()                    # read under t2, its import 1 s inside Z
+        self.assertEqual(lineage.projection(self.conn, pid)["note_seen_gen"], t2)
+        self.later(1)
+        self.job_pass(t2)
+        self.assertIn(pid, sweep._due(self.conn))
+        self.assertEqual(self.now, claimed + _dt.timedelta(seconds=sweep.Z_S))
+        self.cycle()                    # read under t2, its import exactly Z after t2
+        self.later(60)
+        self.job_pass(t2)
+        self.assertNotIn(pid, sweep._due(self.conn))
 
 
 if __name__ == "__main__":
