@@ -20,7 +20,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 10
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -69,11 +69,6 @@ CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (
   PRIMARY KEY (pass_id, key));"""
 CREDITS_GEN_DDL = "CREATE INDEX IF NOT EXISTS ix_credits_gen ON credits(gen);"
 RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
-  job_id TEXT PRIMARY KEY, passes INTEGER NOT NULL DEFAULT 0,
-  completed INTEGER NOT NULL DEFAULT 0);   -- job_next answered this run `complete` once"""
-# `runs` as schema 10 shipped it (v0.9.0, 758851f): the 9 -> 10 migration creates exactly
-# this, and 10 -> 11 adds `completed` (PLAY T7 F4/F5)
-RUNS_DDL_V10 = """CREATE TABLE IF NOT EXISTS runs (
   job_id TEXT PRIMARY KEY, passes INTEGER NOT NULL DEFAULT 0);"""
 
 WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
@@ -481,10 +476,7 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE projections ADD COLUMN note_other_issued_gen INTEGER",
         "ALTER TABLE projections ADD COLUMN note_seen_gen INTEGER",
         "ALTER TABLE probes ADD COLUMN gen INTEGER",
-        CLAIMS_DDL, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL_V10],
-    # 10 -> 11 (PLAY T7 F4): a run answered `complete` once; a re-issued `complete` (Casa
-    # refused the completion) reports no progress again. Existing runs start at 0
-    10: ["ALTER TABLE runs ADD COLUMN completed INTEGER NOT NULL DEFAULT 0"],
+        CLAIMS_DDL, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL],
 }
 
 

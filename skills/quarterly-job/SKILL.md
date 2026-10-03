@@ -20,7 +20,7 @@ gives you `pass_token`. Then do exactly the unit it returns, and call
 answer of `job_next` carries `unit`, `progress` and `report`:
 - `report: true` → `report_job_progress` with its `progress` verbatim.
 - `end-batch` → end the turn: the next batch carries on.
-- `complete` → `report_job_progress` with its `progress` only if `report` is true, then
+- `complete` → `report_job_progress` with its `progress`, then
   `emit_completion(status="ok", text=<its text>)`.
 - A refusal that this job turn is no longer the current one, or that the pass is no longer
   the current one → call `job_next(job_id=…)` once more; if that is refused too, end the turn.

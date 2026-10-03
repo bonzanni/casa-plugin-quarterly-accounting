@@ -56,7 +56,7 @@ class TestSchema(TempEnv):
     def _assert_current_behaviour(self, c, old_seq: int, deliveries=1, first_sent=False):
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
-        self.assertEqual(db.SCHEMA_VERSION, 11)
+        self.assertEqual(db.SCHEMA_VERSION, 10)
         # the migrated store has every column and index a fresh store has
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
@@ -125,7 +125,7 @@ class TestSchema(TempEnv):
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)
         self.assertEqual(c2.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "11")
+                         .fetchone()[0], "10")
 
     def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
         # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
@@ -257,7 +257,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "11")
+                         .fetchone()[0], "10")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -279,7 +279,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "11")
+                         .fetchone()[0], "10")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -302,7 +302,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "11")
+                         .fetchone()[0], "10")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -310,76 +310,6 @@ class TestSchema(TempEnv):
         cols = lambda conn: sorted(r[1] for r in conn.execute("PRAGMA table_info(bank_rows)"))
         self.assertEqual(cols(c), cols(fresh))
         self.assertIn("fx_rate", cols(c))
-
-    def test_a_v0_8_0_schema_9_store_upgrades_through_10_to_11(self):
-        # schema 9 as v0.8.0 shipped it (86656ac): 9 -> 10 creates `runs` exactly as v0.9.0
-        # did (758851f, no `completed`), then 10 -> 11 adds it (PLAY T7 F5)
-        from tests.schema_history import DDL_V9, DDL_V10
-        mem = sqlite3.connect(":memory:")
-        self.addCleanup(mem.close)
-        for stmt in db._statements(DDL_V9):
-            mem.execute(stmt)
-        for stmt in db.MIGRATIONS[9]:
-            mem.execute(stmt)
-        v10 = sqlite3.connect(":memory:")
-        self.addCleanup(v10.close)
-        for stmt in db._statements(DDL_V10):
-            v10.execute(stmt)
-        self.assertEqual(self._shape(mem), self._shape(v10))   # 9 -> 10 is v0.9.0's schema 10
-        self.assertNotIn("completed", self._shape(mem)["runs"])
-        self._released_store(DDL_V9, 9).close()
-        c = db.open_store()
-        self.addCleanup(c.close)
-        self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "11")
-        fresh = sqlite3.connect(":memory:")
-        self.addCleanup(fresh.close)
-        for stmt in db._statements(db.DDL):
-            fresh.execute(stmt)
-        self.assertEqual(self._shape(c), self._shape(fresh))     # fresh == migrated from 9
-        self.assertEqual(self._indexes(c), self._indexes(fresh))
-        self.assertIn("completed", self._shape(c)["runs"])
-        for table, n in (("renders", 2), ("snapshots", 1), ("projections", 1),
-                         ("packages", 1), ("deliveries", 1)):
-            self.assertEqual(c.execute(f"SELECT count(*) FROM {table}").fetchone()[0], n)
-        self.assertIsNotNone(db.epoch(c))                        # 9 -> 10 is an epoch
-
-    def test_a_v0_9_0_schema_10_store_upgrades_to_11_keeping_its_runs(self):
-        # schema 10 as v0.9.0 left it on casa-test (758851f): `runs` without `completed`
-        from tests.schema_history import build_v10_store
-        path = db.data_dir() / db.DB_NAME
-        path.parent.mkdir(parents=True, exist_ok=True)
-        build_v10_store(path, runs=[("aaaaaaaa-1", 2), ("bbbbbbbb-2", 4)])
-        c = db.open_store()
-        self.addCleanup(c.close)
-        self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "11")
-        fresh = sqlite3.connect(":memory:")
-        self.addCleanup(fresh.close)
-        for stmt in db._statements(db.DDL):
-            fresh.execute(stmt)
-        self.assertEqual(self._shape(c), self._shape(fresh))
-        self.assertEqual(self._indexes(c), self._indexes(fresh))
-        self.assertEqual([tuple(r) for r in c.execute(
-            "SELECT job_id, passes, completed FROM runs ORDER BY job_id")],
-            [("aaaaaaaa-1", 2, 0), ("bbbbbbbb-2", 4, 0)])
-        # 10 -> 11 is not an epoch: the store's epoch is v0.9.0's
-        self.assertEqual(db.epoch(c), "2026-10-02T10:00:00Z")
-        c.close()
-        c2 = db.open_store()                               # a second open migrates nothing
-        self.addCleanup(c2.close)
-        self.assertEqual(c2.execute("SELECT count(*) FROM runs").fetchone()[0], 2)
-
-    @staticmethod
-    def _shape(conn):
-        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"
-                                             " AND name NOT LIKE 'sqlite_%'")]
-        return {t: sorted(r[1] for r in conn.execute(f"PRAGMA table_info({t})")) for t in tables}
-
-    @staticmethod
-    def _indexes(conn):
-        return sorted(r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE"
-                                                 " type='index' AND sql IS NOT NULL"))
 
     def test_a_staged_path_is_unique_in_a_fresh_store(self):
         c = db.open_store()

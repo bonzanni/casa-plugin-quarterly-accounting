@@ -753,7 +753,6 @@ def _account(conn, token, out) -> None:
         out["unit"] = "end-batch"           # the unit is handed again next batch (INV-J4)
         cost = 0
     ending = out["unit"] in ("end-batch", "complete")
-    first_complete = out["unit"] == "complete" and _first_complete(conn, c["job_id"])
     conn.execute("UPDATE claims SET spent=spent+?, closed=? WHERE gen=?",
                  (cost, int(ending or c["closed"]), token))
     # INV-J8 (spec §15): a credit, in any pass, earned under a claim of this batch
@@ -761,10 +760,7 @@ def _account(conn, token, out) -> None:
         "SELECT EXISTS(SELECT 1 FROM credits WHERE gen IN (SELECT gen FROM claims WHERE"
         " batch=?))", (c["batch"],)).fetchone()[0] == 1
     left = measure(conn)
-    # a `complete` reports only the first time the run is answered it (PLAY T7 F4): a later
-    # one re-issues a completion Casa refused, and its progress was reported already
-    report = (first_complete if out["unit"] == "complete"
-              else ending or (progressed and not c["reported"]))
+    report = ending or (progressed and not c["reported"])
     if report:
         conn.execute("UPDATE claims SET reported=1 WHERE gen=?", (token,))
     summary = (run_end(conn, c["job_id"])[1] if out["unit"] == "complete"
@@ -773,14 +769,6 @@ def _account(conn, token, out) -> None:
                        "done": None, "remaining": left or None}
     out["report"] = report
     out["pass_token"] = token
-
-
-def _first_complete(conn, job_id) -> bool:
-    """Is this the first `complete` answer for run `job_id`? Marks it on the run's row (a
-    run that began no pass has none yet), in the answer's own transaction."""
-    conn.execute("INSERT OR IGNORE INTO runs(job_id, passes) VALUES (?, 0)", (job_id,))
-    return conn.execute("UPDATE runs SET completed=1 WHERE job_id=? AND completed=0",
-                        (job_id,)).rowcount == 1
 
 
 WORDS = {"probes": "Reading the bank", "snapshot": "Importing the bank read",
