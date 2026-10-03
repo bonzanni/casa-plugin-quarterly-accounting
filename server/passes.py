@@ -425,11 +425,12 @@ def end_pass(conn, token, outcome: str, report: dict) -> dict:
     return out
 
 
-def _end_pass_tx(conn, token, outcome: str, report: dict) -> dict:
+def _end_pass_tx(conn, token, outcome: str, report: dict, *, credit=True) -> dict:
     """end_pass's transaction body, inside the caller's write transaction (end_pass's
     own, or the job cursor's): the pass is ended and its request handed over. Returns
     {ended, outcome, report, **handed} — `_notice` stays inside `handed` — with no reap
-    and no rendering (end_pass adds those after its commit)."""
+    and no rendering (end_pass adds those after its commit). `credit=False` (#38: the
+    operator's cancel, which no job claim makes) earns no INV-J8 credit."""
     assert conn.in_transaction, "a pass is ended inside the write transaction"
     if outcome not in OUTCOMES:
         raise db.Refusal(f"outcome is one of {', '.join(OUTCOMES)}")
@@ -458,11 +459,12 @@ def _end_pass_tx(conn, token, outcome: str, report: dict) -> dict:
     taken = [r[0] for r in conn.execute("SELECT request_id FROM work_requests WHERE"
                                         " pass_id=? AND state='taken'", (m["pass_id"],))]
     asks.settle_taken(conn, m["pass_id"], outcome)      # S2 §6.2: every taken request is done
+    claim = token if credit else None                   # job.credit: a no-op without one
     for rid in taken:                                   # INV-J8: done (or stopped)
-        job.credit(conn, token, m["pass_id"], f"req:work:{rid}")
+        job.credit(conn, claim, m["pass_id"], f"req:work:{rid}")
     conn.execute("UPDATE pass_marker SET live=0, claimed_step=NULL, lease_at=NULL"
                  " WHERE id=1")
-    handed = _hand_over(conn, m["pass_id"], outcome, token)
+    handed = _hand_over(conn, m["pass_id"], outcome, claim)
     return {"ended": m["pass_id"], "outcome": outcome, "report": full, **(handed or {})}
 
 

@@ -476,7 +476,9 @@ def t_job_status(args):
 
 @register("job_report",
           "Ellen: on every notification about the accounting job (pass the id it names and "
-          "status ok or error) and at the end of every accounting turn (no arguments) — "
+          "status: ok for a clean finish, cancelled when it says \"Cancelled by user\" — "
+          "nothing restarts — error for any other end) and at the end of every accounting "
+          "turn (no arguments) — "
           "after the operator's message was answered or applied, never before. Send "
           "`speak` first, then every `texts` entry in the order given, each verbatim and each "
           "then mark_rendering_delivered (the operator's reply binds to the last one shown). "

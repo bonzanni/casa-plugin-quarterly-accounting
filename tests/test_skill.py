@@ -215,6 +215,20 @@ class TestEllen(TempEnv):
                        "If `start_job` is set, call `start_job` with it"):
             self.assertIn(phrase, res, phrase)
 
+    def test_a_cancelled_job_is_reported_cancelled(self):
+        """#38: Casa's "Cancelled by user" is the operator's /cancel, reported as
+        `cancelled` (nothing restarts); every other unclean end stays `error`, whose
+        restart T7's recovery needs."""
+        import qa_server, tools  # noqa: F401
+        res = flat(section(SKILL, "## Ellen: the job's results",
+                           "## Ellen: answering anything"))
+        self.assertIn('cancelled when it says it was cancelled ("Cancelled by user")', res)
+        self.assertIn("error for any other unclean end", res)
+        self.assertNotIn("error for anything but a clean finish", res)
+        desc = flat(qa_server.TOOLS["job_report"]["description"])
+        self.assertIn('cancelled when it says "Cancelled by user"', desc)
+        self.assertIn("error for any other end", desc)
+
     def test_the_no_id_report_comes_after_the_operators_message(self):
         """Diff round 1, R2 (Astra S1): a result relayed before the operator's reply is
         applied would take the reply ("all good") for itself. The no-id job_report comes

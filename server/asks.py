@@ -163,6 +163,8 @@ def handover_covered(conn, pass_id) -> bool:
 ORPHANED = "The accounting check stopped before it finished — I'm starting it again."
 KEPT_STOPPING = "The accounting check kept stopping — ask again when you want me to retry."
 STOPPED = "The accounting check stopped"
+CANCELLED = "The accounting check was cancelled — ask again when you want it."
+CANCEL_REASON = "you cancelled the check"
 # never an offer phrase reply.py parses ("send it again" is a package resend)
 NOT_FOUND = "I can't find that document in what I've filed — please send the file once more."
 NOT_AN_INVOICE = "Filed. It doesn't look like an invoice for any payment — say if it is one."
@@ -187,8 +189,8 @@ def job_report(conn, job_id=None, status=None) -> dict:
     if job_id is not None:
         if not isinstance(job_id, str) or len(job_id) < 8:
             raise db.Refusal("job_id is the id the notification names")
-        if status not in ("ok", "error"):
-            raise db.Refusal("status is 'ok' or 'error'")
+        if status not in ("ok", "error", "cancelled"):
+            raise db.Refusal("status is 'ok', 'error' or 'cancelled'")
     if conn.in_transaction:
         raise RuntimeError("job_report opens its own transaction")
     out = {"orphaned": False, "start_job": None, "texts": [], "speak": None,
@@ -200,13 +202,18 @@ def job_report(conn, job_id=None, status=None) -> dict:
                 p = job.live_job_pass(conn)          # an ended pass is never live
                 drain = conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
                 if who is not None and p is not None and p["holder_job"] == who:
-                    # the job holding the live pass ended: the pass is orphaned, stays
-                    # adoptable, its requests stay taken, and the drain is cleared
-                    conn.execute("UPDATE passes SET orphaned_by=? WHERE pass_id=?",
-                                 (who, p["pass_id"]))
+                    if status == "cancelled":
+                        _withdraw(conn, p)          # #38: the operator ended it
+                    else:
+                        # the job holding the live pass ended: the pass is orphaned, stays
+                        # adoptable, its requests stay taken, and the drain is cleared
+                        conn.execute("UPDATE passes SET orphaned_by=? WHERE pass_id=?",
+                                     (who, p["pass_id"]))
                     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
                                  " ('drain','none')")
                 elif who is not None and drain is not None and drain[0] == who:
+                    if status == "cancelled":
+                        _withdraw(conn, None)
                     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
                                  " ('drain','none')")
                 # any other id (a late or replayed notice): nothing changes
@@ -252,6 +259,35 @@ def job_report(conn, job_id=None, status=None) -> dict:
                              % ",".join("?" * len(handed)),
                              (1 if job_id is not None else 0, *handed))
     return out
+
+
+def _withdraw(conn, p) -> None:
+    """#38: the operator's /cancel ended the job that holds the live pass `p` (or, with
+    `p` None, the drain's job, before it took a pass). Unlike an error, nothing restarts:
+    the pass ends `stopped` through the pass-ending path, and every open ask — queued, or
+    taken by `p`; work or package — is withdrawn as `stopped`. The work requests share
+    ONE stop rendering, relayed through `texts` and consumed by mark_rendering_delivered
+    as every result is; a package request gets its package-stopped notice (`speak`). No
+    job claim made this, so no INV-J8 credit is earned."""
+    assert conn.in_transaction
+    pid = p["pass_id"] if p is not None else None
+    ids = [r[0] for r in conn.execute(
+        "SELECT request_id FROM work_requests WHERE state='queued' OR (state='taken' AND"
+        " pass_id IS ?) ORDER BY request_id", (pid,))]
+    for req in conn.execute("SELECT * FROM package_requests WHERE state='queued' OR"
+                            " (state='snapshot' AND pass_id IS ?) ORDER BY request_id",
+                            (pid,)).fetchall():
+        passes._close(conn, req, "stopped", "stopped", reason=CANCEL_REASON)
+    if p is not None:
+        gen = passes._marker(conn)["generation"]
+        passes._end_pass_tx(conn, gen, "stopped", {"stopped_reason": CANCEL_REASON},
+                            credit=False)
+    conn.execute("UPDATE work_requests SET state='done', outcome='stopped' WHERE"
+                 " state='queued'")
+    if ids:
+        rid = _insert(conn, "job-stop", CANCELLED, {"request_id": ids[0]})
+        conn.execute("UPDATE work_requests SET render_ids_json=? WHERE request_id IN (%s)"
+                     % ",".join("?" * len(ids)), (json.dumps([rid]), *ids))
 
 
 def _bounded(out, pages) -> None:

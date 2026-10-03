@@ -70,9 +70,11 @@ and takes the ask. Anything else (Casa refused it): say "I couldn't start the ch
 ## Ellen: the job's results
 
 - On any notification about the accounting job — it finished, failed, stopped, was cut off,
-  or is said again after a restart: `job_report(job_id=<the id in "(id …)">, status=<ok, or
-  error for anything but a clean finish>)`. A late notification about an older finance
-  delegation whose result starts `quarterly-accounting:` is answered the same way.
+  was cancelled, or is said again after a restart: `job_report(job_id=<the id in "(id …)">,
+  status=<ok for a clean finish; cancelled when it says it was cancelled ("Cancelled by
+  user"); error for any other unclean end>)`. A cancel is the operator's: nothing restarts.
+  A late notification about an older finance delegation whose result starts
+  `quarterly-accounting:` is answered the same way.
 - At the end of every accounting turn: `job_report()`. When the operator wrote, it comes
   last — after their message was answered or applied (`apply_reply`, `build_review`,
   `request_work`, `request_package`): their words are about what they saw, never about a
