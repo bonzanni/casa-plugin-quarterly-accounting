@@ -145,6 +145,29 @@ class Tools(StoreCase):
 class InformationalPages(Tools):
     """R3: handover case lines and stop lines never move the reply binding."""
 
+    def test_an_offer_relayed_in_an_operators_turn_binds_nothing(self):
+        """R5: the same resend offer, handed out by a no-id job_report (an operator's
+        turn) and delivered, is non-binding: "send it again" in the next message binds
+        to what the operator saw before it — here nothing — and is refused."""
+        self.uncertain_package()
+        relay = self.call("job_report")
+        self.assertIn("send it again", relay["speak"]["text"])
+        self.deliver(relay)
+        import db
+        with self.assertRaises(db.Refusal):
+            self.call("stage_for_delivery", channel="telegram", resend=True)
+
+    def uncertain_package(self):
+        self.call("request_package", quarter="2026-Q3", channel="telegram")
+        self.until(self.call("job_next", job_id=A), "complete")
+        tok = self.call("job_report", job_id=A, status="ok")["continue"]["package_token"]
+        pkg = self.call("build_quarterly_package", quarter="2026-Q3", package_token=tok)
+        staged = self.call("stage_for_delivery", channel="telegram",
+                           package_id=pkg["package_id"], package_token=tok)
+        self.call("record_delivery", delivery_id=staged["delivery_id"], outcome="uncertain",
+                  package_token=tok)
+        return pkg
+
     def test_a_handover_page_after_the_resend_offer_keeps_it(self):
         """Astra's reproduction: an uncertain package send, then a finished handover;
         `speak` (the resend offer) and the handover page, relayed on the job's
@@ -216,6 +239,21 @@ class LastDelivered(StoreCase):
                               " ('r4', 'check', '{}', ?, ?, '', '[]', ?)",
                               (db.now(), db.now(), db.next_seq(self.conn)))
         self.assertEqual(db.last_delivered(self.conn)["render_id"], "r4")
+
+    def test_a_non_binding_render_is_skipped(self):
+        """R5: a rendering stamped non-binding (binding=0) is never the last delivered
+        one; NULL (never handed out by job_report) and 1 bind."""
+        import db
+        with db.tx(self.conn):
+            for rid, binding in (("r1", None), ("r2", 1), ("r3", 0)):
+                self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
+                                  " delivered_at, text, membership_json, delivered_seq,"
+                                  " binding) VALUES (?, 'status', '{}', ?, ?, '', '[]', ?, ?)",
+                                  (rid, db.now(), db.now(), db.next_seq(self.conn), binding))
+        self.assertEqual(db.last_delivered(self.conn)["render_id"], "r2")
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE renders SET binding=NULL WHERE render_id='r3'")
+        self.assertEqual(db.last_delivered(self.conn)["render_id"], "r3")
 
 
 class OperatorTurnRelay(Tools):
