@@ -1110,8 +1110,13 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
         conn.execute("UPDATE renders SET delivered_at=?, delivered_seq=? WHERE render_id=?",
                      (now, db.next_seq(conn), render_id))
         scope = json.loads(r["scope_json"])
-        for it in conn.execute("SELECT * FROM render_items WHERE render_id=?",
-                               (render_id,)).fetchall():
+        # a NON-binding rendering (handed out last by an operator turn's job_report:
+        # diff round 1, R5) is recorded delivered, but never becomes what the operator's
+        # words bind to: neither the last sheet (db.last_delivered) nor any payment's
+        # shown revision (`shown`, which every reply and operator write binds through)
+        binds = r["binding"] is None or r["binding"] == 1
+        for it in (conn.execute("SELECT * FROM render_items WHERE render_id=?",
+                                (render_id,)).fetchall() if binds else ()):
             mrevs = it["match_revisions_json"]
             if scope.get("continues"):
                 # a later page of one item view: the operator has now been shown the

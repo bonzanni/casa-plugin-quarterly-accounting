@@ -272,7 +272,8 @@ CREATE TABLE IF NOT EXISTS renders (
   render_id TEXT PRIMARY KEY, kind TEXT NOT NULL, scope_json TEXT NOT NULL,
   created_at TEXT NOT NULL, delivered_at TEXT, text TEXT NOT NULL,
   membership_json TEXT NOT NULL,
-  delivered_seq INTEGER);        -- store sequence at delivery: what "most recent delivered" orders by
+  delivered_seq INTEGER,         -- store sequence at delivery: what "most recent delivered" orders by
+  binding INTEGER);              -- job_report's latest hand-out: 1 notification, 0 operator turn (R5)
 CREATE TABLE IF NOT EXISTS render_items (
   render_id TEXT NOT NULL, pid INTEGER NOT NULL, projection_revision INTEGER NOT NULL,
   match_revisions_json TEXT NOT NULL, PRIMARY KEY (render_id, pid));
@@ -451,6 +452,7 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE pass_steps ADD COLUMN started_gen INTEGER",
         "ALTER TABLE passes ADD COLUMN w_pending INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE passes ADD COLUMN judge_high INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE renders ADD COLUMN binding INTEGER",
         "ALTER TABLE snapshots ADD COLUMN job_id TEXT",
         "ALTER TABLE snapshots ADD COLUMN read_seq INTEGER",
         "ALTER TABLE snapshots ADD COLUMN acq INTEGER",
@@ -605,10 +607,14 @@ def last_delivered(conn: sqlite3.Connection):
     words bind to what they were shown last) — the one place it is resolved. Ordered by
     the store sequence mark_rendering_delivered allocates inside its transaction, so a
     later delivery always wins, even within one second (fix wave D). Informational
-    renderings (INFORMATIONAL_KINDS) are skipped: they offer nothing to answer."""
-    return conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND kind NOT IN"
-                        " (%s) ORDER BY delivered_seq DESC, delivered_at DESC, rowid DESC"
-                        " LIMIT 1" % ",".join("?" * len(INFORMATIONAL_KINDS)),
+    renderings (INFORMATIONAL_KINDS) are skipped: they offer nothing to answer. So are
+    non-binding ones (`binding` = 0): handed out last by the job_report of an operator's
+    turn, after the operator wrote — their words are about what they saw before it
+    (diff round 1, R5). NULL: never handed out by job_report — binding as always."""
+    return conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND"
+                        " coalesce(binding, 1)=1 AND kind NOT IN (%s) ORDER BY delivered_seq"
+                        " DESC, delivered_at DESC, rowid DESC LIMIT 1"
+                        % ",".join("?" * len(INFORMATIONAL_KINDS)),
                         INFORMATIONAL_KINDS).fetchone()
 
 

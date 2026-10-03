@@ -230,6 +230,17 @@ def job_report(conn, job_id=None, status=None) -> dict:
             notice = sends.get("_notice")
             out["speak"] = alerts.pending_in_tx(conn, must=[notice] if notice else None)
             _bounded(out, pages)
+            # R5 (diff round 1): what this call hands out binds a later reply only when
+            # it is a notification's (job_id given: no operator words are pending). A
+            # no-id call runs in an operator's turn, after their message: what it hands
+            # out is non-binding, so their words never bind to a result sent after they
+            # wrote. The latest hand-out wins: a re-offer re-stamps the rendering
+            handed = [x["render_id"] for x in out["texts"]] + (
+                [out["speak"]["render_id"]] if out["speak"] else [])
+            if handed:
+                conn.execute("UPDATE renders SET binding=? WHERE render_id IN (%s)"
+                             % ",".join("?" * len(handed)),
+                             (1 if job_id is not None else 0, *handed))
     return out
 
 

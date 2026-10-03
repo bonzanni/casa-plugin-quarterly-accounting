@@ -147,8 +147,9 @@ class InformationalPages(Tools):
 
     def test_a_handover_page_after_the_resend_offer_keeps_it(self):
         """Astra's reproduction: an uncertain package send, then a finished handover;
-        `speak` (the resend offer) and the handover page delivered in that order. "Send
-        it again" still resends the offered package."""
+        `speak` (the resend offer) and the handover page, relayed on the job's
+        notification, delivered in that order. "Send it again" still resends the
+        offered package."""
         self.call("request_package", quarter="2026-Q3", channel="telegram")
         self.until(self.call("job_next", job_id=A), "complete")
         tok = self.call("job_report")["continue"]["package_token"]
@@ -159,7 +160,7 @@ class InformationalPages(Tools):
                   package_token=tok)
         self.call("request_work", kind="handover", trigger="operator", doc_ids=[self.doc()])
         self.until(self.call("job_next", job_id=B), "complete", job_id=B)
-        relay = self.call("job_report")
+        relay = self.call("job_report", job_id=B, status="ok")       # its notification
         self.assertIn("send it again", relay["speak"]["text"])
         shown = self.deliver(relay)
         self.assertEqual(self.kind(shown[-1]), "handover")
@@ -181,12 +182,12 @@ class InformationalPages(Tools):
                       expected_revision=it["revision"], row_digest=it["row_digest"],
                       document_date="2026-07-02", labels=["no-ref"])
             self.until(self.do(u), "complete")
-            sheet = self.deliver(self.call("job_report"))[-1]
+            sheet = self.deliver(self.call("job_report", job_id=A, status="ok"))[-1]
             self.assertEqual(self.kind(sheet), "status")
             self.call("request_work", kind="handover", trigger="operator",
                       doc_ids=[self.doc(amount_minor=55555)])
             self.until(self.call("job_next", job_id=B), "complete", job_id=B)
-            shown = self.deliver(self.call("job_report"))
+            shown = self.deliver(self.call("job_report", job_id=B, status="ok"))
             self.assertIn("handover", [self.kind(r) for r in shown])
             self.assertEqual(self.kind(shown[-1]), "handover")
             self.call("apply_reply", text="all good")
@@ -215,6 +216,88 @@ class LastDelivered(StoreCase):
                               " ('r4', 'check', '{}', ?, ?, '', '[]', ?)",
                               (db.now(), db.now(), db.next_seq(self.conn)))
         self.assertEqual(db.last_delivered(self.conn)["render_id"], "r4")
+
+
+class OperatorTurnRelay(Tools):
+    """R5: a rendering handed out by job_report WITHOUT job_id (an operator's turn,
+    after the operator wrote) is non-binding; one handed out on a notification
+    (job_id given) binds as before. The latest hand-out wins."""
+
+    def two_checks(self):
+        """Job A pairs payment 1 and its sheet is relayed on A's notification and
+        delivered; job B (an operator's check) pairs payment 2 and completes, its result
+        not yet relayed. Returns (pid1, pid2, the delivered sheet)."""
+        with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
+            u = self.until(self.start(2), "judge")
+            pids = [r[0] for r in self.conn.execute("SELECT pid FROM projections ORDER BY pid")]
+            self.pair(u, pids[0], 10001)
+            self.until(self.do(u), "complete")
+            old = self.deliver(self.call("job_report", job_id=A, status="ok"))[-1]
+            self.call("request_work", kind="check", trigger="operator")
+            u = self.until(self.call("job_next", job_id=B), "judge", job_id=B)
+            self.pair(u, pids[1], 10002)
+            self.until(self.do(u), "complete", job_id=B)
+        return pids[0], pids[1], old
+
+    def pair(self, u, pid, amount):
+        it = self.call("list_quarter_state", pid=pid, pass_token=u["pass_token"])["item"]
+        self.call("record_match", pid=pid, doc_id=self.doc(amount_minor=amount), author="auto",
+                  pass_token=u["pass_token"], expected_revision=it["revision"],
+                  row_digest=it["row_digest"], document_date="2026-07-02", labels=["no-ref"])
+
+    def operator_pairs(self):
+        return [tuple(r) for r in self.conn.execute(
+            "SELECT pid, render_id FROM log WHERE kind='pair' AND author='operator'"
+            " ORDER BY rowid")]
+
+    def test_astras_reply_race_confirms_only_what_the_operator_saw(self):
+        """The operator's "all good" is about the sheet they saw; Ellen relays B's
+        result with a no-id job_report BEFORE apply_reply (the order R2 forbids). The
+        reply still binds to the sheet they saw: one pairing, never the second."""
+        p1, p2, old = self.two_checks()
+        new = self.deliver(self.call("job_report"))[-1]
+        self.assertNotEqual(new, old)
+        self.call("apply_reply", text="all good")
+        self.assertEqual(self.operator_pairs(), [(p1, old)])
+
+    def test_a_notification_relay_still_binds(self):
+        p1, p2, old = self.two_checks()
+        new = self.deliver(self.call("job_report", job_id=B, status="ok"))[-1]
+        self.call("apply_reply", text="all good")
+        pairs = self.operator_pairs()
+        self.assertEqual({p for p, _ in pairs}, {p1, p2})
+        self.assertEqual({r for _, r in pairs}, {new})
+
+    def binding(self, render_id):
+        return self.conn.execute("SELECT binding FROM renders WHERE render_id=?",
+                                 (render_id,)).fetchone()[0]
+
+    def test_the_latest_hand_out_wins(self):
+        """A result first offered on B's notification (not delivered: the turn was cut),
+        then offered again by a no-id call in an operator's turn, is non-binding; offered
+        once more on a notification, it binds again."""
+        p1, p2, old = self.two_checks()
+        first = self.call("job_report", job_id=B, status="ok")["texts"][-1]["render_id"]
+        self.assertEqual(self.binding(first), 1)
+        again = self.call("job_report")["texts"][-1]["render_id"]
+        self.assertEqual(again, first)                 # the same rendering, re-offered
+        self.assertEqual(self.binding(first), 0)
+        self.call("mark_rendering_delivered", render_id=first)
+        self.call("apply_reply", text="all good")
+        self.assertEqual(self.operator_pairs(), [(p1, old)])
+        self.assertEqual(self.binding(old), 1)
+
+
+    def test_a_notification_re_offer_binds_again(self):
+        """The other direction: first offered by a no-id call, then on a notification."""
+        p1, p2, old = self.two_checks()
+        first = self.call("job_report")["texts"][-1]["render_id"]
+        self.assertEqual(self.binding(first), 0)
+        again = self.call("job_report", job_id=B, status="ok")["texts"][-1]["render_id"]
+        self.assertEqual((again, self.binding(first)), (first, 1))
+        self.call("mark_rendering_delivered", render_id=first)
+        self.call("apply_reply", text="all good")
+        self.assertEqual({r for _, r in self.operator_pairs()}, {first})
 
 
 class InstanceSwitch(Tools):
