@@ -216,8 +216,9 @@ def job_report(conn, job_id=None, status=None) -> dict:
             seen, made, pages, views_last = set(), {}, [], []
             for r in conn.execute("SELECT * FROM work_requests WHERE state='done'"
                                   " ORDER BY request_id").fetchall():
-                # the operator's reply binds to the LAST rendering delivered
-                # (db.last_delivered): a status view goes after every handover and stop page
+                # the operator's reply binds to the LAST binding rendering delivered
+                # (db.last_delivered skips handover and stop pages, which offer nothing
+                # to answer): a status view still goes after every handover and stop page
                 into = views_last if _result_class(r) == "status" else pages
                 for page in _result_tx(conn, r["request_id"], made):   # a list of pages
                     if page["render_id"] not in seen:

@@ -593,13 +593,23 @@ def next_seq(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT value FROM counters WHERE name='seq'").fetchone()[0]
 
 
+# Renderings that offer nothing to answer (S2 §6.4): a handover's case lines and a stop
+# line. Delivered after a view or an offer, they never take the operator's reply from it
+# (diff round 1, R3; Astra S2: a handover page delivered after `speak`'s resend offer
+# made "send it again" refuse).
+INFORMATIONAL_KINDS = ("handover", "job-stop")
+
+
 def last_delivered(conn: sqlite3.Connection):
-    """THE most recent DELIVERED rendering (D2/D3: an operator's words bind to
-    what they were shown last) — the one place it is resolved. Ordered by the
-    store sequence mark_rendering_delivered allocates inside its transaction,
-    so a later delivery always wins, even within one second (fix wave D)."""
-    return conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL ORDER BY"
-                        " delivered_seq DESC, delivered_at DESC, rowid DESC LIMIT 1").fetchone()
+    """THE most recent DELIVERED rendering an operator's reply binds to (D2/D3: their
+    words bind to what they were shown last) — the one place it is resolved. Ordered by
+    the store sequence mark_rendering_delivered allocates inside its transaction, so a
+    later delivery always wins, even within one second (fix wave D). Informational
+    renderings (INFORMATIONAL_KINDS) are skipped: they offer nothing to answer."""
+    return conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND kind NOT IN"
+                        " (%s) ORDER BY delivered_seq DESC, delivered_at DESC, rowid DESC"
+                        " LIMIT 1" % ",".join("?" * len(INFORMATIONAL_KINDS)),
+                        INFORMATIONAL_KINDS).fetchone()
 
 
 @contextlib.contextmanager

@@ -87,13 +87,13 @@ def measure(conn) -> list:
     """INV-J8: the work measure, compared lexicographically; a fall is progress. A
     refresh raises only the last component (rows due a read). The third is the pass's
     judge pages as a HIGH-WATER mark (coordinator ruling on the final review): minus the
-    most pages any judgment of the pass has reached since a handover was last taken
-    (`judge_high`). It falls only when a judgment gets further than every judgment
-    before it, so a judgment started again forever — however its pages fall across
-    batches — stops counting as progress once it has reached its high-water mark, and
-    Casa ends the job after three batches (spec §5). A restart does not lower the mark;
-    taking a handover resets it to 0 (bounded by the requests: its documents earn fresh
-    credit). Beginning a judgment is still progress: its first page beats a mark of 0."""
+    most pages a judgment has reached since the mark was last given fresh credit
+    (`judge_high`). It falls only when a judgment gets further than that, so a judgment
+    started again forever for an unbounded cause — however its pages fall across
+    batches — stops counting as progress once it reaches the mark, and Casa ends the job
+    after three batches (spec §5). A restart whose cause is drawn from a finite budget
+    resets the mark to 0 (_fresh_credit), so genuine later work counts. Beginning a
+    judgment is progress: its first page beats a mark of 0."""
     import steps, sweep, work
     open_requests = (conn.execute("SELECT count(*) FROM work_requests WHERE state IN"
                                   " ('queued','taken')").fetchone()[0]
@@ -208,8 +208,6 @@ def _take(conn, token, p) -> None:
             "SELECT 1 FROM work_requests WHERE pass_id=? AND kind='handover' AND request_id IN"
             " (%s)" % ",".join("?" * len(ids)), (p["pass_id"], *ids)).fetchone() is None:
         return
-    # a handover taken: its documents earn fresh judge credit (INV-J8's high-water mark)
-    conn.execute("UPDATE passes SET judge_high=0 WHERE pass_id=?", (p["pass_id"],))
     j = _step(conn, p, "judge")
     if j is not None and j["finished_at"] is None:
         _start_judgment(conn, token, p, restart_running=True)
@@ -392,12 +390,45 @@ def _judge(conn, token, p, req):
 
 
 def _start_judgment(conn, token, p, restart_running=False) -> None:
-    """A judgment starts, or starts again: its page cursor and its judged-page count go
-    back to the start. The pass's high-water mark (judge_high) is kept."""
+    """THE one place a job pass's judgment starts or starts again (from _judge, and from
+    _take for a handover taken mid-judgment): its page cursor and its judged-page count
+    go back to the start, and INV-J8's high-water mark is given fresh credit iff
+    _fresh_credit says the restart's cause is drawn from a finite budget."""
     import steps
+    fresh = _fresh_credit(conn, p, _step(conn, p, "judge"))     # before the start moves
     steps._start_tx(conn, token, "judge", {}, restart_running=restart_running)
-    conn.execute("UPDATE passes SET judge_after=NULL, judge_pages=0 WHERE pass_id=?",
-                 (p["pass_id"],))
+    conn.execute("UPDATE passes SET judge_after=NULL, judge_pages=0, judge_high=CASE WHEN ?"
+                 " THEN 0 ELSE judge_high END WHERE pass_id=?", (int(fresh), p["pass_id"]))
+
+
+def _fresh_credit(conn, p, j) -> bool:
+    """INV-J8 (diff round 1, R1): does the judgment about to (re)start earn fresh judge
+    credit (judge_high := 0)? Yes iff the cause of the restart is drawn from a FINITE
+    budget, so the credit can be granted only finitely often per pass:
+    - the pass's first judgment (`j` is None): once per pass;
+    - a new search chunk handed out since `j` started (the round's chunk is open):
+      _another_chunk hands one only while its count of payments still to search falls
+      strictly, so a pass has finitely many;
+    - a new bank read imported since `j` started: a W refresh (at most W_REFRESH_MAX a
+      pass), a late ask's refresh (at most one per request) or an adoption's (at most
+      ADOPTIONS_MAX a pass);
+    - a handover asked since `j` started, now taken: at most one per request.
+    Only the unbounded restart keeps the mark: the same work judged again because the
+    judgment did not come out whole (`triage_remaining` > 0) or a handover it should
+    cover is still not covered — causes that can recur forever."""
+    import steps
+    if j is None:
+        return True
+    started = j["started_seq"] or 0
+    if steps._chunk(conn, p["pass_id"])[1] is not None:
+        return True                                         # a new search chunk
+    latest_read = conn.execute("SELECT max(read_seq) FROM snapshots WHERE pass_id=?",
+                               (p["pass_id"],)).fetchone()[0]
+    if latest_read is not None and started < latest_read:
+        return True                                         # a new bank read
+    return conn.execute("SELECT 1 FROM work_requests WHERE pass_id=? AND state='taken' AND"
+                        " kind='handover' AND created_seq > ?",
+                        (p["pass_id"], started)).fetchone() is not None   # a handover take
 
 
 def _judge_unit(conn, p, req) -> dict:

@@ -73,7 +73,10 @@ and takes the ask. Anything else (Casa refused it): say "I couldn't start the ch
   or is said again after a restart: `job_report(job_id=<the id in "(id …)">, status=<ok, or
   error for anything but a clean finish>)`. A late notification about an older finance
   delegation whose result starts `quarterly-accounting:` is answered the same way.
-- At the start of every accounting turn: `job_report()`, before anything else.
+- At the end of every accounting turn: `job_report()`. When the operator wrote, it comes
+  last — after their message was answered or applied (`apply_reply`, `build_review`,
+  `request_work`, `request_package`): their words are about what they saw, never about a
+  result sent after they wrote.
 - Send `speak` first, then every `texts` entry in the order given, each verbatim, each then
   `mark_rendering_delivered` with its `render_id` (the operator's reply binds to the last
   one shown). If `more` is `true`, call `job_report()` again after sending what you got.

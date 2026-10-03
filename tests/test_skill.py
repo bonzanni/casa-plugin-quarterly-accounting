@@ -207,13 +207,32 @@ class TestEllen(TempEnv):
         res = flat(section(SKILL, "## Ellen: the job's results",
                            "## Ellen: answering anything"))
         for phrase in ('`job_report(job_id=<the id in "(id …)">, status=',
-                       "At the start of every accounting turn: `job_report()`",
+                       "At the end of every accounting turn: `job_report()`",
                        "Send `speak` first, then every `texts` entry in the order given",
                        "each then `mark_rendering_delivered`",
                        "If `more` is `true`, call `job_report()` again",
                        "If `continue` is set, do Packaging step 3",
                        "If `start_job` is set, call `start_job` with it"):
             self.assertIn(phrase, res, phrase)
+
+    def test_the_no_id_report_comes_after_the_operators_message(self):
+        """Diff round 1, R2 (Astra S1): a result relayed before the operator's reply is
+        applied would take the reply ("all good") for itself. The no-id job_report comes
+        last in an operator's turn, after apply_reply / build_review / request_*."""
+        import qa_server, tools  # noqa: F401  (tools registers into qa_server.TOOLS)
+        desc = qa_server.TOOLS["job_report"]["description"]
+        res = flat(section(SKILL, "## Ellen: the job's results",
+                           "## Ellen: answering anything"))
+        line = res[res.index("At the end of every accounting turn: `job_report()`"):]
+        line = line[:line.index("- Send `speak` first")]
+        self.assertIn("it comes last", line)
+        for after in ("`apply_reply`", "`build_review`", "`request_work`",
+                      "`request_package`"):
+            self.assertIn(after, line)
+        for text in (flat(SKILL), flat(desc)):
+            self.assertNotIn("start of every accounting turn", text)
+            self.assertNotIn("before anything else", text)
+        self.assertIn("after the operator's message was answered or applied", desc)
 
     def test_ellen_never_relays_a_notification_text(self):
         res = flat(section(SKILL, "## Ellen: the job's results",
