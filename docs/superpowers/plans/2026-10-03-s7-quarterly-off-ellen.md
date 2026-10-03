@@ -1447,6 +1447,14 @@ class ShowView(StoreCase):
         self.assertIsNone(out["view"])
         self.assertIn("post_results", out["refused"])
 
+    def test_a_setup_stop_view_posts_with_informational_buttons(self):
+        """Plan round 4, Terra S2: an unbound store's status view (the setup lead) has no
+        items; show_view still stores and posts it."""
+        out, prop, _ = self.post(view="status")          # StoreCase: nothing bound
+        self.assertRegex(out["view"], r"^casa-cap-")
+        self.assertEqual([b["label"] for b in prop["buttons"]],
+                         ["What's missing", "Anything to check?"])
+
     def test_a_legacy_rendering_with_a_control_character_is_deposited_clean(self):
         import db
         with db.tx(self.conn):
@@ -1578,9 +1586,13 @@ def spend_render(conn, key, render_id, action, pid) -> None:
 In `_review`, after `printed` is computed, record:
 
 ```python
-        scope["proposed"] = [p for p in printed if p in by_pid
-                             and _needs_check(by_pid[p]) and by_pid[p]["current"] is not None
-                             and by_pid[p]["current"]["match_id"] in printed[p]]
+        # its own map, defined on every branch: `by_pid` below exists only when names were
+        # composed, and a setup-stop page composes none (`items` is [] there; plan round 4)
+        described = {d["pid"]: d for d in items}
+        scope["proposed"] = [p for p in printed if p in described
+                             and _needs_check(described[p])
+                             and described[p]["current"] is not None
+                             and described[p]["current"]["match_id"] in printed[p]]
         if view == "item" and items:
             d0 = items[0]
             scope["item_state"] = ("exempt" if d0["status"] == "exempt"
