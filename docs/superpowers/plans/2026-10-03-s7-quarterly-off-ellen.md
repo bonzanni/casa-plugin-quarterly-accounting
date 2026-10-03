@@ -52,8 +52,13 @@ the spec's. Parent: `2026-10-02-specialist-front-desk-and-job-offload-design.md`
 - **Casa floor ≥ 0.344.0** (S7a: `operator_file` `filename`, the tool-entry `"filename": true`,
   specialist `start_job`). An older Casa refuses the manifest (`result_contract_invalid`). The
   README says so, and there is no runtime fallback (§6.1, F1).
-- **Live-test prerequisite, not a build gate:** ha-casa-app#1220 fixed (§19). It is not
-  required to build or merge this branch's code.
+- **Live-test prerequisites, not build gates (§19):** these are needed for the live test, not
+  to build or merge this branch's code:
+  - ha-casa-app#1220 fixed: a pinned tap settled `no_call` when the plugin's tools were
+    deferred;
+  - ha-casa-app#1228 fixed (BRAIN, 2026-10-03): on v0.344.2, Ellen starts a specialist-owned
+    job herself instead of delegating to Finance. B2's "Ellen delegates accounting" depends
+    on this fix.
 - **Version:** `plugin.json` 0.9.0 → 0.10.0 (`version.WORKFLOW` follows it). The annotated tag
   `v0.10.0` is created only at release, after PLAY's §19 live test and BRAIN's word.
 - **Branch:** `feat/s7-quarterly-off-ellen`, never `main`.
@@ -797,7 +802,7 @@ git commit -m "feat(s7): broker client, the no-post shape and keyed receipts (§
 - Modify: `server/views.py` (`esc`, `unesc`, `field_raw`, `field`, `deposit_safe`,
   `caption_safe`, `BODY_LIMIT`, every fit)
 - Modify: `server/alerts.py`, `server/asks.py`, `server/reply.py`, `server/package.py`,
-  `server/fold.py` (the composers that bypass `field`)
+  `server/delivery.py`, `server/binding.py` (the composers that bypass `field`)
 - Test: `tests/test_s7_escape.py`
 
 **Interfaces:**
@@ -836,10 +841,9 @@ every f-string that interpolates a stored value and routes each through `views.f
 - `views._status_notes`, `views._degraded_block` (probe details → `field`);
 - `binding.check_setup` conditions (account labels → `field`; they reach `propose_account`'s
   body in Task 7).
-`fold.py`'s two `field` calls build fold keys, not bodies: they switch to `field_raw`, and so
-does `views` where a field value is stored, not displayed (`scope["names"]`, `_bindable`'s
-identity comparison is on the composed text and stays consistent because both sides are
-escaped).
+`views` stores a field value, not displays it, in two places, and both use `field_raw`: a field value is stored, not displayed `scope["names"]`, and `_bindable`'s identity comparison. That comparison runs on the
+composed text and stays consistent because both sides are escaped. (`fold.py`'s `field` is
+`dataclasses.field`, not this one: it is unchanged.)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -970,7 +974,7 @@ def field(text, units: int = FIELD_MAX) -> str:
 Replace `TELEGRAM_LIMIT` with `BODY_LIMIT` in `fit_lines`, in `_review`'s cap loop
 (`utf16_len(text) <= TELEGRAM_LIMIT`), in `_page`'s fit predicate and in `_item_page`.
 `scope["names"]` stores `field_raw(...)`: the operator's words are compared with what they
-read, unescaped. `fold.py`'s two calls become `field_raw`.
+read, unescaped.
 
 - [ ] **Step 4: The bypassing composers**
 
@@ -989,7 +993,7 @@ escaped text. List each one in the commit message.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add server/views.py server/alerts.py server/asks.py server/reply.py server/package.py server/fold.py server/delivery.py server/binding.py tests/
+git add server/views.py server/alerts.py server/asks.py server/reply.py server/package.py server/delivery.py server/binding.py tests/
 git commit -m "feat(s7): one escape for every field, deposit-safe bodies, a proposal-sized budget (§7.6, §12)"
 ```
 
@@ -1904,21 +1908,37 @@ unresolved for the rebuild rule: "fix X. rebuild it" answers "Not rebuilding yet
 change first, then say \"rebuild it\"." That is today's rule that an unresolved correction
 blocks its dependent rebuild. The rebuild is never run before the write it depends on.
 
-**A plan step** is a dict, canonicalised with `db.canonical`:
-- a pairing verdict: `{"op": "confirm"|"unpair", "pid", "match_id", "render_id", "rev",
-  "bind"}`;
-- `{"op": "set_aside", "pid", "bound": [[match_id, render_id, rev], …], "bind"}`;
-- `{"op": "exempt"|"lift", "pid", "render_id", "rev", "bind"}`;
-- `{"op": "revive", "pid"}`;
-- `{"op": "identity", "pid", "who"}`;
-- `{"op": "never", "scope", "changed": {pid: rev, …}}`;
-- `{"op": "class_none", "scopes", "changed": {…}}`;
-- `{"op": "stop", "quarter", "pids": [...]}`;
-- `{"op": "start", "day"}`, `{"op": "name", "slug"}`, `{"op": "ledger_reset"}`.
+**A plan step** is a dict, canonicalised with `db.canonical`. It is the same shape for every
+write (plan round 1, Astra S1: a stop-chasing step recorded no revisions, so Apply committed
+over a payment that had changed — fixed by one rule for all ops, not per op). It holds:
+- `op` and the op's own parameters:
+  - confirm/unpair: `pid`, `match_id`, `render_id`, `rev`, `bind`;
+  - set_aside: `pid`, `bound`, `bind`;
+  - exempt/lift: `pid`, `render_id`, `rev`, `bind`;
+  - revive: `pid`;
+  - identity: `pid`, `who`;
+  - never: `scope`;
+  - class_none: `scopes`;
+  - stop: `quarter`;
+  - start: `day`;
+  - name: `slug`;
+  - ledger_reset: nothing more;
+- `"read"`: `{pid: [revision, digest], …}`, the revision and digest BEFORE the write of every
+  live projection whose revision or digest the write changed. It is measured inside the
+  clause's savepoint by diffing `SELECT pid, revision, digest FROM projections WHERE
+  merged_into IS NULL AND ended IS NULL` before and after `fn()`;
+- `"binding"`: the canonical binding row before the write (`SELECT * FROM binding`; `null`
+  when unbound).
 
-The plan is everything the reading would commit, with the revisions it read. Apply commits
-only when the replay's plan is EXACTLY the stored one. So nothing commits that the proposal
-did not list, and nothing commits if anything it read has changed (all-or-nothing, §8).
+`_Run.write(op, params, fn, phrase_args)` is the ONE helper that runs a write. It holds the
+savepoint, takes both snapshots and builds the step. `guarded`, `setting` and `_broad` all
+call it, and no write path builds a step by hand.
+
+The plan is everything the reading would commit, with the state it read. Apply commits only
+when the replay's plan is EXACTLY the stored one. So nothing commits that the proposal did
+not list. And nothing commits when any payment the reading would change, or the binding
+row, differs from what the reading saw: the before-values, or the set of changed payments,
+would differ (all-or-nothing, §8).
 
 **Each step's two phrasings** (`PHRASE`, in `reply.py`). The proposal shows the first, the
 Apply receipt the second. `{h}` is `views.headline(d)`:
@@ -2067,14 +2087,15 @@ unchanged. The execution changes:
 1. `_Run.__init__(self, conn, grant, bound)` gains `self.grant`, `self.bound` (a renders
    row or None), `self.plan = []`, `self.propose = []` and `self.unresolved_lines = []`.
    `self.lines` stays the receipt-line list.
-2. `_Run.guarded(d, fn, step_of, phrase)` replaces `guarded(d, fn, ok_line)`. It runs
-   `with db.savepoint(self.conn, "clause"): res = fn()`. On success it appends
-   `step_of(res)` to `self.plan`, and `PHRASE[op][0]` / `[1]` formatted to `self.propose` /
-   `self.lines`. On `NotShown`/`Stale`/`Refusal` it records exactly today's line into
+2. `_Run.guarded(d, op, params, fn, phrase_args)` replaces `guarded(d, fn, ok_line)`. It
+   calls `self.write(op, params, fn, phrase_args)`, the one helper defined under **A plan
+   step**, which runs `fn()` in the savepoint `clause` and builds the step with its `read`
+   and `binding`. On success the step is appended to `self.plan`, and `PHRASE[op][0]` /
+   `[1]` formatted go to `self.propose` / `self.lines`. On `NotShown`/`Stale`/`Refusal` it records exactly today's line into
    `self.lines` and `self.unresolved_lines`, and `self.unresolved += 1`.
-3. `_Run.setting(...)` and `_broad(...)` do the same: `db.savepoint` in place of `db.tx`. The
-   step is built from the change's result, and `_broad`'s `changed` pids map to their
-   `before` revisions.
+3. `_Run.setting(...)` and `_broad(...)` call the same `self.write` (in place of `db.tx`).
+   `_broad` keeps its own check that every changed payment was shown at its before
+   revision, inside the same savepoint; its `changed` set is the step's `read`.
 4. `_bind_projection(conn, run, d)` and `_bind_match(conn, run, d, match_id)` return
    `(render_id, rev, bind)`. When `run.bound` is set and its `render_items` hold `d["pid"]`
    (and, for a match, that match id), they return that rendering's recorded revisions with
@@ -2897,7 +2918,7 @@ is never written again (§14 leaves it).
 `_choose`'s `complete` branch:
 
 ```python
-            if done(conn, job_id):
+            if done(conn, job_id, token):
                 conn.execute("INSERT OR IGNORE INTO runs(job_id, passes) VALUES (?, 0)",
                              (job_id,))
                 conn.execute("UPDATE runs SET completed_at=coalesce(completed_at, ?) WHERE"
@@ -2905,8 +2926,9 @@ is never written again (§14 leaves it).
                 return {"unit": "complete", "text": run_end(conn, job_id)[0]}
 ```
 
-Delete the `drain` write there and in `claim`. `job.status`, when `done`, opens a `db.tx`
-and makes the same two statements. Its docstring says: "never a claim; it stamps the run
+Delete the `drain` write there and in `claim`. `job.status` runs `done(conn, job_id)` inside
+its own `db.tx` (`_owed` needs a transaction for its savepoint), and when `done` it makes the
+same two statements in that transaction. Its docstring says: "never a claim; it stamps the run
 complete, as job_next's complete does". `check_claim` loses its `passes.check_revoked`
 call. `passes.check_token` loses its `check_revoked` call.
 
@@ -2961,8 +2983,10 @@ git commit -m "feat(s7): nothing restarts — the next start closes a failed run
   - `job.OFFER_MAX = 2` and `job.POST_MAX = 3`. `job.offers(conn, render_id, job_id) -> int`
     and `job._offer(conn, render_id, job_id)`. The accounts unit is keyed
     `"accounts"`;
-  - `job._owed(conn, job_id) -> bool`, read-only: a `post` or `view` would be handed out
-    now. `done()` requires `not _owed(...)`;
+  - `job._owed(conn, token, job_id) -> bool`, inside the caller's transaction: would
+    `_sends` or `_posts` hand out a unit now? It runs both inside a savepoint that is always
+    rolled back, so it agrees with the cursor by construction. `done()` requires `not
+    _owed(...)`. `job.status` runs `done` inside its own `db.tx`;
   - `job.LEFT_WAITING = "Some asks are waiting: ask again to start them."`. It is a
     `job-left` rendering, made once per run (`meta` key `left:<job_id>`) when the run has
     spent `MAX_PASSES_PER_JOB` with asks still queued (§4.2);
@@ -3086,6 +3110,20 @@ class Posts(StoreCase):
         self.assertEqual(out, {"results": None, "render_ids": []})
         self.assertEqual(fb.deposits, [])
 
+    def test_forty_withheld_alerts_are_all_offered_and_the_run_completes(self):
+        """Plan round 1, Astra S1: more alerts than one rendering holds, nothing ever
+        delivered — every occurrence is handed out (at most twice), then complete."""
+        import alerts, db, job
+        with db.tx(self.conn):
+            for i in range(40):
+                alerts.raise_package(self.conn, "package-stopped", f"t:{i}",
+                                     quarter="2026-Q3", reason="x" * 250, pass_id="")
+        units = self.drive(A, deliver=False)
+        self.assertEqual(units[-1]["unit"], "complete")
+        offered = {r[0] for r in self.conn.execute(
+            "SELECT a.alert_id FROM alerts a JOIN post_offers o ON o.render_id=a.render_id")}
+        self.assertEqual(len(offered), 40)
+
     def test_job_status_is_not_done_while_a_post_is_owed(self):
         import asks, job
         asks.request_work(self.conn, "check", "operator")
@@ -3118,7 +3156,7 @@ In `_choose`, at `if p is None:`, before `done`:
                 u = _posts(conn, job_id)
             if u is not None:
                 return u
-            if done(conn, job_id):
+            if done(conn, job_id, token):
                 ...
 ```
 
@@ -3224,23 +3262,43 @@ def _accounts_owed(conn, job_id) -> bool:
             and offers(conn, "accounts", job_id) < 1)
 ```
 
-`_owed(conn, job_id)` answers the same question without writing. It is true when any of
-these holds:
-- an unsent alert has `render_id IS NULL`, or `offers(render_id) < OFFER_MAX` with that
-  rendering undelivered;
-- a `done` work request has a result class and an empty `render_ids_json`;
-- a `done` work request has a listed undelivered rendering with offers below `OFFER_MAX`;
-- an undelivered `package-note` has offers below `OFFER_MAX`;
-- `_left_owed` holds, and the run's `left:` rendering is missing, or undelivered with offers
-  below `OFFER_MAX`;
-- `_accounts_owed` holds;
-- a request is buildable or built (Task 11's `_sends` would hand it out).
-
-`done(conn, job_id)` becomes:
+**Alerts beyond an exhausted batch** (plan round 1, Astra S1). `alerts.pending_in_tx(conn,
+must=None, skip=())` gains `skip`, a set of alert ids left out of `rows`. The cursor passes
+`_exhausted_alerts(conn, job_id)`: the unsent alerts whose `render_id` this run has already
+handed out `OFFER_MAX` times. So once a batch is exhausted, the next `post` composes the
+following occurrences, and an exhausted occurrence is never re-minted into a new rendering
+within the run. In `_posts`, the call is `a = alerts.pending_in_tx(conn,
+skip=_exhausted_alerts(conn, job_id))`.
 
 ```python
-def done(conn, job_id) -> bool:
-    if live_job_pass(conn) is not None or _owed(conn, job_id):
+def _exhausted_alerts(conn, job_id) -> set:
+    return {r[0] for r in conn.execute(
+        "SELECT a.alert_id FROM alerts a JOIN post_offers o ON o.render_id=a.render_id AND"
+        " o.job_id=? WHERE a.sent_at IS NULL AND o.n >= ?", (job_id, OFFER_MAX))}
+
+
+def _owed(conn, token, job_id) -> bool:
+    """Would the cursor hand out a send or a post now? Answered by running _sends and
+    _posts themselves in a savepoint that is always rolled back, so `done` and the cursor
+    can never disagree (plan round 1: a hand-written mirror of _posts did)."""
+    conn.execute("SAVEPOINT owed")
+    try:
+        return (_sends(conn, token, job_id) or _posts(conn, job_id)) is not None
+    finally:
+        conn.execute("ROLLBACK TO owed")
+        conn.execute("RELEASE owed")
+```
+
+In `_choose`, when `done` is false and `_begin_next` returns `None`, that is a predicate bug:
+raise `RuntimeError("the cursor found nothing to do but the run is not done")`. It rolls the
+claim's transaction back and surfaces as an error, never as a `None` subscripted later.
+
+`done(conn, job_id, token=None)` becomes:
+
+```python
+def done(conn, job_id, token=None) -> bool:
+    assert conn.in_transaction
+    if live_job_pass(conn) is not None or _owed(conn, token, job_id):
         return False
     queued = conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL"
                           " SELECT 1 FROM package_requests WHERE state='queued'").fetchone()
@@ -3503,15 +3561,24 @@ def _sends(conn, token, job_id):
 
 - [ ] **Step 4: Build and record**
 
-- In `package._build`'s registering transaction, after the request is linked, call
-  `job.credit(conn, package_token, req["pass_id"], f"req:pkg:{rid}:built")`. It is a no-op
-  for a non-job pass.
+- In `package._build`'s registering transaction, inside `if request_id is not None:` after
+  the `UPDATE package_requests SET package_id=…`, add:
+  ```python
+                pass_id = conn.execute("SELECT pass_id FROM package_requests WHERE"
+                                       " request_id=?", (request_id,)).fetchone()[0]
+                import job
+                job.credit(conn, package_token, pass_id, f"req:pkg:{request_id}:built")
+  ```
+  It is a no-op for a non-job pass. `_build`'s names there are `request_id` and
+  `package_token`.
 - `RECHECK` ends "…and the package follows it; call job_next".
 - `delivery.record_delivery`:
   - when `req is not None and package_token is not None`, call
     `job.credit(conn, package_token, req["pass_id"], f"req:pkg:{req['request_id']}:delivered")`;
   - on `delivered` for a package, after `close_offers`, call
-    `out["note_render_id"] = _package_note(conn, d)`.
+    `note = _package_note(conn, d)`, a local initialised to `None` at the top of the
+    transaction. After `out = {...}` is built (it is assigned later, `delivery.py:525`), add
+    `if note: out["note_render_id"] = note`.
 
 ```python
 def _package_note(conn, d):
@@ -3709,7 +3776,8 @@ Expected: FAIL (version 0.9.0; the README).
   - "Requires Casa 0.344.0 or later (S7a: the file's delivered name, `operator_file`
     `filename`; a specialist starts its own job). An older Casa refuses the manifest — the
     plugin is not loaded there. Live use also needs ha-casa-app#1220 fixed (buttons on a
-    specialist whose plugin tools are deferred)."
+    specialist whose plugin tools are deferred) and ha-casa-app#1228 fixed (Ellen delegates a
+    specialist's job instead of starting it)."
   - "Assign the plugin to `specialist:finance` only."
   - The §14 assignment steps 1–3, verbatim, with the trigger:
     `name: quarterly-check, type: cron, schedule: "0 9 * * 1", channel: telegram, job:
@@ -4207,8 +4275,8 @@ git commit -m "test(s7): every deposit through Casa's real validators and render
    - the diff round converges: Astra (`gpt-6-astra`, medium, 1500 s) and Terra
      (`gpt-5.6-terra`, medium, 900 s) both answer SHIP on a frozen SHA, and again after
      fixes. Rounds are recorded in `ha-casa-app-docs/specs/rounds-2026-10-03-s7-diff/`.
-2. **PLAY's §19 live test** on casa-test, with Casa carrying S6, S7a and ha-casa-app#1220
-   fixed:
+2. **PLAY's §19 live test** on casa-test, with Casa carrying S6 and S7a, and with ha-casa-app#1220
+   and #1228 fixed:
    1. #41: a routed file is filed by the desk and its case line is posted by the job;
    2. a typed verdict becomes a reading; "All good" commits the sheet; a stale tap refuses;
    3. "Send me Q3" arrives under its name; send-last again; "send it again" after a
