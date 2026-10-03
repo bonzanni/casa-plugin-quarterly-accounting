@@ -4,6 +4,7 @@ token may act (check_claim). A pass held by another job is adopted, at most
 ADOPTIONS_MAX times; a claim that would adopt once more ends it `stopped`."""
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 
@@ -86,14 +87,15 @@ def stop_exhausted_pass(conn, token, pass_id) -> None:
 def measure(conn) -> list:
     """INV-J8: the work measure, compared lexicographically; a fall is progress. A
     refresh raises only the last component (rows due a read). The third is the pass's
-    judge pages as a HIGH-WATER mark (coordinator ruling on the final review): minus the
-    most pages a judgment has reached since the mark was last given fresh credit
-    (`judge_high`). It falls only when a judgment gets further than that, so a judgment
-    started again forever for an unbounded cause — however its pages fall across
-    batches — stops counting as progress once it reaches the mark, and Casa ends the job
-    after three batches (spec §5). A restart whose cause is drawn from a finite budget
-    resets the mark to 0 (_fresh_credit), so genuine later work counts. Beginning a
-    judgment is progress: its first page beats a mark of 0."""
+    judge pages as a HIGH-WATER mark: minus the most pages a judgment has reached since
+    the mark was last reset (`judge_high`). It falls only when a judgment gets further
+    than that, so a judgment started again forever for an unbounded cause stops counting
+    as progress once it reaches the mark, and Casa ends the job after three batches
+    (spec §5). Work ADDED by a bounded event — a pass begun, a bank read imported, a
+    search chunk handed out, a judgment started again for a bounded cause — is never
+    progress and never a loss: the one hook, work_added, moves the batch's baseline by
+    exactly what the event changed (diff round 2, R7). Beginning a judgment is
+    progress: its first page beats a mark of 0."""
     import steps, sweep, work
     open_requests = (conn.execute("SELECT count(*) FROM work_requests WHERE state IN"
                                   " ('queued','taken')").fetchone()[0]
@@ -215,6 +217,7 @@ def _take(conn, token, p) -> None:
 
 def _begin_next(conn, token):
     import asks
+    pre = measure(conn)
     q = conn.execute("SELECT trigger FROM work_requests WHERE state='queued'").fetchall()
     if q:
         op = any(r["trigger"] == "operator" for r in q)
@@ -231,7 +234,7 @@ def _begin_next(conn, token):
     conn.execute("UPDATE passes SET holder_job=?, adopters_json=? WHERE pass_id=?",
                  (who, json.dumps([who]), pid))
     asks.take_queued(conn, pid)
-    _rebase(conn, token)                    # a new pass: a new population (INV-J8)
+    work_added(conn, token, "pass-begin", pre)          # a new pass: a new population
     return live_job_pass(conn)
 
 
@@ -358,8 +361,8 @@ def _gmail(conn, token, p, req):
     if req is None and not carry.get("filed"):
         return {"unit": "filing", "filed_refs": work.filed_refs(conn)}
     if "chunk" not in carry:
-        steps._hand_chunk(conn, p["pass_id"], req, True)
-        _rebase(conn, token)                # the round's population is now known (INV-J8)
+        with adding_work(conn, token, "search-chunk"):   # the round's population is known
+            steps._hand_chunk(conn, p["pass_id"], req, True)
         carry, chunk = steps._chunk(conn, p["pass_id"])
     if chunk is not None:
         left = steps._unrecorded(conn, chunk)
@@ -384,7 +387,8 @@ def _judge(conn, token, p, req):
         _start_judgment(conn, token, p)                # closes the chunk; may restart
         return _judge_unit(conn, p, req)
     if steps._another_chunk(conn, p["pass_id"], req, j):
-        steps._hand_chunk(conn, p["pass_id"], req, False)
+        with adding_work(conn, token, "search-chunk"):
+            steps._hand_chunk(conn, p["pass_id"], req, False)
         return _gmail(conn, token, p, req)
     return None
 
@@ -392,43 +396,93 @@ def _judge(conn, token, p, req):
 def _start_judgment(conn, token, p, restart_running=False) -> None:
     """THE one place a job pass's judgment starts or starts again (from _judge, and from
     _take for a handover taken mid-judgment): its page cursor and its judged-page count
-    go back to the start, and INV-J8's high-water mark is given fresh credit iff
-    _fresh_credit says the restart's cause is drawn from a finite budget."""
+    go back to the start. Started for a bounded cause (restart_cause), it is work added
+    through the hook — the judge high-water mark is reset, and the baseline moves with
+    it; for an unbounded cause the mark is kept."""
     import steps
-    fresh = _fresh_credit(conn, p, _step(conn, p, "judge"))     # before the start moves
-    steps._start_tx(conn, token, "judge", {}, restart_running=restart_running)
-    conn.execute("UPDATE passes SET judge_after=NULL, judge_pages=0, judge_high=CASE WHEN ?"
-                 " THEN 0 ELSE judge_high END WHERE pass_id=?", (int(fresh), p["pass_id"]))
+    cause = restart_cause(conn, p, _step(conn, p, "judge"))   # before the start moves
+    with adding_work(conn, token, cause):
+        steps._start_tx(conn, token, "judge", {}, restart_running=restart_running)
+        conn.execute("UPDATE passes SET judge_after=NULL, judge_pages=0, judge_high=CASE"
+                     " WHEN ? THEN 0 ELSE judge_high END WHERE pass_id=?",
+                     (int(bounded(cause)), p["pass_id"]))
 
 
-def _fresh_credit(conn, p, j) -> bool:
-    """INV-J8 (diff round 1, R1): does the judgment about to (re)start earn fresh judge
-    credit (judge_high := 0)? Yes iff the cause of the restart is drawn from a FINITE
-    budget, so the credit can be granted only finitely often per pass:
-    - the pass's first judgment (`j` is None): once per pass;
-    - a new search chunk handed out since `j` started (the round's chunk is open):
-      _another_chunk hands one only while its count of payments still to search falls
-      strictly, so a pass has finitely many;
-    - a new bank read imported since `j` started: a W refresh (at most W_REFRESH_MAX a
-      pass), a late ask's refresh (at most one per request) or an adoption's (at most
-      ADOPTIONS_MAX a pass);
-    - a handover asked since `j` started, now taken: at most one per request.
-    Only the unbounded restart keeps the mark: the same work judged again because the
-    judgment did not come out whole (`triage_remaining` > 0) or a handover it should
-    cover is still not covered — causes that can recur forever."""
-    import steps
+def restart_cause(conn, p, j) -> str:
+    """Why the judgment `j` (None: none yet) is (re)started: a cause of BOUNDED or of
+    UNBOUNDED (see `bounded`)."""
+    import asks, work
     if j is None:
-        return True
+        return "first-judgment"
     started = j["started_seq"] or 0
+    import steps
     if steps._chunk(conn, p["pass_id"])[1] is not None:
-        return True                                         # a new search chunk
+        return "search-chunk"
     latest_read = conn.execute("SELECT max(read_seq) FROM snapshots WHERE pass_id=?",
                                (p["pass_id"],)).fetchone()[0]
     if latest_read is not None and started < latest_read:
-        return True                                         # a new bank read
-    return conn.execute("SELECT 1 FROM work_requests WHERE pass_id=? AND state='taken' AND"
-                        " kind='handover' AND created_seq > ?",
-                        (p["pass_id"], started)).fetchone() is not None   # a handover take
+        return "bank-read"
+    if conn.execute("SELECT 1 FROM work_requests WHERE pass_id=? AND state='taken' AND"
+                    " kind='handover' AND created_seq > ?", (p["pass_id"], started)).fetchone():
+        return "handover-take"
+    return "not-covered" if work.judge_whole(j) else "not-whole"
+
+
+# INV-J8's causes of added work, each with the budget that bounds how often it occurs in
+# a pass (diff round 2, R7: the fourth finding on this measure, fixed by generalization)
+BOUNDED = {
+    "pass-begin": "a pass begins only for a queued request or package ask, each taken "
+                  "once: at most one per request",
+    "bank-read": "an accepted import: the pass's first read, then at most W_REFRESH_MAX "
+                 "W refreshes, one late-ask read per request and at most ADOPTIONS_MAX "
+                 "adoption reads",
+    "search-chunk": "_another_chunk hands a chunk out only while its count of payments "
+                    "still to search falls strictly: finitely many per pass",
+    "handover-take": "one per handover request",
+    "first-judgment": "once per pass",
+}
+UNBOUNDED = {
+    "not-whole": "the judgment did not come out whole (triage_remaining > 0): the same "
+                 "work judged again, as often as it keeps happening",
+    "not-covered": "a taken handover is still not covered by a whole judgment: the same",
+}
+
+
+def bounded(cause) -> bool:
+    """THE one predicate: is work added for `cause` drawn from a finite budget (BOUNDED)?
+    Only then does it move the batch's baseline (work_added) and, for a judge restart,
+    reset the judge high-water mark. An UNBOUNDED cause never does: re-adding the same
+    work forever must stop counting as progress, so Casa ends the job."""
+    if cause in BOUNDED:
+        return True
+    assert cause in UNBOUNDED, cause
+    return False
+
+
+def work_added(conn, token, cause, pre) -> None:
+    """THE hook (INV-J8, diff round 2, R7): a bounded event added work. `pre` is the
+    measure just before it; the claim's baseline moves by exactly what the event
+    changed, component by component — no credit for the event (an import alone does not
+    count), and no loss of the progress the batch made before it. A no-op for an
+    unbounded cause."""
+    if not bounded(cause):
+        return
+    c = conn.execute("SELECT measure_json FROM claims WHERE gen=?", (int(token),)).fetchone()
+    if c is None or not c["measure_json"]:
+        return
+    post = measure(conn)
+    base = json.loads(c["measure_json"])
+    conn.execute("UPDATE claims SET measure_json=? WHERE gen=?",
+                 (json.dumps([b + (q - a) for b, a, q in zip(base, pre, post)]), int(token)))
+
+
+@contextlib.contextmanager
+def adding_work(conn, token, cause):
+    """work_added around the event in the `with` body."""
+    pre = measure(conn) if bounded(cause) else None
+    yield
+    if pre is not None:
+        work_added(conn, token, cause, pre)
 
 
 def _judge_unit(conn, p, req) -> dict:
@@ -613,14 +667,3 @@ def _summary(unit, now) -> str:
     left = now[1]
     return WORDS[unit] + (f" · {left} payment{'s' if left != 1 else ''} left to search"
                           if left else "")
-
-
-def _rebase(conn, token) -> None:
-    """The claim's baseline takes the live pass's population (Astra plan-r3 S1): a pass
-    begun or a round handed out in this claim sets unsearched/pages/due from zero, and
-    that setting is not progress. The requests component is kept: requests done before
-    the rebase still count."""
-    c = conn.execute("SELECT measure_json FROM claims WHERE gen=?", (token,)).fetchone()
-    base = json.loads(c["measure_json"]) if c and c["measure_json"] else measure(conn)
-    conn.execute("UPDATE claims SET measure_json=? WHERE gen=?",
-                 (json.dumps([base[0]] + measure(conn)[1:]), token))

@@ -337,6 +337,12 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
                                         "more is written until a pass proves the ledger again")
                     raise db.Refusal(f"row #{a['row_id']} now names a different transaction "
                                      "than the one this store holds — nothing was imported")
+        if job_pass:
+            import job
+            # INV-J8 (diff round 2, R7): an accepted import adds work (rows due a read,
+            # fresh items to search); the hook moves the batch's baseline by exactly what
+            # it changed — no credit for the import, none lost for the batch's sweeps
+            pre = job.measure(conn)
         _require_same_ledger(conn, b, ledger_instance)          # may re-bind (drops aliases)
         if job_pass:
             # final review FW-I2: a job pass reads the bank more than once (W refreshes,
@@ -488,6 +494,8 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
             conn.execute("UPDATE projections SET observed_revision=? WHERE pid=?",
                          (p["revision"] if owed is None else None, pid))
         passes.remember_ledger(conn, cur_pass["pass_id"])   # identity proved above
+        if job_pass:
+            job.work_added(conn, token, "bank-read", pre)
         out["delivered_changes"] = check_delivered_bank_half(conn, by_id)
         out["delivered_changes"] += len(_kind_changes(conn, _latest_delivered(conn)))
         # 7. an unsent first send staged under an earlier snapshot is revoked in this
