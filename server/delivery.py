@@ -631,6 +631,9 @@ def resend_target(conn) -> int:
     several are told apart by the date in their filenames (spec §"What the
     operator never has to learn")."""
     last = db.last_delivered(conn)
+    if db.non_binding(last):
+        # R6: newer results were sent since any offer the operator could mean
+        raise db.Refusal(db.NEWER_SINCE_RESEND)
     offered = json.loads(last["scope_json"]).get("offers", []) if last else []
     waiting, why = [], None
     for pid in offered:

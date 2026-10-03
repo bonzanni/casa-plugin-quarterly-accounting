@@ -1111,9 +1111,10 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
                      (now, db.next_seq(conn), render_id))
         scope = json.loads(r["scope_json"])
         # a NON-binding rendering (handed out last by an operator turn's job_report:
-        # diff round 1, R5) is recorded delivered, but never becomes what the operator's
-        # words bind to: neither the last sheet (db.last_delivered) nor any payment's
-        # shown revision (`shown`, which every reply and operator write binds through)
+        # diff round 1, R5) is recorded delivered — db.last_delivered returns it, and a
+        # reply about its contents refuses there (R6) — but it never becomes any
+        # payment's shown revision (`shown`, which named replies and every operator
+        # write bind through)
         binds = r["binding"] is None or r["binding"] == 1
         for it in (conn.execute("SELECT * FROM render_items WHERE render_id=?",
                                 (render_id,)).fetchall() if binds else ()):

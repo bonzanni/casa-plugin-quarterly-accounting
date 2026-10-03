@@ -603,19 +603,35 @@ INFORMATIONAL_KINDS = ("handover", "job-stop")
 
 
 def last_delivered(conn: sqlite3.Connection):
-    """THE most recent DELIVERED rendering an operator's reply binds to (D2/D3: their
+    """THE most recent DELIVERED rendering an operator's reply is about (D2/D3: their
     words bind to what they were shown last) — the one place it is resolved. Ordered by
     the store sequence mark_rendering_delivered allocates inside its transaction, so a
     later delivery always wins, even within one second (fix wave D). Informational
-    renderings (INFORMATIONAL_KINDS) are skipped: they offer nothing to answer. So are
-    non-binding ones (`binding` = 0): handed out last by the job_report of an operator's
-    turn, after the operator wrote — their words are about what they saw before it
-    (diff round 1, R5). NULL: never handed out by job_report — binding as always."""
-    return conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND"
-                        " coalesce(binding, 1)=1 AND kind NOT IN (%s) ORDER BY delivered_seq"
-                        " DESC, delivered_at DESC, rowid DESC LIMIT 1"
-                        % ",".join("?" * len(INFORMATIONAL_KINDS)),
+    renderings (INFORMATIONAL_KINDS) are skipped: they offer nothing to answer, so the
+    reply is still about what came before them.
+
+    A NON-binding rendering (binding = 0: handed out last by the job_report of an
+    operator's turn, diff round 1 R5) is returned like any other — it is what the
+    operator saw last — and is a refusal boundary, never skipped to an older one
+    (diff round 2, R6): a reply whose effect depends on a rendering's contents checks
+    `non_binding` and refuses (NEWER_SINCE). NULL: never handed out by job_report."""
+    return conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND kind NOT IN"
+                        " (%s) ORDER BY delivered_seq DESC, delivered_at DESC, rowid DESC"
+                        " LIMIT 1" % ",".join("?" * len(INFORMATIONAL_KINDS)),
                         INFORMATIONAL_KINDS).fetchone()
+
+
+def non_binding(render) -> bool:
+    """R6: `render` (a renders row, or None) was handed out last by an operator turn's
+    job_report: nothing that reads its contents may act on it."""
+    return render is not None and render["binding"] == 0
+
+
+# R6: the refusal at a non-binding boundary, in the operator's words (no machinery)
+NEWER_SINCE = ("I've sent you new results since, so I can't tell what that is about — "
+               "nothing applied. Ask me for the sheet, or name the payment.")
+NEWER_SINCE_RESEND = ("I've sent you new results since that offer, so I can't tell which "
+                      "package you mean — nothing was sent. Ask me for the package again.")
 
 
 @contextlib.contextmanager

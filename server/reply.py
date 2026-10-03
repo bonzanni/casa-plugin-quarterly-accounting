@@ -550,6 +550,12 @@ def _apply(conn, run, verb, m, items):
         # spec §Testing: "`all good` is a sheet reply only while a sheet is the
         # most recent thing sent" — D2 binds to the most recent DELIVERED rendering
         last = db.last_delivered(conn)
+        if db.non_binding(last):
+            # R6: the operator saw newer results than any sheet they could be approving
+            # — never fall back to an older sheet, never act on the newer one
+            run.lines.append(db.NEWER_SINCE)
+            run.unresolved += 1
+            return
         if last is None or last["kind"] not in ("status", "check", "all"):
             run.lines.append("Nothing applied for \"all good\": the last thing I sent you was "
                              "not a sheet to approve. Name the payment, e.g. \"the Zapier one "
@@ -734,6 +740,10 @@ def _broad(conn, run, change, ok_line) -> None:
 
 
 def _last_delivered(conn):
+    """The provenance stamp of an operator's broad rule ("no invoices ever for X", "X
+    are no longer needed"): a view the operator was shown. The rule is name-scoped and
+    never reads the rendering's items or offers, so a non-binding rendering (R6) is a
+    legitimate stamp: it is what the operator saw last."""
     r = db.last_delivered(conn)
     return r["render_id"] if r else None
 
