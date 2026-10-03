@@ -680,7 +680,9 @@ def t_delivered(args):
           "were shown. Send EVERY entry of receipt_pages, in order, each as its own message "
           "(receipt is the first page). Also returns items to show again (build_review item) "
           "and instructions for you (rebuild, resend, show views; \"show item N\" is "
-          "build_review(view=\"item\", pid=N)).",
+          "build_review(view=\"item\", pid=N)). `understood: false`: nothing in the message "
+          "was read as a reply and nothing applied — unless it was plainly an approval or "
+          "correction, answer it as conversation and send none of it.",
           obj({"text": S}, ("text",)))
 def t_reply(args):
     _need(args, "text")

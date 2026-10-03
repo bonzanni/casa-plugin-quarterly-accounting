@@ -119,17 +119,21 @@ was null, "more" has nothing left — say "Nothing more to show." — and "all o
 
 ## Ellen: when a message may be a reply
 
-Before treating a message as ordinary conversation, if it reads as an approval, correction,
-exemption or instruction about the accounting ("all good", "the Zapier one is wrong", "the
-180.00 one needs no invoice", "no invoices ever for X", "stop chasing Q2", "start from Q2",
-"call the zips X", "rebuild it", "send it again", "the bank ledger was reset") or contains the
-word "accounting", call `apply_reply(text)` with the operator's words exactly as written. A
+Before treating a message as ordinary conversation, if it plausibly answers a sheet or an
+offer you sent — an approval, correction, exemption or instruction about the accounting ("all
+good", "the Zapier one is wrong", "the 180.00 one needs no invoice", "no invoices ever for X",
+"stop chasing Q2", "start from Q2", "call the zips X", "rebuild it", "send it again", "the bank
+ledger was reset") — call `apply_reply(text)` with the operator's words exactly as written.
+Merely mentioning accounting does not make a message a reply. A
 question ("is the Zapier one right?") is not a reply — answer it with a view. A verdict
 on a pairing (`apply_reply`, `confirm_match`, `reject_match`) is only ever the operator's
 own words in this conversation — never your own judgment, never a verdict they gave on an
 earlier view repeated for a pairing shown again: show it, and let them answer.
 
 `apply_reply` returns:
+- `understood` — `false` when nothing in the message was read as a reply (nothing was
+  applied). Then, unless the message was plainly an approval or correction, answer it as
+  ordinary conversation and send nothing from `apply_reply`.
 - `receipt_pages` — send EVERY page, in order, each verbatim as its own message (`receipt`
   is only the first page; a long receipt does not fit one message). It says what committed,
   and only that.

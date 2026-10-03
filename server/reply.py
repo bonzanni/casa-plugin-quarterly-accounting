@@ -371,6 +371,10 @@ class _Run:
         self.excepted = False             # a clause of this reply opens with an exception
         self.named = set()                # payments another clause of this reply judged
         self.stated = set()               # every count the reply's sheet-wide clauses state
+        # #39: some clause was read as a verdict, setting or instruction, or named open
+        # payments without one ("are they wrong or good?"). False: nothing in the message
+        # was understood as a reply, so nothing was applied or asked
+        self.understood = False
 
     def result(self, not_a_reply=False) -> dict:
         if self.rebuilds:
@@ -393,7 +397,7 @@ class _Run:
         return {"receipt": pages[0] if pages else "", "receipt_pages": pages,
                 "applied": self.applied, "asks": self.asks,
                 "reshow": self.reshow, "instructions": self.instructions,
-                "not_a_reply": not_a_reply}
+                "not_a_reply": not_a_reply, "understood": self.understood}
 
     def guarded(self, d, fn, ok_line):
         """Apply one operation in its own transaction; the receipt line is
@@ -494,6 +498,7 @@ def apply_reply(conn, text: str) -> dict:
     for clause, verb, m in parsed:
         if verb == "all_good":
             sheet_wide.append(m)          # R5 (Terra): applied after every other clause
+            run.understood = True
             continue
         if clause.endswith("?"):
             run.lines.append(f"“{clause}” is a question — nothing changed for it.")
@@ -506,6 +511,7 @@ def apply_reply(conn, text: str) -> dict:
         if verb is None:
             names = _targets(clause)
             if names and all(_resolve(conn, n, items)[0] is not None for n in names):
+                run.understood = True
                 pretty = " and ".join(n.title() if n.islower() else n for n in names)
                 run.lines.append(f"Nothing applied for “{clause}”: are they wrong or good? "
                                  f"Say \"{pretty} are wrong\".")
@@ -513,6 +519,7 @@ def apply_reply(conn, text: str) -> dict:
                 run.lines.append(f"I didn't understand “{clause}” — nothing applied for it.")
             run.unresolved += 1
             continue
+        run.understood = True
         _apply(conn, run, verb, m, items)
     # A sheet as a whole is approved last, and only for what no other clause judged:
     # "All good. The Zapier one is wrong." unpairs Zapier and confirms the rest. Any

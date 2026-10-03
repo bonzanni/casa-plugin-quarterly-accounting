@@ -215,6 +215,30 @@ class TestEllen(TempEnv):
                        "If `start_job` is set, call `start_job` with it"):
             self.assertIn(phrase, res, phrase)
 
+    def test_a_reply_is_only_what_answers_a_sheet_or_an_offer(self):
+        """#39: the bare "contains the word accounting" trigger sent every such message
+        through apply_reply, and the operator got "I didn't understand". Only a message
+        that plausibly answers a sheet or an offer goes there; when apply_reply understood
+        nothing, a message that was not plainly an approval or correction is answered as
+        conversation, with nothing sent from apply_reply."""
+        import qa_server, tools  # noqa: F401
+        rep = flat(section(SKILL, "## Ellen: when a message may be a reply", "## Packaging"))
+        self.assertNotIn('contains the word "accounting"', rep)
+        self.assertNotIn("contains the word", rep)
+        self.assertIn("if it plausibly answers a sheet or an offer you sent — an approval, "
+                      "correction, exemption or instruction about the accounting", rep)
+        self.assertIn("Merely mentioning accounting does not make a message a reply.", rep)
+        self.assertIn("`understood` — `false` when nothing in the message was read as a reply",
+                      rep)
+        self.assertIn("unless the message was plainly an approval or correction, answer it as "
+                      "ordinary conversation and send nothing from `apply_reply`", rep)
+        desc = flat(qa_server.TOOLS["apply_reply"]["description"])
+        self.assertIn("`understood: false`", desc)
+        self.assertIn("answer it as conversation and send none of it", desc)
+
+    def test_ellens_skill_fits_its_budget(self):
+        self.assertLessEqual(len(SKILL), 20000, len(SKILL))
+
     def test_a_cancelled_job_is_reported_cancelled(self):
         """#38: Casa's "Cancelled by user" is the operator's /cancel, reported as
         `cancelled` (nothing restarts); every other unclean end stays `error`, whose
