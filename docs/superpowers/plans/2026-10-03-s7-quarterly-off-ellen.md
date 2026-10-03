@@ -257,10 +257,13 @@ class Schema11(StoreCase):
         its notice raised; claims.seq is NULL (read as 0)."""
         import db
         from tests.schema_history import build_v10_store
-        path = self.data / "accounting.sqlite"
+        # a path of its own: StoreCase.setUp already opened a schema-11 store at the
+        # default path (plan round 2, Astra S2)
+        path = self.tmp / "v10" / "accounting.sqlite"
+        path.parent.mkdir()
         build_v10_store(path, drain="aaaaaaaa-1", cancelled="bbbbbbbb-2",
                         email_request=True, staged_email=True)
-        conn = db.open_store()
+        conn = db.open_store(path)
         self.addCleanup(conn.close)
         keys = {r[0] for r in conn.execute("SELECT key FROM meta")}
         self.assertNotIn("drain", keys)
@@ -1923,10 +1926,15 @@ over a payment that had changed — fixed by one rule for all ops, not per op). 
   - start: `day`;
   - name: `slug`;
   - ledger_reset: nothing more;
-- `"read"`: `{pid: [revision, digest], …}`, the revision and digest BEFORE the write of every
-  live projection whose revision or digest the write changed. It is measured inside the
-  clause's savepoint by diffing `SELECT pid, revision, digest FROM projections WHERE
-  merged_into IS NULL AND ended IS NULL` before and after `fn()`;
+- `"read"`: `{pid: revision, …}`, the revision BEFORE the write of every live projection
+  whose revision the write changed. It is measured inside the clause's savepoint by diffing
+  `SELECT pid, revision FROM projections WHERE merged_into IS NULL AND ended IS NULL` before
+  and after `fn()`. Revisions only, never digests. A match digest embeds its `activation`,
+  a store sequence allocated at the write (`lineage.append` → `db.next_seq`, `lineage.py:69,
+  307–321`), and `propose_reading` advances the sequence after the rehearsal. So a replay of
+  an unchanged multi-step reading would carry different digests (plan round 2, Astra S2). A
+  revision moves exactly when its digest does (`lineage._bump`), so a change outside the
+  reading still shows as a different before-revision;
 - `"binding"`: the canonical binding row before the write (`SELECT * FROM binding`; `null`
   when unbound).
 
@@ -2018,6 +2026,16 @@ class Readings(StoreCase):
         self.assertEqual(self.operator_rows(), 0)
         st = self.conn.execute("SELECT state FROM readings").fetchone()[0]
         self.assertEqual(st, "stale")
+
+    def test_an_unchanged_multi_step_reading_applies(self):
+        """Plan round 2, Astra S2: two steps where the second reads what the first
+        wrote; nothing changes between reading and Apply — it applies."""
+        fx = self.sheet_fixture()
+        _, prop = self.propose(f"the {fx['payee']} one is right. have another look at "
+                               f"the {fx['payee']} one")
+        rec = self.tap(prop, "Apply")
+        self.assertIn("Confirmed", rec["receipt"])
+        self.assertEqual(self.operator_rows(), 1)
 
     def test_a_newer_reading_makes_the_older_stale(self):
         fx = self.sheet_fixture()
@@ -2918,7 +2936,7 @@ is never written again (§14 leaves it).
 `_choose`'s `complete` branch:
 
 ```python
-            if done(conn, job_id, token):
+            if done(conn, job_id):
                 conn.execute("INSERT OR IGNORE INTO runs(job_id, passes) VALUES (?, 0)",
                              (job_id,))
                 conn.execute("UPDATE runs SET completed_at=coalesce(completed_at, ?) WHERE"
@@ -2927,7 +2945,7 @@ is never written again (§14 leaves it).
 ```
 
 Delete the `drain` write there and in `claim`. `job.status` runs `done(conn, job_id)` inside
-its own `db.tx` (`_owed` needs a transaction for its savepoint), and when `done` it makes the
+its own `db.tx` (`done` needs a transaction for its savepoint), and when `done` it makes the
 same two statements in that transaction. Its docstring says: "never a claim; it stamps the run
 complete, as job_next's complete does". `check_claim` loses its `passes.check_revoked`
 call. `passes.check_token` loses its `check_revoked` call.
@@ -2962,7 +2980,7 @@ git commit -m "feat(s7): nothing restarts — the next start closes a failed run
 ### Task 10: The job posts its own results — units `post` and `view`, `post_results` (§5, §4.2)
 
 **Files:**
-- Modify: `server/job.py` (`_posts`, `_owed`, `done`, `UNIT_COST`, `WORDS`, `LEFT_WAITING`)
+- Modify: `server/job.py` (`_posts`, `_done_now`, `done`, `UNIT_COST`, `WORDS`, `LEFT_WAITING`)
 - Modify: `server/posting.py` (`post_results`)
 - Modify: `server/views.py` (`mark_rendering_delivered` binds every rendering; `render_ids`)
 - Modify: `server/db.py` (`INFORMATIONAL_KINDS`)
@@ -2983,10 +3001,10 @@ git commit -m "feat(s7): nothing restarts — the next start closes a failed run
   - `job.OFFER_MAX = 2` and `job.POST_MAX = 3`. `job.offers(conn, render_id, job_id) -> int`
     and `job._offer(conn, render_id, job_id)`. The accounts unit is keyed
     `"accounts"`;
-  - `job._owed(conn, token, job_id) -> bool`, inside the caller's transaction: would
-    `_sends` or `_posts` hand out a unit now? It runs both inside a savepoint that is always
-    rolled back, so it agrees with the cursor by construction. `done()` requires `not
-    _owed(...)`. `job.status` runs `done` inside its own `db.tx`;
+  - `job.done(conn, job_id, token=None) -> bool`, inside the caller's transaction. It runs
+    `_done_now` (no live pass; `_sends` and `_posts` hand out nothing; nothing queued, or the
+    budget spent) in a savepoint that is always rolled back, so it agrees with the cursor by
+    construction. `job.status` runs it inside its own `db.tx`;
   - `job.LEFT_WAITING = "Some asks are waiting: ask again to start them."`. It is a
     `job-left` rendering, made once per run (`meta` key `left:<job_id>`) when the run has
     spent `MAX_PASSES_PER_JOB` with asks still queued (§4.2);
@@ -3262,6 +3280,15 @@ def _accounts_owed(conn, job_id) -> bool:
             and offers(conn, "accounts", job_id) < 1)
 ```
 
+**Task order** (plan round 2, Terra S2). This task changes Task 9's `complete` branch call to
+`done(conn, job_id, token)`. It also adds `_sends` as a stub that Task 11 replaces:
+```python
+def _sends(conn, token, job_id):
+    """§6.1's build/deliver units — Task 11."""
+    return None
+```
+So the suite is green at the end of this task.
+
 **Alerts beyond an exhausted batch** (plan round 1, Astra S1). `alerts.pending_in_tx(conn,
 must=None, skip=())` gains `skip`, a set of alert ids left out of `rows`. The cursor passes
 `_exhausted_alerts(conn, job_id)`: the unsent alerts whose `render_id` this run has already
@@ -3277,17 +3304,23 @@ def _exhausted_alerts(conn, job_id) -> set:
         " o.job_id=? WHERE a.sent_at IS NULL AND o.n >= ?", (job_id, OFFER_MAX))}
 
 
-def _owed(conn, token, job_id) -> bool:
-    """Would the cursor hand out a send or a post now? Answered by running _sends and
-    _posts themselves in a savepoint that is always rolled back, so `done` and the cursor
-    can never disagree (plan round 1: a hand-written mirror of _posts did)."""
-    conn.execute("SAVEPOINT owed")
-    try:
-        return (_sends(conn, token, job_id) or _posts(conn, job_id)) is not None
-    finally:
-        conn.execute("ROLLBACK TO owed")
-        conn.execute("RELEASE owed")
+def _done_now(conn, token, job_id) -> bool:
+    """THE completion predicate's body, as the cursor would reach it: no live pass;
+    _sends and _posts hand out nothing (their writes — a stale request's requeue included —
+    in force); then nothing queued, or the run's pass budget spent."""
+    if live_job_pass(conn) is not None:
+        return False
+    if (_sends(conn, token, job_id) or _posts(conn, job_id)) is not None:
+        return False
+    queued = conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL"
+                          " SELECT 1 FROM package_requests WHERE state='queued'").fetchone()
+    return queued is None or run_passes(conn, job_id) >= MAX_PASSES_PER_JOB
 ```
+
+`done` evaluates ALL of `_done_now` inside one savepoint that is always rolled back, the
+queue and budget checks included (plan round 2, Astra S1). When `_sends` requeues a stale
+package request, the queue check sees it queued, exactly as the cursor would. So
+`job_status` and `job_next` agree by construction.
 
 In `_choose`, when `done` is false and `_begin_next` returns `None`, that is a predicate bug:
 raise `RuntimeError("the cursor found nothing to do but the run is not done")`. It rolls the
@@ -3298,12 +3331,15 @@ claim's transaction back and surfaces as an error, never as a `None` subscripted
 ```python
 def done(conn, job_id, token=None) -> bool:
     assert conn.in_transaction
-    if live_job_pass(conn) is not None or _owed(conn, token, job_id):
-        return False
-    queued = conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL"
-                          " SELECT 1 FROM package_requests WHERE state='queued'").fetchone()
-    return queued is None or run_passes(conn, job_id) >= MAX_PASSES_PER_JOB
+    conn.execute("SAVEPOINT done")
+    try:
+        return _done_now(conn, token, job_id)
+    finally:
+        conn.execute("ROLLBACK TO done")
+        conn.execute("RELEASE done")
 ```
+
+There is no separate `_owed` function: `done` is the one predicate.
 
 `UNIT_COST` gains `"post": 3, "view": 3, "build": 3, "deliver": 5`. `WORDS` gains `"post":
 "Posting results"`, `"view": "Posting the status sheet"`, `"build": "Building the
@@ -3533,6 +3569,8 @@ Expected: FAIL.
 
 - [ ] **Step 3: The cursor's `_sends`**
 
+Replace Task 10's `_sends` stub with:
+
 ```python
 def _sends(conn, token, job_id):
     """§6.1: a package whose check is done is built, then posted — by this claim, which
@@ -3546,6 +3584,11 @@ def _sends(conn, token, job_id):
         if req["checked_snapshot"] is None or req["checked_snapshot"] != latest:
             passes.requeue(conn, req["request_id"])
             continue
+        if req["state"] == "built" and _oversize(conn, req["package_id"]):
+            # plan round 2, Astra S2: Telegram refuses it forever (delivery._stage) — the
+            # request ends with its notice instead of a deliver unit handed out again
+            _close_oversize(conn, req)
+            continue
         conn.execute("UPDATE package_requests SET token=?, lease_at=?, updated_at=? WHERE"
                      " request_id=?", (token, db.now(), db.now(), req["request_id"]))
         if req["state"] == "snapshot-done":
@@ -3556,8 +3599,64 @@ def _sends(conn, token, job_id):
     return None
 ```
 
-`_owed` (Task 10) includes "a `snapshot-done` or `built` request exists". After a requeue, the
-`queued` request is served by `_begin_next`, as any queued package request is.
+```python
+def _oversize(conn, package_id) -> bool:
+    import package
+    pk = conn.execute("SELECT oversize, size FROM packages WHERE package_id=?",
+                      (package_id,)).fetchone()
+    return pk is not None and (bool(pk["oversize"]) or pk["size"] > package.MAX_ZIP_BYTES)
+
+
+def _close_oversize(conn, req) -> None:
+    """A built package over Telegram's 20 MB cannot be posted (delivery._stage refuses it,
+    every time): the request ends `stopped` with its package-stopped notice, which the next
+    `post` carries. The zip is kept; notes.md names the largest files (its caption says so)."""
+    import alerts
+    pk = conn.execute("SELECT size FROM packages WHERE package_id=?",
+                      (req["package_id"],)).fetchone()
+    reason = (f"it is {pk['size'] / 1e6:.1f} MB, over Telegram's 20 MB limit — it is kept "
+              "here, and notes.md names the largest files")
+    conn.execute("UPDATE package_requests SET state='stopped', reason=?, updated_at=? WHERE"
+                 " request_id=?", (reason, db.now(), req["request_id"]))
+    alerts.raise_package(conn, "package-stopped", f"request:{req['request_id']}:oversize",
+                         quarter=req["quarter"], reason=reason)
+```
+
+The cursor's `done` (Task 10) runs `_sends`, so a `snapshot-done` or `built` request keeps a
+run open until it is handed out, requeued or closed. After a requeue, the `queued` request is
+served by `_begin_next`, as any queued package request is.
+
+Add to this task's tests:
+
+```python
+    def test_an_oversized_package_is_closed_with_its_notice_not_offered_again(self):
+        """Plan round 2, Astra S2."""
+        import asks, package
+        asks.request_package(self.conn, "2026-Q3")
+        self.patch(package, "MAX_ZIP_BYTES", 10)       # every zip is oversize
+        units = self.drive(A, deliver=True)
+        self.assertNotIn("deliver", [u["unit"] for u in units])
+        self.assertEqual(units[-1]["unit"], "complete")
+        r = self.conn.execute("SELECT state, reason FROM package_requests").fetchone()
+        self.assertEqual(r["state"], "stopped")
+        self.assertIn("20 MB", r["reason"])
+
+    def test_job_status_serves_a_stale_package_request(self):
+        """Plan round 2, Astra S1: a snapshot-done request whose check an import
+        superseded is not 'done' — the cursor would requeue and serve it."""
+        import asks, job, db
+        asks.request_package(self.conn, "2026-Q3")
+        self.drive(A, deliver=True, stop_before="build")
+        self.import_again()
+        with db.tx(self.conn):
+            self.assertFalse(job.done(self.conn, A))
+        self.assertFalse(job.status(self.conn, A)["done"])
+        self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
+                         "snapshot-done")       # done() changed nothing
+```
+
+`self.patch(obj, name, value)` sets the attribute and restores it at cleanup
+(`unittest.mock.patch.object` started in the test and stopped by `addCleanup`).
 
 - [ ] **Step 4: Build and record**
 
