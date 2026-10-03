@@ -58,7 +58,18 @@ def data_dir() -> pathlib.Path:
 # DDL and MIGRATIONS[9] create byte-identical tables.
 CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   gen INTEGER PRIMARY KEY, job_id TEXT NOT NULL, at TEXT NOT NULL,
-  spent INTEGER NOT NULL DEFAULT 0, measure_json TEXT, reported INTEGER NOT NULL DEFAULT 0);"""
+  spent INTEGER NOT NULL DEFAULT 0, reported INTEGER NOT NULL DEFAULT 0,
+  batch INTEGER NOT NULL,        -- the batch this claim belongs to: its first claim's gen
+  closed INTEGER NOT NULL DEFAULT 0);   -- this claim was answered end-batch or complete"""
+
+# INV-J8 (spec §15): what the job earned, once per pass and key, under the claim that
+# earned it; and each Casa job run's pass count (MAX_PASSES_PER_JOB)
+CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (
+  pass_id TEXT NOT NULL, key TEXT NOT NULL, gen INTEGER NOT NULL,
+  PRIMARY KEY (pass_id, key));"""
+CREDITS_GEN_DDL = "CREATE INDEX IF NOT EXISTS ix_credits_gen ON credits(gen);"
+RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
+  job_id TEXT PRIMARY KEY, passes INTEGER NOT NULL DEFAULT 0);"""
 
 WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,10 +124,10 @@ CREATE TABLE IF NOT EXISTS passes (
   acq_gen INTEGER,                -- that acquisition's restore generation
   read_seq INTEGER,               -- the store sequence this pass's read-back is owed from
   w_refreshes INTEGER NOT NULL DEFAULT 0,        -- W-refreshes spent (at most 2 per pass, §5.2)
-  judge_after TEXT,               -- the import's sweep-completion time W is counted from (§5.2)
-  judge_pages INTEGER NOT NULL DEFAULT 0,       -- pages the running judgment judged
+  judge_after TEXT,               -- the running judgment's page start: a validated [pid]
   w_pending INTEGER NOT NULL DEFAULT 0,
-  judge_high INTEGER NOT NULL DEFAULT 0);        -- most pages a judgment reached (INV-J8)
+  judge_epoch INTEGER NOT NULL DEFAULT 0,       -- judgments started for a bounded cause (INV-J8)
+  late_takes INTEGER NOT NULL DEFAULT 0);       -- requests taken while live (LATE_TAKES_MAX)
 CREATE TABLE IF NOT EXISTS pass_steps (
   pass_id TEXT NOT NULL,
   step TEXT NOT NULL CHECK (step IN ('sweep', 'judge', 'handover', 'snapshot')),
@@ -313,7 +324,7 @@ CREATE TABLE IF NOT EXISTS operator_refs (
   -- mail, a Telegram file) by its own ref, once filed, so a pass's capped filing skips it
   ref TEXT PRIMARY KEY, source TEXT NOT NULL, doc_id INTEGER NOT NULL, filed_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at);
-""" + CLAIMS_DDL + "\n" + WORK_REQUESTS_DDL + "\n"
+""" + "\n".join((CLAIMS_DDL, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL)) + "\n"
 
 # Migrations from version N to N+1, appended when the schema changes. Each is
 # a list of statements applied inside the migrating transaction.
@@ -446,12 +457,12 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE passes ADD COLUMN read_seq INTEGER",
         "ALTER TABLE passes ADD COLUMN w_refreshes INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE passes ADD COLUMN judge_after TEXT",
-        "ALTER TABLE passes ADD COLUMN judge_pages INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE pass_steps ADD COLUMN protocol TEXT NOT NULL DEFAULT 'delegation'",
         "ALTER TABLE pass_steps ADD COLUMN started_seq INTEGER",
         "ALTER TABLE pass_steps ADD COLUMN started_gen INTEGER",
         "ALTER TABLE passes ADD COLUMN w_pending INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE passes ADD COLUMN judge_high INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE passes ADD COLUMN judge_epoch INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE passes ADD COLUMN late_takes INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE renders ADD COLUMN binding INTEGER",
         "ALTER TABLE snapshots ADD COLUMN job_id TEXT",
         "ALTER TABLE snapshots ADD COLUMN read_seq INTEGER",
@@ -465,7 +476,7 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE projections ADD COLUMN note_other_issued_gen INTEGER",
         "ALTER TABLE projections ADD COLUMN note_seen_gen INTEGER",
         "ALTER TABLE probes ADD COLUMN gen INTEGER",
-        CLAIMS_DDL, WORK_REQUESTS_DDL],
+        CLAIMS_DDL, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL],
 }
 
 
@@ -574,13 +585,8 @@ def tx(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S):
     if conn.in_transaction:
         raise RuntimeError("tx() does not nest; the caller already holds the write lock")
     _retry_locked(lambda: conn.execute("BEGIN IMMEDIATE"), bound_s)
-    hook, state = _TX_HOOK, None
     try:
-        if hook is not None:
-            state = hook[0](conn)          # in the transaction, before its writes
         yield conn
-        if hook is not None:
-            hook[1](conn, state)           # in the same transaction, after them
     except BaseException:
         _rollback_if_open(conn)
         raise
@@ -592,24 +598,6 @@ def tx(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S):
     except BaseException:
         _rollback_if_open(conn)
         raise
-
-
-# INV-J8 (diff round 3, R8): a call made outside the job (job.outside_writes) routes
-# every write transaction it opens through job.work_added — measured inside that same
-# transaction, before and after its writes, so no other session's write is counted.
-_TX_HOOK = None
-
-
-@contextlib.contextmanager
-def tx_hook(begin, commit):
-    """`begin(conn)` right after BEGIN and `commit(conn, its result)` right before COMMIT,
-    for every tx() opened in the body. Not nested: an inner hook replaces the outer."""
-    global _TX_HOOK
-    saved, _TX_HOOK = _TX_HOOK, (begin, commit)
-    try:
-        yield
-    finally:
-        _TX_HOOK = saved
 
 
 def next_seq(conn: sqlite3.Connection) -> int:

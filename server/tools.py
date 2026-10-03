@@ -31,26 +31,13 @@ def conn():
     return _CONN
 
 
-# tools with their own INV-J8 hook: the job's cursor (its claim stamps the batch's
-# baseline; its events are routed in job.py), and the enqueues (asks.py, cause "request")
-OWN_HOOK = {"job_next", "request_work", "request_package"}
-
-
 def register(name, description, schema):
     """qa_server.register, plus the clock (issue #2): every answer to a call that
     carries a pass_token also carries `clock` — the time left for the running
     step — while that token is live and its step runs."""
     def deco(fn):
         def with_clock(args):
-            if name in OWN_HOOK or args.get("pass_token") not in (None, ""):
-                out = fn(args)
-            else:
-                # INV-J8 (diff round 3, R8): a write made outside the job — no pass_token:
-                # the operator's decisions through Ellen, her package flow and relay — is
-                # work added to the running batch, never a loss of its progress
-                import job
-                with job.outside_writes(lambda c: c is _CONN):
-                    out = fn(args)
+            out = fn(args)
             token = args.get("pass_token")
             if isinstance(token, str) and token.strip().isdigit():
                 token = int(token)

@@ -26,41 +26,52 @@ class Progress(StoreCase):
         self.assertTrue(u["report"])
 
     def test_a_refresh_only_batch_is_not_progress(self):
+        """An import alone earns nothing (spec §15): a fresh batch that only reads the bank
+        again reports no progress after its import."""
         import asks, job
         asks.request_work(self.conn, "check", "cron")
         self.drv.run_until(A, "gmail-probe")
+        self.drv.next_until(self.drv.token, "end-batch")         # the batch is answered
         asks.request_work(self.conn, "check", "operator")      # forces a refresh
-        t = job.claim(self.conn, A)
-        u = job.next_unit(self.conn, t)                           # probes
+        t = job.claim(self.conn, A)                               # a new batch
+        u = job.next_unit(self.conn, t)
+        self.assertEqual(u["unit"], "probes")
         self.drv.do(u, t)
         u = job.next_unit(self.conn, t)                           # snapshot
         self.drv.do(u, t)
         self.assertFalse(job.next_unit(self.conn, t)["progress"]["progressed"])
 
-    def test_a_recorded_search_is_progress_and_reports_once_early(self):
-        import asks, job
-        asks.request_work(self.conn, "check", "operator")
-        self.drv.run_until(A, "item")
-        t = self.drv.token
-        self.drv.do(self.drv.last, t)                             # record_search
-        u = job.next_unit(self.conn, t)
-        self.assertTrue(u["progress"]["progressed"])
-        self.assertTrue(u["report"])
-        self.assertFalse(job.next_unit(self.conn, t)["report"])   # once, until end-batch
-
-    def test_the_first_chunk_is_not_progress_but_its_first_search_is(self):
+    def test_a_recorded_search_earns_and_reports_once_early(self):
+        """The first chunk handed out earns nothing; its first recorded search does
+        (`search:<acq>:<pid>:1`), and a batch whose first credit it is reports at once,
+        once, until end-batch."""
         import asks, job
         asks.request_work(self.conn, "check", "operator")
         u = self.drv.run_until(A, "item")                 # the first item of the pass
+        n = self.conn.execute("SELECT count(*) FROM credits WHERE key LIKE 'search:%'"
+                              ).fetchone()[0]
+        self.assertEqual(n, 0)
+        self.drv.next_until(self.drv.token, "end-batch")
+        t = job.claim(self.conn, A)                       # a new batch, at an item
+        u = job.next_unit(self.conn, t)
+        self.assertEqual(u["unit"], "item")
         self.assertFalse(u["progress"]["progressed"])
-        t = self.drv.token
-        self.drv.do(u, t)                                 # record_search (40 -> 39 searchable)
-        self.assertTrue(job.next_unit(self.conn, t)["progress"]["progressed"])
+        self.drv.do(u, t)                                 # record_search
+        pid = u["item"]["pid"]
+        key = self.conn.execute("SELECT key, gen FROM credits WHERE key LIKE ?",
+                                (f"search:%:{pid}:1",)).fetchone()
+        self.assertEqual(key["gen"], t)
+        u = job.next_unit(self.conn, t)
+        self.assertTrue(u["progress"]["progressed"])
+        self.assertTrue(u["report"])
+        self.assertNotIn(u["unit"], ("end-batch", "complete"))
+        judged = self.drv.do(u, t)                                    # the next unit, done
+        self.assertFalse(job.next_unit(self.conn, t, judged=judged)["report"])   # once
 
     def test_the_summary_carries_no_machinery_words(self):
         import job
         import views
         for unit in job.WORDS:
-            text = job._summary(unit, [0, 3, 0, 0])
+            text = job._summary(unit, 3)
             for word in views.FORBIDDEN:
                 self.assertNotIn(word, text)

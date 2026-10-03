@@ -1,6 +1,7 @@
 """S2 final review (fix wave): a handover whose judgment never covers it ends the job
-through the no-progress guard (FW-I1), a ledger restored between two bank reads of one
-pass stops it (FW-I2), and the guards whose obvious mutant survived (FW-I3, minors)."""
+through the no-progress guard (FW-I1; under the credit rule, test_s2_credits.NeverWhole),
+a ledger restored between two bank reads of one pass stops it (FW-I2), and the guards
+whose obvious mutant survived (FW-I3, minors)."""
 import json
 
 from tests._base import StoreCase
@@ -9,125 +10,35 @@ from tests.sim_job import JobDriver
 A = "aaaaaaaa-1"
 
 
-def _loop(test, drv, answer, batches_max=8):
-    """The job loop as Casa runs it: claim, job_next until `end-batch` (a new claim, a
-    new batch) or `complete`. `answer(u, token)` gives the judge unit's `judged`.
-    Returns the end-batch `progressed` flags and the last unit."""
-    import job
-    flags, judged = [], None
-    drv.token = job.claim(test.conn, A)
-    for _ in range(4000):
-        u = job.next_unit(test.conn, drv.token, judged=judged)
-        judged = None
-        if u["unit"] == "complete":
-            return flags, u
-        if u["unit"] == "end-batch":
-            flags.append(u["progress"]["progressed"])
-            if len(flags) >= batches_max:
-                return flags, u
-            drv.token = job.claim(test.conn, A)
-            continue
-        judged = answer(u, drv.token) if u["unit"] == "judge" else drv.do(u, drv.token)
-    raise AssertionError("the loop never ended a batch")
+class JudgeEpoch(StoreCase):
+    """FW-I1 (a), under the credit rule (spec §15): a judge page earns
+    `judge:<epoch>:<its start>`; a judgment started again for a bounded cause (a handover
+    taken) moves the epoch on, so its pages earn again; the never-covered loop itself is
+    pinned in test_s2_credits.NeverWhole."""
 
-
-def _misreported(drv):
-    """The judge answers every page, its handed-over documents' verdicts included, but
-    the last page's answer says triage was left: the judgment never comes out whole, so
-    the handover is never covered and the judgment is started again, forever."""
-    def answer(u, token):
-        out = drv.do(u, token)
-        if out["page_next"] is None:
-            out["triage_remaining"] = 1
-        return out
-    return answer
-
-
-def _settled(flags):
-    """The job ends on Casa's guard: its last three batches report no progress."""
-    return len(flags) >= 3 and flags[-3:] == [False, False, False]
-
-
-class NeverCovered(StoreCase):
-    """FW-I1 (a), with the coordinator's ruling: INV-J8's third component is the pass's
-    judge-page high-water mark since the last handover take, so a judgment started
-    again forever reports no progress and Casa's guard ends the job after three batches
-    (INV-BGJOB-002)."""
-
-    def test_one_page_judgment_restarted_forever(self):
-        import asks
-        self.bind()
-        drv = JobDriver(self, payments=2)
-        asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
-        flags, last = _loop(self, drv, _misreported(drv))
-        self.assertEqual(last["unit"], "end-batch")
-        self.assertTrue(flags[0])                       # the bank read, the searches
-        self.assertTrue(_settled(flags), flags)
-
-    def test_two_page_judgment_restarted_forever(self):
-        """Each batch judges the running judgment to its end and starts it again (two
-        judge units a batch): it ends where it began."""
-        import asks
-        self.bind()
-        drv = JobDriver(self, payments=10)              # two triage pages of 8
-        asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
-        flags, last = _loop(self, drv, _misreported(drv))
-        self.assertEqual(last["unit"], "end-batch")
-        self.assertTrue(_settled(flags), flags)
-
-    def test_three_page_judgment_restarted_forever(self):
-        """The coordinator's ruling (high-water mark): a judgment of three pages, two
-        judge units a batch, restarted forever. Its pages fall in some batches and rise
-        in others; counted per judgment, a batch reached past its start every third
-        batch, so three no-progress batches never came in a row. Against the pass's
-        high-water mark nothing falls once the judgment reached its last page."""
-        import asks
-        self.bind()
-        drv = JobDriver(self, payments=20)              # three triage pages of 8
-        asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
-        flags, last = _loop(self, drv, _misreported(drv), batches_max=12)
-        self.assertEqual(last["unit"], "end-batch")
-        self.assertIn(True, flags)                      # the work before the loop
-        tail = len(flags) - 1 - max(i for i, f in enumerate(flags) if f)
-        self.assertGreaterEqual(tail, 6, flags)         # never progress again
-        self.assertTrue(_settled(flags), flags)
-
-    def test_a_handover_taken_earns_fresh_credit(self):
-        """Taking a handover resets the high-water mark: the loop's judgment, started
-        again for the new documents, is progress again until it reaches the mark."""
-        import asks
-        self.bind()
-        drv = JobDriver(self, payments=20)
-        asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
-        flags, _ = _loop(self, drv, _misreported(drv), batches_max=10)
-        self.assertTrue(_settled(flags), flags)
-        asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
-        flags, last = _loop(self, drv, _misreported(drv), batches_max=8)
-        self.assertEqual(last["unit"], "end-batch")
-        self.assertIn(True, flags)                      # fresh credit for the new ask
-        self.assertTrue(_settled(flags), flags)         # and it settles again
-
-    def test_a_page_lowers_the_measure_and_a_restart_raises_it(self):
+    def test_a_page_earns_its_start_and_a_handover_restart_moves_the_epoch(self):
         import asks, db, job
         self.bind()
-        drv = JobDriver(self, payments=10)
+        drv = JobDriver(self, payments=10)              # two triage pages
         asks.request_work(self.conn, "check", "cron")
         u = drv.run_until(A, "judge")
         t = drv.token
-        with db.tx(self.conn):
-            fresh = job.measure(self.conn)
+        epoch = job.live_job_pass(self.conn)["judge_epoch"]
+        keys = lambda: [r[0] for r in self.conn.execute(
+            "SELECT key FROM credits WHERE key LIKE 'judge:%' ORDER BY rowid")]
         u = job.next_unit(self.conn, t, judged=drv.do(u, t))           # page 1 of 2
         self.assertEqual((u["unit"], u["after"] is not None), ("judge", True))
-        with db.tx(self.conn):
-            one = job.measure(self.conn)
-        self.assertEqual(one[:2], fresh[:2])
-        self.assertEqual(one[2], fresh[2] - 1)
+        self.assertEqual(keys(), [f"judge:{epoch}:0"])
         asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
         with db.tx(self.conn):                           # taken mid-judgment
             job._take(self.conn, t, job.live_job_pass(self.conn))
-            restarted = job.measure(self.conn)
-        self.assertGreater(restarted[2], one[2])
-        self.assertEqual(restarted[2], fresh[2])
+        p = job.live_job_pass(self.conn)
+        self.assertEqual(p["judge_epoch"], epoch + 1)
+        self.assertIsNone(p["judge_after"])
+        u = drv.next_until(t, "judge")
+        t = drv.token
+        job.next_unit(self.conn, t, judged=drv.do(u, t))
+        self.assertEqual(keys(), [f"judge:{epoch}:0", f"judge:{epoch + 1}:0"])
 
 
 class HandoverVerdicts(StoreCase):
@@ -149,7 +60,7 @@ class HandoverVerdicts(StoreCase):
         good = self.drv.do(u, t)
         self.assertIsNone(good["page_next"])             # one page: this answer finishes
         before = [tuple(r) for r in self.conn.execute(
-            "SELECT p.judge_pages, p.judge_after, s.finished_at, s.started_seq, w.verdicts_json"
+            "SELECT p.judge_epoch, p.judge_after, s.finished_at, s.started_seq, w.verdicts_json"
             " FROM passes p JOIN pass_steps s ON s.pass_id=p.pass_id AND s.step='judge'"
             " JOIN work_requests w ON w.pass_id=p.pass_id")]
         for bad in ({**good, "documents": {}}, {k: v for k, v in good.items()
@@ -162,7 +73,7 @@ class HandoverVerdicts(StoreCase):
             for word in views.FORBIDDEN:
                 self.assertNotIn(word, text)
             after = [tuple(r) for r in self.conn.execute(
-                "SELECT p.judge_pages, p.judge_after, s.finished_at, s.started_seq,"
+                "SELECT p.judge_epoch, p.judge_after, s.finished_at, s.started_seq,"
                 " w.verdicts_json FROM passes p JOIN pass_steps s ON s.pass_id=p.pass_id AND"
                 " s.step='judge' JOIN work_requests w ON w.pass_id=p.pass_id")]
             self.assertEqual(after, before)              # nothing written

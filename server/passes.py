@@ -454,11 +454,15 @@ def _end_pass_tx(conn, token, outcome: str, report: dict) -> dict:
                          f"{'were' if n > 1 else 'was'} not searched — end it interrupted")
     conn.execute("UPDATE passes SET ended_at=?, outcome=?, report_json=? WHERE pass_id=?",
                  (db.now(), outcome, db.canonical(full), m["pass_id"]))
-    import asks
+    import asks, job
+    taken = [r[0] for r in conn.execute("SELECT request_id FROM work_requests WHERE"
+                                        " pass_id=? AND state='taken'", (m["pass_id"],))]
     asks.settle_taken(conn, m["pass_id"], outcome)      # S2 §6.2: every taken request is done
+    for rid in taken:                                   # INV-J8: done (or stopped)
+        job.credit(conn, token, m["pass_id"], f"req:work:{rid}")
     conn.execute("UPDATE pass_marker SET live=0, claimed_step=NULL, lease_at=NULL"
                  " WHERE id=1")
-    handed = _hand_over(conn, m["pass_id"], outcome)
+    handed = _hand_over(conn, m["pass_id"], outcome, token)
     return {"ended": m["pass_id"], "outcome": outcome, "report": full, **(handed or {})}
 
 
@@ -529,7 +533,7 @@ def _judgment_owed(conn, pass_id: str) -> None:
                      f"{'them' if n > 1 else 'it'}")
 
 
-def _hand_over(conn, pass_id: str, outcome: str):
+def _hand_over(conn, pass_id: str, outcome: str, token=None):
     """The package authority transfer, inside end_pass's transaction: the pass's
     open request gets a token of its own (fresh lease, so it is never claimable
     in between), and the request is buildable — or, when the pass stopped, closed
@@ -541,8 +545,13 @@ def _hand_over(conn, pass_id: str, outcome: str):
         return None
     # a job pass's request is settled with no token and no lease (S2 §6.4): job_report
     # claims a buildable one at once
-    token = None if protocol_of(conn, pass_id) == "job" else rotate(conn)
+    job_pass = protocol_of(conn, pass_id) == "job"
+    claim, token = token, (None if job_pass else rotate(conn))
     state, notice = settle_snapshot_request(conn, req, outcome, token=token)
+    if job_pass and state != "queued":
+        # INV-J8: the request reached its job-side end — snapshot-done, or closed
+        import job
+        job.credit(conn, claim, pass_id, f"req:pkg:{req['request_id']}")
     if state == "queued":           # another round follows: continue_pass starts it
         return {"next": None, "request": {"id": req["request_id"], "quarter": req["quarter"],
                                           "channel": req["channel"], "state": state},

@@ -314,7 +314,7 @@ def _ended_noop(conn, p) -> dict:
             "bank_writes": None, "read_back": False}
 
 
-def _confirm_erased(conn, pid: int) -> dict:
+def _confirm_erased(conn, pid: int, token=None) -> dict:
     cur = passes.current_pass(conn)
     p = lineage.projection(conn, pid)
     if p["ended"] == "erased":
@@ -333,9 +333,11 @@ def _confirm_erased(conn, pid: int) -> dict:
         # set — and it stays `vanished` (a row that vanished is not an erasure).
         conn.execute("UPDATE projections SET class_observed_snapshot=?, observed_revision=?"
                      " WHERE pid=?", (lineage.latest_import(conn), p["revision"], pid))
+        job.credit_sweep(conn, token, pid, "settled")       # INV-J8: a settlement completed
         return _ended_noop(conn, p)
     ledger.end_lineage(conn, pid, "erased", cur["snapshot_id"])
     red = lineage.settle(conn, pid)
+    job.credit_sweep(conn, token, pid, "erased")            # INV-J8: an erasure confirmed
     _advance(conn, pid)
     return {"pid": pid, "status": red.status, "ended": "erased", "desired": [],
             "instructions": {}, "bank_writes": None, "read_back": False}
@@ -363,7 +365,7 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
             return _ended_noop(conn, proj)
         if not_found:
             conn.execute("UPDATE projections SET readback_owed=0 WHERE pid=?", (pid,))
-            return _confirm_erased(conn, pid)
+            return _confirm_erased(conn, pid, token)
         _require_proven_import(conn)
         if write_error:
             conn.execute("UPDATE projections SET last_error=?, unprojectable=? WHERE pid=?",
@@ -372,6 +374,7 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
                                         "tags": json.loads(proj["observed_tags_json"] or "[]")}),
                           pid))
             conn.execute("UPDATE projections SET readback_owed=0 WHERE pid=?", (pid,))
+            job.credit_sweep(conn, token, pid, "refused")       # INV-J8: a refused write
             _advance(conn, pid)
             return {"pid": pid, "status": proj["status"], "desired": json.loads(proj["desired_json"]),
                     "instructions": {}, "bank_writes": None, "read_back": False,
@@ -472,6 +475,10 @@ def record_observation(conn, *, pid, token, snapshot_id=None, observed_tags=None
                                 "expected_ledger": gate["expected_ledger"]}
         conn.execute("UPDATE projections SET readback_owed=? WHERE pid=?",
                      (1 if instructions else 0, pid))
+        if not instructions:
+            # INV-J8: the lineage owes nothing — observed at the latest import, at its
+            # revision, no read-back owed: a settlement completed, credited by its state
+            job.credit_sweep(conn, token, pid, "settled")
         _advance(conn, pid)
         return {"pid": pid, "status": red.status, "desired": sorted(red.desired),
                 "instructions": instructions,

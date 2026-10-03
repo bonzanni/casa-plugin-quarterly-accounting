@@ -1,10 +1,16 @@
 """S2 (spec §4–§6): the job's cursor. A job turn's first, token-less job_next claims:
 the claim rotates the token and records itself in `claims`, and only the newest claim's
-token may act (check_claim). A pass held by another job is adopted, at most
-ADOPTIONS_MAX times; a claim that would adopt once more ends it `stopped`."""
+token may act (check_claim). A pass held by another job is adopted: every holder change
+spends one of its ADOPTIONS_MAX adoptions, and a claim that would change it once more
+ends it `stopped`.
+
+INV-J8 (spec §15): a batch progressed iff, under its claims, the job earned a credit it had
+not earned before in that pass. A credit is a `credits(pass_id, key, gen)` row inserted
+INSERT OR IGNORE in the transaction of the work it records, under the unit's claim token
+(`credit`). Every key is drawn from a set finite per pass, so a pass earns finitely many."""
 from __future__ import annotations
 
-import contextlib
+import hashlib
 import json
 import re
 
@@ -12,7 +18,11 @@ import db
 import passes
 
 JOB_ID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
-ADOPTIONS_MAX = 2
+ADOPTIONS_MAX = 2          # holder changes per pass (§6.3), returns of an earlier holder too
+LATE_TAKES_MAX = 2         # requests a live pass takes after it began (each needs a read)
+MAX_PASSES_PER_JOB = 4     # passes one Casa job run begins; past it the run completes
+K_STATES = 32              # distinct settled states credited per (pass, acquisition, payment)
+K_SEARCH = 4               # recorded searches credited per (pass, acquisition, payment)
 TURNS_PER_BATCH, BATCH_RESERVE = 80, 10
 UNIT_COST = {"probes": 12, "snapshot": 6, "sweep": 10, "gmail-probe": 3, "filing": 28,
              "item": 11, "judge": 24}
@@ -53,26 +63,39 @@ def claim(conn, job_id) -> int:
         if m is not None and m["live"] and passes.protocol_of(conn, m["pass_id"]) != "job":
             passes.close_delegation_pass_on_upgrade(conn)        # spec §8
         token = passes.rotate(conn)
-        conn.execute("INSERT INTO claims(gen, job_id, at) VALUES (?,?,?)",
-                     (token, job_id, db.now()))
-        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain', ?)", (job_id,))
         p = live_job_pass(conn)
+        changed = p is not None and p["holder_job"] != job_id
+        conn.execute("INSERT INTO claims(gen, job_id, at, batch) VALUES (?,?,?,?)",
+                     (token, job_id, db.now(), _batch_of(conn, job_id, token, changed)))
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain', ?)", (job_id,))
         if p is not None:
-            # every job id that ever held the pass, its starter first (spec §6.3: one
-            # adoption per adopting job id, whatever came in between)
-            held = json.loads(p["adopters_json"])
-            if job_id not in held:
+            if changed:
+                # spec §6.3, amended (design r1, Astra S2): every claim that takes the pass
+                # from a different job id spends the budget — a return of an earlier holder
+                # (A→B→A) too — since each needs a bank read of its own
                 if p["adoptions"] >= ADOPTIONS_MAX:
                     stop_exhausted_pass(conn, token, p["pass_id"])
-                    _stamp_measure(conn, token)
                     return token
+                held = json.loads(p["adopters_json"])
                 conn.execute("UPDATE passes SET adoptions=adoptions+1, adopters_json=?"
                              " WHERE pass_id=?", (json.dumps(held + [job_id]), p["pass_id"]))
             conn.execute("UPDATE passes SET holder_job=?, orphaned_by=NULL WHERE pass_id=?",
                          (job_id, p["pass_id"]))
             conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
-        _stamp_measure(conn, token)
         return token
+
+
+def _batch_of(conn, job_id, token, holder_changed) -> int:
+    """The batch claim `token` belongs to (design r6, round 5): a new one — named by this
+    claim's own gen — iff it is the job id's first claim, or that job id's latest claim
+    belongs to a batch answered `end-batch` or `complete`, or the live pass's holder
+    changes with it; otherwise the latest claim's batch (a re-claim inside one batch)."""
+    prev = conn.execute("SELECT batch FROM claims WHERE job_id=? ORDER BY gen DESC LIMIT 1",
+                        (job_id,)).fetchone()
+    if prev is None or holder_changed or conn.execute(
+            "SELECT 1 FROM claims WHERE batch=? AND closed=1", (prev["batch"],)).fetchone():
+        return token
+    return prev["batch"]
 
 
 def stop_exhausted_pass(conn, token, pass_id) -> None:
@@ -84,40 +107,75 @@ def stop_exhausted_pass(conn, token, pass_id) -> None:
     passes._end_pass_tx(conn, token, "stopped", {"adoptions_exhausted": True})
 
 
-def measure(conn) -> list:
-    """INV-J8: the work measure, compared lexicographically; a fall is progress. A
-    refresh raises only the last component (rows due a read). The third is the pass's
-    judge pages as a HIGH-WATER mark: minus the most pages a judgment has reached since
-    the mark was last reset (`judge_high`). It falls only when a judgment gets further
-    than that, so a judgment started again forever for an unbounded cause stops counting
-    as progress once it reaches the mark, and Casa ends the job after three batches
-    (spec §5). Work ADDED by a bounded event — a pass begun, a bank read imported, a
-    search chunk handed out, a judgment started again for a bounded cause — is never
-    progress and never a loss: the one hook, work_added, moves the batch's baseline by
-    exactly what the event changed (diff round 2, R7). Beginning a judgment is
-    progress: its first page beats a mark of 0."""
-    import steps, sweep, work
-    open_requests = (conn.execute("SELECT count(*) FROM work_requests WHERE state IN"
-                                  " ('queued','taken')").fetchone()[0]
-                     + conn.execute("SELECT count(*) FROM package_requests WHERE state IN"
-                                    " ('queued','snapshot')").fetchone()[0])
+def measure(conn) -> int:
+    """The progress summary's `remaining` only: the live pass's payments still to search
+    (0 with none). Never progress — INV-J8 is credits (spec §15)."""
+    import steps, work
     p = live_job_pass(conn)
     if p is None:
-        return [open_requests, 0, 0, 0]
+        return 0
     req = steps.round_request(conn, p["pass_id"])
     carry = steps._first_carry(conn, p["pass_id"])
     if req is not None:
-        unsearched = len(work.package_work(conn, req))
-    elif carry.get("since_seq") is not None:
-        unsearched = len(work.check_work(conn, carry["since_seq"], owed=carry.get("owed", [])))
-    else:
-        unsearched = 0
-    return [open_requests, unsearched, -p["judge_high"], len(sweep._due(conn))]
+        return len(work.package_work(conn, req))
+    if carry.get("since_seq") is not None:
+        return len(work.check_work(conn, carry["since_seq"], owed=carry.get("owed", [])))
+    return 0
 
 
-def _stamp_measure(conn, token) -> None:
-    conn.execute("UPDATE claims SET measure_json=? WHERE gen=?",
-                 (json.dumps(measure(conn)), token))
+# --- INV-J8: credits (spec §15; design revision 6) ------------------------------------
+def credit(conn, token, pass_id, key, cap_prefix=None, cap=None) -> None:
+    """Earn `key` for job pass `pass_id` under claim `token`, in the caller's transaction
+    — the work's own. INSERT OR IGNORE: a key earned before in the pass earns nothing.
+    With `cap`, inserted only while fewer than `cap` keys of the pass start with
+    `cap_prefix`. A no-op without a token or for a pass that is not a job's."""
+    assert conn.in_transaction
+    if token is None or pass_id is None or passes.protocol_of(conn, pass_id) != "job":
+        return
+    if cap is not None and conn.execute(
+            "SELECT count(*) FROM credits WHERE pass_id=? AND substr(key, 1, ?)=?",
+            (pass_id, len(cap_prefix), cap_prefix)).fetchone()[0] >= cap:
+        return
+    conn.execute("INSERT OR IGNORE INTO credits(pass_id, key, gen) VALUES (?,?,?)",
+                 (pass_id, key, int(token)))
+
+
+def _acq(conn, p):
+    """The acquisition a key is drawn under: the one the pass's latest import belongs to."""
+    import lineage
+    row = conn.execute("SELECT acq FROM snapshots WHERE snapshot_id=?",
+                       (lineage.latest_import(conn),)).fetchone()
+    return row["acq"] if row is not None and row["acq"] is not None else p["acq"]
+
+
+def credit_sweep(conn, token, pid, what) -> None:
+    """The sweep's credits for payment `pid` (design table): a settlement completed, keyed
+    by the projection's full semantic state (`projections.digest`), at most K_STATES
+    distinct states per (pass, acquisition, pid); a confirmed erasure (`erased`); a refused
+    write (`refused`)."""
+    p = live_job_pass(conn)
+    if p is None or token is None:
+        return
+    prefix = f"sweep:{_acq(conn, p)}:{pid}:"
+    if what in ("erased", "refused"):
+        credit(conn, token, p["pass_id"], prefix + what)
+        return
+    digest = conn.execute("SELECT digest FROM projections WHERE pid=?", (pid,)).fetchone()[0]
+    d = hashlib.sha256((digest or "").encode()).hexdigest()[:24]
+    credit(conn, token, p["pass_id"], prefix + d, cap_prefix=prefix, cap=K_STATES)
+
+
+def credit_search(conn, token, pid) -> None:
+    """A search item recorded for `pid`: `search:<acq>:<pid>:<k>`, the k-th recorded in that
+    acquisition, k ≤ K_SEARCH."""
+    p = live_job_pass(conn)
+    if p is None or token is None:
+        return
+    prefix = f"search:{_acq(conn, p)}:{pid}:"
+    k = conn.execute("SELECT count(*) FROM credits WHERE pass_id=? AND substr(key, 1, ?)=?",
+                     (p["pass_id"], len(prefix), prefix)).fetchone()[0] + 1
+    if k <= K_SEARCH:
+        credit(conn, token, p["pass_id"], f"{prefix}{k}")
 
 
 def hand_acquisition(conn, token, pass_id) -> int:
@@ -173,16 +231,17 @@ def next_unit(conn, token, judged=None) -> dict:
 
 def _choose(conn, token) -> dict:
     import asks, steps
+    job_id = conn.execute("SELECT job_id FROM claims WHERE gen=?", (token,)).fetchone()[0]
     for _ in range(8):                      # passes may end and the next begin in one call
         p = live_job_pass(conn)
         if p is not None and p["trigger"] != "package":
             _take(conn, token, p)
             p = live_job_pass(conn)
         if p is None:
-            p = _begin_next(conn, token)
-            if p is None:
+            if done(conn, job_id):
                 conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain','none')")
                 return {"unit": "complete", "text": "Accounting work finished."}
+            p = _begin_next(conn, token, job_id)
         req = steps.round_request(conn, p["pass_id"])
         ended = False
         for step in (_poisoned, _acquisition, _sweep, _gmail, _judge):
@@ -205,7 +264,7 @@ def _take(conn, token, p) -> None:
     started_seq and started_gen, the page cursor reset, so no verdict of the judgment
     that started before the handover can cover it."""
     import asks, steps
-    ids = asks.take_queued(conn, p["pass_id"])
+    ids = asks.take_queued(conn, p["pass_id"], late=True)
     if not ids or conn.execute(
             "SELECT 1 FROM work_requests WHERE pass_id=? AND kind='handover' AND request_id IN"
             " (%s)" % ",".join("?" * len(ids)), (p["pass_id"], *ids)).fetchone() is None:
@@ -215,9 +274,27 @@ def _take(conn, token, p) -> None:
         _start_judgment(conn, token, p, restart_running=True)
 
 
-def _begin_next(conn, token):
+def run_passes(conn, job_id) -> int:
+    row = conn.execute("SELECT passes FROM runs WHERE job_id=?", (job_id,)).fetchone()
+    return row[0] if row is not None else 0
+
+
+def done(conn, job_id) -> bool:
+    """THE completion predicate, shared by job_next's `complete` and job_status's `done`
+    (design r6, round 5): no job pass is live, and nothing is queued — or this run has
+    begun MAX_PASSES_PER_JOB passes, so what is queued waits for the next job (job_report's
+    standing retry starts it)."""
+    if live_job_pass(conn) is not None:
+        return False
+    queued = conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL"
+                          " SELECT 1 FROM package_requests WHERE state='queued'").fetchone()
+    return queued is None or run_passes(conn, job_id) >= MAX_PASSES_PER_JOB
+
+
+def _begin_next(conn, token, who):
+    """A pass begins for what is queued (the caller found `done` false), counted against
+    the run's MAX_PASSES_PER_JOB in this transaction; adopting a live pass never counts."""
     import asks
-    pre = measure(conn)
     q = conn.execute("SELECT trigger FROM work_requests WHERE state='queued'").fetchall()
     if q:
         op = any(r["trigger"] == "operator" for r in q)
@@ -230,11 +307,11 @@ def _begin_next(conn, token):
             return None
         _, pid = passes.start_pass(conn, "package", "silent", protocol="job", token=token)
         passes._bind_round(conn, req["request_id"], pid)
-    who = conn.execute("SELECT job_id FROM claims WHERE gen=?", (token,)).fetchone()[0]
     conn.execute("UPDATE passes SET holder_job=?, adopters_json=? WHERE pass_id=?",
                  (who, json.dumps([who]), pid))
+    conn.execute("INSERT OR IGNORE INTO runs(job_id, passes) VALUES (?, 0)", (who,))
+    conn.execute("UPDATE runs SET passes=passes+1 WHERE job_id=?", (who,))
     asks.take_queued(conn, pid)
-    work_added(conn, token, "pass-begin", pre)          # a new pass: a new population
     return live_job_pass(conn)
 
 
@@ -361,8 +438,7 @@ def _gmail(conn, token, p, req):
     if req is None and not carry.get("filed"):
         return {"unit": "filing", "filed_refs": work.filed_refs(conn)}
     if "chunk" not in carry:
-        with adding_work(conn, token, "search-chunk"):   # the round's population is known
-            steps._hand_chunk(conn, p["pass_id"], req, True)
+        steps._hand_chunk(conn, p["pass_id"], req, True)
         carry, chunk = steps._chunk(conn, p["pass_id"])
     if chunk is not None:
         left = steps._unrecorded(conn, chunk)
@@ -387,25 +463,22 @@ def _judge(conn, token, p, req):
         _start_judgment(conn, token, p)                # closes the chunk; may restart
         return _judge_unit(conn, p, req)
     if steps._another_chunk(conn, p["pass_id"], req, j):
-        with adding_work(conn, token, "search-chunk"):
-            steps._hand_chunk(conn, p["pass_id"], req, False)
+        steps._hand_chunk(conn, p["pass_id"], req, False)
         return _gmail(conn, token, p, req)
     return None
 
 
 def _start_judgment(conn, token, p, restart_running=False) -> None:
     """THE one place a job pass's judgment starts or starts again (from _judge, and from
-    _take for a handover taken mid-judgment): its page cursor and its judged-page count
-    go back to the start. Started for a bounded cause (restart_cause), it is work added
-    through the hook — the judge high-water mark is reset, and the baseline moves with
-    it; for an unbounded cause the mark is kept."""
+    _take for a handover taken mid-judgment): its page cursor goes back to the start. The
+    pass's judge epoch moves on only for a cause drawn from a finite budget (`bounded`):
+    then the new judgment's pages earn credit again; restarted for an unbounded cause, it
+    re-judges pages already credited, which earns nothing (INV-J8)."""
     import steps
     cause = restart_cause(conn, p, _step(conn, p, "judge"))   # before the start moves
-    with adding_work(conn, token, cause):
-        steps._start_tx(conn, token, "judge", {}, restart_running=restart_running)
-        conn.execute("UPDATE passes SET judge_after=NULL, judge_pages=0, judge_high=CASE"
-                     " WHEN ? THEN 0 ELSE judge_high END WHERE pass_id=?",
-                     (int(bounded(cause)), p["pass_id"]))
+    steps._start_tx(conn, token, "judge", {}, restart_running=restart_running)
+    conn.execute("UPDATE passes SET judge_after=NULL, judge_epoch=judge_epoch+? WHERE"
+                 " pass_id=?", (int(bounded(cause)), p["pass_id"]))
 
 
 def restart_cause(conn, p, j) -> str:
@@ -428,24 +501,16 @@ def restart_cause(conn, p, j) -> str:
     return "not-covered" if work.judge_whole(j) else "not-whole"
 
 
-# INV-J8's causes of added work, each with the budget that bounds how often it occurs in
-# a pass (diff round 2, R7: the fourth finding on this measure, fixed by generalization)
+# The causes a judgment is started (again) for, each with the budget that bounds how often
+# it occurs in a pass: only these move the judge epoch on (INV-J8, spec §15)
 BOUNDED = {
-    "pass-begin": "a pass begins only for a queued request or package ask, each taken "
-                  "once: at most one per request",
     "bank-read": "an accepted import: the pass's first read, then at most W_REFRESH_MAX "
-                 "W refreshes, one late-ask read per request and at most ADOPTIONS_MAX "
-                 "adoption reads",
+                 "W refreshes, LATE_TAKES_MAX late-take reads and ADOPTIONS_MAX "
+                 "holder-change reads",
     "search-chunk": "_another_chunk hands a chunk out only while its count of payments "
                     "still to search falls strictly: finitely many per pass",
-    "handover-take": "one per handover request",
+    "handover-take": "one per handover request, and a pass takes finitely many",
     "first-judgment": "once per pass",
-    "request": "a check, handover or package ask recorded by Ellen (request_work, "
-               "request_package): one per operator's ask or cron run",
-    "outside": "any other write made outside the job (a tool call without a pass_token: "
-               "the operator's decisions through Ellen, Ellen's package build, send and "
-               "relay): one per call Ellen makes, on an operator's message or a "
-               "notification",
 }
 UNBOUNDED = {
     "not-whole": "the judgment did not come out whole (triage_remaining > 0): the same "
@@ -455,70 +520,13 @@ UNBOUNDED = {
 
 
 def bounded(cause) -> bool:
-    """THE one predicate: is work added for `cause` drawn from a finite budget (BOUNDED)?
-    Only then does it move the batch's baseline (work_added) and, for a judge restart,
-    reset the judge high-water mark. An UNBOUNDED cause never does: re-adding the same
-    work forever must stop counting as progress, so Casa ends the job."""
+    """THE one predicate: is a judgment (re)started for `cause` drawn from a finite budget
+    (BOUNDED)? Only then does the judge epoch move on. An UNBOUNDED cause never does:
+    re-judging the same pages forever must stop earning credit, so Casa ends the job."""
     if cause in BOUNDED:
         return True
     assert cause in UNBOUNDED, cause
     return False
-
-
-def work_added(conn, token, cause, pre) -> None:
-    """THE hook (INV-J8, diff round 2, R7): a bounded event added work. `pre` is the
-    measure just before it; the claim's baseline moves by exactly what the event
-    changed, component by component — no credit for the event (an import alone does not
-    count), and no loss of the progress the batch made before it. A no-op for an
-    unbounded cause."""
-    if not bounded(cause):
-        return
-    c = conn.execute("SELECT measure_json FROM claims WHERE gen=?", (int(token),)).fetchone()
-    if c is None or not c["measure_json"]:
-        return
-    post = measure(conn)
-    base = json.loads(c["measure_json"])
-    conn.execute("UPDATE claims SET measure_json=? WHERE gen=?",
-                 (json.dumps([b + (q - a) for b, a, q in zip(base, pre, post)]), int(token)))
-
-
-@contextlib.contextmanager
-def adding_work(conn, token, cause):
-    """work_added around the event in the `with` body (inside its transaction). A no-op
-    when `token` is None (no batch to move)."""
-    pre = measure(conn) if token is not None and bounded(cause) else None
-    yield
-    if pre is not None:
-        work_added(conn, token, cause, pre)
-
-
-def current_batch(conn):
-    """The claim whose batch is running now — the newest — while a job pass is live;
-    else None (nothing to move: the next claim stamps its own baseline)."""
-    assert conn.in_transaction
-    if live_job_pass(conn) is None:
-        return None
-    return conn.execute("SELECT max(gen) FROM claims").fetchone()[0]
-
-
-@contextlib.contextmanager
-def outside_writes(store, cause="outside"):
-    """Every write transaction the body opens on the store (`store(conn)` is true for the
-    accounting store's connection; another database's transactions are left alone) is
-    work added for `cause`, measured inside that transaction (db.tx_hook): it moves the
-    running batch's baseline by exactly what it changed. For writes made outside the
-    job, which no unit of the job can be credited or blamed for."""
-    def begin(conn):
-        if not store(conn):
-            return None
-        tok = current_batch(conn)
-        return (tok, measure(conn)) if tok is not None else None
-
-    def commit(conn, state):
-        if state is not None:
-            work_added(conn, state[0], cause, state[1])
-    with db.tx_hook(begin, commit):
-        yield
 
 
 def _judge_unit(conn, p, req) -> dict:
@@ -552,10 +560,6 @@ def _doc_key(k) -> str:
         return str(k)
 
 
-# a page judged: the running judgment's count, and the pass's high-water mark (INV-J8)
-PAGE_JUDGED = "judge_pages=judge_pages+1, judge_high=max(judge_high, judge_pages+1)"
-
-
 def _judged(conn, token, judged) -> None:
     import asks, steps
     if not isinstance(judged, dict):
@@ -577,7 +581,20 @@ def _judged(conn, token, judged) -> None:
     if not isinstance(documents, dict):
         raise db.Refusal("documents is {<doc_id>: <verdict>, …}")
     nxt = judged.get("page_next")
-    if not nxt:
+    if nxt:
+        # INV-J8 (design r3): the page start a credit is keyed by is never a free value.
+        # page_next is the triage page's `next` — [the last payment it showed], whose
+        # number is past this page's start — checked before anything is stored
+        start = after[0] if after else 0
+        if (not isinstance(nxt, list) or len(nxt) != 1 or not isinstance(nxt[0], int)
+                or isinstance(nxt[0], bool) or nxt[0] <= start
+                or conn.execute("SELECT 1 FROM projections WHERE pid=?",
+                                (nxt[0],)).fetchone() is None):
+            raise db.Refusal("page_next is the `next` the triage page returned, unchanged "
+                             "(null on its last page): it names the last payment that page "
+                             "showed, after this page's start. Nothing was recorded: answer "
+                             "again with the page's `next`")
+    else:
         # the answer that finishes the judgment gives every handed-over document its
         # verdict (final review FW-I1): a judgment finished without one never covers
         # its handover, and would be started again forever. Checked before any write
@@ -593,8 +610,9 @@ def _judged(conn, token, judged) -> None:
                 f"{theirs} under documents. Nothing was recorded")
     asks.record_verdicts(conn, p["pass_id"], documents)
     if nxt:
-        conn.execute("UPDATE passes SET judge_after=?, " + PAGE_JUDGED + " WHERE pass_id=?",
+        conn.execute("UPDATE passes SET judge_after=? WHERE pass_id=?",
                      (json.dumps(nxt), p["pass_id"]))
+        _credit_page(conn, token, p, after)
         return
     n = judged.get("triage_remaining")
     if isinstance(n, bool) or not isinstance(n, int) or n < 0:
@@ -602,8 +620,14 @@ def _judged(conn, token, judged) -> None:
                          "was judged)")
     _, refused = steps._finish_tx(conn, token, "judge", counts={"triage_remaining": n})
     assert refused is None
-    conn.execute("UPDATE passes SET judge_after=NULL, " + PAGE_JUDGED + " WHERE pass_id=?",
-                 (p["pass_id"],))
+    conn.execute("UPDATE passes SET judge_after=NULL WHERE pass_id=?", (p["pass_id"],))
+    _credit_page(conn, token, p, after)
+
+
+def _credit_page(conn, token, p, after) -> None:
+    """A judge page answered: `judge:<epoch>:<its start>` — 0, or a validated page_next.
+    Within an epoch the starts strictly increase over the pids, so the keys are finite."""
+    credit(conn, token, p["pass_id"], f"judge:{p['judge_epoch']}:{after[0] if after else 0}")
 
 
 def _report_extras(conn, p) -> dict:
@@ -654,40 +678,45 @@ def record_filing(conn, token) -> dict:
         carry = steps._first_carry(conn, p["pass_id"])
         carry["filed"] = True
         steps._set_first_carry(conn, p["pass_id"], carry)
+        credit(conn, token, p["pass_id"], "file:unit")
     return {"filed": True}
 
 
 def status(conn, job_id) -> dict:
     """Read-only, never a claim (ha-casa-app#1180; design delta §3): may this job end now?
-    `done` when no pass is live and nothing is queued — the same condition job_next
-    answers `complete` on. An operator-message turn in the job's topic calls it last, so a
-    completion Casa refused (unread inbound) is re-issued from the store."""
+    `done` by THE predicate job_next answers `complete` on (`done`). An operator-message
+    turn in the job's topic calls it last, so a completion Casa refused (unread inbound)
+    is re-issued from the store."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
-    p = live_job_pass(conn)
-    queued = conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL"
-                          " SELECT 1 FROM package_requests WHERE state='queued'").fetchone()
-    done = p is None and queued is None
-    return {"done": done, "text": "Accounting work finished." if done else None}
+    ok = done(conn, job_id)
+    return {"done": ok, "text": "Accounting work finished." if ok else None}
 
 
 def _account(conn, token, out) -> None:
-    """Mutates `out` in place: next_unit returns the same dict."""
+    """Mutates `out` in place: next_unit returns the same dict. The budget and progress
+    are the batch's — every claim of it (`claims.batch`)."""
     c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
+    spent = conn.execute("SELECT sum(spent) FROM claims WHERE batch=?",
+                         (c["batch"],)).fetchone()[0]
     cost = UNIT_COST.get(out["unit"], 0)
-    if cost and c["spent"] > 0 and c["spent"] + cost > TURNS_PER_BATCH - BATCH_RESERVE:
+    if cost and spent > 0 and spent + cost > TURNS_PER_BATCH - BATCH_RESERVE:
         out.clear()
         out["unit"] = "end-batch"           # the unit is handed again next batch (INV-J4)
         cost = 0
-    conn.execute("UPDATE claims SET spent=spent+? WHERE gen=?", (cost, token))
-    now = measure(conn)
-    progressed = now < json.loads(c["measure_json"])
     ending = out["unit"] in ("end-batch", "complete")
+    conn.execute("UPDATE claims SET spent=spent+?, closed=? WHERE gen=?",
+                 (cost, int(ending or c["closed"]), token))
+    # INV-J8 (spec §15): a credit, in any pass, earned under a claim of this batch
+    progressed = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM credits WHERE gen IN (SELECT gen FROM claims WHERE"
+        " batch=?))", (c["batch"],)).fetchone()[0] == 1
+    left = measure(conn)
     report = ending or (progressed and not c["reported"])
     if report:
         conn.execute("UPDATE claims SET reported=1 WHERE gen=?", (token,))
-    out["progress"] = {"summary": _summary(out["unit"], now), "progressed": progressed,
-                       "done": None, "remaining": now[1] or None}
+    out["progress"] = {"summary": _summary(out["unit"], left), "progressed": progressed,
+                       "done": None, "remaining": left or None}
     out["report"] = report
     out["pass_token"] = token
 
@@ -699,7 +728,6 @@ WORDS = {"probes": "Reading the bank", "snapshot": "Importing the bank read",
          "complete": "All accounting work done"}
 
 
-def _summary(unit, now) -> str:
-    left = now[1]
+def _summary(unit, left) -> str:
     return WORDS[unit] + (f" · {left} payment{'s' if left != 1 else ''} left to search"
                           if left else "")

@@ -91,13 +91,18 @@ class CheckPass(StoreCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0], 0)
 
     def test_eight_asks_that_each_stop_at_once_all_get_dispositions(self):
-        import asks
+        import asks, job
         self.drv.bankfeed.restore_since_install()        # every pass stops at its probes
         for q in ("2025-Q1", "2025-Q2", "2025-Q3", "2025-Q4",
                   "2026-Q1", "2026-Q2", "2026-Q3", "2026-Q4"):
             asks.request_package(self.conn, q, "telegram")
         asks.request_work(self.conn, "check", "operator")
-        self.drv.run_job(A)
+        # one Casa job run begins at most MAX_PASSES_PER_JOB passes (spec §15); the
+        # standing retry starts the next job, which takes the rest
+        for k, job_id in enumerate((A, "bbbbbbbb-2", "cccccccc-3")):
+            units = self.drv.run_job(job_id)
+            self.assertEqual(units[-1]["unit"], "complete")
+            self.assertEqual(job.run_passes(self.conn, job_id), (4, 4, 1)[k])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM package_requests WHERE"
                                            " state='queued'").fetchone()[0], 0)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM work_requests WHERE"
@@ -212,6 +217,7 @@ class HandoverMidJudgment(StoreCase):
                                     " request_id=?", (rid,)).fetchone()[0]
         t2 = job.claim(self.conn, A)
         u2 = self.drv.next_until(t2, "judge")
+        t2 = self.drv.token                             # the batch's budget may end it first
         self.assertGreater(u2["judgment"], created)
         self.assertNotEqual(u2["judgment"], u1["judgment"])
         self.assertEqual(u2["documents_first"], [doc])

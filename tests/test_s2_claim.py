@@ -1,6 +1,5 @@
 """S2 Task 4 (spec §4, §6.3): a job turn's claim rotates the token, only the newest
 claim's token may act, and a live job pass is adopted at most ADOPTIONS_MAX times."""
-import json
 
 from tests._base import StoreCase
 
@@ -36,15 +35,21 @@ class Claim(StoreCase):
                                 (pid,)).fetchone()
         self.assertEqual((row["adoptions"], row["holder_job"]), (1, B))
 
-    def test_a_job_that_held_the_pass_before_is_not_charged_again(self):
+    def test_a_return_of_an_earlier_holder_spends_the_budget(self):
+        """Design r1 (Astra S2): the budget counts holder changes, not distinct adopters —
+        A→B→A is two, and the third change ends the pass `stopped`."""
         import job
         t = job.claim(self.conn, A)
         pid = self.start_job_pass(t)
-        for j in (B, A, B, A, B):                # A→B→A→B…: one adoption, by B
-            job.claim(self.conn, j)
-        row = self.conn.execute("SELECT adoptions, ended_at FROM passes WHERE pass_id=?",
-                                (pid,)).fetchone()
-        self.assertEqual((row["adoptions"], row["ended_at"]), (1, None))
+        job.claim(self.conn, B)                 # A→B: 1
+        job.claim(self.conn, A)                 # B→A: 2
+        row = self.conn.execute("SELECT adoptions, holder_job, ended_at FROM passes WHERE"
+                                " pass_id=?", (pid,)).fetchone()
+        self.assertEqual(tuple(row), (2, A, None))
+        job.claim(self.conn, B)                 # A→B again: the third, refused
+        row = self.conn.execute("SELECT adoptions, holder_job, outcome FROM passes WHERE"
+                                " pass_id=?", (pid,)).fetchone()
+        self.assertEqual(tuple(row), (2, A, "stopped"))
 
     def test_third_adoption_stops_the_pass(self):
         import job
@@ -64,16 +69,20 @@ class Claim(StoreCase):
         with self.assertRaises(db.Refusal):
             job.claim(self.conn, "x")
 
-    def test_a_claim_stamps_the_measure(self):
+    def test_a_claim_records_its_batch(self):
+        """claims.batch (design r6, round 5): a job id's first claim starts a batch named
+        by its own gen; a re-claim inherits it until the batch is answered end-batch."""
         import db, job
-        with db.tx(self.conn):                  # one open request: the measure is not all zero
-            self.conn.execute("INSERT INTO work_requests(kind, trigger, created_seq, created_at,"
-                              " state) VALUES ('check','operator',1,'x','queued')")
-        t = job.claim(self.conn, A)
-        stamped = json.loads(self.conn.execute("SELECT measure_json FROM claims WHERE gen=?",
-                                               (t,)).fetchone()[0])
-        self.assertEqual(stamped[0], 1)
-        self.assertEqual(stamped, job.measure(self.conn))
+        t1 = job.claim(self.conn, A)
+        t2 = job.claim(self.conn, A)
+        batch = lambda t: self.conn.execute("SELECT batch FROM claims WHERE gen=?",
+                                            (t,)).fetchone()[0]
+        self.assertEqual((batch(t1), batch(t2)), (t1, t1))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE claims SET closed=1 WHERE gen=?", (t2,))
+        t3 = job.claim(self.conn, A)
+        self.assertEqual(batch(t3), t3)
+        self.assertEqual(batch(job.claim(self.conn, B)), t3 + 1)    # another job id's first
 
     def test_an_adoption_moves_the_fence_to_the_adopter(self):
         import db, job, passes

@@ -10,8 +10,11 @@ class Schema10(StoreCase):
         self.assertEqual(db.SCHEMA_VERSION, 10)
         self.assertEqual(self.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "10")
-        self.assertTrue({"gen", "job_id", "at", "spent", "measure_json", "reported"}
+        self.assertTrue({"gen", "job_id", "at", "spent", "reported", "batch", "closed"}
                         <= self.cols("claims"))
+        self.assertNotIn("measure_json", self.cols("claims"))     # INV-J8 is credits (§15)
+        self.assertEqual({"pass_id", "key", "gen"}, self.cols("credits"))
+        self.assertEqual({"job_id", "passes"}, self.cols("runs"))
         self.assertTrue({"request_id", "kind", "trigger", "doc_ids_json", "created_seq",
                          "state", "pass_id", "outcome", "render_ids_json", "verdicts_json"}
                         <= self.cols("work_requests"))
@@ -19,9 +22,10 @@ class Schema10(StoreCase):
     def test_new_columns(self):
         self.assertTrue({"protocol", "holder_job", "orphaned_by", "adoptions", "adopters_json",
                          "acq",
-                         "acq_gen", "read_seq", "w_refreshes", "judge_after", "judge_pages",
-                         "judge_high"}
+                         "acq_gen", "read_seq", "w_refreshes", "judge_after", "judge_epoch",
+                         "late_takes"}
                         <= self.cols("passes"))
+        self.assertFalse({"judge_high", "judge_pages"} & self.cols("passes"))
         self.assertTrue({"protocol", "started_seq", "started_gen"} <= self.cols("pass_steps"))
         self.assertIn("w_pending", self.cols("passes"))
         self.assertTrue({"job_id", "read_seq", "acq", "export_ref", "swept_at"}
@@ -48,3 +52,12 @@ class Schema10(StoreCase):
         with self.assertRaises(db.Refusal):
             with db.tx(conn):
                 passes.check_token(conn, 1)
+
+    def test_reset_store_wipes_credits_and_runs(self):
+        import binding, db
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO credits(pass_id, key, gen) VALUES ('p', 'file:unit', 1)")
+            self.conn.execute("INSERT INTO runs(job_id, passes) VALUES ('aaaaaaaa-1', 4)")
+        binding.reset_store(self.conn)
+        for t in ("credits", "runs", "claims"):
+            self.assertEqual(self.conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0], 0)

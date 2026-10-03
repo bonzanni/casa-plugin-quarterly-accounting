@@ -337,12 +337,6 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
                                         "more is written until a pass proves the ledger again")
                     raise db.Refusal(f"row #{a['row_id']} now names a different transaction "
                                      "than the one this store holds — nothing was imported")
-        if job_pass:
-            import job
-            # INV-J8 (diff round 2, R7): an accepted import adds work (rows due a read,
-            # fresh items to search); the hook moves the batch's baseline by exactly what
-            # it changed — no credit for the import, none lost for the batch's sweeps
-            pre = job.measure(conn)
         _require_same_ledger(conn, b, ledger_instance)          # may re-bind (drops aliases)
         if job_pass:
             # final review FW-I2: a job pass reads the bank more than once (W refreshes,
@@ -508,10 +502,6 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         # every revoked delivery whose bytes are still there is withdrawn now; one that
         # cannot be refuses the whole import, which rolls back (round E7)
         delivery.withdraw_revoked(conn)
-        if job_pass:
-            # last, so the import's whole change is the event's — the package requests
-            # a revoked first send puts back in the queue included (diff round 3, R8)
-            job.work_added(conn, token, "bank-read", pre)
         return out
 
 

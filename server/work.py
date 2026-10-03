@@ -63,6 +63,8 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
                                  "Gmail items — nothing was written")
             if in_chunk:
                 steps.chunk_recorded(conn, pass_id, pid)
+                import job
+                job.credit_search(conn, token, pid)     # INV-J8: a search item recorded
         state, streak = p["search_state"], p["passes_without_candidate"]
         if revive:
             state, streak = "active", 0

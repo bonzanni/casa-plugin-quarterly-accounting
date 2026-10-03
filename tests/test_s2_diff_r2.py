@@ -1,8 +1,6 @@
-"""S2 diff review round 2, R7 (INV-J8): work added by a bounded event — an accepted
-import, a pass begun, a search chunk, a judge restart for a bounded cause — moves the
-batch's baseline by exactly what it changed (job.work_added): never credit, never a
-loss. Astra r2 S2: a W refresh's import made a productive batch the third no-progress
-one in a row."""
+"""S2 diff review round 2, R7 (INV-J8): a W refresh's import made a productive batch the
+third no-progress one in a row (Astra r2 S2). Under the credit rule (spec §15) an import
+earns nothing and takes nothing away: the refreshed acquisition's sweeps earn."""
 import datetime
 
 from tests._base import StoreCase
@@ -46,37 +44,37 @@ class WRefresh(Tools):
 
 class FirstBatch(StoreCase):
     def test_a_first_batch_that_sweeps_is_progress(self):
-        """The first batch reads the bank, imports and sweeps: the import's rows due are
-        no credit, but every sweep page below the post-import count is."""
-        import asks, db, job
+        """The first batch reads the bank, imports and sweeps: the import alone earns
+        nothing, every settled row of its sweeps does."""
+        import asks, job
         self.bind()
         drv = JobDriver(self, payments=80)
         asks.request_work(self.conn, "check", "cron")
         t = job.claim(self.conn, A)
         u = job.next_unit(self.conn, t)
-        after_import = None
         while u["unit"] != "end-batch":
             drv.do(u, t)
             if u["unit"] == "snapshot":
-                with db.tx(self.conn):
-                    after_import = job.measure(self.conn)
                 nxt = job.next_unit(self.conn, t)
                 self.assertFalse(nxt["progress"]["progressed"])  # the import alone: none
+                self.assertEqual(self.conn.execute("SELECT count(*) FROM credits"
+                                                   ).fetchone()[0], 0)
                 u = nxt
                 continue
             u = job.next_unit(self.conn, t)
-        with db.tx(self.conn):
-            now = job.measure(self.conn)
-        self.assertLess(now[3], after_import[3])                 # its sweeps lowered due
+        self.assertGreater(self.conn.execute("SELECT count(*) FROM credits WHERE key LIKE"
+                                             " 'sweep:%'").fetchone()[0], 0)
         self.assertTrue(u["progress"]["progressed"])
 
 
-class Hook(StoreCase):
-    def test_an_unbounded_cause_never_moves_the_baseline(self):
+class Restarts(StoreCase):
+    def test_only_a_bounded_cause_moves_the_judge_epoch(self):
         import job
         for cause in job.UNBOUNDED:
             self.assertFalse(job.bounded(cause))
         for cause in job.BOUNDED:
             self.assertTrue(job.bounded(cause))
+        self.assertEqual(set(job.BOUNDED), {"bank-read", "search-chunk", "handover-take",
+                                            "first-judgment"})
         with self.assertRaises(AssertionError):
             job.bounded("a cause nobody named")

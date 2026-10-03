@@ -19,8 +19,8 @@ class NoteConfirmation(StoreCase):
         import db, version
         with db.tx(self.conn):
             for gen, at in ((1, T0), (2, T0 + _dt.timedelta(minutes=5))):
-                self.conn.execute("INSERT INTO claims(gen, job_id, at) VALUES (?,?,?)",
-                                  (gen, "aaaaaaaa-1", ts(at)))
+                self.conn.execute("INSERT INTO claims(gen, job_id, at, batch) VALUES (?,?,?,?)",
+                                  (gen, "aaaaaaaa-1", ts(at), gen))
         self.workflow = version.WORKFLOW
 
     def ledger(self, gen, registered=True, missing=()):

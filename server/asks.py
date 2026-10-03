@@ -24,10 +24,7 @@ def request_work(conn, kind, trigger, doc_ids=None) -> dict:
     if kind == "handover" and (not ids or not all(isinstance(i, int) and not isinstance(i, bool)
                                                   for i in ids)):
         raise db.Refusal("a handover names the documents you just filed: doc_ids=[…]")
-    import job
-    with db.tx(conn), job.adding_work(conn, job.current_batch(conn), "request"):
-        # INV-J8 (diff round 3, R8): a request recorded while a job batch runs is work
-        # added to it, never a loss of that batch's progress
+    with db.tx(conn):
         # a handover names documents that are filed (final review FW-I1): an id the
         # judge can never find would leave the handover owed a verdict forever
         unknown = [i for i in ids if conn.execute("SELECT 1 FROM documents WHERE doc_id=?",
@@ -53,8 +50,7 @@ def request_package(conn, quarter, channel) -> dict:
         raise db.Refusal("a package is asked for with its channel: 'telegram' or 'email'")
     dates.parse_quarter(quarter)
     label = dates.quarter_label(quarter)
-    import job
-    with db.tx(conn), job.adding_work(conn, job.current_batch(conn), "request"):
+    with db.tx(conn):
         open_ = conn.execute("SELECT request_id FROM package_requests WHERE quarter=? AND"
                              " state IN ('queued', 'snapshot')", (quarter,)).fetchone()
         if open_ is not None:
@@ -69,13 +65,23 @@ def request_package(conn, quarter, channel) -> dict:
                     "when that's done."}
 
 
-def take_queued(conn, pass_id) -> list:
+def take_queued(conn, pass_id, late=False) -> list:
+    """The queued work requests `pass_id` takes: all of them as it begins; once it is live
+    (`late`), only while it has taken fewer than job.LATE_TAKES_MAX — each needs another bank
+    read (F's condition 2) — and the rest stay queued for the next pass (design r1, Terra
+    S1: the pass's acquisitions stay bounded)."""
+    import job
     assert conn.in_transaction
-    p = conn.execute("SELECT trigger FROM passes WHERE pass_id=?", (pass_id,)).fetchone()
+    p = conn.execute("SELECT trigger, late_takes FROM passes WHERE pass_id=?",
+                     (pass_id,)).fetchone()
     if p is None or p["trigger"] == "package":
         return []                                   # a package round serves its request only
     ids = [r[0] for r in conn.execute("SELECT request_id FROM work_requests WHERE"
                                       " state='queued' ORDER BY request_id")]
+    if late:
+        ids = ids[:max(0, job.LATE_TAKES_MAX - p["late_takes"])]
+        conn.execute("UPDATE passes SET late_takes=late_takes+? WHERE pass_id=?",
+                     (len(ids), pass_id))
     for i in ids:
         conn.execute("UPDATE work_requests SET state='taken', pass_id=? WHERE request_id=?",
                      (pass_id, i))
