@@ -44,6 +44,22 @@ class Report(StoreCase):
         self.assertIsNone(self.conn.execute("SELECT orphaned_by FROM passes").fetchone()[0])
         self.assertEqual(self.drain(), A)
 
+    def test_a_notice_about_an_earlier_holder_changes_nothing(self):
+        """FW-I3 (M18): the notice names a job this store knows, but not the one that
+        holds the pass now (B adopted it): no orphan, the drain stays B's."""
+        import asks, job
+        _, pid = self.live_pass_of(A)
+        job.claim(self.conn, B)                                   # B adopts the pass
+        out = asks.job_report(self.conn, job_id=A[:8], status="error")
+        self.assertFalse(out["orphaned"])
+        self.assertIsNone(out["start_job"])
+        row = self.conn.execute("SELECT holder_job, orphaned_by, ended_at FROM passes WHERE"
+                                " pass_id=?", (pid,)).fetchone()
+        self.assertEqual(tuple(row), (B, None, None))
+        self.assertEqual(self.drain(), B)
+        self.assertEqual(self.conn.execute("SELECT state FROM work_requests").fetchone()[0],
+                         "taken")
+
     def test_the_retry_stands_on_every_report_until_a_job_claims(self):
         import asks, job
         self.live_pass_of(A)
@@ -160,6 +176,29 @@ class Report(StoreCase):
         self.assertEqual(self.conn.execute("SELECT render_ids_json FROM work_requests WHERE"
                                            " state='done'").fetchone()[0], "[]")
 
+    def test_the_answer_is_bounded_at_the_exact_limit(self):
+        """Minor (final review): `more` is measured as `false`, its longer value. A last
+        page that fits only while `more` reads `true` is left for the next call."""
+        import asks, budget
+
+        def answer():
+            return {"orphaned": False, "start_job": None, "texts": [], "speak": None,
+                    "continue": None, "line": None, "more": False}
+
+        def pages(n):
+            return [{"render_id": "r1", "text": "a"}, {"render_id": "r2", "text": "x" * n}]
+        full = answer()
+        full["texts"] = pages(0)
+        n = budget.RESULT_LIMIT - budget.size(full)     # both pages, `false`: the limit
+        out = answer()
+        asks._bounded(out, pages(n))
+        self.assertEqual((len(out["texts"]), out["more"]), (2, False))
+        self.assertEqual(budget.size(out), budget.RESULT_LIMIT)
+        out = answer()
+        asks._bounded(out, pages(n + 1))                # one character over with `false`
+        self.assertEqual((len(out["texts"]), out["more"]), (1, True))
+        self.assertLessEqual(budget.size(out), budget.RESULT_LIMIT)
+
     def test_the_answer_is_deliverable_text_by_text(self):
         import tools, views
         out = {"texts": [{"render_id": "r1", "text": "x" * (views.TELEGRAM_LIMIT + 1)}]}
@@ -169,9 +208,15 @@ class Report(StoreCase):
 
 
 class Handover(StoreCase):
-    def handover_done(self, doc_ids, verdict="no-payment-yet", outcome="complete"):
+    def handover_done(self, doc_ids, verdict="no-payment-yet", outcome="complete",
+                      gone=()):
+        """`gone`: documents removed from the store after the handover named them (no
+        tool removes one; request_work refuses an id that is not filed)."""
         import asks, db, job, passes
         asks.request_work(self.conn, "handover", "operator", doc_ids)
+        with db.tx(self.conn):
+            for d in gone:
+                self.conn.execute("DELETE FROM documents WHERE doc_id=?", (d,))
         t = job.claim(self.conn, A)
         pid = self.start_job_pass(t)
         with db.tx(self.conn):
@@ -192,7 +237,8 @@ class Handover(StoreCase):
 
     def test_an_unknown_document_says_so(self):
         import asks
-        self.handover_done([987654])
+        d = self.doc()
+        self.handover_done([d], gone=[d])
         texts = asks.job_report(self.conn)["texts"]
         self.assertEqual([x["text"] for x in texts],
                          ["I can't find that document in what I've filed — please send the "

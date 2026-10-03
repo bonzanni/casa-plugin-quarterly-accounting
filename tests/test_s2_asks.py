@@ -36,6 +36,25 @@ class Requests(StoreCase):
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
         self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
 
+    def test_a_cron_check_with_nothing_to_show_is_reported_at_its_pass_end(self):
+        """FW-I3 (M7): spec §6.4 — a cron check served complete or interrupted is
+        reported in the transaction that settles it; an operator check waits for its
+        result to be shown, and a stopped cron check for its stop line."""
+        import asks, db, job, passes
+        for outcome, want in (("complete", "reported"), ("interrupted", "reported"),
+                              ("stopped", "done")):
+            with self.subTest(outcome=outcome):
+                asks.request_work(self.conn, "check", "cron")
+                asks.request_work(self.conn, "check", "operator")
+                t = job.claim(self.conn, A)
+                pid = self.start_job_pass(t)
+                with db.tx(self.conn):
+                    asks.take_queued(self.conn, pid)
+                    passes._end_pass_tx(self.conn, t, outcome, {})
+                got = dict(self.conn.execute("SELECT trigger, state FROM work_requests WHERE"
+                                             " pass_id=?", (pid,)).fetchall())
+                self.assertEqual(got, {"cron": want, "operator": "done"})
+
     def test_terminalize_requeues(self):
         import asks, db, job, passes
         asks.request_work(self.conn, "check", "operator")

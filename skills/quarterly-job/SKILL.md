@@ -237,7 +237,10 @@ for each, `read_document(doc_id)` of its `current.document`, read the printed is
 Finish with
 `job_next(pass_token=…, judged={judgment: <the unit's judgment>, after: <the unit's after>, page_next: <the page's next>, triage_remaining: <the page's remaining>, documents: {<doc_id>: <verdict>, …}})`.
 Echo the unit's `judgment` and `after` exactly as handed out (null stays null): an answer
-that does not echo them is refused, because it would finish a judgment it did not see.
+that does not echo them is refused, because it would finish a judgment it did not see. The
+last page's answer (its `next` is null) gives every document of `documents_first` its
+verdict; one refused for a document it left out is answered again, the same page with that
+verdict added.
 
 ## Never
 

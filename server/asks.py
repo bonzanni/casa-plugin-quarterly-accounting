@@ -25,6 +25,16 @@ def request_work(conn, kind, trigger, doc_ids=None) -> dict:
                                                   for i in ids)):
         raise db.Refusal("a handover names the documents you just filed: doc_ids=[…]")
     with db.tx(conn):
+        # a handover names documents that are filed (final review FW-I1): an id the
+        # judge can never find would leave the handover owed a verdict forever
+        unknown = [i for i in ids if conn.execute("SELECT 1 FROM documents WHERE doc_id=?",
+                                                  (i,)).fetchone() is None]
+        if unknown:
+            raise db.Refusal(
+                f"{'documents' if len(unknown) > 1 else 'document'} "
+                f"{', '.join(str(i) for i in unknown)} {'are' if len(unknown) > 1 else 'is'} "
+                "not among the filed documents: pass the ids the filing gave you. Nothing "
+                "was asked")
         rid = conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json, created_seq,"
                            " created_at, state) VALUES (?,?,?,?,?, 'queued')",
                            (kind, trigger, json.dumps(ids), db.next_seq(conn),
@@ -101,6 +111,13 @@ def record_verdicts(conn, pass_id, documents) -> None:
     for doc_id, verdict in (documents or {}).items():
         if verdict not in allowed:
             raise db.Refusal(f"a document's verdict is one of {', '.join(sorted(allowed))}")
+        try:
+            if isinstance(doc_id, bool):
+                raise ValueError(doc_id)
+            int(doc_id)
+        except (TypeError, ValueError):
+            raise db.Refusal(f"documents are keyed by their document id (a number), not "
+                             f"{str(doc_id)[:40]!r}") from None
         for r in conn.execute("SELECT request_id, doc_ids_json, verdicts_json FROM work_requests"
                               " WHERE pass_id=? AND state='taken' AND kind='handover'",
                               (pass_id,)).fetchall():
@@ -220,7 +237,8 @@ def _bounded(out, pages) -> None:
     line, continue and speak included: the pages in order while they fit, always the
     first. A page left out stays undelivered, so the next call offers it (`more`)."""
     import budget
-    out["more"] = True                      # measured as the longer of its two values
+    out["more"] = False                     # measured as the longer of its two values:
+                                            # JSON `false` is a character longer than `true`
     for i, page in enumerate(pages):
         out["texts"].append(page)
         if i > 0 and budget.size(out) > budget.RESULT_LIMIT:

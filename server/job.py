@@ -85,7 +85,13 @@ def stop_exhausted_pass(conn, token, pass_id) -> None:
 
 def measure(conn) -> list:
     """INV-J8: the work measure, compared lexicographically; a fall is progress. A
-    refresh raises only the last component (rows due a read)."""
+    refresh raises only the last component (rows due a read). The third is the pass's
+    unfinished judge pages: the CURRENT judgment's, counted down from its start
+    (`judge_pages` counts the pages it judged, and is set back to 0 whenever a judgment
+    starts or restarts), so judging a page lowers it and a restart raises it again. A
+    judgment's total is not known ahead, so it is measured as minus the pages judged —
+    the same order within a judgment, and a batch that judges a judgment to its end and
+    restarts it ends where it began: no progress (final review FW-I1)."""
     import steps, sweep, work
     open_requests = (conn.execute("SELECT count(*) FROM work_requests WHERE state IN"
                                   " ('queued','taken')").fetchone()[0]
@@ -202,8 +208,7 @@ def _take(conn, token, p) -> None:
         return
     j = _step(conn, p, "judge")
     if j is not None and j["finished_at"] is None:
-        # take_queued has already reset judge_after (the page cursor) for a handover
-        steps._start_tx(conn, token, "judge", {}, restart_running=True)
+        _start_judgment(conn, token, p, restart_running=True)
 
 
 def _begin_next(conn, token):
@@ -374,8 +379,7 @@ def _judge(conn, token, p, req):
                or (latest_read is not None and (j["started_seq"] or 0) < latest_read
                    and passes.judgment_gap(conn, p["pass_id"]) > 0))
     if restart:
-        steps._start_tx(conn, token, "judge", {})      # closes the chunk; may restart
-        conn.execute("UPDATE passes SET judge_after=NULL WHERE pass_id=?", (p["pass_id"],))
+        _start_judgment(conn, token, p)                # closes the chunk; may restart
         return _judge_unit(conn, p, req)
     if steps._another_chunk(conn, p["pass_id"], req, j):
         steps._hand_chunk(conn, p["pass_id"], req, False)
@@ -383,18 +387,44 @@ def _judge(conn, token, p, req):
     return None
 
 
+def _start_judgment(conn, token, p, restart_running=False) -> None:
+    """A judgment starts, or starts again: its page cursor and its judged-page count
+    (INV-J8's unfinished judge pages) go back to the start."""
+    import steps
+    steps._start_tx(conn, token, "judge", {}, restart_running=restart_running)
+    conn.execute("UPDATE passes SET judge_after=NULL, judge_pages=0 WHERE pass_id=?",
+                 (p["pass_id"],))
+
+
 def _judge_unit(conn, p, req) -> dict:
     p = live_job_pass(conn)                           # re-read: judge_after may have changed
     j = _step(conn, p, "judge")
-    firsts = []
-    for r in conn.execute("SELECT doc_ids_json, verdicts_json FROM work_requests WHERE"
-                          " pass_id=? AND state='taken' AND kind='handover'", (p["pass_id"],)):
-        seen = json.loads(r["verdicts_json"])
-        firsts += [d for d in json.loads(r["doc_ids_json"])
-                   if (seen.get(str(d)) or {}).get("judge") != j["started_seq"]]
     after = json.loads(p["judge_after"]) if p["judge_after"] else None
     return {"unit": "judge", "judgment": j["started_seq"], "after": after,
-            "quarter": req["quarter"] if req else None, "documents_first": firsts}
+            "quarter": req["quarter"] if req else None,
+            "documents_first": _unjudged_handovers(conn, p, j)}
+
+
+def _unjudged_handovers(conn, p, j) -> list:
+    """The documents of the pass's taken handovers that have no verdict from judgment
+    `j` yet (the judge unit's `documents_first`), in request order."""
+    out = []
+    for r in conn.execute("SELECT doc_ids_json, verdicts_json FROM work_requests WHERE"
+                          " pass_id=? AND state='taken' AND kind='handover' ORDER BY"
+                          " request_id", (p["pass_id"],)):
+        seen = json.loads(r["verdicts_json"])
+        out += [d for d in json.loads(r["doc_ids_json"])
+                if (seen.get(str(d)) or {}).get("judge") != j["started_seq"] and d not in out]
+    return out
+
+
+def _doc_key(k) -> str:
+    """A `documents` key as record_verdicts stores it ("12" for 12 or "12"); any other
+    key as given (record_verdicts refuses it)."""
+    try:
+        return str(int(k)) if not isinstance(k, bool) else str(k)
+    except (TypeError, ValueError):
+        return str(k)
 
 
 def _judged(conn, token, judged) -> None:
@@ -414,8 +444,25 @@ def _judged(conn, token, judged) -> None:
             or judged["judgment"] != j["started_seq"] or judged["after"] != after):
         raise db.Refusal("this answer is for another judge step: call job_next and judge "
                          "the page it hands out")
-    asks.record_verdicts(conn, p["pass_id"], judged.get("documents") or {})
+    documents = judged.get("documents") or {}
+    if not isinstance(documents, dict):
+        raise db.Refusal("documents is {<doc_id>: <verdict>, …}")
     nxt = judged.get("page_next")
+    if not nxt:
+        # the answer that finishes the judgment gives every handed-over document its
+        # verdict (final review FW-I1): a judgment finished without one never covers
+        # its handover, and would be started again forever. Checked before any write
+        given = {_doc_key(k) for k in documents}
+        missing = [d for d in _unjudged_handovers(conn, p, j) if str(d) not in given]
+        if missing:
+            many = len(missing) > 1
+            them, theirs = ("them", "their verdicts") if many else ("it", "its verdict")
+            raise db.Refusal(
+                f"the operator handed over {'documents' if many else 'document'} "
+                f"{', '.join(str(d) for d in missing)}, and this last page's answer gives "
+                f"{them} no verdict. Judge {them}, then answer again for the same page with "
+                f"{theirs} under documents. Nothing was recorded")
+    asks.record_verdicts(conn, p["pass_id"], documents)
     if nxt:
         conn.execute("UPDATE passes SET judge_after=?, judge_pages=judge_pages+1 WHERE"
                      " pass_id=?", (json.dumps(nxt), p["pass_id"]))

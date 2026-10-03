@@ -338,6 +338,27 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
                     raise db.Refusal(f"row #{a['row_id']} now names a different transaction "
                                      "than the one this store holds — nothing was imported")
         _require_same_ledger(conn, b, ledger_instance)          # may re-bind (drops aliases)
+        if job_pass:
+            # final review FW-I2: a job pass reads the bank more than once (W refreshes,
+            # a late ask, an adoption), but its gate was decided once, from its first
+            # ledger probe. A later read whose ledger is not that one — restored (a new
+            # restore generation) or another instance — stops the pass here, before
+            # anything of it is imported or remembered; the next pass's own gate then
+            # says what happened ("restored"). poison rolls back this transaction (a
+            # re-bind above included), as for an instance switch
+            led = json.loads(probe["data_json"] or "{}")
+            try:                                 # read as the gate reads it
+                gen = int(led.get("generation", -1))
+            except (TypeError, ValueError):
+                gen = None
+            if (led.get("instance") != gate["expected_ledger"]
+                    or gen != gate["expected_generation"]):
+                passes.poison(conn, "the bank ledger was restored or replaced during this "
+                                    "pass; nothing more is written until a pass proves the "
+                                    "ledger again")
+                raise db.Refusal("the bank ledger is not the one this pass started on (it was "
+                                 "restored or replaced since): nothing was imported, and the "
+                                 "pass stops — call job_next")
         old_facts = {r["row_id"]: dict(r) for r in conn.execute("SELECT * FROM bank_rows")}
         sync = conn.execute("SELECT ok, pass_id FROM probes WHERE kind='bank_sync'").fetchone()
         prev = conn.execute("SELECT bank_through FROM snapshots ORDER BY snapshot_id DESC"

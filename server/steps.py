@@ -267,8 +267,12 @@ def _finish_tx(conn, token, step: str, *, counts: dict, stopped=None, failed=Fal
     # A refused stop is KEPT on the unfinished step (R2): only a finish that says
     # `out_of_time=true` clears it (R6: never inferred from who seems to finish), and
     # a step that expires instead ends stopped — as the stop said
-    late = _age(row["started_at"]) >= SWEEP_STOP_S and conn.execute(
-        "SELECT 1 FROM snapshots WHERE pass_id=?", (m["pass_id"],)).fetchone() is not None
+    # A job pass's steps carry no wall clock (S2 INV-J3): the job's turn budget and the
+    # cursor decide its time, and a stop it records is the cursor's own (final review)
+    late = (passes.protocol_of(conn, m["pass_id"]) != "job"
+            and _age(row["started_at"]) >= SWEEP_STOP_S and conn.execute(
+                "SELECT 1 FROM snapshots WHERE pass_id=?", (m["pass_id"],)).fetchone()
+            is not None)
     if stopped and late and not by_refusal:
         import views
         conn.execute("UPDATE pass_steps SET finish_json=? WHERE pass_id=? AND step=?",

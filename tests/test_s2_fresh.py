@@ -252,6 +252,35 @@ class FreshnessF(Acquisition):
         self.assertIn("call job_next", str(cm.exception))
 
 
+    def test_a_pairing_and_a_proposal_commit_while_f_holds(self):
+        """FW-I3 (M17): the positive half of INV-J10 — while F holds, a job pass's
+        machine pairing and proposal commit (a guard that refused every machine write
+        under a live job pass would pass every refusal test above)."""
+        import db, job, ledger, lineage, matches, work
+        acq = self.handed()
+        self.probes(acq)
+        ledger.import_ledger_export(
+            self.conn, path=self.export([{"row_id": 1},
+                                         {"row_id": 2, "amount_minor": 20000}]),
+            token=self.tok, ledger_instance=self.LEDGER, acq=acq)
+        self.sweep_to_zero()
+        with db.tx(self.conn):
+            self.assertIsNone(job.fresh_reason(self.conn))
+            self.assertIsNotNone(job.live_job_pass(self.conn))
+        p1, p2 = sorted(lineage.live_pids(self.conn))
+        for pid in (p1, p2):                    # sweep_to_zero's reads carry no category
+            self.classify(pid, {"software"})
+        self.machine_match(p1, self.doc(), self.tok)
+        item = work.list_quarter_state(self.conn, pid=p2)["item"]
+        matches.propose_match(self.conn, pid=p2, doc_id=self.doc(amount_minor=20000),
+                              expected_revision=item["revision"],
+                              row_digest=item["row_digest"], document_date="2026-07-02",
+                              token=self.tok)
+        rows = {(r["pid"], r["state"]) for r in self.conn.execute(
+            "SELECT pid, state FROM match_state")}
+        self.assertEqual(rows, {(p1, "matched"), (p2, "proposed")})
+
+
 class DelegationPass(StoreCase):
     def test_f_never_gates_a_delegation_pass(self):
         import db, job
