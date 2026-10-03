@@ -506,3 +506,127 @@ class Cancelled(StoreCase):
         outcomes = [r[0] for r in self.conn.execute("SELECT outcome FROM passes ORDER BY"
                                                     " generation")]
         self.assertEqual(outcomes, ["stopped", "complete"])
+
+
+class CancelRevokes(StoreCase):
+    """#38 round 7: a cancel revokes the cancelled job (R7-1) — no token it was issued and
+    no new claim of its id lands after it — and an `error` notice before the cancel does
+    not stop the withdrawal (R7-2)."""
+    LINE = Cancelled.LINE
+    WORDS = "this job was cancelled — nothing was done"
+
+    def live_pass_of(self, job_id):
+        return Report.live_pass_of(self, job_id)
+
+    def drain(self):
+        return Report.drain(self)
+
+    def work(self):
+        return Cancelled.work(self)
+
+    def test_an_old_job_next_after_a_cancel_is_refused(self):
+        """Astra/Terra R7-1: claim A, cancel A, a new ask; A's already-issued
+        job_next(pass_token=old) opened a new live pass held by A."""
+        import asks, db, job
+        t = job.claim(self.conn, A)
+        asks.job_report(self.conn, job_id=A[:8], status="cancelled")
+        asks.request_work(self.conn, "check", "operator")
+        with self.assertRaises(db.Refusal) as e:
+            job.next_unit(self.conn, t)
+        self.assertEqual(str(e.exception), self.WORDS)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM passes").fetchone()[0], 0)
+        self.assertEqual(self.work(), [("queued", None)])           # no ask taken
+        self.assertIsNotNone(asks.job_report(self.conn)["start_job"])
+
+    def test_a_delayed_write_of_the_cancelled_job_is_refused(self):
+        """Astra R7-1: a delayed record_probe(old_token) after the cancel."""
+        import asks, db, passes
+        t, pid = self.live_pass_of(A)
+        asks.job_report(self.conn, job_id=A[:8], status="cancelled")
+        with self.assertRaises(db.Refusal) as e:
+            passes.record_probe(self.conn, t, "gmail", True)
+        self.assertEqual(str(e.exception), self.WORDS)
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM probes").fetchone())
+
+    def test_the_live_token_of_a_cancelled_job_is_refused_by_the_pass_fence(self):
+        """check_token itself refuses it, even where the marker still names the token
+        (the guard is the claim's job id, not the pass's liveness)."""
+        import asks, db, passes
+        t, _ = self.live_pass_of(A)
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO meta(key, value) VALUES (?, 'x')",
+                              (passes.cancelled_key(A),))
+            with self.assertRaises(db.Refusal) as e:
+                passes.check_token(self.conn, t)
+        self.assertEqual(str(e.exception), self.WORDS)
+
+    def test_a_fresh_claim_by_the_cancelled_job_is_refused(self):
+        import asks, db, job
+        job.claim(self.conn, A)
+        asks.job_report(self.conn, job_id=A[:8], status="cancelled")
+        asks.request_work(self.conn, "check", "operator")
+        gens = self.conn.execute("SELECT count(*) FROM claims").fetchone()[0]
+        with self.assertRaises(db.Refusal) as e:
+            job.claim(self.conn, A)
+        self.assertEqual(str(e.exception), self.WORDS)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM claims").fetchone()[0], gens)
+        self.assertEqual(self.drain(), "none")
+        job.claim(self.conn, B)                                     # another job may
+        self.assertEqual(self.drain(), B)
+
+    def test_error_then_cancelled_before_any_pass_withdraws(self):
+        """Astra R7-2: job_next paused after its claim committed; `error`, then
+        `cancelled`. The cancel returned start_job and left the ask queued."""
+        import asks, db, job
+        asks.request_work(self.conn, "check", "operator")
+        t = job.claim(self.conn, A)                                  # paused after this
+        err = asks.job_report(self.conn, job_id=A[:8], status="error")
+        self.assertIsNotNone(err["start_job"])
+        out = asks.job_report(self.conn, job_id=A[:8], status="cancelled")
+        self.assertIsNone(out["start_job"])
+        self.assertEqual([x["text"] for x in out["texts"]], [self.LINE])
+        self.assertEqual(self.work(), [("done", "stopped")])
+        with self.assertRaises(db.Refusal):
+            job.next_unit(self.conn, t)                              # the paused turn resumes
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM passes").fetchone()[0], 0)
+
+    def test_error_then_cancelled_stops_the_orphaned_pass(self):
+        import asks, json
+        _, pid = self.live_pass_of(A)
+        asks.request_work(self.conn, "check", "operator")
+        asks.job_report(self.conn, job_id=A[:8], status="error")
+        out = asks.job_report(self.conn, job_id=A[:8], status="cancelled")
+        self.assertIsNone(out["start_job"])
+        self.assertFalse(out["orphaned"])
+        row = self.conn.execute("SELECT outcome, report_json FROM passes WHERE pass_id=?",
+                                (pid,)).fetchone()
+        self.assertEqual(row["outcome"], "stopped")
+        self.assertEqual(json.loads(row["report_json"])["stopped_reason"],
+                         "you cancelled the check")
+        self.assertEqual(self.work(), [("done", "stopped")] * 2)
+        self.assertEqual([x["text"] for x in out["texts"]], [self.LINE])
+
+    def test_a_cancel_while_another_job_holds_the_drain_changes_nothing(self):
+        import asks, job, passes
+        job.claim(self.conn, A)
+        asks.job_report(self.conn, job_id=A[:8], status="error")
+        asks.request_work(self.conn, "check", "operator")
+        job.claim(self.conn, B)                                       # B drains now
+        out = asks.job_report(self.conn, job_id=A[:8], status="cancelled")
+        self.assertEqual(out["texts"], [])
+        self.assertEqual(self.drain(), B)
+        self.assertEqual(self.work(), [("queued", None)])
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM meta WHERE key=?",
+                                            (passes.cancelled_key(A),)).fetchone())
+
+    def test_an_error_only_crash_still_restarts(self):
+        import asks, job
+        _, pid = self.live_pass_of(A)
+        out = asks.job_report(self.conn, job_id=A[:8], status="error")
+        self.assertTrue(out["orphaned"])
+        self.assertIsNotNone(out["start_job"])
+        job.claim(self.conn, B)                                        # the restart adopts
+        row = self.conn.execute("SELECT holder_job, ended_at FROM passes WHERE pass_id=?",
+                                (pid,)).fetchone()
+        self.assertEqual(tuple(row), (B, None))
+        self.assertEqual(self.work(), [("taken", None)])

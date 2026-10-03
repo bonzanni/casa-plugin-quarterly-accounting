@@ -329,11 +329,31 @@ def _close(conn, req, state: str, outcome: str, reason=None):
                                 quarter=req["quarter"])
 
 
-def check_token(conn, token) -> None:
-    """A pass-only write's fence. Accepting a token inside a write transaction also
-    renews its holder's lease: a holder that keeps writing is never claimed over."""
+CANCELLED_JOB = "this job was cancelled — nothing was done"
+
+
+def cancelled_key(job_id) -> str:
+    """#38 R7-1: the meta key recording that the operator cancelled job `job_id`."""
+    return f"cancelled:{job_id}"
+
+
+def check_revoked(conn, token) -> None:
+    """#38 R7-1: a token whose claim belongs to a job the operator cancelled is refused —
+    every token that job was ever issued, so nothing it sent before the cancel lands."""
     if token is None:
         return
+    if conn.execute("SELECT 1 FROM claims c JOIN meta m ON m.key = 'cancelled:' || c.job_id"
+                    " WHERE c.gen=?", (int(token),)).fetchone() is not None:
+        raise db.Refusal(CANCELLED_JOB)
+
+
+def check_token(conn, token) -> None:
+    """A pass-only write's fence. Accepting a token inside a write transaction also
+    renews its holder's lease: a holder that keeps writing is never claimed over. A
+    cancelled job's token is refused (check_revoked)."""
+    if token is None:
+        return
+    check_revoked(conn, token)
     m = _marker(conn)
     if m is None or not m["live"] or int(token) != m["generation"]:
         raise db.Refusal("this pass is no longer the current one (another turn continued it, "

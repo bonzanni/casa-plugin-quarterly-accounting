@@ -201,19 +201,28 @@ def job_report(conn, job_id=None, status=None) -> dict:
                 who = _match_job(conn, job_id)
                 p = job.live_job_pass(conn)          # an ended pass is never live
                 drain = conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
-                if who is not None and p is not None and p["holder_job"] == who:
-                    if status == "cancelled":
-                        _withdraw(conn, p)          # #38: the operator ended it
-                    else:
-                        # the job holding the live pass ended: the pass is orphaned, stays
-                        # adoptable, its requests stay taken, and the drain is cleared
-                        conn.execute("UPDATE passes SET orphaned_by=? WHERE pass_id=?",
-                                     (who, p["pass_id"]))
+                drain = drain[0] if drain is not None else "none"
+                if status == "cancelled":
+                    # #38 (R7-2): the operator's cancel acts whenever no OTHER job holds the
+                    # drain — after an `error` notice cleared it too — once per job id (a
+                    # replayed notice changes nothing). It revokes the job (R7-1)
+                    if who is not None and drain in ("none", who) and conn.execute(
+                            "SELECT 1 FROM meta WHERE key=?",
+                            (passes.cancelled_key(who),)).fetchone() is None:
+                        _withdraw(conn, p if p is not None and p["holder_job"] == who
+                                  else None)
+                        conn.execute("INSERT INTO meta(key, value) VALUES (?,?)",
+                                     (passes.cancelled_key(who), db.now()))
+                        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
+                                     " ('drain','none')")
+                elif who is not None and p is not None and p["holder_job"] == who:
+                    # the job holding the live pass ended: the pass is orphaned, stays
+                    # adoptable, its requests stay taken, and the drain is cleared
+                    conn.execute("UPDATE passes SET orphaned_by=? WHERE pass_id=?",
+                                 (who, p["pass_id"]))
                     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
                                  " ('drain','none')")
-                elif who is not None and drain is not None and drain[0] == who:
-                    if status == "cancelled":
-                        _withdraw(conn, None)
+                elif who is not None and drain == who:
                     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
                                  " ('drain','none')")
                 # any other id (a late or replayed notice): nothing changes
@@ -262,8 +271,9 @@ def job_report(conn, job_id=None, status=None) -> dict:
 
 
 def _withdraw(conn, p) -> None:
-    """#38: the operator's /cancel ended the job that holds the live pass `p` (or, with
-    `p` None, the drain's job, before it took a pass). Unlike an error, nothing restarts:
+    """#38: the operator's /cancel ended a job while no other job holds the drain; `p` is
+    the live pass it holds (orphaned by an earlier error notice, or not), or None. Unlike
+    an error, nothing restarts:
     the pass ends `stopped` through the pass-ending path, and every open ask — queued, or
     taken by `p`; work or package — is withdrawn as `stopped`. The work requests share
     ONE stop rendering, relayed through `texts` and consumed by mark_rendering_delivered

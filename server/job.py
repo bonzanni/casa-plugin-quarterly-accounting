@@ -47,6 +47,7 @@ def check_claim(conn, token) -> None:
     assert conn.in_transaction
     if token is None:
         raise db.Refusal("a job turn starts with job_next(job_id=…): pass the pass_token it gave you")
+    passes.check_revoked(conn, token)                     # #38 R7-1: a cancelled job
     top = conn.execute("SELECT max(gen) FROM claims").fetchone()[0]
     if top is None or int(token) != top:
         raise db.Refusal("this job turn is no longer the current one (a newer turn claimed "
@@ -59,6 +60,9 @@ def claim(conn, job_id) -> int:
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
     with db.tx(conn):
+        if conn.execute("SELECT 1 FROM meta WHERE key=?",
+                        (passes.cancelled_key(job_id),)).fetchone() is not None:
+            raise db.Refusal(passes.CANCELLED_JOB)        # #38 R7-1: never claims again
         m = passes._marker(conn)
         if m is not None and m["live"] and passes.protocol_of(conn, m["pass_id"]) != "job":
             passes.close_delegation_pass_on_upgrade(conn)        # spec §8
