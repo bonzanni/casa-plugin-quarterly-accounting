@@ -74,7 +74,7 @@ def claim(conn, job_id) -> int:
                 # from a different job id spends the budget — a return of an earlier holder
                 # (A→B→A) too — since each needs a bank read of its own
                 if p["adoptions"] >= ADOPTIONS_MAX:
-                    stop_exhausted_pass(conn, token, p["pass_id"])
+                    stop_exhausted_pass(conn, token, p["pass_id"], job_id)
                     return token
                 held = json.loads(p["adopters_json"])
                 conn.execute("UPDATE passes SET adoptions=adoptions+1, adopters_json=?"
@@ -103,13 +103,16 @@ def _batch_of(conn, job_id, token, holder_changed) -> int:
     return token if closed or n >= TURNS_PER_BATCH else prev["batch"]
 
 
-def stop_exhausted_pass(conn, token, pass_id) -> None:
+def stop_exhausted_pass(conn, token, pass_id, job_id=None) -> None:
     """The adoption budget is spent (spec §6.3): the pass ends `stopped` through
     _end_pass_tx, which dispositions what it serves in this same transaction — its work
     requests `done`/`stopped` (asks.settle_taken), its package request closed `stopped`
-    with its package-stopped notice (_hand_over → _close)."""
+    with its package-stopped notice (_hand_over → _close). The stopping claim never takes
+    the pass, so its report names the job that stopped it (`stopped_by`): that job's run
+    ended a pass stopped, and says so (run_end)."""
     conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
-    passes._end_pass_tx(conn, token, "stopped", {"adoptions_exhausted": True})
+    passes._end_pass_tx(conn, token, "stopped", {"adoptions_exhausted": True,
+                                                 "stopped_by": job_id})
 
 
 def measure(conn) -> int:
@@ -245,7 +248,7 @@ def _choose(conn, token) -> dict:
         if p is None:
             if done(conn, job_id):
                 conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain','none')")
-                return {"unit": "complete", "text": "Accounting work finished."}
+                return {"unit": "complete", "text": run_end(conn, job_id)[0]}
             p = _begin_next(conn, token, job_id)
         req = steps.round_request(conn, p["pass_id"])
         ended = False
@@ -693,7 +696,49 @@ def status(conn, job_id) -> dict:
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
     ok = done(conn, job_id)
-    return {"done": ok, "text": "Accounting work finished." if ok else None}
+    return {"done": ok, "text": run_end(conn, job_id)[0] if ok else None}
+
+
+RUN_FINISHED = "Accounting work finished."
+TOPIC_MAX = 200     # one topic line: Casa keeps a summary's or completion's first line, cut
+                    # at 300 characters; the full stop line is the main chat's (job_report)
+
+
+def run_end(conn, job_id) -> tuple:
+    """THE closing words of job run `job_id` (PLAY T7 F2): (the completion's text, its
+    progress summary), shared by job_next's `complete` and job_status. "Finished" only
+    when every pass of the run finished; otherwise each pass of the run that ended
+    stopped, interrupted or failed, with its reason, in the order they began. A pass of
+    the run is one the run held when it ended (every cursor end is under the holder's
+    claim), or one a claim of the run stopped (`stopped_by`, stop_exhausted_pass)."""
+    import views
+    out = []
+    for r in conn.execute(
+            "SELECT outcome, report_json FROM passes WHERE protocol='job' AND ended_at IS NOT"
+            " NULL AND outcome<>'complete' AND (holder_job=? OR"
+            " json_extract(report_json, '$.stopped_by')=?) ORDER BY generation, pass_id",
+            (job_id, job_id)):
+        line = _end_line(r["outcome"], json.loads(r["report_json"] or "{}"))
+        if line not in out:
+            out.append(line)
+    if not out:
+        return RUN_FINISHED, WORDS["complete"]
+    text = views.clip(" ".join(out), TOPIC_MAX)
+    return text, text
+
+
+def _end_line(outcome, rep) -> str:
+    """One pass's end, in the operator's words (the stop line's reason: asks._stop_line)."""
+    if outcome == "stopped":
+        reason = ("it kept stopping" if rep.get("adoptions_exhausted")
+                  else " ".join(str(rep.get("stopped_reason") or "").split()).rstrip(". "))
+        return f"Accounting check stopped: {reason}." if reason else "Accounting check stopped."
+    if outcome == "interrupted":
+        if "checked" in rep and "total" in rep:
+            return (f"Accounting check interrupted: {int(rep['checked'])} of "
+                    f"{int(rep['total'])} new payments checked.")
+        return "Accounting check interrupted before it finished."
+    return "Accounting check failed."
 
 
 def _account(conn, token, out) -> None:
@@ -718,7 +763,9 @@ def _account(conn, token, out) -> None:
     report = ending or (progressed and not c["reported"])
     if report:
         conn.execute("UPDATE claims SET reported=1 WHERE gen=?", (token,))
-    out["progress"] = {"summary": _summary(out["unit"], left), "progressed": progressed,
+    summary = (run_end(conn, c["job_id"])[1] if out["unit"] == "complete"
+               else _summary(out["unit"], left))
+    out["progress"] = {"summary": summary, "progressed": progressed,
                        "done": None, "remaining": left or None}
     out["report"] = report
     out["pass_token"] = token
