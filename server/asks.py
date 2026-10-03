@@ -206,13 +206,15 @@ def job_report(conn, job_id=None, status=None) -> dict:
                     # #38 (R7-2): the operator's cancel acts whenever no OTHER job holds the
                     # drain — after an `error` notice cleared it too — once per job id (a
                     # replayed notice changes nothing). It revokes the job (R7-1)
-                    if who is not None and drain in ("none", who) and conn.execute(
-                            "SELECT 1 FROM meta WHERE key=?",
-                            (passes.cancelled_key(who),)).fetchone() is None:
-                        _withdraw(conn, p if p is not None and p["holder_job"] == who
-                                  else None)
+                    # R8-1: an id no claim matches (the job was cancelled before its first
+                    # claim) acts too while no job holds the drain: the id as the notice
+                    # names it is recorded, and a later claim matching it is refused
+                    target = who if who is not None else job_id
+                    if drain in ("none", who) and not _cancel_recorded(conn, target):
+                        _withdraw(conn, p if who is not None and p is not None
+                                  and p["holder_job"] == who else None)
                         conn.execute("INSERT INTO meta(key, value) VALUES (?,?)",
-                                     (passes.cancelled_key(who), db.now()))
+                                     (passes.cancelled_key(target), db.now()))
                         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
                                      " ('drain','none')")
                 elif who is not None and p is not None and p["holder_job"] == who:
@@ -268,6 +270,15 @@ def job_report(conn, job_id=None, status=None) -> dict:
                              % ",".join("?" * len(handed)),
                              (1 if job_id is not None else 0, *handed))
     return out
+
+
+def _cancel_recorded(conn, job_id) -> bool:
+    """A cancel of `job_id` was recorded already (a replayed notice): by the claim rule
+    (passes.is_cancelled), or a recorded full id that this notice's prefix names."""
+    if passes.is_cancelled(conn, job_id):
+        return True
+    return any(key[len("cancelled:"):].startswith(job_id) for (key,) in conn.execute(
+        "SELECT key FROM meta WHERE key LIKE 'cancelled:%'"))
 
 
 def _withdraw(conn, p) -> None:

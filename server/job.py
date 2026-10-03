@@ -60,8 +60,7 @@ def claim(conn, job_id) -> int:
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
     with db.tx(conn):
-        if conn.execute("SELECT 1 FROM meta WHERE key=?",
-                        (passes.cancelled_key(job_id),)).fetchone() is not None:
+        if passes.is_cancelled(conn, job_id):
             raise db.Refusal(passes.CANCELLED_JOB)        # #38 R7-1: never claims again
         m = passes._marker(conn)
         if m is not None and m["live"] and passes.protocol_of(conn, m["pass_id"]) != "job":

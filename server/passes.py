@@ -337,13 +337,24 @@ def cancelled_key(job_id) -> str:
     return f"cancelled:{job_id}"
 
 
+def is_cancelled(conn, job_id) -> bool:
+    """#38 R8-1: `job_id` is a job the operator cancelled — by the #17 matching rule of
+    asks._match_job: a recorded id equal to it, or a recorded prefix (≥ 8 characters, as
+    a notification may name it before the job ever claimed) it starts with."""
+    for (key,) in conn.execute("SELECT key FROM meta WHERE key LIKE 'cancelled:%'"):
+        rec = key[len("cancelled:"):]
+        if job_id == rec or (len(rec) >= 8 and job_id.startswith(rec)):
+            return True
+    return False
+
+
 def check_revoked(conn, token) -> None:
     """#38 R7-1: a token whose claim belongs to a job the operator cancelled is refused —
     every token that job was ever issued, so nothing it sent before the cancel lands."""
     if token is None:
         return
-    if conn.execute("SELECT 1 FROM claims c JOIN meta m ON m.key = 'cancelled:' || c.job_id"
-                    " WHERE c.gen=?", (int(token),)).fetchone() is not None:
+    row = conn.execute("SELECT job_id FROM claims WHERE gen=?", (int(token),)).fetchone()
+    if row is not None and is_cancelled(conn, row[0]):
         raise db.Refusal(CANCELLED_JOB)
 
 

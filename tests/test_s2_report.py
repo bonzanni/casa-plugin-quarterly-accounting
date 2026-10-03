@@ -630,3 +630,78 @@ class CancelRevokes(StoreCase):
                                 (pid,)).fetchone()
         self.assertEqual(tuple(row), (B, None))
         self.assertEqual(self.work(), [("taken", None)])
+
+
+class CancelBeforeClaim(StoreCase):
+    """#38 round 8 (Astra R8-1): a cancel that names a job before its first claim — no
+    claim matches it — still withdraws while no job holds the drain, and the job's later
+    claim is refused, matched by the #17 rule (an equal id, or one starting with the
+    recorded ≥ 8-character prefix)."""
+    LINE = Cancelled.LINE
+    WORDS = CancelRevokes.WORDS
+
+    def drain(self):
+        return Report.drain(self)
+
+    def work(self):
+        return Cancelled.work(self)
+
+    def test_a_cancel_before_the_first_claim_withdraws_and_refuses_the_job(self):
+        import asks, db, job
+        for named in (A, A[:8]):                                    # full id, 8 characters
+            with self.subTest(named=named):
+                self.conn.execute("DELETE FROM meta WHERE key LIKE 'cancelled:%'")
+                self.conn.execute("DELETE FROM work_requests")
+                self.conn.commit()
+                asks.request_work(self.conn, "check", "operator")
+                out = asks.job_report(self.conn, job_id=named, status="cancelled")
+                self.assertIsNone(out["start_job"])
+                self.assertEqual([x["text"] for x in out["texts"]], [self.LINE])
+                self.assertEqual(self.work(), [("done", "stopped")])
+                with self.assertRaises(db.Refusal) as e:
+                    job.claim(self.conn, A)                         # X's job_next
+                self.assertEqual(str(e.exception), self.WORDS)
+                self.assertEqual(self.conn.execute("SELECT count(*) FROM claims"
+                                                   ).fetchone()[0], 0)
+                self.assertEqual(self.conn.execute("SELECT count(*) FROM passes"
+                                                   ).fetchone()[0], 0)
+        t = job.claim(self.conn, B)                                  # a replacement job Y
+        self.assertEqual(job.next_unit(self.conn, t)["unit"], "complete")   # no ask for it
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM passes").fetchone()[0], 0)
+
+    def test_an_unmatched_cancel_while_a_job_holds_the_drain_changes_nothing(self):
+        import asks, job
+        job.claim(self.conn, B)
+        asks.request_work(self.conn, "check", "operator")
+        out = asks.job_report(self.conn, job_id=A, status="cancelled")
+        self.assertEqual(out["texts"], [])
+        self.assertEqual(self.drain(), B)
+        self.assertEqual(self.work(), [("queued", None)])
+        job.claim(self.conn, A)                                      # not recorded: allowed
+
+    def test_a_replayed_unmatched_cancel_changes_nothing(self):
+        import asks, job
+        asks.request_work(self.conn, "check", "operator")
+        first = asks.job_report(self.conn, job_id=A[:8], status="cancelled")
+        asks.request_work(self.conn, "check", "operator")            # asked again after it
+        for named in (A[:8], A):                                     # the same notice, replayed
+            again = asks.job_report(self.conn, job_id=named, status="cancelled")
+            self.assertIsNotNone(again["start_job"])                 # the new ask stands
+        self.assertEqual(self.work(), [("done", "stopped"), ("queued", None)])
+        self.assertEqual([x["render_id"] for x in again["texts"]],
+                         [x["render_id"] for x in first["texts"]])
+        job.claim(self.conn, B)                                      # a new job takes it
+        self.assertEqual(self.drain(), B)
+
+    def test_a_matched_cancel_recorded_in_full_is_replayed_by_its_prefix(self):
+        import asks, job
+        job.claim(self.conn, A)
+        asks.job_report(self.conn, job_id=A, status="cancelled")
+        asks.request_work(self.conn, "check", "operator")
+        asks.job_report(self.conn, job_id=A[:8], status="cancelled")
+        self.assertEqual(self.work(), [("queued", None)])
+
+    def test_the_id_is_still_checked(self):
+        import asks, db
+        with self.assertRaises(db.Refusal):
+            asks.job_report(self.conn, job_id="aaaa", status="cancelled")
