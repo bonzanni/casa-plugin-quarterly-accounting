@@ -122,7 +122,7 @@ class TestSheet(Base):
         self.assertLess(text.index("MISSING"), text.index("I GUESSED THESE"))
         self.assertIn("Adobe · EUR 100.00 · 14 Sep", text)
         self.assertIn("https://adobe.example/invoices", text)
-        self.assertIn("Picked invoice 8841 (17 Sep); 8712 (10 Sep) also fits.", text)
+        self.assertIn("Picked invoice 8841 (17 Sep); 8712 \\(10 Sep\\) also fits.", text)
         self.assertIn('"the Zapier one is wrong"', text)
 
     def test_a_long_list_caps_largest_first_and_counts_the_rest(self):

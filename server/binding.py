@@ -85,6 +85,7 @@ def check_setup(conn) -> dict:
         conditions.append("I can't see bank-feed's tools from here. Check that bank-feed is "
                           "installed on the finance specialist.")
         can_run = False
+    import views        # views imports binding: a module-level import would be circular
     accounts = ((probes.get("bank_accounts") or {}).get("data") or {}).get("accounts")
     if b is None:
         can_run = False
@@ -93,11 +94,11 @@ def check_setup(conn) -> dict:
             conditions.append("No bank account is bound yet.")
         elif len(company) > 1:
             conditions.append("Several company accounts are linked — which one is the business "
-                              "account? " + ", ".join(a.get("label") or a["account_id"]
+                              "account? " + ", ".join(views.field(a.get("label") or a["account_id"])
                                                       for a in company))
         else:
             conditions.append("No company account is linked. bank-feed has: "
-                              + (", ".join(a.get("label") or a["account_id"] for a in accounts)
+                              + (", ".join(views.field(a.get("label") or a["account_id"]) for a in accounts)
                                  or "no accounts")
                               + ". label_account is how an account becomes a company one.")
     elif accounts is not None and not any(a.get("account_id") == b["account_id"]

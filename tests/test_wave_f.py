@@ -9,6 +9,7 @@ from unittest import mock
 from tests._base import StoreCase  # noqa: F401
 from tests.test_tools import ToolCase, _json, _text, _tool
 import db  # noqa: E402
+import views  # noqa: E402
 
 AUTUMN = dt.datetime(2026, 10, 5, 9, 0, tzinfo=dt.timezone.utc)
 
@@ -139,7 +140,7 @@ class TestSendItAgainAfterATimeout(ToolCase):
         staged = _json("stage_for_delivery", channel="telegram", package_id=self.pkg["package_id"])
         out = _json("record_delivery", delivery_id=staged["delivery_id"], outcome="uncertain")
         speak = out["speak"]
-        self.assertEqual(speak["text"], f"{self.pkg['filename']} may not have arrived —\n"
+        self.assertEqual(speak["text"], f"{views.field(self.pkg['filename'])} may not have arrived —\n"
                                         'say "send it again".')
         for f in os.listdir(self.outbox):          # Casa consumed the outbox copy on send
             os.unlink(self.outbox / f)

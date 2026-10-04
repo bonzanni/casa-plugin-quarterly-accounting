@@ -115,7 +115,7 @@ def _units(conn, rows) -> list:
     for a in rows:
         if a["kind"] in COLLECTION:
             c = json.loads(a["detail"])
-            detail = views.clip(c["detail"] or "", DETAIL_MAX)
+            detail = views.field(c["detail"] or "", DETAIL_MAX)
             paren = f" ({detail})" if detail else ""
             text = (GMAIL_ABSENT if a["kind"] == "gmail" and c.get("absent")
                     else COLLECTION[a["kind"]].format(paren=paren))
@@ -131,12 +131,12 @@ def _units(conn, rows) -> list:
                 fname = conn.execute("SELECT filename FROM packages WHERE package_id=?",
                                      (c["package_id"],)).fetchone()[0]
                 lines = delivery.offer_lines(fname) if why is None \
-                    else views._wrap(f"{fname} may not have arrived — {why}.")
+                    else views._wrap(f"{views.field(fname)} may not have arrived — {why}.")
             elif a["kind"] == "package-send-failed" and why is not None:
                 lines = views._wrap(f"The {dates.quarter_label(c['quarter'])} package didn't go "
                                     f"out — {why}.")
             else:
-                reason = (c.get("reason") or "").rstrip(". ")
+                reason = views.field((c.get("reason") or "").rstrip(". "), 300)
                 lines = views._wrap(PACKAGE[a["kind"]].format(
                     quarter=dates.quarter_label(c["quarter"]), reason=reason))
             out.append((a["alert_id"], None, lines))

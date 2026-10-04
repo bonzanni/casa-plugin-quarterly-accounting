@@ -82,7 +82,7 @@ class TestTelegram(Base):
         delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 1)
         text = views.build_review(self.conn, view="status", quarter="2026-Q3")["text"]
-        self.assertIn(self.pkg["filename"], text)
+        self.assertIn(views.field(self.pkg["filename"]), text)
         self.assertIn('say "send it again"', text)
         self.assertEqual(delivery.resendable(self.conn), self.pkg["package_id"])
         again = delivery.stage_for_delivery(self.conn, channel="telegram",
@@ -109,13 +109,13 @@ class TestTelegram(Base):
         for view, page in (("status", None), ("all", 1)):
             text = views.build_review(self.conn, view=view, quarter="2026-Q3", page=page)["text"]
             self.assertIn('say "send it again"', text, view)
-            self.assertLessEqual(views.utf16_len(text), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(text), views.BODY_LIMIT)
             for line in text.splitlines():
                 self.assertLessEqual(len(line), views.WIDTH, (view, line))
             for word in views.FORBIDDEN:
                 self.assertNotIn(word, text, (view, word))
         # a view that does not fit is cut by the final fit, never extended after it
-        with mock.patch.object(views, "TELEGRAM_LIMIT", 120):
+        with mock.patch.object(views, "BODY_LIMIT", 120):
             text = views.build_review(self.conn, view="status", quarter="2026-Q3")["text"]
             self.assertLessEqual(views.utf16_len(text), 120)
 
@@ -278,8 +278,8 @@ class TestResendTarget(Base):
         b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
         self.send(b["package_id"], "delivered")
         text = self.shown()
-        self.assertIn(a["filename"], text)
-        self.assertNotIn(b["filename"], text)
+        self.assertIn(views.field(a["filename"]), text)
+        self.assertNotIn(views.field(b["filename"]), text)
         self.assertEqual(delivery.resend_target(self.conn), a["package_id"])
         self.assertEqual(delivery.resendable(self.conn), a["package_id"])
 

@@ -325,7 +325,7 @@ class StoppedResult(StoreCase):
         self.assertEqual(tools[0], 1)
         texts = [x["text"] for x in asks.job_report(self.conn)["texts"]]
         stops = [x for x in texts if x.startswith("The accounting check stopped")]
-        self.assertEqual(stops, ["The accounting check stopped: bank-feed's tools are not "
+        self.assertEqual(stops, ["The accounting check stopped: bank\\-feed's tools are not "
                                  "available to the finance specialist."])
 
     def test_a_stop_without_a_reason_says_only_that(self):

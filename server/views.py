@@ -18,6 +18,7 @@ import hashlib
 import json
 import re
 import textwrap
+import unicodedata
 
 import amounts
 import binding
@@ -29,6 +30,9 @@ import work
 WIDTH = 64
 CAP = 8
 TELEGRAM_LIMIT = 4096
+LABEL_ALLOWANCE = 64       # Casa's "📊 <display name>" label line: the plugin cannot read it
+PROPOSAL_SETTLE_RESERVE = 1 + 2 + 2 * 32     # casa:result_broker.py, a83d6aa8
+BODY_LIMIT = TELEGRAM_LIMIT - PROPOSAL_SETTLE_RESERVE - LABEL_ALLOWANCE - 1   # 3964 (S7 §7.6)
 VIEWS = ("status", "missing", "check", "rest", "older", "all", "item", "quarter")
 KIND_WORD = {"invoice": "invoice", "sales-invoice": "sales invoice", "credit-note": "credit note",
              "payslip": "payslip", "statement": "statement", "receipt": "receipt",
@@ -80,11 +84,60 @@ class _Names:
 _NAMES = None
 
 
-def field(text, units: int = FIELD_MAX) -> str:
+def field_raw(text, units: int = FIELD_MAX) -> str:
     """A literal free-text field: MARK neutralized, clipped to `units` with a
     digest of its FULL value ("…·3f9a"), as long as this rendering needs for
-    all its clipped values to print distinct."""
+    all its clipped values to print distinct. NOT escaped (see `field`)."""
     return _field(text, units, _NAMES.digest if _NAMES is not None else 4)
+
+
+def field(text, units: int = FIELD_MAX) -> str:
+    """A literal free-text field as DISPLAYED: clipped (field_raw), then escaped (esc)."""
+    return esc(field_raw(text, units))
+
+
+_ESC = set("\\`*_[]()!|#<>~-")
+_LEAD_NUM_DOT = re.compile(r"^(\d+)\.")
+
+
+def _flat(text: str) -> str:
+    return "".join(" " if (ch == "\n" or unicodedata.category(ch) == "Cc") else ch
+                   for ch in text)
+
+
+def esc(text, plain: bool = False):
+    """THE escape (S7 §12): a dynamic field reaches a body only through here (inside
+    `field`). Control characters and newlines become spaces (§7.6: Casa's body check, and
+    a caption's one line); the dialect's markers are backslash-escaped unless `plain` (a
+    file caption is sent as plain text)."""
+    if not text:
+        return text
+    flat = _flat(text)
+    if plain:
+        return flat
+    out = "".join("\\" + ch if ch in _ESC else ch for ch in flat)
+    return _LEAD_NUM_DOT.sub(lambda m: m.group(1) + "\\.", out, count=1)
+
+
+_UNESC = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+
+def unesc(text: str) -> str:
+    """What the dialect displays for escaped text (a backslash before ASCII punctuation
+    is consumed): used to compare a quoted post with a stored rendering (§8)."""
+    return _UNESC.sub(r"\1", text)
+
+
+def deposit_safe(body: str) -> str:
+    """The last step on every body a posting tool deposits (S7 §7.6): any Cc character
+    other than newline and tab becomes a space — renderings stored before S7 included."""
+    return "".join(" " if (unicodedata.category(ch) == "Cc" and ch not in "\n\t") else ch
+                   for ch in body)
+
+
+def caption_safe(line: str) -> str:
+    """A file caption's one line, printable as Casa's _file_caption_ok judges it."""
+    return "".join(ch if ch.isprintable() else " " for ch in line)
 
 
 def _field(text, units, n) -> str:
@@ -796,7 +849,7 @@ def _page(parts, after, first):
                      all_sections_empty_msgs=first)
 
     def fits(page, last):
-        return utf16_len(_text(emit(page, last)[0])) <= TELEGRAM_LIMIT
+        return utf16_len(_text(emit(page, last)[0])) <= BODY_LIMIT
 
     if not flat and not first:
         return list(parts["head"]) + ["", "That is everything."], [], None
@@ -838,7 +891,7 @@ def fit_lines(lines, closing=None, always_close=False) -> tuple:
     """THE fit (fix wave D round 2, generalized after the same shape recurred in
     views, alerts and receipts): every operator-facing message is produced
     through here, and what it returns joins with "\n" to at most
-    TELEGRAM_LIMIT UTF-16 units — every separator and the closing line
+    BODY_LIMIT UTF-16 units — every separator and the closing line
     included, whatever the inputs.
 
     Returns (out_lines, whole): `whole` is how many leading input lines are
@@ -849,10 +902,10 @@ def fit_lines(lines, closing=None, always_close=False) -> tuple:
     `whole` is 0). The closing line is never cut away (it is clipped only if it
     alone exceeds the limit)."""
     lines = list(lines)
-    tail = [clip(closing, TELEGRAM_LIMIT)] if closing else []
-    if utf16_len("\n".join(lines + (tail if always_close else []))) <= TELEGRAM_LIMIT:
+    tail = [clip(closing, BODY_LIMIT)] if closing else []
+    if utf16_len("\n".join(lines + (tail if always_close else []))) <= BODY_LIMIT:
         return lines + (tail if always_close else []), len(lines)
-    budget = TELEGRAM_LIMIT - (utf16_len(tail[0]) + 1 if tail else 0)
+    budget = BODY_LIMIT - (utf16_len(tail[0]) + 1 if tail else 0)
     kept, used = [], 0
     for ln in lines:
         need = utf16_len(ln) + (1 if kept else 0)
@@ -914,7 +967,7 @@ def _item_page(d, after):
     n = 1 if rest else 0
     while n < len(rest) and utf16_len(_text(_item_block(d, rest[:n + 1],
                                                          n + 1 < len(rest)).lines)) \
-            <= TELEGRAM_LIMIT:
+            <= BODY_LIMIT:
         n += 1
     more = n < len(rest)
     return _item_block(d, rest[:n], more), ([rest[n - 1]["match_id"]] if more else None)
@@ -1002,7 +1055,7 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
             for cap in range(CAP, -1, -1):
                 lines, chosen = _capped(parts, cap)
                 text = _text(lines)
-                if utf16_len(text) <= TELEGRAM_LIMIT:
+                if utf16_len(text) <= BODY_LIMIT:
                     break
             if any(len(s.blocks) > sum(1 for c in chosen if c in s.blocks)
                    for s in parts["sections"]):
@@ -1042,7 +1095,7 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
         # the payee name each bound payment was SHOWN as: a reply resolves names
         # against what the operator saw, as well as the stored names (round 7)
         by_pid = {d["pid"]: d for d in items}
-        seen = {str(p): field(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
+        seen = {str(p): field_raw(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
         if seen:
             scope["names"] = seen
     rid = f"r{db.next_seq(conn)}"

@@ -10,6 +10,7 @@ import unittest
 from tests._base import ROOT, StoreCase, TempEnv
 import db  # noqa: E402
 import qa_server  # noqa: E402
+import views  # noqa: E402
 
 sys.modules.setdefault("qa_server", qa_server)
 
@@ -249,7 +250,7 @@ class TestResend(ToolCase):
     def test_send_it_again_stages_the_offered_package(self):
         self.send(self.a["package_id"], "uncertain")
         self.send(self.b["package_id"], "delivered")
-        self.assertIn(self.a["filename"], self.show())
+        self.assertIn(views.field(self.a["filename"]), self.show())
         self.assertIn("resend", _json("apply_reply", text="send it again")["instructions"])
         staged = _json("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(staged["filename"], self.a["filename"])

@@ -7,6 +7,7 @@ import json
 
 from tests._base import StoreCase
 from tests.sim_job import JobDriver
+import views  # noqa: E402
 
 A, B, C, D = "aaaaaaaa-1", "bbbbbbbb-2", "cccccccc-3", "dddddddd-4"
 DEAD_LINK = "HTTP 404 not_found; cached data unchanged"      # casa-test's dead bank link
@@ -61,7 +62,7 @@ class FailedSync(StoreCase):
         # was checked (the date before the failed sync)
         out = asks.job_report(self.conn, job_id=B, status="ok")
         speak = " ".join(out["speak"]["text"].split())     # the rendering wraps its lines
-        self.assertIn(f"The bank connection stopped ({DEAD_LINK}) — new payments aren't "
+        self.assertIn(f"The bank connection stopped ({views.field(DEAD_LINK)}) — new payments aren't "
                       "coming in.", speak)
         texts = " ".join(" ".join(x["text"] for x in out["texts"]).split())
         # the view's coverage line ("First review · bank checked through …" on a first

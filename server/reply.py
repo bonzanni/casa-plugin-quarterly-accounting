@@ -276,7 +276,7 @@ def _resolve(conn, phrase, items):
         return hits[0], None
     if not hits:
         same = [d for d in items if t["vendor"] and t["vendor"] in _names(d, seen_names)]
-        msg = f"Nothing open matches “{phrase}”."
+        msg = f"Nothing open matches “{views.field(phrase)}”."
         if same:
             msg += " Open for that name: " + "; ".join(views.headline(d) for d in same) + "."
         return None, msg
@@ -322,19 +322,19 @@ def _split(line: str) -> list:
     pieces that each fit a message: broken between words, a word longer than a
     message between code points. Nothing is added and nothing lost (fix wave D
     round 2: the previous splitter appended a ";" to a full piece)."""
-    if views.utf16_len(line) <= views.TELEGRAM_LIMIT:
+    if views.utf16_len(line) <= views.BODY_LIMIT:
         return [line]
     out, cur = [], ""
     for word in line.split(" "):
         cand = word if not cur else cur + " " + word
-        if views.utf16_len(cand) <= views.TELEGRAM_LIMIT:
+        if views.utf16_len(cand) <= views.BODY_LIMIT:
             cur = cand
             continue
         if cur:
             out.append(cur)
         cur = ""
         for ch in word:
-            if views.utf16_len(cur + ch) > views.TELEGRAM_LIMIT:
+            if views.utf16_len(cur + ch) > views.BODY_LIMIT:
                 out.append(cur)
                 cur = ""
             cur += ch
@@ -348,7 +348,7 @@ def _pages(lines: list) -> list:
     "the exceptions [riding] in the same receipt" — a summary would drop the
     names that make a misread reply visible. Each page is what views.fit_lines
     keeps whole of the lines still to send, so every page is within
-    TELEGRAM_LIMIT by the one shared fit. `receipt` is the first page; the
+    BODY_LIMIT by the one shared fit. `receipt` is the first page; the
     caller sends `receipt_pages` in order."""
     rest = [p for line in lines for p in _split(line)]
     pages = []
@@ -501,10 +501,10 @@ def apply_reply(conn, text: str) -> dict:
             run.understood = True
             continue
         if clause.endswith("?"):
-            run.lines.append(f"“{clause}” is a question — nothing changed for it.")
+            run.lines.append(f"“{views.field(clause)}” is a question — nothing changed for it.")
             continue
         if _NUMBERED.fullmatch(clause):
-            run.lines.append(f"“{clause}”: there are no numbered lines — name the payee, "
+            run.lines.append(f"“{views.field(clause)}”: there are no numbered lines — name the payee, "
                              "e.g. \"the Zapier one is wrong\".")
             run.unresolved += 1
             continue
@@ -512,11 +512,11 @@ def apply_reply(conn, text: str) -> dict:
             names = _targets(clause)
             if names and all(_resolve(conn, n, items)[0] is not None for n in names):
                 run.understood = True
-                pretty = " and ".join(n.title() if n.islower() else n for n in names)
-                run.lines.append(f"Nothing applied for “{clause}”: are they wrong or good? "
+                pretty = " and ".join(views.field(n.title() if n.islower() else n) for n in names)
+                run.lines.append(f"Nothing applied for “{views.field(clause)}”: are they wrong or good? "
                                  f"Say \"{pretty} are wrong\".")
             else:
-                run.lines.append(f"I didn't understand “{clause}” — nothing applied for it.")
+                run.lines.append(f"I didn't understand “{views.field(clause)}” — nothing applied for it.")
             run.unresolved += 1
             continue
         run.understood = True
@@ -549,7 +549,7 @@ def _apply(conn, run, verb, m, items):
         t = re.sub(r"^the\s+|\s+one$", "", m.group("t").strip())
         d, _ = _resolve(conn, t, items)
         who = d["counterparty"] if d is not None else t
-        run.lines.append(f"Nothing applied for that: say \"all good\" and \"the {who} one is "
+        run.lines.append(f"Nothing applied for that: say \"all good\" and \"the {views.field(who)} one is "
                          "wrong\" as two sentences, or only the one that is wrong.")
         run.unresolved += 1
         return
@@ -618,7 +618,7 @@ def _apply(conn, run, verb, m, items):
         seen_names = _seen_names(conn)
         fits = sorted({d["counterparty"] for d in items if said in _names(d, seen_names)})
         if len(fits) > 1:           # the name the operator saw fits several payees: ask
-            ask = (f"Which one? “{m.group('t').strip()}” could be " + " or ".join(
+            ask = (f"Which one? “{views.field(m.group('t').strip())}” could be " + " or ".join(
                 views.field(n) for n in fits) + " — nothing applied.")
             run.asks.append(ask)
             run.lines.append(ask)
@@ -629,7 +629,7 @@ def _apply(conn, run, verb, m, items):
             known = kb.counterparty_for(conn, said)
             if known is None:
                 # none -> say so, never create a payee from a typo (fix round 1)
-                run.lines.append(f"Nothing open matches “{m.group('t').strip()}”, and I know no "
+                run.lines.append(f"Nothing open matches “{views.field(m.group('t').strip())}”, and I know no "
                                  "payee by that name — nothing applied.")
                 run.unresolved += 1
                 return
@@ -637,7 +637,7 @@ def _apply(conn, run, verb, m, items):
         _broad(conn, run, lambda: kb.set_expectation_in_tx(
                    conn, scope_type="counterparty", scope=name, kind="none",
                    author="operator", render_id=_last_delivered(conn)),
-               f"{name}: never needs a document.")
+               f"{views.field(name)}: never needs a document.")
         return
     if verb == "class_none":
         k = m.group("k")
@@ -663,7 +663,7 @@ def _apply(conn, run, verb, m, items):
         return
     if verb == "name":
         run.setting(lambda: binding.set_package_name(conn, m.group("n")),
-                    lambda res: f"The zips are now called {res['package_name']}-….zip.",
+                    lambda res: f"The zips are now called {views.field(res['package_name'])}-….zip.",
                     "The zip name")
         return
     if verb == "ledger_reset":
@@ -837,5 +837,5 @@ def _one(conn, run, verb, d, m):
         def receipt():
             after = work.describe(conn, d["pid"])
             tail = "; still missing a document." if views._is_missing(after) else "."
-            return f"{d['bank_counterparty']}: {who}{tail}"
+            return f"{views.field(d['bank_counterparty'])}: {views.field(who)}{tail}"
         _broad(conn, run, ident, receipt)

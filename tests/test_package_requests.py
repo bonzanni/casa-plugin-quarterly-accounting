@@ -19,6 +19,7 @@ import delivery  # noqa: E402
 import package  # noqa: E402
 import passes  # noqa: E402
 import steps  # noqa: E402
+import views  # noqa: E402
 
 TAKEN = "refused: this package request has been taken over by a later turn"
 
@@ -146,7 +147,7 @@ class TestHandOver(Requests):
         self.assertIsNone(end["next"])
         self.assertEqual(end["request"]["state"], "stopped")
         self.assertEqual(end["speak"]["text"], "I couldn't build the Q3 2026 package: the bound "
-                                               "account is gone\nfrom bank-feed.")
+                                               "account is gone\nfrom bank\\-feed.")
         self.assertTrue(self.text("end_pass", pass_token=c["pass_token"],
                                   outcome="stopped").startswith(STALE))
         first, second = self.claim(), self.claim()
@@ -927,7 +928,7 @@ class TestAStagedSendIsRecoveredByItsDelivery(Requests):
         self.assertIsNone(steps.claim(other)["continue"])
         out = sim.run_pass(self.conn, self.bf)
         self.assertEqual(out["import"]["revoked_deliveries"], [])
-        self.assertIn(pkg["filename"], out["end"]["speak"]["text"])
+        self.assertIn(views.field(pkg["filename"]), out["end"]["speak"]["text"])
 
     def test_a_stalled_resend_is_taken_back_and_told_on_telegram(self):
         self.recovered("telegram")
@@ -1005,7 +1006,7 @@ class TestEveryCallTellsItsOwnNotice(Requests):
         _, pkg, _ = self.staged()
         self.fill_alerts()
         self.clock.advance(steps.LEASE_S)
-        self.assert_told(self.claim()["speak"], pkg["filename"], "continue_pass")
+        self.assert_told(self.claim()["speak"], views.field(pkg["filename"]), "continue_pass")
 
     def test_record_delivery(self):
         self.seed(1, documents=1)
@@ -1225,7 +1226,7 @@ class TestReviewC6(Requests):
         self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
         os.unlink(d["path"])
         view = self.call("build_review", view="status", quarter="2026-Q3")
-        self.assertIn(pkg["filename"], view["text"])
+        self.assertIn(views.field(pkg["filename"]), view["text"])
         self.assertIn("didn't go out", view["text"])
         self.call("mark_rendering_delivered", render_id=view["render_id"])
         again = self.call("stage_for_delivery", channel="telegram", resend=True)
@@ -1289,7 +1290,7 @@ class TestReviewC7(Requests):
         self.assertIsNone(self.conn.execute("SELECT revoked_at FROM deliveries WHERE"
                                             " delivery_id=?", (d["delivery_id"],)).fetchone()[0])
         view = self.call("build_review", view="status", quarter="2026-Q3")
-        self.assertIn(pkg["filename"], view["text"])
+        self.assertIn(views.field(pkg["filename"]), view["text"])
         self.call("mark_rendering_delivered", render_id=view["render_id"])
         again = self.call("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(again["filename"], pkg["filename"])
@@ -1308,7 +1309,7 @@ class TestReviewC7(Requests):
                               " 'staged', ?, ?)", (pkg["package_id"], db.now(), db.now()))
         self.fill_alerts(1)                      # another pass's alert forces a new rendering
         speak = self.claim()["speak"]
-        self.assertIn(pkg["filename"], speak["text"])       # the outcome is still told
+        self.assertIn(views.field(pkg["filename"]), speak["text"])       # the outcome is still told
         self.assertNotIn("send it again", speak["text"])    # but not offered
         self.assertNotIn("offers", self.scope(speak))
 

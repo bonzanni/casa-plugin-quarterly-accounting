@@ -28,6 +28,7 @@ import matches  # noqa: E402
 import package  # noqa: E402
 import sweep  # noqa: E402
 import work  # noqa: E402
+import views  # noqa: E402
 
 call = test_e2e.TestPackagingSeesTheClassification.call
 read = test_e2e.TestPackagingSeesTheClassification.read
@@ -532,7 +533,7 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
                 os.unlink(self.outbox / f)
         pkg = self.built_then_superseded(before_import=send_uncertain)
         r = call("build_review", view="status", quarter="2026-Q3")
-        self.assertIn(pkg["filename"], r["text"])                     # offered again
+        self.assertIn(views.field(pkg["filename"]), r["text"])                     # offered again
         call("mark_rendering_delivered", render_id=r["render_id"])
         self.assertIn("resend", call("apply_reply", text="send it again")["instructions"])
         staged = call("stage_for_delivery", channel="telegram", resend=True)

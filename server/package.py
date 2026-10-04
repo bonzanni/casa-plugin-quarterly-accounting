@@ -357,7 +357,8 @@ def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, si
         out.append(f"Too large for Telegram ({size / 1e6:.1f} MB; the limit is 20 MB) — kept "
                    "here; notes.md names the largest files.")
     if not b["package_name_announced"]:
-        out.append(f'Files are named "{filename}" — say "call the zips <name>" to change that.')
+        import views
+        out.append(f'Files are named "{views.esc(filename, plain=True)}" — say "call the zips <name>" to change that.')
     return "\n".join(out)
 
 

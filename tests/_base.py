@@ -217,6 +217,30 @@ class StoreCase(TempEnv):
                               % (",".join(r), ",".join("?" * len(r))), tuple(r.values()))
         return r
 
+    def seed_payments(self, rows, tags=("software",)):
+        """Bind, then admit one searched, classified, settled payment per dict in `rows`
+        (bank-row overrides, e.g. counterparty / amount_minor). Returns the pids."""
+        import db
+        import work
+        self.bind()
+        token = self.pass_()
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
+                              " bank_through) VALUES ('p1', 'x', 0, 0, '2026-09-20')")
+        pids = []
+        for n, over in enumerate(rows, 1):
+            self.row(n, booking_date="2026-09-14", value_date="2026-09-14", **over)
+            pid = self.lineage_for(n)
+            self.classify(pid, set(tags))
+            with db.tx(self.conn):
+                self.conn.execute("UPDATE projections SET class_observed_at=? WHERE pid=?",
+                                  ("2026-09-20T10:00:00Z", pid))
+            self.settle(pid)
+            self.handed(pid)
+            work.record_search(self.conn, pid=pid, token=token, queries=["x"])
+            pids.append(pid)
+        return pids
+
     def lineage_for(self, row_id):
         import db
         with db.tx(self.conn):

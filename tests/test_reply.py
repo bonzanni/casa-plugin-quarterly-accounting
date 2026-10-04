@@ -263,7 +263,7 @@ class TestGrammar(Base):
         pid = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)
         self.deliver()
         out = reply.apply_reply(self.conn, "the BCK*XYZ one is my accountant")
-        self.assertIn("BCK*XYZ: my accountant; still missing a document.", out["receipt"])
+        self.assertIn("BCK\\*XYZ: my accountant; still missing a document.", out["receipt"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE kind='exempt'")
                          .fetchone()[0], 0)
         self.assertEqual(self.conn.execute("SELECT status FROM projections WHERE pid=?",
@@ -789,7 +789,7 @@ class TestFieldClip(Base):
                                  expected_revision=self.rev(pid), token=self.token,
                                  row_snapshot=self.snapshot(pid))
         r = self.deliver(view="check")
-        self.assertIn("HIDDEN-B", r["text"])
+        self.assertIn("HIDDEN\\-B", r["text"])
         self.assertIn(views.CLIP_MARK, r["text"])
         self.assertLess(views.utf16_len(r["text"]), 1000)
         out = reply.apply_reply(self.conn, "the Adobe one is wrong")

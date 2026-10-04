@@ -441,6 +441,8 @@ def _stop_line(conn, r) -> str:
     if rep.get("adoptions_exhausted"):
         return KEPT_STOPPING
     reason = str(rep.get("stopped_reason") or "").strip().rstrip(".")
+    import views
+    reason = views.field(reason, 300)
     return f"{STOPPED}: {reason}." if reason else f"{STOPPED}."
 
 
