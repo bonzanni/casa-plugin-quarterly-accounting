@@ -466,7 +466,9 @@ class TestSetupSentence(ToolCase):
 
 
 class TestInstallSmoke(TempEnv):
-    def test_resident_files_specialist_reads_the_same_record_resident_stages_it(self):
+    def test_one_server_files_another_reads_the_same_record(self):
+        # final fix wave T11-a: a single document is no longer staged from the surface
+        # (post_package posts packages only); the staging half now pins the refusal
         env = dict(os.environ)
         resident, specialist = _server(env), _server(env)
         try:
@@ -478,11 +480,10 @@ class TestInstallSmoke(TempEnv):
                                      document_date="2026-09-01"))
             seen = json.loads(_call(specialist, "list_unmatched_documents", 2))
             self.assertEqual([d["doc_id"] for d in seen["documents"]], [filed["doc_id"]])
-            staged = json.loads(_call(resident, "stage_for_delivery", 3, channel="telegram",
-                                      doc_id=filed["doc_id"]))
-            self.assertTrue(os.path.exists(staged["path"]))
-            stored = next((self.data / "documents").rglob("*.pdf"))
-            self.assertEqual(pathlib.Path(staged["path"]).read_bytes(), stored.read_bytes())
+            staged = _call(resident, "stage_for_delivery", 3, channel="telegram",
+                           doc_id=filed["doc_id"])
+            self.assertEqual(staged, "refused: a single document is not sent from here — "
+                                     "nothing was staged")
         finally:
             for p in (resident, specialist):
                 p.stdin.close()
