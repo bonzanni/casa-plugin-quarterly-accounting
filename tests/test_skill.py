@@ -75,7 +75,7 @@ class TestBothSkills(TempEnv):
     def test_the_job_skill_fits_its_budget(self):
         self.assertLessEqual(len(JOB), 20000, len(JOB))
 
-    @unittest.expectedFailure  # S7-merge: needs Tasks 5–11 surface
+    @unittest.expectedFailure  # S7-merge: needs post_results, post_package (Tasks 10–11)
     def test_every_backticked_tool_exists(self):
         import tools  # noqa: F401
         ours = set(qa_server.TOOLS)
@@ -89,7 +89,7 @@ class TestBothSkills(TempEnv):
                 if "_" in n:
                     self.assertIn(n, ours | EXTERNAL, (name, n))
 
-    @unittest.expectedFailure  # S7-merge: needs Tasks 5–11 surface
+    @unittest.expectedFailure  # S7-merge: needs mark_rendering_delivered(render_ids) (Task 10)
     def test_every_named_argument_exists_on_its_tool(self):
         """`tool(arg=…, …)`: each keyword a call of OUR tool names is in that
         tool's schema, so the skill cannot teach an argument the server drops."""
@@ -103,7 +103,7 @@ class TestBothSkills(TempEnv):
                 for kw in re.findall(r"(?:^|[(,\s])([a-z_]+)=", args):
                     self.assertIn(kw, props, f"{name}({kw}=)")
 
-    @unittest.expectedFailure  # S7-merge: needs Tasks 5–11 surface
+    @unittest.expectedFailure  # S7-merge: needs post_results, post_package (Tasks 10–11)
     def test_the_skills_call_only_the_s7_surface(self):
         """The S7 tools both skills call are on the surface (§15), so the backticked-tool
         pin above is not vacuous for them."""

@@ -72,6 +72,16 @@ class StoreCase(TempEnv):
         with db.tx(self.conn):
             return fn(self.conn, *args, grant=self.grant(), **kw)
 
+    def run_job_to_complete(self, job_id) -> list:
+        """Job run `job_id`, driven by the S2 simulator (tests/sim_job.py) from its claim
+        until `complete`. Binds the account and builds the driver on first use."""
+        if getattr(self, "_job_driver", None) is None:
+            from tests.sim_job import JobDriver
+            if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
+                self.bind()
+            self._job_driver = JobDriver(self)
+        return self._job_driver.run_job(job_id)
+
     def operator_pair(self, *, pid, doc_id, expected_revision, render_id):
         """The operator pairs a document with a payment they were shown (what
         record_match(author="operator") did before S7 §8.1: in the server only a tap's
@@ -287,6 +297,26 @@ class StoreCase(TempEnv):
             self.conn.execute("UPDATE package_requests SET lease_at=? WHERE state='built'",
                               (lapsed,))
         return token
+
+    def stage_stalled_package(self, quarter="2026-Q3"):
+        """A package's first send staged and never settled, its holder gone: package_built_
+        unsent(), staged under its package_token, then the delivery's lease set to a lapsed
+        time — the stalled send any claim recovers (S7 §6.1; S2's job_report recovery case,
+        moved here). Returns its delivery_id."""
+        import datetime as _dt
+        import db
+        import delivery
+        import steps
+        token = self.package_built_unsent(quarter)
+        pkg = self.conn.execute("SELECT package_id FROM package_requests WHERE state='built'"
+                                ).fetchone()[0]
+        d = delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg,
+                                        package_token=token)
+        lapsed = steps._stamp(db._clock() - _dt.timedelta(seconds=steps.LEASE_S + 60))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE deliveries SET lease_at=?, created_at=? WHERE"
+                              " delivery_id=?", (lapsed, lapsed, d["delivery_id"]))
+        return d["delivery_id"]
 
     def check_round(self, token, gmail_ok=True, triage_remaining=0):
         """The rest of a package round (issue #15): Ellen's Gmail round (its probe) and

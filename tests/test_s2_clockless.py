@@ -139,25 +139,6 @@ class InTxCores(StoreCase):
             self.assertEqual(passes.judgment_gap(self.conn, pid), 0)
             passes._judgment_owed(self.conn, pid)                          # no refusal
 
-    def test_choose_sends_only_skips_the_pass(self):
-        import db, steps
-        import datetime as dt
-        t = self.pass_("cron")
-        steps.start(self.conn, t, "sweep", {})
-        later = db._clock() + dt.timedelta(seconds=steps.STEP_EXPIRY_S + 5)
-        with self.patch_clock(later):
-            self.assertEqual(steps._choose(self.conn)[0], "pass")
-            self.assertEqual(steps._choose(self.conn, sends_only=True)[0], "none")
-
-    def test_choose_sends_only_skips_the_round(self):
-        import db, passes, steps
-        passes.begin_pass(self.conn, "package", quarter="2026-Q3", channel="telegram")
-        with db.tx(self.conn):          # the pass gone, its request queued for a round
-            self.conn.execute("UPDATE pass_marker SET live=0")
-            self.conn.execute("UPDATE package_requests SET state='queued', pass_id=NULL")
-        self.assertEqual(steps._choose(self.conn)[0], "round")
-        self.assertEqual(steps._choose(self.conn, sends_only=True)[0], "none")
-
     def test_patch_clock_restores_the_clock(self):
         import db
         real = db._clock

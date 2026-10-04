@@ -191,7 +191,9 @@ def obj(props, required=()):
           "File a document into custody. source_path must be a path in Casa's handoff folder "
           "(gmail's download_attachment, or share_inbound_file for a document the operator "
           "sent); any other path is refused. Bytes are copied and hashed; filing the same bytes "
-          "twice returns the same doc_id. The metadata is your provisional reading, for filing. During a pass, pass the pass_token.",
+          "twice returns the same doc_id. The metadata is your provisional reading, for filing. "
+          "extraction_author is desk (a desk turn's filing, no token) or specialist (the "
+          "job's filing). During a pass, pass the pass_token.",
           obj({"source_path": S, "kind": S, "source": S, "extraction_author": S,
                "counterparty": S, "issuer": S, "document_date": S, "document_number": S,
                "amount_minor": I, "currency": S, "recipient": S, "source_ref": S,
@@ -452,28 +454,13 @@ def t_job_status(args):
     return job.status(conn(), args["job_id"])
 
 
-@register("job_report",
-          "Ellen: on every notification about the accounting job (pass the id it names and "
-          "status: ok for a clean finish, cancelled when it says \"Cancelled by user\" — "
-          "nothing restarts — error for any other end) and at the end of every accounting "
-          "turn (no arguments) — "
-          "after the operator's message was answered or applied, never before. Send "
-          "`speak` first, then every `texts` entry in the order given, each verbatim and each "
-          "then mark_rendering_delivered (the operator's reply binds to the last one shown). "
-          "With `more: true`, call job_report again after sending what you got: more pages "
-          "wait. Do a `continue` as Packaging step 3 says; if `start_job` is set, call "
-          "start_job with it.",
-          obj({"job_id": S, "status": S}))
-def t_job_report(args):
-    import asks
-    return _deliverable("job_report", asks.job_report(conn(), job_id=args.get("job_id"),
-                                                      status=args.get("status")))
-
-
 @register("request_work",
-          "Ellen: record a check (kind=check, trigger cron|operator) or a handed-over "
-          "document (kind=handover, trigger=operator, doc_ids) BEFORE start_job; then call "
-          "start_job with the returned start_job and say the returned line.",
+          "Record a check (kind=check, trigger=operator) or a filed document handed over "
+          "(kind=handover, trigger=operator, doc_ids) BEFORE start_job; then start_job with "
+          "the returned start_job; then say the result's reading: "
+          "pending → `line`; job_busy → ask_state(kind, request_id) and say its line; "
+          "anything else → \"I couldn't start the check (<Casa's message>). Ask again in "
+          "a minute.\"",
           obj({"kind": S, "trigger": S, "doc_ids": AI}, ("kind", "trigger")))
 def t_request_work(args):
     import asks
@@ -482,13 +469,25 @@ def t_request_work(args):
 
 
 @register("request_package",
-          "Ellen: ask for a quarter's package (channel telegram or email) BEFORE start_job; "
-          "then start_job with the returned start_job, and say the returned line.",
-          obj({"quarter": Q, "channel": S}, ("quarter", "channel")))
+          "Ask for a quarter's package BEFORE start_job; then start_job with the returned "
+          "start_job; then say the result's reading: "
+          "pending → `line`; job_busy → ask_state(kind, request_id) and say its line; "
+          "anything else → \"I couldn't start the check (<Casa's message>). Ask again in "
+          "a minute.\"",
+          obj({"quarter": Q}, ("quarter",)))
 def t_request_package(args):
     import asks
-    _need(args, "quarter", "channel")
-    return asks.request_package(conn(), _quarter(args), args["channel"])
+    _need(args, "quarter")
+    return asks.request_package(conn(), _quarter(args))
+
+
+@register("ask_state",
+          "Read-only: will the running accounting job take this ask? Say its `line`.",
+          obj({"kind": S, "request_id": I}, ("kind", "request_id")))
+def t_ask_state(args):
+    import asks
+    _need(args, "kind", "request_id")
+    return asks.ask_state(conn(), args["kind"], _int(args, "request_id"))
 
 
 @register("record_filing",

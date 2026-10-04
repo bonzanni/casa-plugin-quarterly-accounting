@@ -34,7 +34,7 @@ class Base(StoreCase):
     def file(self, **meta):
         self.k += 1
         args = dict(source_path=self.publish(f"d{self.k}.pdf", PDF + str(self.k).encode()),
-                    kind="invoice", source="gmail", extraction_author="resident",
+                    kind="invoice", source="gmail", extraction_author="desk",
                     counterparty="Adobe", issuer="Adobe", currency="EUR",
                     document_number=f"N{self.k}")
         args.update(meta)
