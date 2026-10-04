@@ -58,6 +58,11 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
             r = conn.execute("SELECT * FROM renders WHERE render_id=?",
                              (out["render_id"],)).fetchone()
         scope = json.loads(r["scope_json"])
+        if walk is not None and r["kind"] == "item" and scope.get("walk") != walk:
+            # r3 #5: a typed "more" on this page carries the walk, as its More button does
+            scope["walk"] = walk
+            conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
+                         (db.canonical(scope), r["render_id"]))
         buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r, walk))
         revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
         value = _proposal(r["text"], buttons, revision)
@@ -93,9 +98,8 @@ def post_results(conn, render_ids) -> dict:
 
 
 CAPTION_MAX = 900          # 1024 − views.LABEL_ALLOWANCE − 1, rounded down (§6.1)
-PKG_REFUSED = "the package could not be sent under its name ({code}) — ask again"
-ALREADY_POSTED = ("that package was already sent — nothing was posted again; wait for its "
-                  "receipt, then record_delivery")
+PKG_REFUSED = "the package could not be sent under its name — ask again"
+ALREADY_POSTED = "That package was already sent once — nothing was posted again."
 
 
 def post_package(conn, delivery_id, package_token=None) -> dict:
@@ -146,11 +150,11 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
                 if req is not None:
                     conn.execute("UPDATE package_requests SET state='stopped', reason=?,"
                                  " updated_at=? WHERE request_id=?",
-                                 (PKG_REFUSED.format(code=exc.code), now, req["request_id"]))
+                                 (PKG_REFUSED, now, req["request_id"]))
                     alerts.raise_package(conn, "package-not-sent",
                                          f"request:{req['request_id']}:posted",
                                          quarter=pk["quarter"])
-        raise db.Refusal(PKG_REFUSED.format(code=exc.code))
+        raise db.Refusal(PKG_REFUSED)
     return {"package": ref, "delivery_id": delivery_id, "filename": pk["filename"]}
 
 

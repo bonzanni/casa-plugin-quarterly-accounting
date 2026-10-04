@@ -760,8 +760,17 @@ def _apply(conn, run, verb, m, items):
         if m.group("s") in ("more", "all of them"):
             # a desk turn is a fresh session (S7 §2): it cannot know the cursor, so the
             # bound rendering's own `next` is returned as ready show_view arguments
-            nxt = (json.loads(run.bound["scope_json"]).get("next")
-                   if run.bound is not None else None)
+            scope = json.loads(run.bound["scope_json"]) if run.bound is not None else {}
+            nxt = scope.get("next")
+            if run.bound is not None and run.bound["kind"] in views.VIEWS \
+                    and "next" not in scope:
+                # r3 #4: a page delivered before S7 stored no `next` (an explicit null is
+                # "nothing more"): a fresh paged view of the same view and quarter
+                nxt = {"view": run.bound["kind"], "quarter": scope.get("quarter"), "page": 1}
+                if run.bound["kind"] == "item":
+                    nxt["pid"] = scope.get("pid")
+            elif nxt and run.bound["kind"] == "item" and scope.get("walk"):
+                nxt = dict(nxt, walk=scope["walk"])      # r3 #5: as the More button does
             if nxt:
                 run.instructions.append({"show_view": nxt})
             else:
