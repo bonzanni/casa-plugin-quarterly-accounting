@@ -21,10 +21,16 @@
     "resultContract": {
       "version": 1,
       "tools": {
+        "apply_reading": {
+          "result": "safe"
+        },
         "build_quarterly_package": {
           "result": "safe"
         },
         "build_review": {
+          "result": "safe"
+        },
+        "cancel_reading": {
           "result": "safe"
         },
         "check_setup": {
@@ -65,6 +71,15 @@
         },
         "propose_match": {
           "result": "safe"
+        },
+        "propose_reading": {
+          "result": "capability",
+          "provides": [
+            "reading"
+          ],
+          "delivers": {
+            "reading": "operator_proposal"
+          }
         },
         "read_document": {
           "result": "safe"
@@ -126,8 +141,10 @@
       }
     },
     "provides_tools": [
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__apply_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_quarterly_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_review",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__cancel_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__check_setup",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__get_counterparty",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__import_ledger_export",
@@ -141,6 +158,7 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__mark_irrelevant",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__mark_rendering_delivered",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__propose_match",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__propose_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__read_document",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_delivery",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_filing",

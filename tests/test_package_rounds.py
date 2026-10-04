@@ -12,7 +12,6 @@ from tests import _base  # noqa: F401  (puts server/ on sys.path)
 from tests import sim
 from tests.test_package_requests import Requests
 import db  # noqa: E402
-import reply  # noqa: E402
 import work  # noqa: E402
 
 
@@ -356,8 +355,8 @@ class TestSendTheLastBuild(Rounds):
         # be refused once the bank moved on, and a staged first send would be revoked
         self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
                   package_token=p)
-        # S7: the tool left the surface; Task 6 ports this line to propose_reading
-        out = reply.apply_reply(self.conn, "send me the last package you built for Q3")
+        # S7 §6.3/§8: send-last is a direct — propose_reading returns it, posts nothing
+        out = self.call("propose_reading", text="send me the last package you built for Q3")
         self.assertEqual(out["instructions"], ["send last 2026-Q3"])
         again = self.call("stage_for_delivery", channel="telegram", last_built=True,
                           quarter="2026-Q3")

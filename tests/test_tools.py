@@ -9,7 +9,6 @@ import unittest
 
 from tests._base import ROOT, StoreCase, TempEnv
 import db  # noqa: E402
-import reply  # noqa: E402
 import qa_server  # noqa: E402
 import views  # noqa: E402
 
@@ -32,6 +31,8 @@ EXPECTED = {
     # set_package_name, stop_chasing and apply_reply left the surface (a tap's grant only)
     # S7 §7 (Task 5): a view posted with its buttons, and the verdict a button carries
     "show_view", "verdict",
+    # S7 §8 (Task 6): typed words read into a reading, and its Apply / Cancel buttons
+    "propose_reading", "apply_reading", "cancel_reading",
 }
 
 
@@ -89,14 +90,14 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 32)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2
+        self.assertEqual(len(EXPECTED), 35)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 32)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 35)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
@@ -156,8 +157,9 @@ class TestDeliverableBoundary(TempEnv):
                  ("record_delivery", delivery, "record_delivery",
                   {"speak": {"render_id": "r1", "text": big}},
                   {"delivery_id": 1, "outcome": "uncertain"})]
-        # S7 Task 4: apply_reply (receipt, receipt_pages) left the surface; Task 6's
-        # reading tools carry the receipt keys again
+        # S7: apply_reply (receipt, receipt_pages) left the surface (Task 4); a reading's
+        # proposal and its Apply receipt are fitted by construction (views.fit_message,
+        # views.fits_proposal), pinned in test_s7_readings and test_fit
         for tool, mod, fn, out, args in cases:
             with mock.patch.object(mod, fn, lambda *a, _o=out, **k: _o):
                 res = _tool(tool, **args)
@@ -219,8 +221,8 @@ class TestPassTokens(ToolCase):
 
 
 class TestResend(ToolCase):
-    """'send it again': apply_reply emits the instruction `resend`; Ellen calls
-    stage_for_delivery(resend=true), which stages what the last delivered
+    """'send it again': propose_reading returns the instruction `resend`; the desk turn
+    calls stage_for_delivery(resend=true), which stages what the last delivered
     rendering offered (delivery.resend_target)."""
     def setUp(self):
         super().setUp()
@@ -251,9 +253,8 @@ class TestResend(ToolCase):
         self.send(self.a["package_id"], "uncertain")
         self.send(self.b["package_id"], "delivered")
         self.assertIn(views.field(self.a["filename"]), self.show())
-        # S7: the tool left the surface; Task 6 ports this line to propose_reading
-        self.assertIn("resend",
-                      reply.apply_reply(self.conn, "send it again")["instructions"])
+        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
+        self.assertIn("resend", _json("propose_reading", text="send it again")["instructions"])
         staged = _json("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(staged["filename"], self.a["filename"])
         self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),

@@ -9,7 +9,6 @@ from unittest import mock
 from tests._base import StoreCase  # noqa: F401
 from tests.test_tools import ToolCase, _json, _text, _tool
 import db  # noqa: E402
-import reply  # noqa: E402
 import views  # noqa: E402
 
 AUTUMN = dt.datetime(2026, 10, 5, 9, 0, tzinfo=dt.timezone.utc)
@@ -138,9 +137,8 @@ class TestSendItAgainAfterATimeout(ToolCase):
         for f in os.listdir(self.outbox):          # Casa consumed the outbox copy on send
             os.unlink(self.outbox / f)
         _json("mark_rendering_delivered", render_id=speak["render_id"])
-        # S7: the tool left the surface; Task 6 ports this line to propose_reading
-        self.assertIn("resend",
-                      reply.apply_reply(self.conn, "send it again")["instructions"])
+        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
+        self.assertIn("resend", _json("propose_reading", text="send it again")["instructions"])
         again = _json("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(again["filename"], self.pkg["filename"])
         self.assertNotEqual(again["path"], staged["path"])          # a path of its own

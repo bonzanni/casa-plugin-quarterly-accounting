@@ -29,6 +29,18 @@ QUERY_CLIP = 200           # one recorded search query (issue #3: the record is 
 
 def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhausted=False,
                   incomplete=False, identity_unknown=None, revive=False) -> dict:
+    with db.tx(conn):
+        return record_search_in_tx(conn, pid=pid, token=token, queries=queries,
+                                   found_candidate=found_candidate, exhausted=exhausted,
+                                   incomplete=incomplete, identity_unknown=identity_unknown,
+                                   revive=revive)
+
+
+def record_search_in_tx(conn, *, pid, token, queries=(), found_candidate=False,
+                        exhausted=False, incomplete=False, identity_unknown=None,
+                        revive=False) -> dict:
+    """record_search inside the caller's transaction (a reading's "have another look",
+    S7 §8: it runs in a savepoint of its clause)."""
     import passes
     # Only actual search effort — a query run, a candidate found, or the idea-space
     # exhausted — is "searched". A bare `incomplete` (no queries: the pass ran out of
@@ -45,85 +57,84 @@ def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhaus
     # which is how an operator's reply re-arms an item outside a pass (fix round 1, finding 4).
     if token is None and not (revive and not effort):
         raise db.Refusal("search bookkeeping is a pass's work: pass the pass_token")
-    with db.tx(conn):
-        passes.check_token(conn, token)
-        pid = lineage.resolve_pid(conn, pid)
-        p = lineage.projection(conn, pid)
-        search = json.loads(p["search_json"] or "{}")
-        cur = passes.current_pass(conn)
-        pass_id = cur["pass_id"] if cur else None
-        if token is not None and pass_id is not None:
-            # issue #26/#28 (A4): a search is recorded only for the work handed out — the
-            # open chunk's payments. A call without effort (an identity question, a bare
-            # incomplete, a quiet revive) is accepted anywhere, as before
-            import steps
-            in_chunk = steps.chunk_has(conn, pass_id, pid)
-            if effort and not in_chunk:
-                raise db.Refusal(f"payment #{pid} is not in the work you were handed: search "
-                                 "and record only the payments job_next hands out in its "
-                                 "Gmail items — nothing was written")
-            if in_chunk:
-                steps.chunk_recorded(conn, pass_id, pid)
-                import job
-                job.credit_search(conn, token, pid)     # INV-J8: a search item recorded
-        state, streak = p["search_state"], p["passes_without_candidate"]
-        if revive:
-            state, streak = "active", 0
-        identity = p["identity_question"] if identity_unknown is None else int(bool(identity_unknown))
-        if not effort:
-            # No search effort was spent here: a quiet revive (state/streak above), an
-            # identity-only call, and/or an incomplete-only call (the pass never reached
-            # this item) move nothing else.
-            if identity_unknown and token is not None:
-                # issue #27: the payee is unknown — this check (or package round) asked,
-                # and does not hand the item out again; the next one does
-                search["identity_seq"] = db.next_seq(conn)
-                live = lineage.live_row(conn, p)
-                search["identity_fp"] = (db.canonical(R.facts_of(live))
-                                         if live is not None else None)
-            conn.execute("UPDATE projections SET search_json=?, search_state=?,"
-                         " passes_without_candidate=?, identity_question=? WHERE pid=?",
-                         (db.canonical(search), state, streak, identity, pid))
-            lineage.settle(conn, pid)
-            return {"pid": pid, "search_state": state, "passes_without_candidate": streak}
-        may_count = _may_count(search)         # before this search's own stamps
-        if queries:
-            had = search.get("queries", [])
-            new = []
-            for q in (budget.clip(q, QUERY_CLIP) for q in queries):
-                if q not in had and q not in new:
-                    new.append(q)
-            search["queries"] = (had + new)[-50:]
-        search["exhausted"] = bool(exhausted)
-        search["incomplete"] = bool(incomplete)
-        search["last_searched_at"] = db.now()
-        # issue #15: a package request counts a search only if it came after the request
-        # (the store sequence: stamps are whole seconds) and the payment's facts are
-        # still the ones searched for
-        search["searched_seq"] = db.next_seq(conn)
-        live = lineage.live_row(conn, p)
-        search["facts_fp"] = db.canonical(R.facts_of(live)) if live is not None else None
-        # issue #24 (D4, Terra S1): a check searches what it owes though a judgment paired
-        # the item first; that search counts for the report, but an item that needs no
-        # search now never moves its age-out count (0.6.0 never searched it at all)
-        owed_only = not revive and not _needs_search(describe(conn, pid))
-        if owed_only:
-            pass
-        elif found_candidate:
-            streak = 0
-            if state == "aged-out":
-                state = "active"            # B4: a re-armed search that found something
-        elif not revive and pass_id and may_count:
-            streak += 1
-            search["last_counted_pass"] = pass_id
-            search["last_counted_at"] = db.now()
-        if not owed_only and state == "active" and streak >= AGE_OUT_PASSES:
-            state = "aged-out"
+    passes.check_token(conn, token)
+    pid = lineage.resolve_pid(conn, pid)
+    p = lineage.projection(conn, pid)
+    search = json.loads(p["search_json"] or "{}")
+    cur = passes.current_pass(conn)
+    pass_id = cur["pass_id"] if cur else None
+    if token is not None and pass_id is not None:
+        # issue #26/#28 (A4): a search is recorded only for the work handed out — the
+        # open chunk's payments. A call without effort (an identity question, a bare
+        # incomplete, a quiet revive) is accepted anywhere, as before
+        import steps
+        in_chunk = steps.chunk_has(conn, pass_id, pid)
+        if effort and not in_chunk:
+            raise db.Refusal(f"payment #{pid} is not in the work you were handed: search "
+                             "and record only the payments job_next hands out in its "
+                             "Gmail items — nothing was written")
+        if in_chunk:
+            steps.chunk_recorded(conn, pass_id, pid)
+            import job
+            job.credit_search(conn, token, pid)     # INV-J8: a search item recorded
+    state, streak = p["search_state"], p["passes_without_candidate"]
+    if revive:
+        state, streak = "active", 0
+    identity = p["identity_question"] if identity_unknown is None else int(bool(identity_unknown))
+    if not effort:
+        # No search effort was spent here: a quiet revive (state/streak above), an
+        # identity-only call, and/or an incomplete-only call (the pass never reached
+        # this item) move nothing else.
+        if identity_unknown and token is not None:
+            # issue #27: the payee is unknown — this check (or package round) asked,
+            # and does not hand the item out again; the next one does
+            search["identity_seq"] = db.next_seq(conn)
+            live = lineage.live_row(conn, p)
+            search["identity_fp"] = (db.canonical(R.facts_of(live))
+                                     if live is not None else None)
         conn.execute("UPDATE projections SET search_json=?, search_state=?,"
                      " passes_without_candidate=?, identity_question=? WHERE pid=?",
                      (db.canonical(search), state, streak, identity, pid))
         lineage.settle(conn, pid)
         return {"pid": pid, "search_state": state, "passes_without_candidate": streak}
+    may_count = _may_count(search)         # before this search's own stamps
+    if queries:
+        had = search.get("queries", [])
+        new = []
+        for q in (budget.clip(q, QUERY_CLIP) for q in queries):
+            if q not in had and q not in new:
+                new.append(q)
+        search["queries"] = (had + new)[-50:]
+    search["exhausted"] = bool(exhausted)
+    search["incomplete"] = bool(incomplete)
+    search["last_searched_at"] = db.now()
+    # issue #15: a package request counts a search only if it came after the request
+    # (the store sequence: stamps are whole seconds) and the payment's facts are
+    # still the ones searched for
+    search["searched_seq"] = db.next_seq(conn)
+    live = lineage.live_row(conn, p)
+    search["facts_fp"] = db.canonical(R.facts_of(live)) if live is not None else None
+    # issue #24 (D4, Terra S1): a check searches what it owes though a judgment paired
+    # the item first; that search counts for the report, but an item that needs no
+    # search now never moves its age-out count (0.6.0 never searched it at all)
+    owed_only = not revive and not _needs_search(describe(conn, pid))
+    if owed_only:
+        pass
+    elif found_candidate:
+        streak = 0
+        if state == "aged-out":
+            state = "active"            # B4: a re-armed search that found something
+    elif not revive and pass_id and may_count:
+        streak += 1
+        search["last_counted_pass"] = pass_id
+        search["last_counted_at"] = db.now()
+    if not owed_only and state == "active" and streak >= AGE_OUT_PASSES:
+        state = "aged-out"
+    conn.execute("UPDATE projections SET search_json=?, search_state=?,"
+                 " passes_without_candidate=?, identity_question=? WHERE pid=?",
+                 (db.canonical(search), state, streak, identity, pid))
+    lineage.settle(conn, pid)
+    return {"pid": pid, "search_state": state, "passes_without_candidate": streak}
 
 
 def _counted_age(search: dict):

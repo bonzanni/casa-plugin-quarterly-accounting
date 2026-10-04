@@ -111,3 +111,58 @@ def verdict(conn, render_id, action, pid, key) -> dict:
                 quarters.add(d["quarter"])
         lines += reply.package_lines(conn, quarters)
     return {"receipt": views.fit_message(lines), "applied": applied}
+
+
+CHANGED = ("Something changed since I read your message — nothing was applied. Say it again.")
+DONE = {"applied": "That was applied already.", "cancelled": "That was cancelled — nothing "
+        "was applied.", "stale": keys.NO_LONGER}
+
+
+def _reading(conn, reading_id, key):
+    import hmac
+    row = conn.execute("SELECT * FROM readings WHERE reading_id=?", (reading_id,)).fetchone() \
+        if isinstance(reading_id, int) and not isinstance(reading_id, bool) else None
+    if (row is None or not isinstance(key, str) or not keys.KEY_RE.fullmatch(key)
+            or not hmac.compare_digest(row["key"], key)):
+        raise db.Refusal(keys.NO_LONGER)
+    if row["state"] != "open":
+        raise db.Refusal(DONE[row["state"]])
+    return row
+
+
+class _Changed(Exception):
+    pass
+
+
+def apply_reading(conn, reading_id, key) -> dict:
+    """§8: Apply on a reading. After the key check, the stored words are read again under
+    the operator's grant, bound to the same rendering, in ONE transaction; they commit only
+    when that plan is exactly the stored one — every step, every revision it read, the
+    binding row. Anything else: nothing applies, and the reading is stale."""
+    with db.tx(conn):
+        row = _reading(conn, reading_id, key)
+        grant = authority.OperatorGrant("apply_reading", key)
+        try:
+            with db.savepoint(conn, "replay"):
+                out = reply.replay(conn, row, grant)
+                if db.canonical(out["plan"]) != row["plan_json"]:
+                    raise _Changed
+        except _Changed:
+            conn.execute("UPDATE readings SET state='stale', settled_at=? WHERE reading_id=?",
+                         (db.now(), reading_id))
+            return {"receipt": CHANGED}
+        conn.execute("UPDATE readings SET state='applied', settled_at=? WHERE reading_id=?",
+                     (db.now(), reading_id))
+        lines = [x for x in out["receipt"] if not x.startswith("Not rebuilding yet")]
+        lines += reply.package_lines(conn, out["quarters"])
+    return {"receipt": views.fit_message(lines)}
+
+
+def cancel_reading(conn, reading_id, key) -> dict:
+    """§8: Cancel on a reading — nothing is applied, and the key is spent. It constructs no
+    grant: it writes no operator authority."""
+    with db.tx(conn):
+        _reading(conn, reading_id, key)
+        conn.execute("UPDATE readings SET state='cancelled', settled_at=? WHERE reading_id=?",
+                     (db.now(), reading_id))
+    return {"receipt": "Cancelled — nothing was applied."}

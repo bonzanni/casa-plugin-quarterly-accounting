@@ -89,7 +89,7 @@ def upsert_counterparty(conn, name, *, patterns=(), source=None, document_link=N
 
 def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, link_note=None,
                  search_hint=None, notes=None, window_days=None) -> dict:
-    """The upsert inside the caller's transaction (apply_reply's identity clause
+    """The upsert inside the caller's transaction (a reading's identity clause
     checks the shown revision in the same transaction as this write)."""
     import lineage
     if not (name or "").strip():

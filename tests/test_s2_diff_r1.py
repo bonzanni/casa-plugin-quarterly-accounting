@@ -5,9 +5,8 @@ instance switched mid-pass after the reset acknowledgement stops the pass.
 The relay tests drive the registered tools (qa_server.TOOLS) against a synthetic bank,
 as the round's reproductions did (Astra, /tmp/s2-review-XQEBYB/review_repro.py)."""
 import datetime
-import unittest
 
-from tests._base import StoreCase
+from tests._base import StoreCase, apply_now
 from tests.sim_job import JobDriver
 
 A, B = "aaaaaaaa-1", "bbbbbbbb-2"
@@ -144,41 +143,38 @@ class Tools(StoreCase):
 
 
 class InformationalPages(Tools):
-    """R3: handover case lines and stop lines never move the reply binding; R5/R6: a
-    non-binding offer is a refusal boundary."""
+    """R3: handover case lines and stop lines never move the reply binding. S7 §9 deletes
+    the R5/R6 non-binding boundary: "send it again" binds to the offer last delivered
+    (§6.3), whoever handed it out."""
 
-    def test_an_offer_relayed_in_an_operators_turn_is_a_boundary(self):
-        """R5/R6: the same resend offer, handed out by a no-id job_report (an operator's
-        turn) and delivered, is non-binding: "send it again" in the next message refuses
-        there, and nothing is sent."""
-        import db
-        self.uncertain_package()
+    def resent(self):
+        before = self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]
+        again = self.call("stage_for_delivery", channel="telegram", resend=True)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
+                         before + 1)
+        return self.conn.execute("SELECT package_id FROM deliveries WHERE delivery_id=?",
+                                 (again["delivery_id"],)).fetchone()[0]
+
+    def test_an_offer_relayed_in_an_operators_turn_is_resent(self):
+        """The resend offer, handed out by a no-id job_report (an operator's turn) and
+        delivered: "send it again" resends the offered package (it was the boundary R6
+        refused at; §9 deletes it)."""
+        pkg = self.uncertain_package()
         relay = self.call("job_report")
         self.assertIn("send it again", relay["speak"]["text"])
         self.deliver(relay)
-        before = self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]
-        with self.assertRaises(db.Refusal) as cm:
-            self.call("stage_for_delivery", channel="telegram", resend=True)
-        self.assertEqual(str(cm.exception), db.NEWER_SINCE_RESEND)
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
-                         before)
+        self.assertEqual(self.resent(), pkg["package_id"])
 
-    def test_astras_q2_offer_after_a_q3_offer_sends_nothing(self):
-        """Astra r2 S1: a binding Q3 resend offer, then a NON-binding Q2 offer delivered
-        after it. "Send it again" must not fall back to the Q3 offer."""
-        import db
+    def test_astras_q2_offer_after_a_q3_offer_resends_q2(self):
+        """Astra r2 S1: a Q3 resend offer, then a Q2 offer delivered after it. "Send it
+        again" never falls back to the Q3 offer: it resends the one last seen (§6.3)."""
         self.uncertain_package("2026-Q3", A)
         self.deliver(self.call("job_report", job_id=A, status="ok"))
-        self.uncertain_package("2026-Q2", B)
+        q2 = self.uncertain_package("2026-Q2", B)
         r2 = self.call("job_report")
         self.assertIn("send it again", r2["speak"]["text"])
         self.deliver(r2)
-        before = self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]
-        with self.assertRaises(db.Refusal) as cm:
-            self.call("stage_for_delivery", channel="telegram", resend=True)
-        self.assertEqual(str(cm.exception), db.NEWER_SINCE_RESEND)
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
-                         before)
+        self.assertEqual(self.resent(), q2["package_id"])
 
     def uncertain_package(self, quarter="2026-Q3", job_id=A):
         self.call("request_package", quarter=quarter, channel="telegram")
@@ -218,7 +214,6 @@ class InformationalPages(Tools):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
                          before + 1)
 
-    @unittest.skip("S7: re-enabled in Task 6")
     def test_all_good_after_a_handover_page_binds_to_the_sheet_before_it(self):
         with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
             u = self.until(self.start(2), "judge")
@@ -237,7 +232,7 @@ class InformationalPages(Tools):
             shown = self.deliver(self.call("job_report", job_id=B, status="ok"))
             self.assertIn("handover", [self.kind(r) for r in shown])
             self.assertEqual(self.kind(shown[-1]), "handover")
-            self.call("apply_reply", text="all good")
+            apply_now(self.conn, "all good")
         pairs = [tuple(r) for r in self.conn.execute(
             "SELECT pid, render_id FROM log WHERE kind='pair' AND author='operator'")]
         self.assertEqual(pairs, [(pid, sheet)])
@@ -264,10 +259,9 @@ class LastDelivered(StoreCase):
                               (db.now(), db.now(), db.next_seq(self.conn)))
         self.assertEqual(db.last_delivered(self.conn)["render_id"], "r4")
 
-    def test_a_non_binding_render_is_the_boundary(self):
-        """R6: a rendering stamped non-binding (binding=0) IS the last delivered one —
-        never skipped to an older one — and reads as non-binding; NULL (never handed out
-        by job_report) and 1 bind."""
+    def test_a_non_binding_render_is_the_last_delivered(self):
+        """A rendering stamped non-binding (binding=0) IS the last delivered one — never
+        skipped to an older one. S7 §9 deletes the boundary (db.non_binding) it was."""
         import db
         with db.tx(self.conn):
             for rid, binding in (("r1", None), ("r2", 1), ("r3", 0)):
@@ -275,18 +269,15 @@ class LastDelivered(StoreCase):
                                   " delivered_at, text, membership_json, delivered_seq,"
                                   " binding) VALUES (?, 'status', '{}', ?, ?, '', '[]', ?, ?)",
                                   (rid, db.now(), db.now(), db.next_seq(self.conn), binding))
-        last = db.last_delivered(self.conn)
-        self.assertEqual((last["render_id"], db.non_binding(last)), ("r3", True))
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE renders SET binding=NULL WHERE render_id='r3'")
-        last = db.last_delivered(self.conn)
-        self.assertEqual((last["render_id"], db.non_binding(last)), ("r3", False))
+        self.assertEqual(db.last_delivered(self.conn)["render_id"], "r3")
 
 
 class OperatorTurnRelay(Tools):
     """R5: a rendering handed out by job_report WITHOUT job_id (an operator's turn,
-    after the operator wrote) is non-binding; one handed out on a notification
-    (job_id given) binds as before. The latest hand-out wins."""
+    after the operator wrote) is stamped non-binding; one handed out on a notification
+    (job_id given) binds as before. The latest hand-out wins. S7 §9 deletes the R6
+    refusal boundary: a reading binds to what it quotes, else the last delivered
+    rendering, and its proposal shows what it would change."""
 
     def two_checks(self):
         """Job A pairs payment 1 and its sheet is relayed on A's notification and
@@ -315,53 +306,15 @@ class OperatorTurnRelay(Tools):
             "SELECT pid, render_id FROM log WHERE kind='pair' AND author='operator'"
             " ORDER BY rowid")]
 
-    @unittest.skip("S7: re-enabled in Task 6")
-    def test_astras_reply_race_applies_nothing(self):
-        """Ellen relays B's result with a no-id job_report BEFORE apply_reply (the order
-        R2 forbids). The newer non-binding sheet is a boundary (R6): "all good" applies
-        nothing — neither the sheet the operator meant nor the newer one — and says so."""
-        import db
-        p1, p2, old = self.two_checks()
-        new = self.deliver(self.call("job_report"))[-1]
-        self.assertNotEqual(new, old)
-        out = self.call("apply_reply", text="all good")
-        self.assertEqual(self.operator_pairs(), [])
-        self.assertIn(db.NEWER_SINCE, out["receipt_pages"][0])
+    # S7 §9: test_astras_reply_race_applies_nothing and
+    # test_astras_wider_sheet_confirms_nothing are deleted — both pinned the NEWER_SINCE
+    # refusal at a non-binding rendering, a mechanism §9 deletes (the quoted binding and
+    # the proposal shown before Apply replace it, §8).
 
-    @unittest.skip("S7: re-enabled in Task 6")
-    def test_astras_wider_sheet_confirms_nothing(self):
-        """Astra r2 S1: a binding check view shows payment 1; a no-id relay delivers a
-        sheet of payments 2–9. "all good" confirms nothing — never payment 1 through
-        the older view, never 2–9 through the non-binding one."""
-        import db
-        with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
-            u = self.until(self.start(9), "judge")
-            pids = [r[0] for r in self.conn.execute("SELECT pid FROM projections ORDER BY pid")]
-            self.pair(u, pids[0], 10001)
-            self.until(self.do(u), "complete")
-            self.deliver(self.call("job_report", job_id=A, status="ok"))
-            old = self.call("build_review", view="check", quarter="2026-Q3")
-            self.call("mark_rendering_delivered", render_id=old["render_id"])
-            self.call("request_work", kind="check", trigger="operator")
-            u = self.until(self.call("job_next", job_id=B), "judge", job_id=B)
-            for i, pid in enumerate(pids[1:]):
-                self.pair(u, pid, 10002 + i)
-            self.until(self.do(u), "complete", job_id=B)
-            new = self.deliver(self.call("job_report"))[-1]
-            out = self.call("apply_reply", text="all good")
-            self.assertEqual(self.operator_pairs(), [])
-            self.assertIn(db.NEWER_SINCE, out["receipt_pages"][0])
-            # a count names the sheet too: it refuses the same way
-            out = self.call("apply_reply", text="confirm all 8")
-            self.assertEqual(self.operator_pairs(), [])
-            self.assertIn(db.NEWER_SINCE, out["receipt_pages"][0])
-            self.assertNotEqual(new, old["render_id"])
-
-    @unittest.skip("S7: re-enabled in Task 6")
     def test_a_notification_relay_still_binds(self):
         p1, p2, old = self.two_checks()
         new = self.deliver(self.call("job_report", job_id=B, status="ok"))[-1]
-        self.call("apply_reply", text="all good")
+        apply_now(self.conn, "all good")
         pairs = self.operator_pairs()
         self.assertEqual({p for p, _ in pairs}, {p1, p2})
         self.assertEqual({r for _, r in pairs}, {new})
@@ -370,7 +323,6 @@ class OperatorTurnRelay(Tools):
         return self.conn.execute("SELECT binding FROM renders WHERE render_id=?",
                                  (render_id,)).fetchone()[0]
 
-    @unittest.skip("S7: re-enabled in Task 6")
     def test_the_latest_hand_out_wins(self):
         """A result first offered on B's notification (not delivered: the turn was cut),
         then offered again by a no-id call in an operator's turn, is non-binding; offered
@@ -382,12 +334,12 @@ class OperatorTurnRelay(Tools):
         self.assertEqual(again, first)                 # the same rendering, re-offered
         self.assertEqual(self.binding(first), 0)
         self.call("mark_rendering_delivered", render_id=first)
-        self.call("apply_reply", text="all good")
-        self.assertEqual(self.operator_pairs(), [])          # the boundary (R6)
+        # S7 §9: no boundary — the reading binds to the rendering delivered last
+        apply_now(self.conn, "all good")
+        self.assertEqual({r for _, r in self.operator_pairs()}, {first})
         self.assertEqual(self.binding(old), 1)
 
 
-    @unittest.skip("S7: re-enabled in Task 6")
     def test_a_notification_re_offer_binds_again(self):
         """The other direction: first offered by a no-id call, then on a notification."""
         p1, p2, old = self.two_checks()
@@ -396,7 +348,7 @@ class OperatorTurnRelay(Tools):
         again = self.call("job_report", job_id=B, status="ok")["texts"][-1]["render_id"]
         self.assertEqual((again, self.binding(first)), (first, 1))
         self.call("mark_rendering_delivered", render_id=first)
-        self.call("apply_reply", text="all good")
+        apply_now(self.conn, "all good")
         self.assertEqual({r for _, r in self.operator_pairs()}, {first})
 
 

@@ -94,8 +94,8 @@ class Undeliverable(RuntimeError):
 
 def _deliverable(tool: str, out):
     """The final invariant (fix wave D round 2): every operator-facing text a
-    tool returns — a view's `text`, a `speak.text`, apply_reply's
-    `receipt` and each of its `receipt_pages`, job_report's `texts[i].text` — is at
+    tool returns — a view's `text`, a `speak.text`, a `receipt` and each of its
+    `receipt_pages`, job_report's `texts[i].text` — is at
     most TELEGRAM_LIMIT UTF-16 units; otherwise the call fails loudly (isError)."""
     if not isinstance(out, dict):
         return out
@@ -637,6 +637,43 @@ def t_verdict(args):
                         _int(args, "pid"), args.get("key"))
 
 
+@register("propose_reading",
+          "The operator's words about the accounting (a swipe-reply's words, or the brief "
+          "of a delegation): pass them VERBATIM as text, and the quoted post's text as "
+          "quoted when your context has one. Nothing is applied: a change is posted to "
+          "the operator to Apply. `say`: say it as your answer, verbatim. `instructions`: "
+          "run each (show_view for \"more\", \"all of them\", \"show item N\"; "
+          "request_package then start_job for \"rebuild Qn\"; resend and send-last as "
+          "your skill says). `reshow`: show_view(view=\"item\", pid=…) for each. "
+          "`understood: false`: nothing was read as an accounting reply.",
+          obj({"text": S, "quoted": S}, ("text",)))
+@capability("reading")
+def t_propose_reading(args):
+    import posting
+    _need(args, "text")
+    return posting.propose_reading(conn(), args["text"], args.get("quoted"))
+
+
+@register("apply_reading",
+          "A button's call: only a tap on the operator's own button makes it. Never call it "
+          "yourself — it refuses without the button's key.",
+          obj({"reading_id": I, "key": S}, ("reading_id", "key")))
+@keyed
+def t_apply_reading(args):
+    import taps
+    return taps.apply_reading(conn(), _int(args, "reading_id"), args.get("key"))
+
+
+@register("cancel_reading",
+          "A button's call: only a tap on the operator's own button makes it. Never call it "
+          "yourself — it refuses without the button's key.",
+          obj({"reading_id": I, "key": S}, ("reading_id", "key")))
+@keyed
+def t_cancel_reading(args):
+    import taps
+    return taps.cancel_reading(conn(), _int(args, "reading_id"), args.get("key"))
+
+
 @register("mark_rendering_delivered",
           "Call right after a rendering (or a `speak`, or a job_report text) was sent successfully. Only this "
           "makes it count as shown.",
@@ -661,7 +698,7 @@ def t_build(args):
 @register("stage_for_delivery",
           "Stage a built package (package_id) or one invoice (doc_id) for telegram (send_media) or "
           "email (gmail send_email to the operator's own address only, with the returned "
-          "request_id). Then record_delivery. For apply_reply's `resend` instruction (\"send it "
+          "request_id). Then record_delivery. For propose_reading's `resend` instruction (\"send it "
           "again\") pass resend=true and neither id: it stages the exact file the last view the "
           "operator saw offered, or refuses with the words to say. For its `send last` "
           "instruction pass last_built=true (and the quarter it names, if any) and neither "

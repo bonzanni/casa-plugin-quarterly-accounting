@@ -9,10 +9,15 @@ description resolves against the store's open items with no fuzzy matching
 (several -> ask with dates and amounts; none -> say so, never redirect); each
 application is bound to the revision the operator was SHOWN (authorship.py)
 — an item never shown, or changed since, is re-shown and nothing is applied
-to it; independent clauses still apply; the receipt is generated from what
-actually committed."""
+to it; independent clauses still apply.
+
+S7 §8: nothing commits from text. reading_in_tx runs the grammar under a rehearsal
+(always rolled back) and returns the plan of writes, each with the revisions it read;
+taps.apply_reading replays it under the operator's grant and commits only an identical
+plan. The receipt is generated from what the replay wrote."""
 from __future__ import annotations
 
+import json
 import re
 
 import authorship
@@ -208,7 +213,6 @@ def _shown_scopes(conn) -> list:
     """(pid, scope) of the rendering each payment was last SHOWN in — its own
     `shown.render_id`, the rendering D3 binds its shown revision to (round 8:
     the globally latest delivery may be an unrelated item view or an alert)."""
-    import json
     return [(r[0], json.loads(r[1])) for r in conn.execute(
         "SELECT s.pid, r.scope_json FROM shown s JOIN renders r ON r.render_id=s.render_id"
         " WHERE r.delivered_at IS NOT NULL")]
@@ -328,90 +332,103 @@ def package_lines(conn, quarters) -> list:
                        "longer matches — say \"rebuild it\" for a fresh one.")
     return out
 
+REBUILD_PENDING = "Not rebuilding yet: apply the change first, then say \"rebuild it\"."
+REBUILD_BLOCKED = ("Not rebuilding yet: a correction in this message did not apply. Say "
+                   "\"rebuild it\" again once it has.")
 
-def _split(line: str) -> list:
-    """A line over the limit (a "Which one?" listing a hundred charges) as
-    pieces that each fit a message: broken between words, a word longer than a
-    message between code points. Nothing is added and nothing lost (fix wave D
-    round 2: the previous splitter appended a ";" to a full piece)."""
-    if views.utf16_len(line) <= views.BODY_LIMIT:
-        return [line]
-    out, cur = [], ""
-    for word in line.split(" "):
-        cand = word if not cur else cur + " " + word
-        if views.utf16_len(cand) <= views.BODY_LIMIT:
-            cur = cand
-            continue
-        if cur:
-            out.append(cur)
-        cur = ""
-        for ch in word:
-            if views.utf16_len(cur + ch) > views.BODY_LIMIT:
-                out.append(cur)
-                cur = ""
-            cur += ch
-    return out + [cur] if cur else out
-
-
-def _pages(lines: list) -> list:
-    """The receipt as Telegram-sized messages (fix wave D, Astra S2): EVERY
-    line, in order. Paged, never summarised: spec §Flows asks for "one receipt,
-    generated from what actually committed, naming vendor and effect", with
-    "the exceptions [riding] in the same receipt" — a summary would drop the
-    names that make a misread reply visible. Each page is what views.fit_lines
-    keeps whole of the lines still to send, so every page is within
-    BODY_LIMIT by the one shared fit. `receipt` is the first page; the
-    caller sends `receipt_pages` in order."""
-    rest = [p for line in lines for p in _split(line)]
-    pages = []
-    while rest:
-        out, whole = views.fit_lines(rest)
-        if whole == 0:              # unreachable: every piece fits on its own
-            raise RuntimeError("a receipt line does not fit one message")
-        pages.append("\n".join(out))
-        rest = rest[whole:]
-    return pages
+# S7 §8: each write's two phrasings — the proposal's line, then the Apply receipt's. Every
+# value is a field (views.field; views.headline already takes its fields through it)
+PHRASE = {
+    "confirm": ("Confirm {h}.", "Confirmed {h}."),
+    "unpair": ("Unpair {h}.", "Unpaired {h}."),
+    "set_aside": ("Set aside {n} for {h}.", "Set aside {n} for {h}."),
+    "exempt": ("{h}: needs no document{drop}.", "{h}: needs no document{dropped}."),
+    "lift": ("{h}: needs a document again.", "{h}: needs a document again."),
+    "revive": ("{h}: look again at the next check.", "{h}: I'll look again at the next check."),
+    "identity": ("{bank}: {who}.", "{bank}: {who}{tail}"),
+    "never": ("{name}: never needs a document.", "{name}: never needs a document."),
+    "class_none": ("{kind} are no longer needed.", "{kind} are no longer needed."),
+    "stop": ("Stop chasing {q}: {n} still missing, no longer searched.",
+             "Stopped chasing {q}: {n} still missing, no longer searched."),
+    "start": ("Start from {q}; its payments come in at the next check.",
+              "Starting from {q}; its payments come in at the next check."),
+    "name": ("Call the zips {slug}-….zip.", "The zips are now called {slug}-….zip."),
+    "ledger_reset": ("{note}", "{note}"),
+}
+_LIVE = "SELECT pid, revision FROM projections WHERE merged_into IS NULL AND ended IS NULL"
 
 
 class _Run:
-    def __init__(self, conn):
-        self.conn = conn
-        self.lines, self.applied, self.asks, self.reshow, self.instructions = [], [], [], [], []
+    def __init__(self, conn, grant, bound):
+        self.conn, self.grant, self.bound = conn, grant, bound
+        self.lines, self.asks, self.reshow, self.instructions = [], [], [], []
+        self.plan, self.propose, self.unresolved_lines = [], [], []
         self.touched_quarters = set()
         self.unresolved = 0               # corrections in this reply that did not apply
         self.rebuilds = []                # rebuild requests, released only if nothing is unresolved
         self.excepted = False             # a clause of this reply opens with an exception
         self.named = set()                # payments another clause of this reply judged
         self.stated = set()               # every count the reply's sheet-wide clauses state
+        self.not_a_reply = False
         # #39: some clause was read as a verdict, setting or instruction, or named open
         # payments without one ("are they wrong or good?"). False: nothing in the message
         # was understood as a reply, so nothing was applied or asked
         self.understood = False
 
-    def result(self, not_a_reply=False) -> dict:
+    def note(self, line, unresolved=True):
+        """A line that is not a write: said in the receipt, and listed in the proposal as
+        not included. `unresolved`: a correction that did not apply (it blocks a rebuild)."""
+        self.lines.append(line)
+        self.unresolved_lines.append(line)
+        if unresolved:
+            self.unresolved += 1
+
+    def result(self) -> dict:
         if self.rebuilds:
-            if self.unresolved:
+            if self.unresolved or self.plan:
                 # spec: "An unresolved correction blocks its dependent rebuild and says so."
-                # Decided after every clause, whatever their order (round p6).
-                self.lines.append("Not rebuilding yet: a correction in this message did not "
-                                  "apply. Say \"rebuild it\" again once it has.")
+                # Decided after every clause, whatever their order (round p6). A write
+                # waiting for Apply is unresolved too: the rebuild never runs before it (§8)
+                self.lines.append(REBUILD_PENDING if self.plan else REBUILD_BLOCKED)
             else:
                 for q in self.rebuilds:
                     qs = [_quarter(q)] if q else (sorted(self.touched_quarters)
                                                   or [_quarter(None)])
                     self.instructions.extend(f"rebuild {x}" for x in qs)
-        self.lines += package_lines(self.conn, self.touched_quarters)
-        pages = _pages(self.lines)
-        return {"receipt": pages[0] if pages else "", "receipt_pages": pages,
-                "applied": self.applied, "asks": self.asks,
-                "reshow": self.reshow, "instructions": self.instructions,
-                "not_a_reply": not_a_reply, "understood": self.understood}
+        return {"plan": self.plan, "propose": self.propose, "unresolved": self.unresolved_lines,
+                "receipt": self.lines, "instructions": self.instructions, "asks": self.asks,
+                "reshow": self.reshow, "understood": self.understood,
+                "not_a_reply": self.not_a_reply, "quarters": sorted(self.touched_quarters)}
 
-    def guarded(self, d, fn, ok_line):
-        """Apply one operation in its own transaction; the receipt line is
-        built from what that call committed, or says it was not applied."""
-        try:
+    def write(self, op, params, fn, phrase_args, check=None):
+        """THE one way a clause writes (S7 §8): `fn` runs in the savepoint `clause`; the step
+        records `op`, its parameters, the revision BEFORE the write of every live payment
+        whose revision it changed (`read`), and the binding row it saw. `check(read)` may
+        refuse inside the savepoint. Returns (fn's result, read)."""
+        conn = self.conn
+        b = conn.execute("SELECT * FROM binding").fetchone()
+        with db.savepoint(conn, "clause"):
+            before = dict(conn.execute(_LIVE).fetchall())
             res = fn()
+            after = dict(conn.execute(_LIVE).fetchall())
+            read = {pid: rev for pid, rev in before.items() if after.get(pid) != rev}
+            if check is not None:
+                check(read)
+            args = phrase_args(res) if callable(phrase_args) else phrase_args
+        step = {"op": op, **params, "read": {str(p): r for p, r in sorted(read.items())},
+                "binding": dict(b) if b is not None else None}
+        self.plan.append(json.loads(db.canonical(step)))
+        self.propose.append(PHRASE[op][0].format(**args))
+        self.lines.append(PHRASE[op][1].format(**args))
+        return res, read
+
+    def guarded(self, d, op, params, fn, phrase_args):
+        """One payment's write. `params` (or the callable building them: the binding is
+        read there) are the step's; `fn(params)` writes. A refusal is said as today and
+        leaves the step out of the plan."""
+        try:
+            p = params() if callable(params) else params
+            res, _ = self.write(op, p, lambda: fn(p), phrase_args)
         except (authorship.NotShown, authorship.Stale) as exc:
             # a merged payment's refusal names its survivor: that is what is shown next
             pid = getattr(exc, "pid", None) or d["pid"]
@@ -420,51 +437,88 @@ class _Run:
             self.reshow.append(pid)
             word = "changed since you saw it" if isinstance(exc, authorship.Stale) else \
                 "hasn't been shown to you in this form yet"
-            self.lines.append(f"{views.headline(d)} {word} — here it is now; nothing applied.")
-            self.unresolved += 1
+            self.note(f"{views.headline(d)} {word} — here it is now; nothing applied.")
             return None
         except db.Refusal as exc:
-            self.lines.append(f"{views.headline(d)}: not applied — {_say(self.conn, exc)}")
-            self.unresolved += 1
+            self.note(f"{views.headline(d)}: not applied — {_say(self.conn, exc)}")
             return None
-        self.applied.append({"pid": d["pid"], **res})
-        self.lines.append(ok_line(res))
         if d["quarter"]:
             self.touched_quarters.add(d["quarter"])
         return res
 
-    def setting(self, fn, ok_line, what):
+    def setting(self, op, params, fn, phrase_args, what):
         """A store-wide setting (stop chasing, start from, the zip name, the
         ledger reset) — guarded like _broad, so a refusal rides in the same
-        receipt after earlier clauses committed (pre-flight R2; spec §Flows,
+        receipt beside the other clauses (pre-flight R2; spec §Flows,
         "the exceptions ride in the same receipt")."""
         try:
-            res = fn()
+            res, _ = self.write(op, params, fn, phrase_args)
         except db.Refusal as exc:
-            self.lines.append(f"{what}: not applied — {_say(self.conn, exc)}.")
-            self.unresolved += 1
+            self.note(f"{what}: not applied — {_say(self.conn, exc)}.")
             return None
-        self.applied.append(res)
-        self.lines.append(ok_line(res))
         return res
 
 
-def _bind_projection(conn, d):
+def _item(conn, run, pid):
+    """The row the bound rendering recorded for `pid`, or None."""
+    if run.bound is None:
+        return None
+    return conn.execute("SELECT * FROM render_items WHERE render_id=? AND pid=?",
+                        (run.bound["render_id"], pid)).fetchone()
+
+
+def _bind_projection(conn, run, d):
+    """(render_id, revision, bind): the bound rendering's own row for the payment when it
+    has one (bind="rendered"), else the payment's latest shown rendering (bind="shown")."""
+    it = _item(conn, run, d["pid"])
+    if it is not None:
+        return it["render_id"], it["projection_revision"], "rendered"
     s = _shown(conn, d["pid"])
     if s is None:
         raise authorship.NotShown(d["pid"], "not shown")
-    return s["render_id"], s["projection_revision"]
+    return s["render_id"], s["projection_revision"], "shown"
 
 
-def _bind_match(conn, d, match_id):
-    import json
+def _bind_match(conn, run, d, match_id):
+    it = _item(conn, run, d["pid"])
+    if it is not None:
+        rev = json.loads(it["match_revisions_json"]).get(str(match_id))
+        if rev is not None:
+            return it["render_id"], rev, "rendered"
     s = _shown(conn, d["pid"])
     if s is None:
         raise authorship.NotShown(d["pid"], "not shown")
     rev = json.loads(s["match_revisions_json"]).get(str(match_id))
     if rev is None:
         raise authorship.NotShown(d["pid"], "not shown")
-    return s["render_id"], rev
+    return s["render_id"], rev, "shown"
+
+
+def _bind_candidates(conn, run, d) -> dict:
+    """A set-aside's step parameters: every displayed candidate bound to ONE rendering —
+    the bound one when it showed them all, else the payment's latest shown rendering."""
+    mids = [c["match_id"] for c in d["candidates"]]
+    it = _item(conn, run, d["pid"])
+    src, bind = it, "rendered"
+    if it is None or any(str(m) not in json.loads(it["match_revisions_json"]) for m in mids):
+        src, bind = _shown(conn, d["pid"]), "shown"
+        if src is None:
+            raise authorship.NotShown(d["pid"], "not shown")
+    mrevs = json.loads(src["match_revisions_json"])
+    if any(str(m) not in mrevs for m in mids):
+        raise authorship.NotShown(d["pid"], "not shown")
+    return {"pid": d["pid"], "bound": [[m, src["render_id"], mrevs[str(m)]] for m in mids],
+            "bind": bind}
+
+
+def _match_params(conn, run, d, match_id):
+    rid, rev, bind = _bind_match(conn, run, d, match_id)
+    return {"pid": d["pid"], "match_id": match_id, "render_id": rid, "rev": rev, "bind": bind}
+
+
+def _projection_params(conn, run, d):
+    rid, rev, bind = _bind_projection(conn, run, d)
+    return {"pid": d["pid"], "render_id": rid, "rev": rev, "bind": bind}
 
 
 _EXCEPTION = re.compile(r"(?:except|but|apart from|other than|besides|save for|excluding|"
@@ -483,14 +537,17 @@ def _parse(clause: str):
     return None, None
 
 
-def apply_reply(conn, text: str) -> dict:
-    run = _Run(conn)
+def _run(conn, text, grant, bound) -> "_Run":
+    """The reply grammar applied inside the caller's transaction (S7 §8): every write under
+    `grant` and inside a savepoint of its clause, bound to `bound` (a renders row or None)."""
+    run = _Run(conn, grant, bound)
     clauses = _clauses(text)
     # spec §"Asking between passes": a question is never a correction. A
     # message of questions only is not a reply; a question beside a correction
     # changes nothing for itself and the correction still applies.
     if not clauses or all(c.endswith("?") for c in clauses):
-        return run.result(not_a_reply=True)
+        run.not_a_reply = True
+        return run
     items = _open_items(conn)
     parsed = [(c, *_parse(c)) for c in clauses]
     # R3/R4 (Astra): a reply is split into clauses, so a qualification of a sheet-wide
@@ -500,7 +557,7 @@ def apply_reply(conn, text: str) -> dict:
     # or one opening with an exception, and no sheet-wide approval applies
     # R6 (Astra): a question may carry one too ("… Can you leave the Zapier one out?")
     run.excepted = any(verb is None or c.endswith("?") or _NUMBERED.fullmatch(c) or
-                       _EXCEPTION.match(c.lstrip(" -\u2013\u2014,:")) for c, verb, _ in parsed
+                       _EXCEPTION.match(c.lstrip(" -–—,:")) for c, verb, _ in parsed
                        if verb != "all_good")
     sheet_wide = []
     for clause, verb, m in parsed:
@@ -509,23 +566,22 @@ def apply_reply(conn, text: str) -> dict:
             run.understood = True
             continue
         if clause.endswith("?"):
-            run.lines.append(f"“{views.field(clause)}” is a question — nothing changed for it.")
+            run.note(f"“{views.field(clause)}” is a question — nothing changed for it.",
+                     unresolved=False)
             continue
         if _NUMBERED.fullmatch(clause):
-            run.lines.append(f"“{views.field(clause)}”: there are no numbered lines — name the payee, "
-                             "e.g. \"the Zapier one is wrong\".")
-            run.unresolved += 1
+            run.note(f"“{views.field(clause)}”: there are no numbered lines — name the payee, "
+                     "e.g. \"the Zapier one is wrong\".")
             continue
         if verb is None:
             names = _targets(clause)
             if names and all(_resolve(conn, n, items)[0] is not None for n in names):
                 run.understood = True
                 pretty = " and ".join(views.field(n.title() if n.islower() else n) for n in names)
-                run.lines.append(f"Nothing applied for “{views.field(clause)}”: are they wrong or good? "
-                                 f"Say \"{pretty} are wrong\".")
+                run.note(f"Nothing applied for “{views.field(clause)}”: are they wrong or good? "
+                         f"Say \"{pretty} are wrong\".")
             else:
-                run.lines.append(f"I didn't understand “{views.field(clause)}” — nothing applied for it.")
-            run.unresolved += 1
+                run.note(f"I didn't understand “{views.field(clause)}” — nothing applied for it.")
             continue
         run.understood = True
         _apply(conn, run, verb, m, items)
@@ -543,39 +599,50 @@ def apply_reply(conn, text: str) -> dict:
             run.excepted = True
         run.stated = set().union(*(_counts(m.group(0)) for m in sheet_wide))
         _apply(conn, run, "all_good", sheet_wide[0], items)
-    return run.result()
+    return run
+
+
+def reading_in_tx(conn, text, quoted=None) -> dict:
+    """S7 §8 propose: what `text` would do, learnt by running it under a rehearsal that is
+    always rolled back. Nothing it wrote survives."""
+    import authority
+    bound = views.bound_rendering(conn, quoted)
+    with authority.rehearsal(conn) as r:
+        out = _run(conn, text, r, bound).result()
+    out["render_id"] = bound["render_id"] if bound is not None else None
+    return out
+
+
+def replay(conn, row, grant) -> dict:
+    """S7 §8 apply: the stored reading run again under the operator's grant, against the
+    rendering it was bound to; the caller compares the plan and commits or rolls back."""
+    bound = (conn.execute("SELECT * FROM renders WHERE render_id=?", (row["render_id"],))
+             .fetchone() if row["render_id"] else None)
+    return _run(conn, row["text"], grant, bound).result()
 
 
 def _apply(conn, run, verb, m, items):
     if verb == "all_good" and run.excepted:
-        run.lines.append("Nothing applied for that: something else in the same message "
-                         "leaves unclear what is approved. Say \"all good\" and \"the Zapier one is "
-                         "wrong\" as two sentences, or only the one that is wrong.")
-        run.unresolved += 1
+        run.note("Nothing applied for that: something else in the same message "
+                 "leaves unclear what is approved. Say \"all good\" and \"the Zapier one is "
+                 "wrong\" as two sentences, or only the one that is wrong.")
         return
     if verb == "bulk_except":
         t = re.sub(r"^the\s+|\s+one$", "", m.group("t").strip())
         d, _ = _resolve(conn, t, items)
         who = d["counterparty"] if d is not None else t
-        run.lines.append(f"Nothing applied for that: say \"all good\" and \"the {views.field(who)} one is "
-                         "wrong\" as two sentences, or only the one that is wrong.")
-        run.unresolved += 1
+        run.note(f"Nothing applied for that: say \"all good\" and \"the {views.field(who)} one is "
+                 "wrong\" as two sentences, or only the one that is wrong.")
         return
     if verb == "all_good":
         # spec §Testing: "`all good` is a sheet reply only while a sheet is the
-        # most recent thing sent" — D2 binds to the most recent DELIVERED rendering
-        last = db.last_delivered(conn)
-        if db.non_binding(last):
-            # R6: the operator saw newer results than any sheet they could be approving
-            # — never fall back to an older sheet, never act on the newer one
-            run.lines.append(db.NEWER_SINCE)
-            run.unresolved += 1
-            return
+        # most recent thing sent" — S7 §8: it binds to the rendering the reading is
+        # bound to (the quoted post's, else the most recent DELIVERED rendering)
+        last = run.bound
         if last is None or last["kind"] not in ("status", "check", "all"):
-            run.lines.append("Nothing applied for \"all good\": the last thing I sent you was "
-                             "not a sheet to approve. Name the payment, e.g. \"the Zapier one "
-                             "is good\".")
-            run.unresolved += 1
+            run.note("Nothing applied for \"all good\": the last thing I sent you was "
+                     "not a sheet to approve. Name the payment, e.g. \"the Zapier one "
+                     "is good\".")
             return
         said = len(run.lines)
         waiting, decided = [], 0
@@ -594,28 +661,22 @@ def _apply(conn, run, verb, m, items):
             # a count that is not the sheet's: the operator means a sheet other than
             # this one, or only some of its lines — confirm none of them
             n = len(waiting) + decided
-            run.lines.append(f"Nothing applied: that sheet has {n} pairing"
-                             f"{'' if n == 1 else 's'} waiting for your approval, "
-                             f"not {' or '.join(str(x) for x in sorted(stated))}. Say \"all good\" to confirm all of them, or name the "
-                             "ones that are right, e.g. \"the Zapier one is good\".")
-            run.unresolved += 1
+            run.note(f"Nothing applied: that sheet has {n} pairing"
+                     f"{'' if n == 1 else 's'} waiting for your approval, "
+                     f"not {' or '.join(str(x) for x in sorted(stated))}. Say \"all good\" to confirm all of them, or name the "
+                     "ones that are right, e.g. \"the Zapier one is good\".")
             return
         for d, cur in waiting:
-            run.guarded(d, lambda d=d, cur=cur: _ungranted(conn, lambda: matches.confirm_in_tx(
-                conn, grant=None, match_id=cur["match_id"],
-                expected_revision=_bind_match(conn, d, cur["match_id"])[1],
-                render_id=_bind_match(conn, d, cur["match_id"])[0])),
-                lambda res, d=d: f"Confirmed {views.headline(d)}.")
+            _confirm(conn, run, d, cur)
         if len(run.lines) == said:
-            run.lines.append("Nothing on that sheet was waiting for your approval.")
+            run.note("Nothing on that sheet was waiting for your approval.", unresolved=False)
         return
     if verb in ("unpair", "confirm", "exempt", "lift", "revive", "identity"):
         for phrase in _targets(m.group("t")) if verb in ("unpair", "confirm") else [m.group("t")]:
             d, problem = _resolve(conn, phrase, items)
             if d is None:
                 run.asks.append(problem)
-                run.lines.append(problem)
-                run.unresolved += 1
+                run.note(problem)
                 continue
             if verb in ("unpair", "confirm"):
                 run.named.add(d["pid"])   # its own verdict, said in its own receipt line
@@ -629,57 +690,55 @@ def _apply(conn, run, verb, m, items):
             ask = (f"Which one? “{views.field(m.group('t').strip())}” could be " + " or ".join(
                 views.field(n) for n in fits) + " — nothing applied.")
             run.asks.append(ask)
-            run.lines.append(ask)
-            run.unresolved += 1
+            run.note(ask)
             return
         name = fits[0] if fits else None
         if name is None:
             known = kb.counterparty_for(conn, said)
             if known is None:
                 # none -> say so, never create a payee from a typo (fix round 1)
-                run.lines.append(f"Nothing open matches “{views.field(m.group('t').strip())}”, and I know no "
-                                 "payee by that name — nothing applied.")
-                run.unresolved += 1
+                run.note(f"Nothing open matches “{views.field(m.group('t').strip())}”, and I know no "
+                         "payee by that name — nothing applied.")
                 return
             name = known["name"]
-        _broad(conn, run, lambda: kb.set_expectation_in_tx(
+        _broad(conn, run, "never", {"scope": name}, lambda: kb.set_expectation_in_tx(
                    conn, scope_type="counterparty", scope=name, kind="none",
-                   author="operator", render_id=_last_delivered(conn), grant=None),
-               f"{views.field(name)}: never needs a document.")
+                   author="operator", render_id=_last_delivered(run), grant=run.grant),
+               {"name": views.field(name)})
         return
     if verb == "class_none":
         k = m.group("k")
-        _broad(conn, run, lambda: [kb.set_expectation_in_tx(
+        _broad(conn, run, "class_none", {"scopes": list(CLASS_SCOPES[k])},
+               lambda: [kb.set_expectation_in_tx(
                    conn, scope_type="chain", scope=scope, kind="none", author="operator",
-                   render_id=_last_delivered(conn), grant=None) for scope in CLASS_SCOPES[k]],
-               f"{k.capitalize()} are no longer needed.")
+                   render_id=_last_delivered(run), grant=run.grant) for scope in CLASS_SCOPES[k]],
+               {"kind": k.capitalize()})
         return
     if verb == "stop":
         q = _quarter(m.group("q"))
-        if run.setting(lambda: _ungranted(conn, lambda: work.stop_chasing_in_tx(
-                           conn, q, grant=None)),
-                       lambda res: f"Stopped chasing {dates.quarter_label(q)}: "
-                       f"{len(res['accepted_missing'])} still missing, no longer searched.",
+        if run.setting("stop", {"quarter": q},
+                       lambda: work.stop_chasing_in_tx(conn, q, grant=run.grant),
+                       lambda res: {"q": dates.quarter_label(q),
+                                    "n": len(res["accepted_missing"])},
                        f"Still chasing {dates.quarter_label(q)}"):
             run.touched_quarters.add(q)        # "rebuild it" then rebuilds that quarter
         return
     if verb == "start":
         q = _quarter(m.group("q"))
-        run.setting(lambda: _ungranted(conn, lambda: work.set_watermark_in_tx(conn, q, grant=None)),
-                    lambda res: f"Starting from {dates.quarter_label(q)}; its payments come in "
-                    "at the next check.",
+        run.setting("start", {"day": dates.quarter_bounds(q)[0]},
+                    lambda: work.set_watermark_in_tx(conn, q, grant=run.grant),
+                    {"q": dates.quarter_label(q)},
                     f"Not changing where the books start ({dates.quarter_label(q)})")
         return
     if verb == "name":
-        run.setting(lambda: _ungranted(conn, lambda: binding.set_package_name_in_tx(
-                        conn, m.group("n"), grant=None)),
-                    lambda res: f"The zips are now called {views.field(res['package_name'])}-….zip.",
-                    "The zip name")
+        run.setting("name", {"slug": binding.slug(m.group("n"))},
+                    lambda: binding.set_package_name_in_tx(conn, m.group("n"), grant=run.grant),
+                    lambda res: {"slug": views.field(res["package_name"])}, "The zip name")
         return
     if verb == "ledger_reset":
-        run.setting(lambda: _ungranted(conn, lambda: binding.acknowledge_ledger_reset_in_tx(
-                        conn, grant=None)),
-                    lambda res: res["note"], "The bank ledger reset")
+        run.setting("ledger_reset", {},
+                    lambda: binding.acknowledge_ledger_reset_in_tx(conn, grant=run.grant),
+                    lambda res: {"note": res["note"]}, "The bank ledger reset")
         return
     if verb == "rebuild":
         run.rebuilds.append(m.group("q"))        # decided after the WHOLE reply (result())
@@ -698,7 +757,7 @@ def _apply(conn, run, verb, m, items):
         d, problem = _resolve(conn, m.group("t"), items)
         if d is None:
             run.asks.append(problem)
-            run.lines.append(problem)
+            run.note(problem, unresolved=False)
             return
         run.instructions.append(f"show item {d['pid']}")
         return
@@ -710,142 +769,120 @@ class _Unseen(Exception):
         self.pids = pids
 
 
-def _broad(conn, run, change, ok_line) -> None:
+def _broad(conn, run, op, params, change, phrase_args) -> None:
     """A vendor- or class-wide operator change — or an identity, which reaches
     every payment with that bank text — binds EVERY payment whose proposition
     it changes (round p6, Terra S1: "no invoices ever for Adobe" retired a
-    pairing on an Adobe payment the operator had never seen). The
-    change is made inside one transaction; every payment whose digest it moved
-    must have been shown at the revision it had before the change, or the whole
-    change rolls back and those payments are shown first."""
+    pairing on an Adobe payment the operator had never seen). The change is
+    made inside its clause's savepoint; every payment whose revision it moved
+    (the step's `read`) must have been shown at the revision it had before the
+    change, or the whole change rolls back and those payments are shown first."""
+    def check(read):
+        unseen = []
+        for pid, rev in sorted(read.items()):
+            s_ = _shown(conn, pid)
+            if s_ is None or s_["projection_revision"] != rev:
+                unseen.append(pid)
+        if unseen:
+            raise _Unseen(unseen)
     try:
-        with db.tx(conn):
-            before = {r[0]: (r[1], r[2]) for r in conn.execute(
-                "SELECT pid, revision, digest FROM projections WHERE merged_into IS NULL"
-                " AND ended IS NULL")}
-            res = change()
-            unseen, changed = [], []
-            for pid, (rev, digest) in sorted(before.items()):
-                now = conn.execute("SELECT digest FROM projections WHERE pid=?",
-                                   (pid,)).fetchone()[0]
-                if now == digest:
-                    continue
-                changed.append(pid)
-                s_ = _shown(conn, pid)
-                if s_ is None or s_["projection_revision"] != rev:
-                    unseen.append(pid)
-            if unseen:
-                raise _Unseen(unseen)
+        _, read = run.write(op, params, change, phrase_args, check=check)
     except _Unseen as exc:
         for pid in exc.pids:
             if pid not in run.reshow:
                 run.reshow.append(pid)
-        run.lines.append(f"Not applied: it would change {len(exc.pids)} payment"
-                         f"{'s' if len(exc.pids) != 1 else ''} you haven't seen as they are "
-                         "now — here they are first.")
-        run.unresolved += 1
+        run.note(f"Not applied: it would change {len(exc.pids)} payment"
+                 f"{'s' if len(exc.pids) != 1 else ''} you haven't seen as they are "
+                 "now — here they are first.")
         return
     except db.Refusal as exc:
-        run.lines.append(f"Not applied — {_say(conn, exc)}.")
-        run.unresolved += 1
+        run.note(f"Not applied — {_say(conn, exc)}.")
         return
-    run.applied.append({"broad": res if isinstance(res, dict) else {"changes": len(res)}})
-    run.lines.append(ok_line() if callable(ok_line) else ok_line)
-    for pid in changed:                    # "rebuild it" rebuilds the quarters it changed (p8)
+    for pid in read:                       # "rebuild it" rebuilds the quarters it changed (p8)
         q = work.describe(conn, pid)["quarter"]
         if q:
             run.touched_quarters.add(q)
 
 
-def _ungranted(conn, write):
-    """S7 §8.1 (temporary, Task 4): an operator write in its own transaction with no grant,
-    so it refuses with authority.TAP_ONLY. apply_reply has left the tool surface; Task 6
-    replaces it with a reading applied under a tap's grant."""
-    with db.tx(conn):
-        return write()
-
-
-def _last_delivered(conn):
+def _last_delivered(run):
     """The provenance stamp of an operator's broad rule ("no invoices ever for X", "X
-    are no longer needed"): a view the operator was shown. The rule is name-scoped and
-    never reads the rendering's items or offers, so a non-binding rendering (R6) is a
-    legitimate stamp: it is what the operator saw last."""
-    r = db.last_delivered(conn)
-    return r["render_id"] if r else None
+    are no longer needed"): the rendering the reading is bound to (S7 §8)."""
+    return run.bound["render_id"] if run.bound is not None else None
 
 
-def _set_aside_all(conn, d) -> dict:
+def _confirm(conn, run, d, cur):
+    run.guarded(d, "confirm", lambda: _match_params(conn, run, d, cur["match_id"]),
+                lambda p: matches.confirm_in_tx(
+                    conn, grant=run.grant, match_id=p["match_id"], expected_revision=p["rev"],
+                    render_id=p["render_id"], bind=p["bind"]),
+                {"h": views.headline(d)})
+
+
+def _set_aside_all(conn, run, p) -> dict:
     """"Wrong" on a payment with several displayed candidates sets them ALL
-    aside or none (fix round 1): inside one transaction every candidate is
-    checked against the revision the operator was shown BEFORE the first
+    aside or none (fix round 1): inside the clause's savepoint every candidate
+    is checked against the revision the operator was shown BEFORE the first
     write; any refusal rolls the whole set back and the payment is re-shown."""
-    with db.tx(conn):
-        bound = []
-        for c in d["candidates"]:
-            rid, rev = _bind_match(conn, d, c["match_id"])
-            authorship.require_match(conn, d["pid"], c["match_id"], rid, rev)
-            bound.append((c["match_id"], rid, rev))
-        effects = matches.reject_all_in_tx(conn, d["pid"], [(mid, rid) for mid, rid, _ in bound],
-                                           grant=None)
-        return {"set_aside": [b[0] for b in bound], "effects": effects}
+    for mid, rid, rev in p["bound"]:
+        authorship.require_match(conn, p["pid"], mid, rid, rev, bind=p["bind"])
+    effects = matches.reject_all_in_tx(conn, p["pid"], [(mid, rid) for mid, rid, _ in p["bound"]],
+                                       grant=run.grant)
+    return {"set_aside": [b[0] for b in p["bound"]], "effects": effects}
 
 
 def _one(conn, run, verb, d, m):
     cur = d["current"]
+    h = views.headline(d)
     if verb == "unpair":
         if cur is not None:
-            run.guarded(d, lambda: _ungranted(conn, lambda: matches.reject_in_tx(
-                conn, grant=None, match_id=cur["match_id"],
-                expected_revision=_bind_match(conn, d, cur["match_id"])[1],
-                render_id=_bind_match(conn, d, cur["match_id"])[0])),
-                lambda res: f"Unpaired {views.headline(d)}.")
+            run.guarded(d, "unpair", lambda: _match_params(conn, run, d, cur["match_id"]),
+                        lambda p: matches.reject_in_tx(
+                            conn, grant=run.grant, match_id=p["match_id"],
+                            expected_revision=p["rev"], render_id=p["render_id"],
+                            bind=p["bind"]),
+                        {"h": h})
         elif d["candidates"]:
             n = len(d["candidates"])
-            run.guarded(d, lambda: _set_aside_all(conn, d),
-                        lambda res: f"Set aside {'both' if n == 2 else n} candidate"
-                        f"{'s' if n != 1 else ''} for {views.headline(d)}.")
+            run.guarded(d, "set_aside", lambda: _bind_candidates(conn, run, d),
+                        lambda p: _set_aside_all(conn, run, p),
+                        {"h": h, "n": "both candidates" if n == 2 else
+                         f"{n} candidate{'s' if n != 1 else ''}"})
         else:
-            run.lines.append(f"{views.headline(d)} has nothing paired to remove — say it needs no "
-                             "document, or hand me the invoice.")
-            run.unresolved += 1                   # a no-op correction blocks its rebuild
+            run.note(f"{h} has nothing paired to remove — say it needs no "
+                     "document, or hand me the invoice.")      # a no-op blocks its rebuild
     elif verb == "confirm":
         if cur is None:
-            run.lines.append(f"{views.headline(d)} has no single pairing to approve.")
-            run.unresolved += 1
+            run.note(f"{h} has no single pairing to approve.")
         elif not views._needs_check(d):
-            run.lines.append(f"{views.headline(d)} was already fine.")
+            run.note(f"{h} was already fine.", unresolved=False)
         else:
-            run.guarded(d, lambda: _ungranted(conn, lambda: matches.confirm_in_tx(
-                conn, grant=None, match_id=cur["match_id"],
-                expected_revision=_bind_match(conn, d, cur["match_id"])[1],
-                render_id=_bind_match(conn, d, cur["match_id"])[0])),
-                lambda res: f"Confirmed {views.headline(d)}.")
+            _confirm(conn, run, d, cur)
     elif verb in ("exempt", "lift"):
-        def line(res):
-            if verb == "lift":
-                return f"{views.headline(d)}: needs a document again."
-            dropped = [e for e in res["effects"] if e.startswith("unpaired")]
-            return (f"{views.headline(d)}: needs no document"
-                    + ("; dropped its pairing." if dropped else "."))
-        run.guarded(d, lambda: _ungranted(conn, lambda: matches.set_exemption_in_tx(
-            conn, grant=None, pid=d["pid"], exempt=(verb == "exempt"),
-            expected_revision=_bind_projection(conn, d)[1],
-            render_id=_bind_projection(conn, d)[0])), line)
+        def phrase(res):
+            dropped = any(e.startswith("unpaired") for e in res.get("effects", ()))
+            return {"h": h, "drop": "; drop its pairing" if dropped else "",
+                    "dropped": "; dropped its pairing" if dropped else ""}
+        run.guarded(d, verb, lambda: _projection_params(conn, run, d),
+                    lambda p: matches.set_exemption_in_tx(
+                        conn, grant=run.grant, pid=p["pid"], exempt=(verb == "exempt"),
+                        expected_revision=p["rev"], render_id=p["render_id"], bind=p["bind"]),
+                    phrase)
     elif verb == "revive":
-        run.guarded(d, lambda: work.record_search(conn, pid=d["pid"], token=None, revive=True),
-                    lambda res: f"{views.headline(d)}: I'll look again at the next check.")
+        run.guarded(d, "revive", {"pid": d["pid"]},
+                    lambda p: work.record_search_in_tx(conn, pid=p["pid"], token=None,
+                                                       revive=True),
+                    {"h": h})
     elif verb == "identity":
         who = m.group("who").strip()
         # An identity reaches every payment with that bank text (the KB re-settles
         # them all), so it goes through the same guard as a vendor-wide rule: the
         # named payment AND every other payment it changes must have been shown as
-        # they are (round p7, Astra S1). The receipt is read after the commit.
+        # they are (round p7, Astra S1). The receipt is read after the write.
         if _shown(conn, d["pid"]) is None:
             if d["pid"] not in run.reshow:
                 run.reshow.append(d["pid"])
-            run.lines.append(f"{views.headline(d)} hasn't been shown to you in this form yet "
-                             "— here it is now; nothing applied.")
-            run.unresolved += 1
+            run.note(f"{h} hasn't been shown to you in this form yet — here it is now; "
+                     "nothing applied.")
             return
 
         def ident():
@@ -854,8 +891,8 @@ def _one(conn, run, verb, d, m):
             lineage.settle(conn, d["pid"])
             return {"identity": who}
 
-        def receipt():
+        def phrase(res):
             after = work.describe(conn, d["pid"])
-            tail = "; still missing a document." if views._is_missing(after) else "."
-            return f"{views.field(d['bank_counterparty'])}: {views.field(who)}{tail}"
-        _broad(conn, run, ident, receipt)
+            return {"bank": views.field(d["bank_counterparty"]), "who": views.field(who),
+                    "tail": "; still missing a document." if views._is_missing(after) else "."}
+        _broad(conn, run, "identity", {"pid": d["pid"], "who": who}, ident, phrase)

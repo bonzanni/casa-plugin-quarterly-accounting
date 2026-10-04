@@ -23,7 +23,6 @@ import zipfile
 from tests import test_e2e
 from tests import _procs, sim, test_sweep_real
 import db  # noqa: E402
-import reply  # noqa: E402
 import lineage  # noqa: E402
 import matches  # noqa: E402
 import package  # noqa: E402
@@ -536,9 +535,8 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
         r = call("build_review", view="status", quarter="2026-Q3")
         self.assertIn(views.field(pkg["filename"]), r["text"])                     # offered again
         call("mark_rendering_delivered", render_id=r["render_id"])
-        # S7: the tool left the surface; Task 6 ports this line to propose_reading
-        self.assertIn("resend",
-                      reply.apply_reply(self.conn, "send it again")["instructions"])
+        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
+        self.assertIn("resend", call("propose_reading", text="send it again")["instructions"])
         staged = call("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(staged["filename"], pkg["filename"])
         self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),
@@ -600,9 +598,8 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
             os.unlink(self.outbox / f)
         r = call("build_review", view="status", quarter="2026-Q3")
         call("mark_rendering_delivered", render_id=r["render_id"])
-        # S7: the tool left the surface; Task 6 ports this line to propose_reading
-        self.assertIn("resend",
-                      reply.apply_reply(self.conn, "send it again")["instructions"])
+        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
+        self.assertIn("resend", call("propose_reading", text="send it again")["instructions"])
         again = call("stage_for_delivery", channel="telegram", resend=True)
         token = self.begin("cron")                                  # import N+1
         self.end(token, "interrupted")

@@ -94,32 +94,17 @@ class StoreCase(TempEnv):
         `pids`: every guessed payment, in printed order."""
         import datetime as dt
         import db
-        import matches
         import views
         made = []
         with self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc)):
             self.bind()
-            token = self._fixture_token = self.pass_()
+            self._fixture_token = self.pass_()
             with db.tx(self.conn):
                 self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
                                   " bank_through) VALUES ('p', 'x', 0, 0, '2026-09-20')")
-            for i in range(guesses):
-                who = payee if i == 0 else self.EXTRA_PAYEES[i - 1]
-                cents = amount + 1000 * i
-                n = 1 + (self.conn.execute("SELECT max(row_id) FROM bank_rows").fetchone()[0]
-                         or 0)
-                self.row(n, counterparty=who, amount_minor=cents, booking_date=day,
-                         value_date=day)
-                pid = self.lineage_for(n)
-                self.classify(pid, {"software"})
-                self.settle(pid)
-                doc_id = self.doc(counterparty=who, issuer=who, amount_minor=cents,
-                                  document_date=day)
-                mid = matches.record_match(self.conn, pid=pid, doc_id=doc_id, author="auto",
-                                           expected_revision=self.rev(pid),
-                                           row_snapshot=StoreCase.snapshot(self, pid),
-                                           token=token, labels=("guessed",))["match_id"]
-                made.append((who, pid, mid, doc_id))
+            self._fixture_guess = (payee, amount, day, 0)
+            for _ in range(guesses):
+                made.append(self.add_guess())
             r = views.build_review(self.conn, view="check", quarter="2026-Q3")
             views.mark_rendering_delivered(self.conn, r["render_id"])
         listed = views.render_items(self.conn, r["render_id"])
@@ -129,6 +114,30 @@ class StoreCase(TempEnv):
                 "revision": self.rev(pid), "match_revision": self.rev(match_id=mid),
                 "payee": payee,
                 "pids": [m[1] for m in sorted(made, key=lambda m: r["text"].index(m[0]))]}
+
+    def add_guess(self):
+        """One more payment with a guessed machine pairing, after sheet_fixture's: the first
+        to its payee, the next to EXTRA_PAYEES in turn, each EUR 10 more. Returns (payee,
+        pid, match_id, doc_id). Not shown until a view of it is delivered."""
+        import datetime as dt
+        import matches
+        payee, amount, day, i = self._fixture_guess
+        self._fixture_guess = (payee, amount, day, i + 1)
+        who = payee if i == 0 else self.EXTRA_PAYEES[i - 1]
+        cents = amount + 1000 * i
+        with self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc)):
+            n = 1 + (self.conn.execute("SELECT max(row_id) FROM bank_rows").fetchone()[0] or 0)
+            self.row(n, counterparty=who, amount_minor=cents, booking_date=day, value_date=day)
+            pid = self.lineage_for(n)
+            self.classify(pid, {"software"})
+            self.settle(pid)
+            doc_id = self.doc(counterparty=who, issuer=who, amount_minor=cents, document_date=day)
+            mid = matches.record_match(self.conn, pid=pid, doc_id=doc_id, author="auto",
+                                       expected_revision=self.rev(pid),
+                                       row_snapshot=StoreCase.snapshot(self, pid),
+                                       token=self._fixture_token,
+                                       labels=("guessed",))["match_id"]
+        return who, pid, mid, doc_id
 
     def rejudge(self, pid):
         """A machine relabel of `pid`'s current pairing under the fixture's pass token, as
@@ -470,6 +479,34 @@ class StoreCase(TempEnv):
     def snapshot(self, pid):
         import lineage
         return lineage.live_row(self.conn, lineage.projection(self.conn, pid))
+
+
+def apply_now(conn, text, quoted=None) -> dict:
+    """S7 §8: the operator's words read (propose_reading) and, when a reading was posted,
+    its Apply tapped — what apply_reply did in one call before S7. The result is shaped
+    like the old one: `receipt` is the Apply receipt, or `say` when nothing was proposed;
+    `applied` is the reading's plan once applied ([] otherwise); `instructions`, `reshow`,
+    `understood` and `not_a_reply` come from the proposal; `proposal` is the posted text."""
+    import json
+    import posting
+    import qa_server
+    import tools  # noqa: F401 — registers the tools
+    from tests.fakebroker import FakeBroker
+    with FakeBroker() as b:
+        out = posting.propose_reading(conn, text, quoted)
+    res = dict(out, proposal=None, applied=[])
+    if out["reading"] is None:
+        res["receipt"] = out["say"]
+        return res
+    prop = json.loads(b.deposits[-1]["value"])
+    res["proposal"] = prop["text"]
+    call = next(x for x in prop["buttons"] if x["label"] == "Apply")["call"]
+    res["receipt"] = qa_server.TOOLS[call["tool"]]["fn"](call["arguments"])["receipt"]
+    row = conn.execute("SELECT state, plan_json FROM readings WHERE reading_id=?",
+                       (out["reading_id"],)).fetchone()
+    if row["state"] == "applied":
+        res["applied"] = json.loads(row["plan_json"])
+    return res
 
 
 def hand(conn, pids):

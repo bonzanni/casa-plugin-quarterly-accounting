@@ -9,12 +9,11 @@ import random
 import unittest
 from unittest import mock
 
-from tests._base import StoreCase
+from tests._base import StoreCase, apply_now
 import db  # noqa: E402
 import kb  # noqa: E402
 import matches  # noqa: E402
 import passes  # noqa: E402
-import reply  # noqa: E402
 import views  # noqa: E402
 import work  # noqa: E402
 
@@ -220,33 +219,52 @@ class TestAlertsProperty(Base):
 
 
 class TestReplyProperty(Base):
-    @unittest.skip("S7: re-enabled in Task 6")
-    def test_every_receipt_page_is_deliverable_and_nothing_is_lost(self):
+    def test_every_reading_text_is_deliverable_and_nothing_is_lost(self):
+        """S7 §8: a reading is posted as one proposal and applied with one receipt. Every
+        text it produces fits one message; a reading that cannot be shown whole is refused
+        and applies nothing; one that is shown applies exactly the payments it listed, and
+        its receipt names every one of them."""
+        import posting
         rng = random.Random(3)
-        pids, names = [], []
+        pids, names = {}, []
         for i in range(rng.randint(60, 140)):
             name = "Vendor%03d" % i + ("" if rng.random() < 0.8
                                        else " " + " ".join(["Holding"] * rng.randint(1, 40)))
-            pids.append(self.item(name, 1000 + i, True))
+            pids[name] = self.item(name, 1000 + i, True)
             names.append(name)
         # several payments under one long shared name: a long "Which one?" line
-        for i in range(rng.randint(30, 150)):
-            pids.append(self.item("Shared Payee Group", 50000 + i, False))
-        self.show(*pids)
-        picked = rng.sample(names, rng.randint(20, len(names)))
-        clauses = [f"{n} is wrong" for n in picked] + ["Shared Payee Group is wrong",
-                                                       "what is this?"]
-        rng.shuffle(clauses)
-        out = reply.apply_reply(self.conn, ". ".join(clauses))
-        pages = out["receipt_pages"]
-        self.assertEqual(out["receipt"], pages[0])
-        for page in pages:
-            self.assertLessEqual(views.utf16_len(page), LIMIT)
-        whole = _flat("\n".join(pages))
-        self.assertEqual(whole.count("Unpaired Vendor"), len(picked))
-        self.assertGreater(len(pages), 1)
-        self.assertGreater(views.utf16_len(out["asks"][0]), LIMIT)
-        self.assertIn(_flat(out["asks"][0]), whole)            # the long ask, split, intact
+        shared = [self.item("Shared Payee Group", 50000 + i, False)
+                  for i in range(rng.randint(30, 150))]
+        outcomes = set()
+        for k, ask in ((rng.randint(1, 8), False), (rng.randint(1, 8), True),
+                       (rng.randint(60, 80), False), (rng.randint(9, 20), False)):
+            live = [n for n in names if self.conn.execute(
+                "SELECT 1 FROM match_state WHERE pid=? AND state IN ('matched','proposed')",
+                (pids[n],)).fetchone()]
+            self.show(*[pids[n] for n in live], *shared)
+            picked = rng.sample(live, min(k, len(live)))
+            clauses = [f"{n} is wrong" for n in picked] + ["what is this?"] + (
+                ["Shared Payee Group is wrong"] if ask else [])
+            rng.shuffle(clauses)
+            before = self.conn.execute("SELECT COUNT(*) FROM log WHERE author='operator'"
+                                       ).fetchone()[0]
+            try:
+                out = apply_now(self.conn, ". ".join(clauses))
+            except db.Refusal as exc:
+                self.assertEqual(str(exc), posting.READING_TOO_LONG)
+                self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE"
+                                                   " author='operator'").fetchone()[0], before)
+                outcomes.add("refused")
+                continue
+            outcomes.add("applied")
+            for t in (out["proposal"], out["receipt"]):
+                self.assertLessEqual(views.utf16_len(t), LIMIT)
+            self.assertEqual(_flat(out["proposal"]).count("· Unpair Vendor"), len(picked))
+            self.assertEqual(_flat(out["receipt"]).count("Unpaired Vendor"), len(picked))
+            self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE"
+                                               " author='operator'").fetchone()[0],
+                             before + len(picked))
+        self.assertEqual(outcomes, {"refused", "applied"})
 
 
 if __name__ == "__main__":
@@ -503,12 +521,12 @@ class TestSeenNameProperty(Base):
             words = [shown] + rng.choice(([], ["%.2f" % (amount / 100)],
                                           ["%.2f" % (amount / 100), views._day(day)]))
             before = {p: paired(p) for p in pids}
-            out = reply.apply_reply(self.conn, "the %s one is wrong" % " ".join(words))
+            out = apply_now(self.conn, "the %s one is wrong" % " ".join(words))
             changed = [p for p in pids if before[p] != paired(p)]
             self.assertLessEqual(set(changed), {target}, (words, out["receipt"]))
             if not changed:
-                self.assertTrue(out["asks"] or out["reshow"] or "not applied" in out["receipt"],
-                                out["receipt"])
+                self.assertTrue("Which one?" in out["receipt"] or out["reshow"]
+                                or "not applied" in out["receipt"], out["receipt"])
 
 
 def _ref_collisions(k=3, upto=4000):
@@ -570,7 +588,7 @@ class TestRefCollisionProperty(Base):
             hexes = [h for h, v in refs.items() if target in v]
             words = rng.choice((["ref", hexes[0]], [pids[target], "ref", hexes[0]]))
             before = {p: paired(p) for p in pids}
-            out = reply.apply_reply(self.conn, "the %s one is wrong" % " ".join(words))
+            out = apply_now(self.conn, "the %s one is wrong" % " ".join(words))
             changed = [p for p in pids if before[p] != paired(p)]
             self.assertLessEqual(set(changed), {target}, (words, out["receipt"]))
             if words[0] == "ref" and len(refs[hexes[0]]) > 1:

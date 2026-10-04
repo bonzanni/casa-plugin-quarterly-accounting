@@ -1221,6 +1221,38 @@ def _bindable(chosen, text) -> dict:
     return out
 
 
+_LABEL_LINE = "\U0001f4ca "        # Casa's "📊 <display name>" label, first line of a post
+BOUND_SCAN = 200                   # delivered renderings a quote is compared with
+QUOTE_UNITS = 200                  # the quoted characters compared (§8)
+
+
+def _qnorm(s: str) -> str:
+    """A post's text as compared for binding: Casa's label line dropped, whitespace runs
+    collapsed to one space, stripped."""
+    lines = s.split("\n")
+    if lines and lines[0].startswith(_LABEL_LINE):
+        lines = lines[1:]
+    return re.sub(r"\s+", " ", "\n".join(lines)).strip()
+
+
+def bound_rendering(conn, quoted):
+    """S7 §8: the rendering a reading binds to — the most recently delivered one (any kind
+    that offers something) whose displayed text, normalised, has the same first 200
+    characters as the quoted post (Casa quotes a post's first 2,000 characters, §2: a
+    shorter post is quoted whole, so a later sheet that merely extends it never matches);
+    with no quote, or no match among the latest 200, db.last_delivered."""
+    q = _qnorm(quoted)[:QUOTE_UNITS] if isinstance(quoted, str) else ""
+    if q:
+        for r in conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND kind"
+                              " NOT IN (%s) ORDER BY delivered_seq DESC, delivered_at DESC,"
+                              " rowid DESC LIMIT %d"
+                              % (",".join("?" * len(db.INFORMATIONAL_KINDS)), BOUND_SCAN),
+                              db.INFORMATIONAL_KINDS):
+            if _qnorm(unesc(r["text"] or ""))[:QUOTE_UNITS] == q:
+                return r
+    return db.last_delivered(conn)
+
+
 def render_items(conn, render_id) -> list:
     return [r[0] for r in conn.execute("SELECT pid FROM render_items WHERE render_id=?",
                                        (render_id,))]
@@ -1239,10 +1271,8 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
                      (now, db.next_seq(conn), render_id))
         scope = json.loads(r["scope_json"])
         # a NON-binding rendering (handed out last by an operator turn's job_report:
-        # diff round 1, R5) is recorded delivered — db.last_delivered returns it, and a
-        # reply about its contents refuses there (R6) — but it never becomes any
-        # payment's shown revision (`shown`, which named replies and every operator
-        # write bind through)
+        # diff round 1, R5) is recorded delivered but never becomes any payment's shown
+        # revision (`shown`, a reading's fallback binding); S7 §9 retires the column
         binds = r["binding"] is None or r["binding"] == 1
         for it in (conn.execute("SELECT * FROM render_items WHERE render_id=?",
                                 (render_id,)).fetchall() if binds else ()):

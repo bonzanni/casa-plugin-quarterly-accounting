@@ -15,7 +15,6 @@ from tests.test_continuation import STALE, Flow
 from tests import _base, sim
 import alerts  # noqa: E402
 import db  # noqa: E402
-import reply  # noqa: E402
 import delivery  # noqa: E402
 import package  # noqa: E402
 import passes  # noqa: E402
@@ -225,9 +224,8 @@ class TestAStaleHolderCannotSend(Requests):
         speak = out["end"]["speak"]
         self.assertEqual(speak["render_id"], r["speak"]["render_id"])     # the same offer
         self.call("mark_rendering_delivered", render_id=speak["render_id"])
-        # S7: the tool left the surface; Task 6 ports this line to propose_reading
-        self.assertIn("resend",
-                      reply.apply_reply(self.conn, "send it again")["instructions"])
+        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
+        self.assertIn("resend", self.call("propose_reading", text="send it again")["instructions"])
         y = self.call("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(y["filename"], pkg["filename"])
         self.assertNotEqual(y["path"], d["path"])
@@ -389,9 +387,8 @@ class TestPackageNotices(Requests):
         self.call("mark_rendering_delivered", render_id=speak["render_id"])
         self.assertIsNone(self.claim()["speak"])
         os.unlink(d["path"])
-        # S7: the tool left the surface; Task 6 ports this line to propose_reading
-        self.assertIn("resend",
-                      reply.apply_reply(self.conn, "send it again")["instructions"])
+        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
+        self.assertIn("resend", self.call("propose_reading", text="send it again")["instructions"])
         self.assertEqual(self.call("stage_for_delivery", channel="telegram",
                                    resend=True)["filename"], pkg["filename"])
 

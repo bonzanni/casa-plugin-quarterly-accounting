@@ -71,3 +71,49 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
                 keys.revoke_render(conn, minted)
         raise
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
+
+
+READING_TOO_LONG = ("That is more than I can show for one Apply — nothing was read. Send it "
+                    "in shorter parts.")
+
+
+def propose_reading(conn, text, quoted=None) -> dict:
+    """§8: read the operator's words; with a write, post them as a reading to Apply."""
+    import reply
+    if not isinstance(text, str) or not text.strip():
+        raise db.Refusal("text is the operator's words, verbatim")
+    if quoted is not None and not isinstance(quoted, str):
+        raise db.Refusal("quoted is the quoted post's text, as the desk context gave it")
+    with db.tx(conn):
+        out = reply.reading_in_tx(conn, text, quoted)
+        base = {k: out[k] for k in ("instructions", "reshow", "understood", "not_a_reply")}
+        if not out["plan"]:
+            say = "\n".join(out["receipt"])
+            return {"reading": None, "say": views.fit_message(say) if say else "", **base}
+        body = ["I read this as:"] + [f"· {x}" for x in out["propose"]]
+        if out["unresolved"]:
+            body += ["", "Not included:"] + [f"· {x}" for x in out["unresolved"]]
+        body += [x for x in out["receipt"] if x.startswith("Not rebuilding yet")]
+        text_ = "\n".join(body)
+        if not views.fits_proposal(text_):
+            raise db.Refusal(READING_TOO_LONG)
+        now = db.now()
+        # a newer reading supersedes an unanswered older one (§8: `↻ replaced`)
+        conn.execute("UPDATE readings SET state='stale', settled_at=? WHERE state='open'", (now,))
+        key = keys.mint()
+        rid = conn.execute("INSERT INTO readings(key, text, quoted, render_id, plan_json,"
+                           " created_seq, created_at, state) VALUES (?,?,?,?,?,?,?, 'open')",
+                           (key, text, quoted, out["render_id"], db.canonical(out["plan"]),
+                            db.next_seq(conn), now)).lastrowid
+        value = _proposal(text_, [("Apply", "apply_reading", {"reading_id": rid, "key": key}),
+                                  ("Cancel", "cancel_reading", {"reading_id": rid, "key": key})],
+                          "reading")
+    try:
+        ref = casa_broker.deposit("reading", value)
+    except casa_broker.DepositFailed:
+        # no tap can carry a key Casa never took: the reading can never be applied (§7.5)
+        with db.tx(conn):
+            conn.execute("UPDATE readings SET state='stale', settled_at=? WHERE reading_id=?"
+                         " AND state='open'", (db.now(), rid))
+        raise
+    return {"reading": ref, "reading_id": rid, **base}
