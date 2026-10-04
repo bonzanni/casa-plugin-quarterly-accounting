@@ -38,7 +38,9 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
 - `reshow`: `show_view(view="item", pid=…)` for each.
 - `instructions`: do each one:
   - `{"show_view": {…}}` (for "more", "all of them"): call `show_view` with the arguments
-    the reading returns, exactly;
+    the reading returns, exactly (also when the reading asks to send a list afresh);
+  - `{"stage_for_delivery": {…}}` ("send it again" on a quoted post): call
+    `stage_for_delivery` with those arguments exactly, then as in Sending again, below;
   - "show the rest", "show older", "show item N": `show_view`;
   - "check emailed invoices": the check ask below;
   - "rebuild Qn": the package ask below;

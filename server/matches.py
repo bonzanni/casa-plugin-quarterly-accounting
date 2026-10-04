@@ -289,7 +289,7 @@ def propose_match(conn, *, pid, doc_id, expected_revision, labels=("clean",), ra
                     runners_up, resolves, row_snapshot, token, row_digest, document_date)
 
 
-def confirm_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="shown") -> dict:
+def confirm_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="rendered") -> dict:
     """The operator approves a pairing they were shown, inside the caller's transaction,
     under a tap's grant (S7 §8.1)."""
     authority.require(conn, grant)
@@ -306,7 +306,7 @@ def confirm_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="
     return _operator_pair(conn, pid, s["doc_id"], render_id, match_id=match_id)
 
 
-def reject_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="shown") -> dict:
+def reject_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="rendered") -> dict:
     """The operator removes a pairing they were shown, inside the caller's transaction,
     under a tap's grant (S7 §8.1)."""
     authority.require(conn, grant)
@@ -354,7 +354,7 @@ def reject_all_in_tx(conn, pid, bound, *, grant) -> list:
 
 
 def set_exemption_in_tx(conn, *, grant, pid, exempt, expected_revision, render_id,
-                        bind="shown") -> dict:
+                        bind="rendered") -> dict:
     """The operator says one payment needs no document (exempt) or needs one after all,
     inside the caller's transaction, under a tap's grant (S7 §8.1)."""
     authority.require(conn, grant)

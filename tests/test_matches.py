@@ -436,12 +436,25 @@ class TestFixRound1(Base):
                                  token=self.token)
         self.assertIn("snapshot", str(caught.exception))
 
-    def test_an_older_render_after_a_newer_delivered_one_is_not_shown(self):
+    def test_a_write_binds_the_rows_of_the_rendering_it_names(self):
+        # binding §2 #12: the `shown` pointer no longer binds — a write is checked against
+        # the render_items row of the rendering it names, older or not; a rendering that
+        # did not show the payment, or a revision changed since, refuses
         old = self.show(self.pid)
         self.show(self.pid)
+        self.row(2)
+        other = self.lineage_for(2)
+        self.classify(other, {"software"})
+        self.settle(other)
+        elsewhere = self.show(other)
         with self.assertRaises(authorship.NotShown):
             self.operator_pair(pid=self.pid, doc_id=self.doc(),
-                               expected_revision=self.rev(self.pid), render_id=old)
+                               expected_revision=self.rev(self.pid), render_id=elsewhere)
+        with self.assertRaises(authorship.Stale):
+            self.operator_pair(pid=self.pid, doc_id=self.doc(),
+                               expected_revision=self.rev(self.pid) - 1, render_id=old)
+        self.operator_pair(pid=self.pid, doc_id=self.doc(),
+                           expected_revision=self.rev(self.pid), render_id=old)
 
 
 if __name__ == "__main__":

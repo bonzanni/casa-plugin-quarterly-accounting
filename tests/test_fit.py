@@ -521,12 +521,17 @@ class TestSeenNameProperty(Base):
             words = [shown] + rng.choice(([], ["%.2f" % (amount / 100)],
                                           ["%.2f" % (amount / 100), views._day(day)]))
             before = {p: paired(p) for p in pids}
-            out = apply_now(self.conn, "the %s one is wrong" % " ".join(words))
+            # binding R1/R3: a reply quoting the sheet resolves on it; unquoted words bind
+            # whatever came last, and refuse when it does not show the payee
+            quoted = views.unesc(r["text"]) if rng.random() < 0.5 else None
+            out = apply_now(self.conn, "the %s one is wrong" % " ".join(words), quoted=quoted)
             changed = [p for p in pids if before[p] != paired(p)]
             self.assertLessEqual(set(changed), {target}, (words, out["receipt"]))
             if not changed:
                 self.assertTrue("Which one?" in out["receipt"] or out["reshow"]
-                                or "not applied" in out["receipt"], out["receipt"])
+                                or "not applied" in out["receipt"]
+                                or "isn't on the last list I sent" in out["receipt"],
+                                out["receipt"])
 
 
 def _ref_collisions(k=3, upto=4000):

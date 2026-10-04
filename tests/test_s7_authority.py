@@ -74,16 +74,17 @@ class Authority(StoreCase):
             authority.OperatorGrant("show_view", "k")
 
     def test_bind_rendered_reads_the_rendering_itself(self):
-        """bind="rendered" (a verdict, §7.3) binds to the rows of render_id, even after a
-        newer rendering replaced `shown`; bind="shown" (a reading's fallback) does not."""
+        """bind="rendered" (a verdict, §7.3; a reading's one bound rendering) binds to the
+        rows of render_id, even after a newer rendering replaced `shown`; the bind="shown"
+        branch is gone (binding §2 #12), and "rendered" is the default."""
         import authorship, db, matches  # noqa: E401
         fx = self.sheet_fixture()
         self.show(fx["pid"])                      # a newer delivered rendering of the payment
         args = dict(match_id=fx["match_id"], expected_revision=fx["match_revision"],
                     render_id=fx["render_id"])
-        with self.assertRaises(authorship.NotShown):
-            self.granted(matches.confirm_in_tx, **args)
-        out = self.granted(matches.confirm_in_tx, bind="rendered", **args)
+        with self.assertRaises(ValueError):
+            self.granted(matches.confirm_in_tx, bind="shown", **args)
+        out = self.granted(matches.confirm_in_tx, **args)
         self.assertEqual(out["state"], "matched")
         with self.assertRaises(authorship.NotShown):      # a rendering without the payment
             with db.tx(self.conn):

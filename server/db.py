@@ -693,6 +693,15 @@ def next_seq(conn: sqlite3.Connection) -> int:
 INFORMATIONAL_KINDS = ("handover", "job-stop", "package-note", "job-left")
 
 
+def seen_render(row) -> bool:
+    """§1 of the binding design: the ONE "seen" predicate — a rendering marked delivered, or
+    one show_view posted (posted_seq: a deposit was attempted). It makes a rendering a quote
+    candidate (views.bound_rendering) and an operator rule's provenance (kb); it is never
+    continuation evidence (V1: a continued page merges only its explicit predecessor)."""
+    return row is not None and (row["delivered_at"] is not None
+                                or row["posted_seq"] is not None)
+
+
 def last_delivered(conn: sqlite3.Connection):
     """THE most recent DELIVERED rendering an operator's reply is about (D2/D3: their
     words bind to what they were shown last) — the one place it is resolved. Ordered by
@@ -701,8 +710,8 @@ def last_delivered(conn: sqlite3.Connection):
     renderings (INFORMATIONAL_KINDS) are skipped: they offer nothing to answer, so the
     reply is still about what came before them.
 
-    S7 §9: it binds a reading only as the fallback when no quoted post names a rendering
-    (views.bound_rendering), and "send it again" to the offer last seen."""
+    S7 §9: it binds a reading's words that carry no quote (views.bound_rendering), and
+    "send it again" to the offer last seen."""
     return conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND kind NOT IN"
                         " (%s) ORDER BY delivered_seq DESC, delivered_at DESC, rowid DESC"
                         " LIMIT 1" % ",".join("?" * len(INFORMATIONAL_KINDS)),

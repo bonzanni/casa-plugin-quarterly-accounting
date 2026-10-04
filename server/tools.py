@@ -596,7 +596,7 @@ def t_state(args):
           "as text for your own reading. It posts nothing: never send its text to the operator "
           "and never mark it delivered — show_view posts a view, with its buttons. `next` is "
           "the arguments of the following page (null when nothing is left).",
-          obj({"view": S, "quarter": Q, "pid": I, "page": I,
+          obj({"view": S, "quarter": Q, "pid": I, "page": I, "prev": S,
                "after": {"type": "array", "description": "the cursor from the previous `next`, "
                                                           "passed back unchanged"}}))
 def t_review(args):
@@ -605,16 +605,17 @@ def t_review(args):
         raise db.Refusal("after is the cursor a previous page's `next` returned")
     return _deliverable("build_review", views.build_review(
         conn(), view=args.get("view") or "status", quarter=_quarter(args),
-        pid=_int(args, "pid"), page=_int(args, "page"), after=after))
+        pid=_int(args, "pid"), page=_int(args, "page"), after=after, prev=args.get("prev")))
 
 
 @register("show_view",
           "Post a view to the operator, with its buttons (Casa posts it, labelled; never "
           "retell it). view: status, missing, check, rest, older, all, item (with pid), "
-          "quarter; page/after from a previous `next`. render_id: post that stored "
+          "quarter; page/after/prev from a previous `next`, unchanged. render_id: post that stored "
           "rendering again (the job's `view` unit). After Casa's receipt "
           "(casa_delivery.status delivered), call mark_rendering_delivered(render_id).",
           obj({"view": S, "quarter": Q, "pid": I, "page": I, "walk": S, "render_id": S,
+               "prev": S,
                "after": {"type": "array", "description": "the cursor from a `next`, unchanged"}}))
 @capability("view")
 def t_show_view(args):
@@ -624,7 +625,8 @@ def t_show_view(args):
         raise db.Refusal("after is the cursor a previous page's `next` returned")
     return posting.show_view(conn(), view=args.get("view"), quarter=_quarter(args),
                              pid=_int(args, "pid"), page=_int(args, "page"), after=after,
-                             walk=args.get("walk"), render_id=args.get("render_id"))
+                             walk=args.get("walk"), render_id=args.get("render_id"),
+                             prev=args.get("prev"))
 
 
 @register("verdict",
@@ -762,11 +764,12 @@ def t_build(args):
           "post_package(delivery_id), then record_delivery. For propose_reading's `resend` "
           "instruction (\"send it again\") pass resend=true and neither id: it stages the "
           "exact file the last view the operator saw offered, or refuses with the words to "
-          "say. For its `send last` instruction pass last_built=true (and the quarter it "
+          "say; its `stage_for_delivery` instruction (a reply to one message) gives the "
+          "arguments, render_id included. For its `send last` instruction pass last_built=true (and the quarter it "
           "names, if any) and neither id: the last package built, unchanged. A package built "
           "for a package request needs its package_token; staging it again returns the same "
           "send. channel is telegram (the default). During a pass, pass the pass_token.",
-          obj({"channel": S, "package_id": I, "resend": B, "last_built": B,
+          obj({"channel": S, "package_id": I, "resend": B, "render_id": S, "last_built": B,
                "quarter": Q, "pass_token": TOKEN, "package_token": PKG_TOKEN}))
 def t_stage(args):
     if args.get("doc_id") is not None:
@@ -775,11 +778,14 @@ def t_stage(args):
         raise db.Refusal("a single document is not sent from here — nothing was staged")
     resend = _bool(args, "resend", False)
     package_id = _int(args, "package_id")
+    render_id = args.get("render_id")
+    if render_id is not None and not resend:
+        raise db.Refusal("render_id goes with resend=true, as the reading's instruction says")
     if resend:
         if package_id is not None:
             raise db.Refusal("resend stages what the operator was offered: name no package "
                              "with it")
-        package_id = delivery.resend_target(conn())
+        package_id = delivery.resend_target(conn(), render_id)
     return delivery.stage_for_delivery(conn(), channel=args.get("channel") or "telegram",
                                        package_id=package_id,
                                        pass_token=_int(args, "pass_token"),

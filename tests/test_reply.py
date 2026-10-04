@@ -309,10 +309,12 @@ class TestGrammar(Base):
         self.assertEqual(out["applied"], [])
         self.assertIn("Nothing open matches", out["receipt"])
 
-    def test_an_item_never_shown_is_reshown_and_nothing_applies(self):
+    def test_an_item_never_shown_is_refused_and_nothing_applies(self):
+        # binding R3: words resolve only on the one bound rendering; nothing names it
         pid = self.item("Zapier", 9900, "2026-09-17")
         out = apply_now(self.conn, "the Zapier one is wrong")
-        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        self.assertEqual((out["applied"], out["reshow"]), ([], []))
+        self.assertIn("isn't on the last list I sent", out["receipt"])
         self.assertEqual(self.author(pid)[0], "auto")
 
     def test_a_pass_that_moved_one_item_refuses_it_and_applies_the_rest(self):
@@ -395,26 +397,32 @@ class TestGrammar(Base):
         self.assertEqual(out["instructions"], ["rebuild 2026-Q3"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM packages").fetchone()[0], 0)
 
-    def test_identity_on_an_unseen_or_changed_item_applies_nothing(self):
+    def test_identity_on_an_unseen_item_applies_nothing_and_a_changed_one_lists_it(self):
         self.deliver()
         pid = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)    # never shown
         out = apply_now(self.conn, "the BCK*XYZ one is my accountant")
-        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        # binding R2/R3: no provenance on the bound rendering — refused, nothing re-shown
+        self.assertEqual((out["applied"], out["reshow"]), ([], []))
+        self.assertIn("isn't on the last list I sent", out["receipt"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
         self.deliver()
         self.row(self.n, counterparty="BCK*XYZ", amount_minor=17000, booking_date="2026-09-16",
                  value_date="2026-09-16")                                # changed since shown
         self.settle(pid)
         out = apply_now(self.conn, "the BCK*XYZ one is my accountant")
-        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
+        # R2: provenance is the named payment on R; the payment it changes is listed in the
+        # proposal as it is now (170.00), and Apply's replay-and-compare guards that set
+        self.assertEqual((len(out["applied"]), out["reshow"]), (1, []))
+        self.assertIn("170.00", out["proposal"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 1)
 
-    def test_a_vendor_wide_rule_waits_for_every_payment_it_changes_to_be_seen(self):
-        # round p6 (Terra S1)
+    def test_a_vendor_wide_rule_needs_the_vendor_on_the_bound_rendering(self):
+        # round p6 (Terra S1); binding R2: provenance, not a re-show of every payment
         self.deliver()
         pid = self.item("Adobe", 5445, "2026-09-14")                     # paired, unseen
         out = apply_now(self.conn, "no invoices ever for Adobe")
-        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        self.assertEqual((out["applied"], out["reshow"]), ([], []))
+        self.assertIn("isn't on the last list I sent", out["receipt"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties WHERE"
                                            " exp_kind IS NOT NULL").fetchone()[0], 0)
         self.assertEqual(self.author(pid)[0], "auto")                   # the pairing survives
@@ -422,20 +430,22 @@ class TestGrammar(Base):
         out = apply_now(self.conn, "no invoices ever for Adobe")
         self.assertEqual(len(out["applied"]), 1)
 
-    def test_an_identity_waits_for_every_payment_it_changes(self):
-        # round p7 (Astra S1): the identity reaches an unseen payment with the same bank text
+    def test_an_identity_lists_every_payment_it_changes(self):
+        # round p7 (Astra S1): the identity reaches an unseen payment with the same bank text.
+        # Binding R2 (d1 Astra S2): it binds by provenance and lists that payment in the
+        # proposal — the operator sees it before Apply; no re-show, no livelock
         import kb
         kb.upsert_counterparty(self.conn, "my accountant")
         kb.set_expectation(self.conn, scope_type="counterparty", scope="my accountant",
                            kind="none", author="specialist")
-        shown_pid = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)
+        self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)
         self.deliver()
         hidden = self.item("BCK*XYZ", 25000, "2026-09-18")              # paired, never shown
         out = apply_now(self.conn, "the BCK*XYZ 180.00 one is my accountant")
-        self.assertEqual(out["applied"], [])
-        self.assertIn(hidden, out["reshow"])
-        self.assertEqual(self.author(hidden)[0], "auto")
-        del shown_pid
+        self.assertEqual((len(out["applied"]), out["reshow"]), (1, []))
+        self.assertIn("It changes 2 payments", out["proposal"])
+        self.assertIn("250.00", out["proposal"])
+        self.assertIn(str(hidden), out["applied"][0]["read"])
 
     def test_a_broad_rule_rebuilds_the_quarter_it_changed(self):
         pid = self.item("Adobe", 5445, "2026-05-14", paired=False)
@@ -519,7 +529,7 @@ class TestPreflightRulings(Base):
         self.item("Adobe", 18000, "2026-09-16", paired=False)
         out = apply_now(self.conn, "no invoices ever for Adobe")
         self.assertEqual(out["applied"], [])
-        self.assertIn("Not applied", out["receipt"])
+        self.assertIn("isn't on the last list I sent", out["receipt"])
         self.assertNotIn("render", out["receipt"])
 
     def test_store_refusals_are_translated(self):
@@ -1061,6 +1071,14 @@ class TestIdentity(Base):
             it = views.build_review(self.conn, view="item", pid=z)
             views.mark_rendering_delivered(self.conn, it["render_id"])
         out = apply_now(self.conn, "the A\u2022B one is wrong")
+        # binding R3: unquoted words bind what came last, which shows neither payment
+        self.assertEqual(out["applied"], [])
+        self.assertIn("isn't on the last list I sent", out["receipt"])
+        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
+        # quoting the sheet, the alias it printed still asks between both payments
+        sheet = self.conn.execute("SELECT text FROM renders WHERE kind='status' ORDER BY"
+                                  " rowid DESC LIMIT 1").fetchone()[0]
+        out = apply_now(self.conn, "the A\u2022B one is wrong", quoted=views.unesc(sheet))
         self.assertEqual(out["applied"], [])
         self.assertIn("Which one?", out["receipt"])
         self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
@@ -1157,17 +1175,19 @@ class TestIdentity(Base):
         self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
         out = apply_now(self.conn, "candidates for 54.45 14 Sep")
         self.assertEqual(out["instructions"], ["show item %d" % pid])
-        seen, page, after = set(), None, None
+        seen, kw = set(), {"view": "item", "pid": pid}
+        page = None
         for _ in range(20):
-            kw = {"page": page, "after": after} if page else {}
-            it = views.build_review(self.conn, view="item", pid=pid, **kw)
+            it = views.build_review(self.conn, **kw)
             self.assertLessEqual(views.utf16_len(it["text"]), views.BODY_LIMIT)
             seen |= self.bound(it["render_id"], pid)
             views.mark_rendering_delivered(self.conn, it["render_id"])
             if it["next"] is None:
                 break
             self.assertTrue(it["text"].endswith('say "more".'))
-            page, after = it["next"]["page"], it["next"]["after"]
+            # binding V1: More's call names this page as `prev`, so the next page adds its
+            # candidates — the last page binds all 60
+            kw, page = dict(it["next"]), it["next"]["page"]
         self.assertGreater(page or 1, 1)
         self.assertEqual(len(seen), 60)
         out = apply_now(self.conn, "the Adobe one is wrong")
@@ -1175,9 +1195,10 @@ class TestIdentity(Base):
 
 
 class TestIntegration(Base):
-    def test_a_counted_but_unprinted_payment_is_reshown_not_changed(self):
+    def test_a_counted_but_unprinted_payment_is_refused_not_changed(self):
         # a never-searched payment is counted ("not searched"), not printed: the
-        # operator never saw its line, so a correction naming it applies nothing
+        # operator never saw its line, so a correction naming it applies nothing (binding
+        # R3: it is not on the bound rendering)
         self.n += 1
         self.row(self.n, counterparty="BCK*XYZ", amount_minor=18000,
                  booking_date="2026-09-16", value_date="2026-09-16")
@@ -1186,8 +1207,10 @@ class TestIntegration(Base):
         self.settle(pid)
         self.deliver()
         out = apply_now(self.conn, "the BCK*XYZ one is my accountant")
-        self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
+        self.assertEqual((out["applied"], out["reshow"]), ([], []))
+        self.assertIn("isn't on the last list I sent", out["receipt"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
+        del pid
 
 
 if __name__ == "__main__":

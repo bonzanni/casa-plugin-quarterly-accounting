@@ -145,12 +145,14 @@ def _refuse_shared_bank_text(conn, entry, texts) -> None:
                              "counterparty another name")
 
 
-def _require_delivered_render(conn, render_id) -> None:
-    r = conn.execute("SELECT delivered_at FROM renders WHERE render_id=?",
+def _require_seen_render(conn, render_id) -> None:
+    """An operator rule's provenance is a SEEN rendering — delivered, or posted by show_view
+    (db.seen_render; binding §2 #11: the reading's one bound rendering R)."""
+    r = conn.execute("SELECT delivered_at, posted_seq FROM renders WHERE render_id=?",
                      (render_id,)).fetchone() if render_id else None
-    if r is None or r["delivered_at"] is None:
+    if not db.seen_render(r):
         raise db.Refusal("an operator decision must come from a view the operator was shown "
-                         "(a delivered render_id)")
+                         "(a delivered or posted render_id)")
 
 
 def set_expectation(conn, *, scope_type, scope, kind, tier=None, author, render_id=None,
@@ -187,7 +189,7 @@ def set_expectation_in_tx(conn, *, scope_type, scope, kind, tier=None, author,
         tier = None
     if author == "operator":
         authority.require(conn, grant)
-        _require_delivered_render(conn, render_id)
+        _require_seen_render(conn, render_id)
     if scope_type == "chain":
         if author != "operator":
             raise db.Refusal("a class-level expectation is the operator's to set")

@@ -622,21 +622,33 @@ def uncertain(conn, quarter=None) -> list:
     return [(pid, f) for pid, f, st in offerable(conn, quarter) if st == "uncertain"]
 
 
-def resend_target(conn) -> int:
-    """What "send it again" resends: the package the most recent DELIVERED
-    rendering that offers a package offered (D3: an operator's words bind to what they
-    were shown; S7 §6.3: "last saw" is the latest delivered rendering that offers one —
-    a view, a post or a status sheet delivered after it offers nothing and hides nothing).
+NO_OFFER = "that message offers no package to send again"
+
+
+def resend_target(conn, render_id=None) -> int:
+    """What "send it again" resends (S7 §6.3, binding R4): typed words quoting a rendering
+    bind `render_id`, that rendering's own `offers` (none: NO_OFFER); unquoted words bind
+    the package the most recent DELIVERED rendering that offers a package offered (D3: an
+    operator's words bind to what they were shown — a view, a post or a status sheet
+    delivered after it offers nothing and hides nothing).
     An offered package that is no longer eligible (resend_refusal) is answered
     with its own reason. None waiting, or several, is a refusal in the operator's words —
     several are told apart by the date in their filenames (spec §"What the
     operator never has to learn")."""
-    last = conn.execute(
-        "SELECT scope_json FROM renders WHERE delivered_at IS NOT NULL AND kind NOT IN (%s)"
-        " AND json_array_length(scope_json, '$.offers') > 0 ORDER BY delivered_seq DESC,"
-        " delivered_at DESC, rowid DESC LIMIT 1" % ",".join("?" * len(db.INFORMATIONAL_KINDS)),
-        db.INFORMATIONAL_KINDS).fetchone()
-    offered = json.loads(last["scope_json"]).get("offers", []) if last else []
+    if render_id is not None:
+        r = conn.execute("SELECT scope_json, delivered_at, posted_seq FROM renders WHERE"
+                         " render_id=?", (render_id,)).fetchone() \
+            if isinstance(render_id, str) else None
+        offered = json.loads(r["scope_json"]).get("offers") or [] if db.seen_render(r) else []
+        if not offered:
+            raise db.Refusal(NO_OFFER)
+    else:
+        last = conn.execute(
+            "SELECT scope_json FROM renders WHERE delivered_at IS NOT NULL AND kind NOT IN (%s)"
+            " AND json_array_length(scope_json, '$.offers') > 0 ORDER BY delivered_seq DESC,"
+            " delivered_at DESC, rowid DESC LIMIT 1"
+            % ",".join("?" * len(db.INFORMATIONAL_KINDS)), db.INFORMATIONAL_KINDS).fetchone()
+        offered = json.loads(last["scope_json"]).get("offers", []) if last else []
     waiting, why = [], None
     for pid in offered:
         refusal = resend_refusal(conn, pid)

@@ -4,7 +4,7 @@ import re
 import unittest
 from unittest import mock
 
-from tests._base import StoreCase
+from tests._base import StoreCase, untag
 import db  # noqa: E402
 import kb  # noqa: E402
 import matches  # noqa: E402
@@ -188,7 +188,7 @@ class TestSheet(Base):
         self.add(counterparty="New1", searched=False)
         self.add(counterparty="New2", searched=False)
         passes.record_probe(self.conn, self.token, "gmail", False, "auth failed")
-        text = self.render()["text"]
+        text = untag(self.render()["text"])
         self.assertTrue(text.startswith(
             "Review incomplete - Gmail unavailable.\n1 invoice already missing.\n"
             "2 new payments not searched.\nNo reply needed; I'll retry next pass.\n"), text)
@@ -196,7 +196,7 @@ class TestSheet(Base):
         self.assertNotIn("not checked yet", text)    # could not look is not "not reached"
         self.assertIn("3 transactions, 1 missing a document.", flat(text))
         self.end_with_counts(self.token, "interrupted", {"checked": 18, "total": 30})
-        text = self.render()["text"]
+        text = untag(self.render()["text"])
         self.assertIn("Review interrupted.\n18 of 30 new payments checked.\n12 not checked yet. Saved.",
                       text)
 
@@ -312,7 +312,8 @@ class TestSheet(Base):
             self.add(counterparty=f"Vend{i:03d}", amount_minor=1000 + i)
         capped = self.render("missing")
         self.assertIn('+192 more — say "all of them"', capped["text"])
-        self.assertEqual(capped["next"], {"view": "missing", "quarter": "2026-Q3", "page": 1})
+        self.assertEqual(capped["next"], {"view": "missing", "quarter": "2026-Q3", "page": 1,
+                                          "prev": capped["render_id"]})
         for view in ("all", "missing"):
             seen, page, after, n = set(), 1, None, 0
             while True:
@@ -408,7 +409,7 @@ class TestSheet(Base):
         self.add(counterparty="Seen")
         self.add(counterparty="Unreached", searched=False)
         self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 2})
-        text = self.render()["text"]
+        text = untag(self.render()["text"])
         self.assertIn("Review interrupted.\n1 of 2 new payments checked.\n1 not checked yet. Saved.",
                       text)
         self.assertEqual(text.count("not checked yet"), 1)
@@ -422,8 +423,8 @@ class TestSheet(Base):
         for trigger in ("package", "handover"):
             tok = self.pass_(trigger=trigger)
             passes.end_pass(self.conn, tok, "complete", {})
-            self.assertIn("Review interrupted.\n1 of 2 new payments checked.", self.render()["text"],
-                          trigger)
+            self.assertIn("Review interrupted.\n1 of 2 new payments checked.",
+                          untag(self.render()["text"]), trigger)
         tok = self.pass_(trigger="cron")
         passes.end_pass(self.conn, tok, "complete", {})
         self.assertNotIn("Review interrupted.", self.render()["text"])
@@ -517,7 +518,10 @@ class TestRenderLog(Base):
 
     def test_same_store_same_bytes(self):
         self.add()
-        self.assertEqual(self.render()["text"], self.render()["text"])
+        # binding V2: two renderings of one unchanged store differ only by their tag
+        a, b = self.render(), self.render()
+        self.assertNotEqual(a["text"], b["text"])
+        self.assertEqual(untag(a["text"]), untag(b["text"]))
 
     def test_composition_holds_the_write_lock(self):
         import sqlite3

@@ -124,13 +124,15 @@ class Readings(StoreCase):
         self.assertIn("no longer applies", rec["receipt"])
         self.assertEqual(self.operator_rows(), 0)
 
-    def test_a_quote_that_matches_no_rendering_binds_to_the_latest(self):
-        """§8: with no match, the reading binds to the latest delivered rendering; a quote
-        of a longer post binds by its first 200 characters."""
+    def test_a_quote_that_matches_no_rendering_refuses(self):
+        """§8 (binding R3): a quote that matches no rendering refuses — never the latest
+        delivered one; a quote of a longer post binds the rendering its text begins with."""
         import views
         fx = self.sheet_fixture(guesses=2)
         out, prop = self.propose("all good", quoted="📊 Finance\nsomething never posted")
-        self.assertEqual(prop["text"].count("Confirm "), 2)
+        self.assertIsNone(prop)
+        self.assertIn(views.UNMATCHED, out["say"])
+        self.assertEqual(out["instructions"], [{"show_view": {"view": "status"}}])
         r = self.conn.execute("SELECT * FROM renders WHERE render_id=?",
                               (fx["render_id"],)).fetchone()
         long = "📊 Finance\n" + views.unesc(r["text"]) + "\n" + "x " * 300
@@ -138,8 +140,8 @@ class Readings(StoreCase):
 
     def test_a_quote_of_a_joined_post_binds_to_its_first_rendering(self):
         """Task 6 ruling (§8's literal rule, §5): a post joins up to POST_MAX renderings; a
-        quote of it binds to the first, even one under 200 normalised characters — not to
-        the later ones delivered with it (the fallback, last delivered)."""
+        quote of it binds to the first, even a short one (its whole text is a prefix of the
+        quote: binding R1) — not to the later ones delivered with it."""
         import db, job, views
         texts = ["The bank connection stopped — new payments aren't coming in.",
                  "a" * 900, "b" * 900]
@@ -152,7 +154,7 @@ class Readings(StoreCase):
                                   (rid, kind, db.now(), text))
                 rids.append(rid)
         self.assertEqual(len(rids), job.POST_MAX)
-        self.assertLess(len(views._qnorm(texts[0])), views.QUOTE_UNITS)
+        self.assertLess(len(views._qnorm(texts[0])), 200)
         for rid in rids:                                  # one post: marked in order
             views.mark_rendering_delivered(self.conn, rid)
         quoted = "📊 Finance\n" + "\n\n".join(texts)

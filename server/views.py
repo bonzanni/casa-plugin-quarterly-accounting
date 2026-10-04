@@ -82,6 +82,19 @@ class _Names:
 
 
 _NAMES = None
+_TAG = ""                   # binding V2: the first-line tag of the rendering being composed
+
+
+def tag_for(render_id: str) -> str:
+    """Binding V2: every rendering composed after S7 ends its first line with " · <n>", its
+    render id's digits — a separator and digits only, no machinery word — so two post-S7
+    renderings never match one quote, whatever Casa's raw truncation does to the rest."""
+    return f" {MARK} {render_id[1:]}"
+
+
+def _limit() -> int:
+    """The body budget a page is filled to: BODY_LIMIT less the tag line 1 will carry."""
+    return BODY_LIMIT - utf16_len(_TAG)
 
 
 def field_raw(text, units: int = FIELD_MAX) -> str:
@@ -777,7 +790,12 @@ def _compose(conn, view, q, items, members, lead):
 
 
 def _text(lines) -> str:
-    return "\n".join(w for line in lines for w in (_wrap(line) if line else [""]))
+    """The lines, each wrapped to WIDTH — but while a rendering is composed (binding V2) its
+    first line is kept whole: the tag ends it, and a tag spliced into a wrapped headline
+    would split the identity it binds (_bindable)."""
+    return "\n".join(w for i, line in enumerate(lines)
+                     for w in ([line] if i == 0 and _TAG and line else
+                               _wrap(line) if line else [""]))
 
 
 def _emit(parts, picks, *, announce, more=None, cap=None, all_sections_empty_msgs=True):
@@ -861,7 +879,7 @@ def _page(parts, after, first):
                      all_sections_empty_msgs=first)
 
     def fits(page, last):
-        return utf16_len(_text(emit(page, last)[0])) <= BODY_LIMIT
+        return utf16_len(_text(emit(page, last)[0])) <= _limit()
 
     if not flat and not first:
         return list(parts["head"]) + ["", "That is everything."], [], None
@@ -899,7 +917,7 @@ def clip(text: str, units: int) -> str:
     return "".join(out) + CLIP_MARK
 
 
-def fit_lines(lines, closing=None, always_close=False) -> tuple:
+def fit_lines(lines, closing=None, always_close=False, tag="") -> tuple:
     """THE fit (fix wave D round 2, generalized after the same shape recurred in
     views, alerts and receipts): every operator-facing message is produced
     through here, and what it returns joins with "\n" to at most
@@ -912,8 +930,13 @@ def fit_lines(lines, closing=None, always_close=False) -> tuple:
     lines while they fit beside the closing line; when not even the first line
     fits, it is clipped with CLIP_MARK so the message still says something (and
     `whole` is 0). The closing line is never cut away (it is clipped only if it
-    alone exceeds the limit)."""
+    alone exceeds the limit).
+
+    `tag` (binding V2) ends line 1 and is counted inside the fit; it is never cut: a line 1
+    that must be clipped is clipped before its tag."""
     lines = list(lines)
+    if tag:
+        lines = [(lines[0] if lines else "") + tag] + lines[1:]
     tail = [clip(closing, BODY_LIMIT)] if closing else []
     if utf16_len("\n".join(lines + (tail if always_close else []))) <= BODY_LIMIT:
         return lines + (tail if always_close else []), len(lines)
@@ -926,8 +949,9 @@ def fit_lines(lines, closing=None, always_close=False) -> tuple:
         kept.append(ln)
         used += need
     whole = len(kept)
-    if whole == 0 and lines and budget > utf16_len(CLIP_MARK):
-        kept = [clip(lines[0], budget)]
+    if whole == 0 and lines and budget > utf16_len(CLIP_MARK) + utf16_len(tag):
+        head = lines[0][:len(lines[0]) - len(tag)] if tag else lines[0]
+        kept = [clip(head, budget - utf16_len(tag)) + tag]
     if not kept and tail:
         return tail, 0
     return kept + tail, whole
@@ -979,46 +1003,75 @@ def _item_page(d, after):
     n = 1 if rest else 0
     while n < len(rest) and utf16_len(_text(_item_block(d, rest[:n + 1],
                                                          n + 1 < len(rest)).lines)) \
-            <= BODY_LIMIT:
+            <= _limit():
         n += 1
     more = n < len(rest)
     return _item_block(d, rest[:n], more), ([rest[n - 1]["match_id"]] if more else None)
 
 
-def build_review(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
+def build_review(conn, view="status", quarter=None, pid=None, page=None, after=None,
+                 prev=None) -> dict:
     """See _build_review. The per-rendering disambiguation (_NAMES) lives only
     for the duration of one call."""
-    global _NAMES
+    global _NAMES, _TAG
     try:
-        return _build_review(conn, view, quarter, pid, page, after)
+        return _build_review(conn, view, quarter, pid, page, after, prev)
     finally:
-        _NAMES = None
+        _NAMES, _TAG = None, ""
 
 
-def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
+def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=None,
+                  prev=None) -> dict:
     """review_in_tx under its own write transaction."""
     with db.tx(conn):
-        return review_in_tx(conn, view, quarter, pid, page, after)
+        return review_in_tx(conn, view, quarter, pid, page, after, prev=prev)
 
 
-def review_in_tx(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
+def review_in_tx(conn, view="status", quarter=None, pid=None, page=None, after=None,
+                 prev=None) -> dict:
     """The rendering, inside the caller's write transaction (S2 §6.4: job_report composes
     a result in its own one transaction). The per-rendering disambiguation (_NAMES) is
     reset after, as build_review does."""
-    global _NAMES
+    global _NAMES, _TAG
     assert conn.in_transaction, "a review is composed inside the write transaction"
     try:
-        return _review(conn, view, quarter, pid, page, after)
+        return _review(conn, view, quarter, pid, page, after, prev)
     finally:
-        _NAMES = None
+        _NAMES, _TAG = None, ""
 
 
-def _review(conn, view, quarter, pid, page, after) -> dict:
+_RENDER_ID = re.compile(r"^r\d{1,18}$")
+
+
+def _predecessor_mrevs(conn, prev, pid, page, after) -> dict:
+    """Binding V1: the candidates a continued item page (page >= 2) adds from its explicit
+    predecessor `prev` — that rendering's RECORDED match revisions for `pid` — only when it
+    is an item rendering of the same pid whose `next` is exactly this page's call and whose
+    projection revision is still current. Anything else adds nothing; a candidate changed
+    since then is refused at bind as stale. A posting attempt alone never adds them."""
+    r = conn.execute("SELECT kind, scope_json FROM renders WHERE render_id=?",
+                     (prev,)).fetchone()
+    if r is None or r["kind"] != "item":
+        return {}
+    scope = json.loads(r["scope_json"])
+    want = {"view": "item", "pid": pid, "page": page, "after": after, "prev": prev}
+    if scope.get("pid") != pid or scope.get("next") != want:
+        return {}
+    it = conn.execute("SELECT projection_revision, match_revisions_json FROM render_items"
+                      " WHERE render_id=? AND pid=?", (prev, pid)).fetchone()
+    cur = conn.execute("SELECT revision FROM projections WHERE pid=?", (pid,)).fetchone()
+    if it is None or cur is None or it["projection_revision"] != cur[0]:
+        return {}
+    return json.loads(it["match_revisions_json"])
+
+
+def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
     """`page` (1, 2, ...) renders the view uncapped, one message per page, and
     `after` is the cursor the previous page's `next` returned; the `all` view
     is the status view paged. The answer's `next` is the call that the phrase
-    the text ends with asks for (`all of them`, `more`), or None."""
-    global _NAMES
+    the text ends with asks for (`all of them`, `more`), or None; it names this
+    rendering as `prev` (binding V1)."""
+    global _NAMES, _TAG
     if view not in VIEWS:
         raise db.Refusal(f"view is one of {', '.join(VIEWS)}")
     if view == "item" and pid is None:
@@ -1031,8 +1084,14 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
                               or not all(isinstance(x, int) and not isinstance(x, bool)
                                          for x in after)):
         raise db.Refusal("after is the cursor a previous page's `next` returned")
+    if prev is not None and (not isinstance(prev, str) or not _RENDER_ID.fullmatch(prev)):
+        raise db.Refusal("prev is the render id the More button carried")
     q = quarter or dates.quarter_of(db.now()[:10])
     dates.parse_quarter(q)
+    # binding V2: the render id is minted before composing — its tag ends line 1, counted
+    # inside every page budget (_limit), and this page's `next` names it as `prev` (V1)
+    rid = f"r{db.next_seq(conn)}"
+    _TAG = tag_for(rid)
     lead = _lead(conn)                  # may record the pass's gate
     # Compose and persist under ONE write lock, so the revisions recorded are
     # exactly those of the facts the text shows (round p1, Astra S1: a write
@@ -1042,7 +1101,8 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
     items = []
     if lead[0] is not None:
         notes = _status_notes(conn) if view in ("status", "all") else []
-        text = fit_message(_text(lead[0] + notes), FIT_CLOSING)
+        text = "\n".join(fit_lines(_text(lead[0] + notes).split("\n"), FIT_CLOSING,
+                                    tag=_TAG)[0])
         scope["stop"] = True
     else:
         members = membership(conn, view, q, pid)
@@ -1055,25 +1115,26 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
             lines, chosen = blk.lines, [blk]
             text = _text(lines)
             if cursor is not None:
-                nxt = {"view": "item", "pid": pid, "page": (page or 1) + 1, "after": cursor}
+                nxt = {"view": "item", "pid": pid, "page": (page or 1) + 1, "after": cursor,
+                       "prev": rid}
             scope["page"], scope["after"] = page, after
-            # a later page adds to what the earlier pages of this item bound
-            scope["continues"] = bool(page and page > 1)
         elif page is not None:
             lines, chosen, cursor = _page(parts, after, page == 1)
             text = _text(lines)
             if cursor is not None:
-                nxt = {"view": view, "quarter": q, "page": page + 1, "after": cursor}
+                nxt = {"view": view, "quarter": q, "page": page + 1, "after": cursor,
+                       "prev": rid}
             scope["page"], scope["after"] = page, after
         else:
             for cap in range(CAP, -1, -1):
                 lines, chosen = _capped(parts, cap)
                 text = _text(lines)
-                if utf16_len(text) <= BODY_LIMIT:
+                if utf16_len(text) <= _limit():
                     break
             if any(len(s.blocks) > sum(1 for c in chosen if c in s.blocks)
                    for s in parts["sections"]):
-                nxt = {"view": "all" if view == "status" else view, "quarter": q, "page": 1}
+                nxt = {"view": "all" if view == "status" else view, "quarter": q, "page": 1,
+                       "prev": rid}
         # The final text goes through the one fit. If it cut anything, nothing it
         # prints is bound: the text may not show every block chosen. The closing
         # line carries the phrase `next` answers, so it is never cut.
@@ -1082,7 +1143,7 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
             closing = (MORE_LINE if "after" in nxt
                        else 'The rest did not fit — say "all of them".')
         body = text.split("\n")
-        out, whole = fit_lines(body, closing)
+        out, whole = fit_lines(body, closing, tag=_TAG)
         text, cut = "\n".join(out), whole < len(body)
         if cut:
             chosen = []
@@ -1131,18 +1192,22 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
         seen = {str(p): field_raw(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
         if seen:
             scope["names"] = seen
-    rid = f"r{db.next_seq(conn)}"
     conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                  " membership_json) VALUES (?,?,?,?,?,?)",
                  (rid, view, db.canonical(scope), db.now(), text, json.dumps(members)))
     for p, shown_ids in printed.items():
-        prev = conn.execute("SELECT revision FROM projections WHERE pid=?", (p,)).fetchone()[0]
+        prev_rev = conn.execute("SELECT revision FROM projections WHERE pid=?",
+                                (p,)).fetchone()[0]
         mrevs = {str(r[0]): r[1] for r in conn.execute(
             "SELECT match_id, revision FROM match_state WHERE pid=?", (p,))
             if r[0] in shown_ids}
+        if view == "item" and page and page > 1 and prev is not None:
+            # V1: a later page of one item adds its explicit predecessor's candidates, at
+            # the revisions that predecessor recorded (a stale one refuses at bind)
+            mrevs = {**_predecessor_mrevs(conn, prev, p, page, after), **mrevs}
         conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
                      " match_revisions_json) VALUES (?,?,?,?)",
-                     (rid, p, prev, db.canonical(mrevs)))
+                     (rid, p, prev_rev, db.canonical(mrevs)))
     return {"render_id": rid, "text": text, "printed": len(printed), "next": nxt}
 
 
@@ -1238,8 +1303,22 @@ def _bindable(chosen, text) -> dict:
 
 
 _LABEL_LINE = "\U0001f4ca "        # Casa's "📊 <display name>" label, first line of a post
-BOUND_SCAN = 200                   # delivered renderings a quote is compared with
-QUOTE_UNITS = 200                  # the quoted characters compared (§8)
+QUOTE_CAP = 2000                   # Casa quotes a post's first 2,000 characters (§2)
+# binding V3: every scope field the grammar (reply.py) reads — "same binding facts" is
+# equality of these, the kind and the rendering's render_items rows. A new grammar read
+# joins this list (an AST pin holds reply.py to it)
+FACT_FIELDS = ("names", "refs", "proposed", "offers", "next", "walk", "quarter", "pid")
+AMBIGUOUS = "I sent more than one version of that list — reply to the newest one."
+UNMATCHED = "I can't find the message you replied to — here is the list as it is now."
+
+
+class QuoteRefusal(Exception):
+    """A quote that binds no one rendering (binding R1/R3): `line` is said, nothing is
+    applied, and `view` is the show_view arguments of the recovery."""
+
+    def __init__(self, line, view):
+        super().__init__(line)
+        self.line, self.view = line, view
 
 
 def _qnorm(s: str) -> str:
@@ -1251,29 +1330,69 @@ def _qnorm(s: str) -> str:
     return re.sub(r"\s+", " ", "\n".join(lines)).strip()
 
 
-def bound_rendering(conn, quoted):
-    """S7 §8: the rendering a reading binds to — the most recently delivered one (any kind
-    that offers something) whose displayed text's first 200 characters, normalised, begin
-    the quoted post (Casa quotes a post's first 2,000 characters, §2). The quote may be
-    longer than the rendering: a post joins up to job.POST_MAX renderings (§5), and a
-    quote of it binds to its first, even one shorter than 200 characters. With no quote,
-    or no match among the latest 200, db.last_delivered.
+def binding_facts(conn, r) -> str:
+    """V3: what a reading bound to rendering `r` can read — its kind, its render_items rows
+    (pid, projection revision, match revisions) and every FACT_FIELDS value (a field the
+    rendering never stored is told apart from an explicit null) — canonically."""
+    scope = json.loads(r["scope_json"])
+    items = [[it["pid"], it["projection_revision"], json.loads(it["match_revisions_json"])]
+             for it in conn.execute("SELECT * FROM render_items WHERE render_id=? ORDER BY pid",
+                                    (r["render_id"],))]
+    return db.canonical({"kind": r["kind"], "items": items,
+                         "scope": {k: [k in scope, scope.get(k)] for k in FACT_FIELDS}})
 
-    r3 #3: a quote is the operator's own evidence of what they saw, so it also matches a
-    rendering show_view posted (posted_seq) that nobody marked delivered — a view posted by
-    a tap's stored call, whose turn has no room for the mark."""
-    q = _qnorm(quoted) if isinstance(quoted, str) else ""
-    if q:
-        for r in conn.execute("SELECT * FROM renders WHERE (delivered_at IS NOT NULL OR"
-                              " posted_seq IS NOT NULL) AND kind NOT IN (%s) ORDER BY"
-                              " max(coalesce(delivered_seq, 0), coalesce(posted_seq, 0)) DESC,"
-                              " delivered_at DESC, rowid DESC LIMIT %d"
-                              % (",".join("?" * len(db.INFORMATIONAL_KINDS)), BOUND_SCAN),
-                              db.INFORMATIONAL_KINDS):
-            head = _qnorm(unesc(r["text"] or ""))[:QUOTE_UNITS]
-            if head and q.startswith(head):
-                return r
-    return db.last_delivered(conn)
+
+def _rid_order(rid: str):
+    return (0, int(rid[1:]), "") if _RENDER_ID.fullmatch(rid) else (1, 0, rid)
+
+
+def _common_view(rows) -> dict:
+    """The show_view arguments of the candidates' common view, else the status view."""
+    kinds = {r["kind"] for r in rows}
+    scopes = [json.loads(r["scope_json"]) for r in rows]
+    quarters = {sc.get("quarter") for sc in scopes}
+    pids = {sc.get("pid") for sc in scopes}
+    if len(kinds) == 1 and len(quarters) == 1 and len(pids) == 1:
+        kind, (q,), (pid,) = next(iter(kinds)), quarters, pids
+        if kind in VIEWS and (kind != "item" or pid is not None):
+            out = {"view": kind}
+            if q:
+                out["quarter"] = q
+            if kind == "item":
+                out["pid"] = pid
+            return out
+    return {"view": "status"}
+
+
+def bound_rendering(conn, quoted):
+    """S7 §8, binding R1/R3: THE one rendering a reading binds. Words with no quote bind
+    db.last_delivered. A quote's candidates are every SEEN rendering (db.seen_render:
+    delivered, or posted by show_view), informational kinds excluded, with no row limit and
+    no ordering. A candidate matches when its normalised text and the normalised quote agree
+    over their whole overlap, capped at QUOTE_CAP (the shorter is a prefix of the other: a
+    post joins up to job.POST_MAX renderings, §5, and its quote binds the first). One match
+    binds. Several with the same binding facts (V3) bind the lowest render id — the choice
+    cannot change what commits. Several with differing facts raise QuoteRefusal (AMBIGUOUS:
+    possible only among pre-S7 renderings, V2 tags the rest); none raises it too
+    (UNMATCHED) — an explicit quote never falls back. Recency never picks."""
+    q = _qnorm(quoted)[:QUOTE_CAP] if isinstance(quoted, str) else ""
+    if not q:
+        return db.last_delivered(conn)
+    found = []
+    for r in conn.execute("SELECT * FROM renders WHERE (delivered_at IS NOT NULL OR posted_seq"
+                          " IS NOT NULL) AND kind NOT IN (%s)"
+                          % ",".join("?" * len(db.INFORMATIONAL_KINDS)),
+                          db.INFORMATIONAL_KINDS):
+        t = _qnorm(unesc(r["text"] or ""))[:QUOTE_CAP]
+        n = min(len(t), len(q))
+        if db.seen_render(r) and n and t[:n] == q[:n]:
+            found.append(r)
+    if not found:
+        raise QuoteRefusal(UNMATCHED, {"view": "status"})
+    found.sort(key=lambda r: _rid_order(r["render_id"]))
+    if len({binding_facts(conn, r) for r in found}) == 1:
+        return found[0]
+    raise QuoteRefusal(AMBIGUOUS, _common_view(found))
 
 
 def render_items(conn, render_id) -> list:
@@ -1295,23 +1414,15 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
         scope = json.loads(r["scope_json"])
         # every delivered rendering's items become `shown` (S7 §9 retires renders.binding,
         # the stamp job_report's hand-out wrote: it is ignored, whatever it holds)
+        # (binding §2 #13: a continued page's candidates are merged when it is composed,
+        # from its explicit predecessor only — never here; nothing outside views reads
+        # `shown`)
         for it in conn.execute("SELECT * FROM render_items WHERE render_id=?",
                                (render_id,)).fetchall():
-            mrevs = it["match_revisions_json"]
-            if scope.get("continues"):
-                # a later page of one item view: the operator has now been shown the
-                # earlier pages' candidates too, at the same revision of the payment
-                prev = conn.execute("SELECT s.*, r.kind FROM shown s JOIN renders r ON"
-                                    " r.render_id=s.render_id WHERE s.pid=?",
-                                    (it["pid"],)).fetchone()
-                if prev is not None and prev["kind"] == "item" \
-                        and prev["projection_revision"] == it["projection_revision"]:
-                    merged = json.loads(prev["match_revisions_json"])
-                    merged.update(json.loads(mrevs))
-                    mrevs = db.canonical(merged)
             conn.execute("INSERT OR REPLACE INTO shown(pid, render_id, projection_revision,"
                          " match_revisions_json, delivered_at) VALUES (?,?,?,?,?)",
-                         (it["pid"], render_id, it["projection_revision"], mrevs, now))
+                         (it["pid"], render_id, it["projection_revision"],
+                          it["match_revisions_json"], now))
         for rid_ in scope.get("residue", []) + scope.get("residue_silent", []):
             conn.execute("UPDATE residue SET shown_render=? WHERE id=?", (render_id, rid_))
         if scope.get("announce_watermark"):

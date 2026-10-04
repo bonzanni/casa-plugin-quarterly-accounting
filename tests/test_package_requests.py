@@ -1300,9 +1300,12 @@ class TestReviewC7(Requests):
 
 
 PHRASES = ("send it again", "may not have arrived", "didn't go out")
-# the phrase's owner, the reply grammar that PARSES it, and the one collector of what
-# views._compose built (views._review: build_review's in-transaction body, S2 Task 10)
-EXEMPT = {("delivery", "offer_lines"), ("reply", "_clauses"), ("views", "_review")}
+# the phrase's owner, the reply grammar that PARSES it, the one collector of what
+# views._compose built (views._review: build_review's in-transaction body, S2 Task 10), and
+# the reply grammar's record of its bound rendering (reply._Scope.__init__), which READS
+# that rendering's stored offers (binding R4) and composes none
+EXEMPT = {("delivery", "offer_lines"), ("reply", "_clauses"), ("views", "_review"),
+          ("reply", "__init__")}
 
 
 def offer_builders() -> dict:

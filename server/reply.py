@@ -5,11 +5,17 @@ grammar is an executable contract, not 'Ellen understands free text'").
 Ellen decides that a message IS a reply (model judgment, stated as such in
 the spec) and passes its text verbatim. Everything after that is here:
 split into clauses; a clause must be consumed WHOLE by one pattern; a
-description resolves against the store's open items with no fuzzy matching
-(several -> ask with dates and amounts; none -> say so, never redirect); each
-application is bound to the revision the operator was SHOWN (authorship.py)
-— an item never shown, or changed since, is re-shown and nothing is applied
-to it; independent clauses still apply.
+description resolves against the open items of the ONE rendering the reading is
+bound to, with no fuzzy matching (several -> ask with dates and amounts; none -> say
+so, never redirect); each application is bound to the revision that rendering
+recorded (authorship.py) — an item it did not show, or changed since, is refused and
+nothing is applied to it; independent clauses still apply.
+
+Binding (rounds-2026-10-03-s7-diff/binding/): a reading has exactly one bound rendering
+R — the one its quote identifies (views.bound_rendering), or, for words with no quote,
+db.last_delivered. Every resolution step reads only R's record (_Scope): its
+render_items rows and the scope fields views.FACT_FIELDS lists. No step reads `shown`,
+and no step reads another rendering.
 
 S7 §8: nothing commits from text. reading_in_tx runs the grammar under a rehearsal
 (always rolled back) and returns the plan of writes, each with the revisions it read;
@@ -24,6 +30,7 @@ import authorship
 import binding
 import dates
 import db
+import expectation
 import kb
 import lineage
 import matches
@@ -201,30 +208,11 @@ def _parse_target(phrase: str) -> dict:
 
 def _names(d, seen=None) -> set:
     """Every name a payment answers to: its stored names, and the name the
-    latest delivered rendering showed it as (round 7: "A·B" is shown "A•B",
-    so "the A•B one" may mean either payment)."""
+    bound rendering showed it as (round 7: "A·B" is shown "A•B", so "the A•B
+    one" may mean either payment)."""
     out = {kb.norm(d["counterparty"]), kb.norm(d["bank_counterparty"])}
     if seen and str(d["pid"]) in seen:
         out.add(kb.norm(seen[str(d["pid"])]))
-    return out
-
-
-def _shown_scopes(conn) -> list:
-    """(pid, scope) of the rendering each payment was last SHOWN in — its own
-    `shown.render_id`, the rendering D3 binds its shown revision to (round 8:
-    the globally latest delivery may be an unrelated item view or an alert)."""
-    return [(r[0], json.loads(r[1])) for r in conn.execute(
-        "SELECT s.pid, r.scope_json FROM shown s JOIN renders r ON r.render_id=s.render_id"
-        " WHERE r.delivered_at IS NOT NULL")]
-
-
-def _seen_names(conn) -> dict:
-    """pid (str) -> the payee name the rendering that last showed it printed."""
-    out = {}
-    for pid, scope in _shown_scopes(conn):
-        name = scope.get("names", {}).get(str(pid))
-        if name is not None:
-            out[str(pid)] = name
     return out
 
 
@@ -242,26 +230,17 @@ def _matches(d, t, seen=None) -> bool:
     return bool(t["vendor"] or t["amount"] is not None)
 
 
-def _delivered_refs(conn) -> dict:
-    """hex -> the pids whose last-shown rendering printed that generated ref."""
-    out: dict = {}
-    for pid, scope in _shown_scopes(conn):
-        for k, v in scope.get("refs", {}).items():
-            if pid in (v if isinstance(v, list) else [v]):
-                out.setdefault(k, set()).add(pid)
-    return out
-
-
-def _resolve(conn, phrase, items):
-    """A description resolves to exactly one open item. The literal reading
-    (the whole phrase as payee, amount, date) and a ref reading are both
-    tried; a "ref <hex>" counts only as a generated ref the latest DELIVERED
-    rendering printed, exactly (round 6: a payee literally named "Adobe ref
-    e40c" is not a ref). Several readings, or several payments: ask."""
+def _resolve(run, phrase, items):
+    """A description resolves to exactly one open item of the bound rendering R (`items`
+    are those). The literal reading (the whole phrase as payee, amount, date) and a ref
+    reading are both tried; a "ref <hex>" counts only as a generated ref R printed,
+    exactly (round 6: a payee literally named "Adobe ref e40c" is not a ref). Several
+    readings, or several payments: ask. None on R while an open item elsewhere answers
+    to it: R3's refusal (run.not_on)."""
     t = _parse_target(phrase)
-    seen_names = _seen_names(conn)
+    seen_names = run.scope.names
     hits = [d for d in items if _matches(d, t, seen_names)]
-    refs = _delivered_refs(conn)
+    refs = run.scope.refs
     m = _REF.search(phrase)
     if m and m.group(1) in refs:
         rest = (phrase[:m.start()] + phrase[m.end():]).strip(" ,")
@@ -280,6 +259,8 @@ def _resolve(conn, phrase, items):
         return hits[0], None
     if not hits:
         same = [d for d in items if t["vendor"] and t["vendor"] in _names(d, seen_names)]
+        if not same and any(_matches(d, t) for d in run.all_items):
+            return None, run.not_on(phrase)
         msg = f"Nothing open matches “{views.field(phrase)}”."
         if same:
             msg += " Open for that name: " + "; ".join(views.headline(d) for d in same) + "."
@@ -304,10 +285,6 @@ def _matches_loose(d, t) -> bool:
         if (dd.day, dd.month) != t["day"]:
             return False
     return True
-
-
-def _shown(conn, pid):
-    return conn.execute("SELECT * FROM shown WHERE pid=?", (pid,)).fetchone()
 
 
 def _targets(phrase: str) -> list:
@@ -363,9 +340,50 @@ PHRASE = {
 _LIVE = "SELECT pid, revision FROM projections WHERE merged_into IS NULL AND ended IS NULL"
 
 
+def _survivor(conn, pid):
+    try:
+        return lineage.resolve_pid(conn, pid)
+    except db.Refusal:
+        return pid
+
+
+class _Scope:
+    """THE bound rendering R's own record (binding §1): every resolution step reads only
+    this — R's render_items rows (`rev`, `mrevs`, by the pid R recorded) and the scope
+    fields the grammar reads (views.FACT_FIELDS; an AST pin holds this module to that
+    list). With no R it is empty. A recorded pid maps to its lineage survivor in `pids`,
+    `names` and `refs`; R recorded no row for the survivor, so a merge fails closed at bind
+    (matches._operator_pid's shape)."""
+
+    def __init__(self, conn, bound):
+        self.rid = bound["render_id"] if bound is not None else None
+        self.kind = bound["kind"] if bound is not None else None
+        scope = json.loads(bound["scope_json"]) if bound is not None else {}
+        rows = conn.execute("SELECT * FROM render_items WHERE render_id=?",
+                            (self.rid,)).fetchall() if bound is not None else []
+        self.rev = {r["pid"]: r["projection_revision"] for r in rows}
+        self.mrevs = {r["pid"]: json.loads(r["match_revisions_json"]) for r in rows}
+        self.pids = {_survivor(conn, p) for p in self.rev}
+        self.names = {str(_survivor(conn, int(k))): v
+                      for k, v in (scope.get("names") or {}).items()}
+        self.refs = {}
+        for k, v in (scope.get("refs") or {}).items():
+            self.refs[k] = {_survivor(conn, p) for p in (v if isinstance(v, list) else [v])}
+        self.proposed = list(scope.get("proposed") or [])
+        self.offers = list(scope.get("offers") or [])
+        self.has_next = "next" in scope        # a pre-S7 page stored no `next` (r3 #4)
+        self.next = scope.get("next")
+        self.walk = scope.get("walk")
+        self.quarter = scope.get("quarter")
+        self.pid = scope.get("pid")
+
+
 class _Run:
-    def __init__(self, conn, grant, bound):
+    def __init__(self, conn, grant, bound, quoted=False):
         self.conn, self.grant, self.bound = conn, grant, bound
+        self.quoted = quoted              # the words came with a quote (binding R2/R3/R4)
+        self.scope = _Scope(conn, bound)
+        self.all_items = []               # every open item: only to say R3's refusal
         self.lines, self.asks, self.reshow, self.instructions = [], [], [], []
         self.plan, self.propose, self.unresolved_lines = [], [], []
         self.touched_quarters = set()
@@ -379,6 +397,19 @@ class _Run:
         # payments without one ("are they wrong or good?"). False: nothing in the message
         # was understood as a reply, so nothing was applied or asked
         self.understood = False
+
+    def not_on(self, phrase) -> str:
+        """R2/R3: words naming what the bound rendering does not contain."""
+        if self.quoted:
+            return f"“{views.field(phrase)}” isn't on the message you replied to — nothing applied."
+        return (f"“{views.field(phrase)}” isn't on the last list I sent — reply to the list "
+                "you mean.")
+
+    def recorded(self, d, cur) -> bool:
+        """§2 #10: the pairing a named verdict judges is the one R recorded — False when R
+        recorded the payment with another (or no) pairing."""
+        return d["pid"] not in self.scope.rev or \
+            str(cur["match_id"]) in self.scope.mrevs[d["pid"]]
 
     def note(self, line, unresolved=True):
         """A line that is not a write: said in the receipt, and listed in the proposal as
@@ -465,56 +496,31 @@ class _Run:
         return res
 
 
-def _item(conn, run, pid):
-    """The row the bound rendering recorded for `pid`, or None."""
-    if run.bound is None:
-        return None
-    return conn.execute("SELECT * FROM render_items WHERE render_id=? AND pid=?",
-                        (run.bound["render_id"], pid)).fetchone()
-
-
 def _bind_projection(conn, run, d):
-    """(render_id, revision, bind): the bound rendering's own row for the payment when it
-    has one (bind="rendered"), else the payment's latest shown rendering (bind="shown")."""
-    it = _item(conn, run, d["pid"])
-    if it is not None:
-        return it["render_id"], it["projection_revision"], "rendered"
-    s = _shown(conn, d["pid"])
-    if s is None:
+    """(render_id, revision, bind): the bound rendering's own row for the payment, or
+    NotShown (binding §2 #5)."""
+    if d["pid"] not in run.scope.rev:
         raise authorship.NotShown(d["pid"], "not shown")
-    return s["render_id"], s["projection_revision"], "shown"
+    return run.scope.rid, run.scope.rev[d["pid"]], "rendered"
 
 
 def _bind_match(conn, run, d, match_id):
-    it = _item(conn, run, d["pid"])
-    if it is not None:
-        rev = json.loads(it["match_revisions_json"]).get(str(match_id))
-        if rev is not None:
-            return it["render_id"], rev, "rendered"
-    s = _shown(conn, d["pid"])
-    if s is None:
-        raise authorship.NotShown(d["pid"], "not shown")
-    rev = json.loads(s["match_revisions_json"]).get(str(match_id))
+    """The revision R recorded for the pairing, or NotShown (§2 #6: no fallback)."""
+    rev = run.scope.mrevs.get(d["pid"], {}).get(str(match_id))
     if rev is None:
         raise authorship.NotShown(d["pid"], "not shown")
-    return s["render_id"], rev, "shown"
+    return run.scope.rid, rev, "rendered"
 
 
 def _bind_candidates(conn, run, d) -> dict:
-    """A set-aside's step parameters: every displayed candidate bound to ONE rendering —
-    the bound one when it showed them all, else the payment's latest shown rendering."""
+    """A set-aside's step parameters: every displayed candidate, each bound to R, which
+    must record them all (§2 #7; a continued page records its predecessor's, V1)."""
     mids = [c["match_id"] for c in d["candidates"]]
-    it = _item(conn, run, d["pid"])
-    src, bind = it, "rendered"
-    if it is None or any(str(m) not in json.loads(it["match_revisions_json"]) for m in mids):
-        src, bind = _shown(conn, d["pid"]), "shown"
-        if src is None:
-            raise authorship.NotShown(d["pid"], "not shown")
-    mrevs = json.loads(src["match_revisions_json"])
-    if any(str(m) not in mrevs for m in mids):
+    mrevs = run.scope.mrevs.get(d["pid"])
+    if mrevs is None or any(str(m) not in mrevs for m in mids):
         raise authorship.NotShown(d["pid"], "not shown")
-    return {"pid": d["pid"], "bound": [[m, src["render_id"], mrevs[str(m)]] for m in mids],
-            "bind": bind}
+    return {"pid": d["pid"], "bound": [[m, run.scope.rid, mrevs[str(m)]] for m in mids],
+            "bind": "rendered"}
 
 
 def _match_params(conn, run, d, match_id):
@@ -543,10 +549,11 @@ def _parse(clause: str):
     return None, None
 
 
-def _run(conn, text, grant, bound) -> "_Run":
+def _run(conn, text, grant, bound, quoted=False) -> "_Run":
     """The reply grammar applied inside the caller's transaction (S7 §8): every write under
-    `grant` and inside a savepoint of its clause, bound to `bound` (a renders row or None)."""
-    run = _Run(conn, grant, bound)
+    `grant` and inside a savepoint of its clause, bound to `bound` (a renders row or None):
+    its open items are the only ones a description resolves to (binding §2 #4)."""
+    run = _Run(conn, grant, bound, quoted)
     clauses = _clauses(text)
     # spec §"Asking between passes": a question is never a correction. A
     # message of questions only is not a reply; a question beside a correction
@@ -554,7 +561,8 @@ def _run(conn, text, grant, bound) -> "_Run":
     if not clauses or all(c.endswith("?") for c in clauses):
         run.not_a_reply = True
         return run
-    items = _open_items(conn)
+    run.all_items = _open_items(conn)
+    items = [d for d in run.all_items if d["pid"] in run.scope.pids]
     parsed = [(c, *_parse(c)) for c in clauses]
     # R3/R4 (Astra): a reply is split into clauses, so a qualification of a sheet-wide
     # approval ("all good,\nexcept the Zapier one"; "…\nwith the exception of …";
@@ -581,7 +589,7 @@ def _run(conn, text, grant, bound) -> "_Run":
             continue
         if verb is None:
             names = _targets(clause)
-            if names and all(_resolve(conn, n, items)[0] is not None for n in names):
+            if names and all(_resolve(run, n, items)[0] is not None for n in names):
                 run.understood = True
                 pretty = " and ".join(views.field(n.title() if n.islower() else n) for n in names)
                 run.note(f"Nothing applied for “{views.field(clause)}”: are they wrong or good? "
@@ -608,13 +616,37 @@ def _run(conn, text, grant, bound) -> "_Run":
     return run
 
 
+def _is_quote(quoted) -> bool:
+    return isinstance(quoted, str) and bool(views._qnorm(quoted))
+
+
+def _refused(conn, text, exc) -> dict:
+    """A quote that binds no one rendering (R1/R3): its line is said, nothing at all is
+    read, and the recovery is a fresh rendering (`show_view`). Words that are only
+    questions are still not a reply."""
+    run = _Run(conn, None, None, True)
+    clauses = _clauses(text)
+    if not clauses or all(c.endswith("?") for c in clauses):
+        run.not_a_reply = True
+    else:
+        run.understood = True
+        run.note(exc.line, unresolved=False)
+        run.instructions.append({"show_view": exc.view})
+    out = run.result()
+    out["render_id"] = None
+    return out
+
+
 def reading_in_tx(conn, text, quoted=None) -> dict:
     """S7 §8 propose: what `text` would do, learnt by running it under a rehearsal that is
-    always rolled back. Nothing it wrote survives."""
+    always rolled back. Nothing it wrote survives. Bound to ONE rendering (binding §1)."""
     import authority
-    bound = views.bound_rendering(conn, quoted)
+    try:
+        bound = views.bound_rendering(conn, quoted)
+    except views.QuoteRefusal as exc:
+        return _refused(conn, text, exc)
     with authority.rehearsal(conn) as r:
-        out = _run(conn, text, r, bound).result()
+        out = _run(conn, text, r, bound, _is_quote(quoted)).result()
     out["render_id"] = bound["render_id"] if bound is not None else None
     return out
 
@@ -624,7 +656,7 @@ def replay(conn, row, grant) -> dict:
     rendering it was bound to; the caller compares the plan and commits or rolls back."""
     bound = (conn.execute("SELECT * FROM renders WHERE render_id=?", (row["render_id"],))
              .fetchone() if row["render_id"] else None)
-    return _run(conn, row["text"], grant, bound).result()
+    return _run(conn, row["text"], grant, bound, _is_quote(row["quoted"])).result()
 
 
 def _apply(conn, run, verb, m, items):
@@ -635,7 +667,7 @@ def _apply(conn, run, verb, m, items):
         return
     if verb == "bulk_except":
         t = re.sub(r"^the\s+|\s+one$", "", m.group("t").strip())
-        d, _ = _resolve(conn, t, items)
+        d, _ = _resolve(run, t, items)
         who = d["counterparty"] if d is not None else t
         run.note(f"Nothing applied for that: say \"all good\" and \"the {views.field(who)} one is "
                  "wrong\" as two sentences, or only the one that is wrong.")
@@ -643,7 +675,8 @@ def _apply(conn, run, verb, m, items):
     if verb == "all_good":
         # spec §Testing: "`all good` is a sheet reply only while a sheet is the
         # most recent thing sent" — S7 §8: it binds to the rendering the reading is
-        # bound to (the quoted post's, else the most recent DELIVERED rendering)
+        # bound to (the quoted post's, else the most recent DELIVERED rendering), and it
+        # approves exactly the pairings that rendering proposed (as taps.verdict, §2 #10)
         last = run.bound
         if last is None or last["kind"] not in ("status", "check", "all"):
             run.note("Nothing applied for \"all good\": the last thing I sent you was "
@@ -651,27 +684,33 @@ def _apply(conn, run, verb, m, items):
                      "is good\".")
             return
         said = len(run.lines)
-        waiting, decided = [], 0
-        for pid in views.render_items(conn, last["render_id"]):
-            if pid in run.named:
-                decided += 1              # another clause of this reply decides it
-                continue
-            d = work.describe(conn, pid)
+        waiting, changed = [], []
+        for pid in run.scope.proposed:
+            p = _survivor(conn, pid)
+            if p in run.named:
+                continue                  # another clause of this reply decides it
+            d = work.describe(conn, p)
             cur = d["current"]
-            if cur is None or not views._needs_check(d) or d["candidates"]:
+            if cur is None or not run.recorded(d, cur):
+                changed.append(d)         # R proposed another pairing than today's
+                continue
+            if not views._needs_check(d) or d["candidates"]:
                 continue
             waiting.append((d, cur))
         stated = run.stated
-        # the count names the sheet: its pairings waiting, the ones decided here included
-        if stated and stated != {len(waiting) + decided}:
+        # the count names the sheet: the pairings it proposed, those decided here included
+        n = len(run.scope.proposed)
+        if stated and stated != {n}:
             # a count that is not the sheet's: the operator means a sheet other than
             # this one, or only some of its lines — confirm none of them
-            n = len(waiting) + decided
             run.note(f"Nothing applied: that sheet has {n} pairing"
                      f"{'' if n == 1 else 's'} waiting for your approval, "
                      f"not {' or '.join(str(x) for x in sorted(stated))}. Say \"all good\" to confirm all of them, or name the "
                      "ones that are right, e.g. \"the Zapier one is good\".")
             return
+        for d in changed:
+            run.note(f"{views.headline(d)}: the pairing on that sheet has changed since — "
+                     "nothing applied.")
         for d, cur in waiting:
             _confirm(conn, run, d, cur)
         if len(run.lines) == said:
@@ -679,7 +718,7 @@ def _apply(conn, run, verb, m, items):
         return
     if verb in ("unpair", "confirm", "exempt", "lift", "revive", "identity"):
         for phrase in _targets(m.group("t")) if verb in ("unpair", "confirm") else [m.group("t")]:
-            d, problem = _resolve(conn, phrase, items)
+            d, problem = _resolve(run, phrase, items)
             if d is None:
                 run.asks.append(problem)
                 run.note(problem)
@@ -689,8 +728,10 @@ def _apply(conn, run, verb, m, items):
             _one(conn, run, verb, d, m)
         return
     if verb == "never":
+        # R2: bound by provenance — the name is one R printed, or the stored payee of a
+        # payment R records; its effect set is listed in the proposal (_broad)
         said = kb.norm(m.group("t"))
-        seen_names = _seen_names(conn)
+        seen_names = run.scope.names
         fits = sorted({d["counterparty"] for d in items if said in _names(d, seen_names)})
         if len(fits) > 1:           # the name the operator saw fits several payees: ask
             ask = (f"Which one? “{views.field(m.group('t').strip())}” could be " + " or ".join(
@@ -700,24 +741,34 @@ def _apply(conn, run, verb, m, items):
             return
         name = fits[0] if fits else None
         if name is None:
+            if any(said in _names(d) for d in run.all_items):
+                run.note(run.not_on(m.group("t").strip()))    # open, but not on R
+                return
             known = kb.counterparty_for(conn, said)
             if known is None:
                 # none -> say so, never create a payee from a typo (fix round 1)
                 run.note(f"Nothing open matches “{views.field(m.group('t').strip())}”, and I know no "
                          "payee by that name — nothing applied.")
                 return
+            if not _shows_payee(conn, run, said, known["name"]):
+                run.note(run.not_on(m.group("t").strip()))
+                return
             name = known["name"]
         _broad(conn, run, "never", {"scope": name}, lambda: kb.set_expectation_in_tx(
                    conn, scope_type="counterparty", scope=name, kind="none",
-                   author="operator", render_id=_last_delivered(run), grant=run.grant),
+                   author="operator", render_id=_provenance(run), grant=run.grant),
                {"name": views.field(name)})
         return
     if verb == "class_none":
         k = m.group("k")
+        # R2: R records at least one payment the class's chain scope covers
+        if not any(_class_covers(conn, p, CLASS_SCOPES[k]) for p in run.scope.pids):
+            run.note(run.not_on(k))
+            return
         _broad(conn, run, "class_none", {"scopes": list(CLASS_SCOPES[k])},
                lambda: [kb.set_expectation_in_tx(
                    conn, scope_type="chain", scope=scope, kind="none", author="operator",
-                   render_id=_last_delivered(run), grant=run.grant) for scope in CLASS_SCOPES[k]],
+                   render_id=_provenance(run), grant=run.grant) for scope in CLASS_SCOPES[k]],
                {"kind": k.capitalize()})
         return
     if verb == "stop":
@@ -750,7 +801,16 @@ def _apply(conn, run, verb, m, items):
         run.rebuilds.append(m.group("q"))        # decided after the WHOLE reply (result())
         return
     if verb == "resend":
-        run.instructions.append("resend")
+        # R4: words quoting a rendering resend that rendering's own offer; unquoted words
+        # resend the newest delivered offer (delivery.resend_target)
+        if not run.quoted:
+            run.instructions.append("resend")
+        elif run.scope.offers:
+            run.instructions.append({"stage_for_delivery": {"resend": True,
+                                                            "render_id": run.scope.rid}})
+        else:
+            run.note("Not sent again: that message offers no package to send again.",
+                     unresolved=False)
         return
     if verb == "send_last":
         q = m.group("q")
@@ -759,18 +819,18 @@ def _apply(conn, run, verb, m, items):
     if verb == "show":
         if m.group("s") in ("more", "all of them"):
             # a desk turn is a fresh session (S7 §2): it cannot know the cursor, so the
-            # bound rendering's own `next` is returned as ready show_view arguments
-            scope = json.loads(run.bound["scope_json"]) if run.bound is not None else {}
-            nxt = scope.get("next")
-            if run.bound is not None and run.bound["kind"] in views.VIEWS \
-                    and "next" not in scope:
+            # bound rendering's own `next` is returned as ready show_view arguments — it
+            # names R as `prev` (binding V1)
+            sc = run.scope
+            nxt = sc.next
+            if run.bound is not None and sc.kind in views.VIEWS and not sc.has_next:
                 # r3 #4: a page delivered before S7 stored no `next` (an explicit null is
                 # "nothing more"): a fresh paged view of the same view and quarter
-                nxt = {"view": run.bound["kind"], "quarter": scope.get("quarter"), "page": 1}
-                if run.bound["kind"] == "item":
-                    nxt["pid"] = scope.get("pid")
-            elif nxt and run.bound["kind"] == "item" and scope.get("walk"):
-                nxt = dict(nxt, walk=scope["walk"])      # r3 #5: as the More button does
+                nxt = {"view": sc.kind, "quarter": sc.quarter, "page": 1}
+                if sc.kind == "item":
+                    nxt["pid"] = sc.pid
+            elif nxt and sc.kind == "item" and sc.walk:
+                nxt = dict(nxt, walk=sc.walk)            # r3 #5: as the More button does
             if nxt:
                 run.instructions.append({"show_view": nxt})
             else:
@@ -779,7 +839,7 @@ def _apply(conn, run, verb, m, items):
         run.instructions.append(m.group("s"))
         return
     if verb == "candidates":
-        d, problem = _resolve(conn, m.group("t"), items)
+        d, problem = _resolve(run, m.group("t"), items)
         if d is None:
             run.asks.append(problem)
             run.note(problem, unresolved=False)
@@ -788,51 +848,73 @@ def _apply(conn, run, verb, m, items):
         return
 
 
-class _Unseen(Exception):
-    def __init__(self, pids):
-        super().__init__("unseen")
-        self.pids = pids
+EFFECTS_MAX = 8                 # the proposal lists at most this many changed payments
 
 
 def _broad(conn, run, op, params, change, phrase_args) -> None:
-    """A vendor- or class-wide operator change — or an identity, which reaches
-    every payment with that bank text — binds EVERY payment whose proposition
-    it changes (round p6, Terra S1: "no invoices ever for Adobe" retired a
-    pairing on an Adobe payment the operator had never seen). The change is
-    made inside its clause's savepoint; every payment whose revision it moved
-    (the step's `read`) must have been shown at the revision it had before the
-    change, or the whole change rolls back and those payments are shown first."""
-    def check(read):
-        unseen = []
-        for pid, rev in sorted(read.items()):
-            s_ = _shown(conn, pid)
-            if s_ is None or s_["projection_revision"] != rev:
-                unseen.append(pid)
-        if unseen:
-            raise _Unseen(unseen)
+    """A vendor- or class-wide operator change — or an identity, which reaches every
+    payment with that bank text — binds by provenance (binding R2: the caller checked that
+    the bound rendering shows what the words name). Its effect set, every payment whose
+    revision the change moves (the step's `read`), is computed in this rehearsal and listed
+    in the proposal, one headline each (round p6, Terra S1: the operator sees every payment
+    it changes before Apply); `read` is in the plan, so Apply's replay-and-compare refuses
+    a changed set. No per-payment re-show, so no livelock (d1 Astra S2)."""
     try:
-        _, read = run.write(op, params, change, phrase_args, check=check)
-    except _Unseen as exc:
-        for pid in exc.pids:
-            if pid not in run.reshow:
-                run.reshow.append(pid)
-        run.note(f"Not applied: it would change {len(exc.pids)} payment"
-                 f"{'s' if len(exc.pids) != 1 else ''} you haven't seen as they are "
-                 "now — here they are first.")
-        return
+        _, read = run.write(op, params, change, phrase_args)
     except db.Refusal as exc:
         run.note(f"Not applied — {_say(conn, exc)}.")
         return
+    heads = [views.headline(work.describe(conn, pid)) for pid in sorted(read)]
+    if heads:
+        n = len(heads)
+        shown = heads[:EFFECTS_MAX] + ([f"and {n - EFFECTS_MAX} more"] if n > EFFECTS_MAX
+                                       else [])
+        run.propose[-1] += (f" It changes {n} payment{'s' if n != 1 else ''}:\n"
+                            + "\n".join(f"  {h}" for h in shown))
     for pid in read:                       # "rebuild it" rebuilds the quarters it changed (p8)
         q = work.describe(conn, pid)["quarter"]
         if q:
             run.touched_quarters.add(q)
 
 
-def _last_delivered(run):
+def _provenance(run):
     """The provenance stamp of an operator's broad rule ("no invoices ever for X", "X
     are no longer needed"): the rendering the reading is bound to (S7 §8)."""
     return run.bound["render_id"] if run.bound is not None else None
+
+
+def _shows_payee(conn, run, said, name) -> bool:
+    """R2: the bound rendering shows the payee — a name it printed, or the stored payee of
+    a payment it records (kb.counterparty_for's fallback refuses otherwise)."""
+    if any(kb.norm(v) == said for v in run.scope.names.values()):
+        return True
+    return any(kb.norm(work.describe(conn, p)["counterparty"]) == kb.norm(name)
+               for p in run.scope.pids)
+
+
+def _class_covers(conn, pid, scopes) -> bool:
+    """R2: a chain scope of the class covers the payment — the row and key its
+    classification selects meet expectation.normalize_scope's (rows, key) for one of
+    `scopes`, as expectation.derive applies an override."""
+    try:
+        proj = lineage.projection(conn, pid)
+        row = lineage.live_row(conn, proj)
+    except db.Refusal:
+        return False
+    if row is None:
+        return False
+    tags = json.loads(proj["class_tags_json"]) if proj["class_tags_json"] else []
+    if expectation.classification_state(tags) != "classified":
+        return False
+    chosen = expectation.decisive(tags, row["direction"])
+    if chosen is None:
+        return False
+    r, key = chosen
+    for scope in scopes:
+        norm = expectation.normalize_scope(kb.parse_scope(scope))
+        if norm is not None and r in norm[0] and norm[1] <= key:
+            return True
+    return False
 
 
 def _confirm(conn, run, d, cur):
@@ -859,7 +941,9 @@ def _one(conn, run, verb, d, m):
     cur = d["current"]
     h = views.headline(d)
     if verb == "unpair":
-        if cur is not None:
+        if cur is not None and not run.recorded(d, cur):
+            run.note(f"{h}: the pairing on that sheet has changed since — nothing applied.")
+        elif cur is not None:
             run.guarded(d, "unpair", lambda: _match_params(conn, run, d, cur["match_id"]),
                         lambda p: matches.reject_in_tx(
                             conn, grant=run.grant, match_id=p["match_id"],
@@ -878,6 +962,8 @@ def _one(conn, run, verb, d, m):
     elif verb == "confirm":
         if cur is None:
             run.note(f"{h} has no single pairing to approve.")
+        elif not run.recorded(d, cur):
+            run.note(f"{h}: the pairing on that sheet has changed since — nothing applied.")
         elif not views._needs_check(d):
             run.note(f"{h} was already fine.", unresolved=False)
         else:
@@ -900,14 +986,11 @@ def _one(conn, run, verb, d, m):
     elif verb == "identity":
         who = m.group("who").strip()
         # An identity reaches every payment with that bank text (the KB re-settles
-        # them all), so it goes through the same guard as a vendor-wide rule: the
-        # named payment AND every other payment it changes must have been shown as
-        # they are (round p7, Astra S1). The receipt is read after the write.
-        if _shown(conn, d["pid"]) is None:
-            if d["pid"] not in run.reshow:
-                run.reshow.append(d["pid"])
-            run.note(f"{h} hasn't been shown to you in this form yet — here it is now; "
-                     "nothing applied.")
+        # them all), so it binds like a vendor-wide rule (R2): its provenance is the
+        # named payment, on R; every payment it changes is listed in the proposal
+        # (round p7, Astra S1). The receipt is read after the write.
+        if d["pid"] not in run.scope.pids:
+            run.note(run.not_on(h))
             return
 
         def ident():

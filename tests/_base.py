@@ -589,6 +589,14 @@ class StoreCase(TempEnv):
         return lineage.live_row(self.conn, lineage.projection(self.conn, pid))
 
 
+def untag(text: str) -> str:
+    """A rendering's text without its first-line tag (binding V2: " · <n>", the render id's
+    digits) — for pins of composed text that predate the tag."""
+    import re
+    first, sep, rest = text.partition("\n")
+    return re.sub(r" \u00b7 \d+$", "", first) + sep + rest
+
+
 def apply_now(conn, text, quoted=None) -> dict:
     """S7 §8: the operator's words read (propose_reading) and, when a reading was posted,
     its Apply tapped — what apply_reply did in one call before S7. The result is shaped

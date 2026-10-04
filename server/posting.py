@@ -36,15 +36,16 @@ def _keyed(conn, render_id, specs) -> list:
 
 
 def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None, walk=None,
-              render_id=None) -> dict:
+              render_id=None, prev=None) -> dict:
     """§7.1: render exactly as build_review does (or, with render_id, re-post that stored
     rendering — the job's `view` unit, §5) and deposit it as a proposal: text = the page,
-    buttons = §7.2, revision = view:<view>:<quarter>."""
+    buttons = §7.2, revision = view:<view>:<quarter>. `prev` is the predecessor page the
+    More button (or a typed "more") names (binding V1)."""
     if walk is not None and (not isinstance(walk, str) or not RENDER_ID.fullmatch(walk)):
         raise db.Refusal("walk is the render id the One by one button carried")
     with db.tx(conn):
         if render_id is not None:
-            if any(v is not None for v in (view, quarter, pid, page, after)):
+            if any(v is not None for v in (view, quarter, pid, page, after, prev)):
                 raise db.Refusal("render_id re-posts a stored rendering: name nothing else")
             r = conn.execute("SELECT * FROM renders WHERE render_id=?",
                              (render_id,)).fetchone() if isinstance(render_id, str) else None
@@ -54,7 +55,8 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
                 raise db.Refusal("that rendering is too long for buttons: post it with "
                                  "post_results(render_ids=[…]) instead")
         else:
-            out = views.review_in_tx(conn, view or "status", quarter, pid, page, after)
+            out = views.review_in_tx(conn, view or "status", quarter, pid, page, after,
+                                     prev=prev)
             r = conn.execute("SELECT * FROM renders WHERE render_id=?",
                              (out["render_id"],)).fetchone()
         scope = json.loads(r["scope_json"])
