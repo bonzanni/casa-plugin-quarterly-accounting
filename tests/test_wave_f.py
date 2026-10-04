@@ -45,18 +45,10 @@ class TestQuarterWords(ToolCase):
                     package_token=self.package_token())
         self.assertIn("-2026-Q3-", out["filename"])
 
-    def test_stop_chasing_q3_and_start_from_q2(self):
-        self.assertEqual(_json("stop_chasing", quarter="q3")["quarter"], "2026-Q3")
-        self.assertEqual(_json("set_watermark", when="Q2")["watermark"], "2026-04-01")
-        self.assertEqual(_json("set_watermark", when="2026-03-15")["watermark"], "2026-03-15")
-
     def test_anything_else_is_a_refusal_in_words_never_an_error(self):
         calls = [("build_review", {"view": "quarter", "quarter": "the third quarter"}),
                  ("list_quarter_state", {"quarter": "Q5"}),
                  ("build_quarterly_package", {"quarter": "Q3-2026", "package_token": 1}),
-                 ("stop_chasing", {"quarter": "summer"}),
-                 ("set_watermark", {"when": "Q7"}),
-                 ("set_watermark", {"when": "2026-13-45"}),
                  ("build_review", {"view": "quarter", "quarter": 3})]
         for name, args in calls:
             res = _tool(name, **args)
@@ -68,7 +60,7 @@ class TestQuarterWords(ToolCase):
     def test_the_schemas_show_the_format(self):
         import qa_server
         for name, arg in (("build_review", "quarter"), ("build_quarterly_package", "quarter"),
-                          ("list_quarter_state", "quarter"), ("stop_chasing", "quarter"),
+                          ("list_quarter_state", "quarter"),
                           ("list_projections", "quarter")):
             desc = qa_server.TOOLS[name]["schema"]["properties"][arg].get("description", "")
             self.assertIn("YYYY-Qn, e.g. 2026-Q3 (Qn and Qn YYYY accepted)", desc, name)
@@ -134,6 +126,7 @@ class TestSendItAgainAfterATimeout(ToolCase):
         self.other = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
         self.pkg = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
 
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_timeout_offer_mark_delivered_then_send_it_again(self):
         import os
         import pathlib

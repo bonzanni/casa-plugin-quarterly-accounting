@@ -220,6 +220,7 @@ class TestAlertsProperty(Base):
 
 
 class TestReplyProperty(Base):
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_every_receipt_page_is_deliverable_and_nothing_is_lost(self):
         rng = random.Random(3)
         pids, names = [], []

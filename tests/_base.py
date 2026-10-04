@@ -54,9 +54,68 @@ class StoreCase(TempEnv):
     def bind(self, account="acc-biz", label="Zakelijk", watermark="2026-07-01"):
         import binding
         import db
-        binding.bind_account(self.conn, account, label)
         with db.tx(self.conn):
+            binding.bind_in_tx(self.conn, account, label, grant=self.grant())
             self.conn.execute("UPDATE binding SET watermark=?", (watermark,))
+
+    @staticmethod
+    def grant():
+        """S7 §8.1: the operator's authority, as a keyed tap holds it. Tests are the one
+        place outside taps.py that construct one (the grep pin reads server/ only)."""
+        import authority
+        return authority.OperatorGrant("verdict", "test")
+
+    def granted(self, fn, *args, **kw):
+        """An operator write (an *_in_tx form) in its own transaction, under a test grant —
+        what the public wrappers did before S7 §8.1 removed them."""
+        import db
+        with db.tx(self.conn):
+            return fn(self.conn, *args, grant=self.grant(), **kw)
+
+    def operator_pair(self, *, pid, doc_id, expected_revision, render_id):
+        """The operator pairs a document with a payment they were shown (what
+        record_match(author="operator") did before S7 §8.1: in the server only a tap's
+        confirm_in_tx reaches matches._operator_pair; tests drive it directly)."""
+        import authorship
+        import db
+        import matches
+        with db.tx(self.conn):
+            pid = matches._operator_pid(self.conn, pid)
+            authorship.require_projection(self.conn, pid, render_id, expected_revision)
+            return matches._operator_pair(self.conn, pid, doc_id, render_id)
+
+    def sheet_fixture(self, payee="Zapier", amount=9900, day="2026-09-17"):
+        """A bound store with one payment holding one guessed machine pairing, and a
+        delivered check view that shows it (S7 sheet tests, under a Q3 clock — Ruling F3).
+        Returns {render_id, pid, match_id, doc_id, revision, match_revision, payee}."""
+        import datetime as dt
+        import db
+        import matches
+        import views
+        with self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc)):
+            self.bind()
+            token = self.pass_()
+            with db.tx(self.conn):
+                self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
+                                  " bank_through) VALUES ('p', 'x', 0, 0, '2026-09-20')")
+            n = 1 + (self.conn.execute("SELECT max(row_id) FROM bank_rows").fetchone()[0] or 0)
+            self.row(n, counterparty=payee, amount_minor=amount, booking_date=day,
+                     value_date=day)
+            pid = self.lineage_for(n)
+            self.classify(pid, {"software"})
+            self.settle(pid)
+            doc_id = self.doc(counterparty=payee, issuer=payee, amount_minor=amount,
+                              document_date=day)
+            mid = matches.record_match(self.conn, pid=pid, doc_id=doc_id, author="auto",
+                                       expected_revision=self.rev(pid),
+                                       row_snapshot=StoreCase.snapshot(self, pid), token=token,
+                                       labels=("guessed",))["match_id"]
+            r = views.build_review(self.conn, view="check", quarter="2026-Q3")
+            views.mark_rendering_delivered(self.conn, r["render_id"])
+        assert pid in views.render_items(self.conn, r["render_id"]), r["text"]
+        return {"render_id": r["render_id"], "pid": pid, "match_id": mid, "doc_id": doc_id,
+                "revision": self.rev(pid), "match_revision": self.rev(match_id=mid),
+                "payee": payee}
 
     LEDGER = "a" * 32             # the bank-feed ledger instance id the fixtures bind to
 

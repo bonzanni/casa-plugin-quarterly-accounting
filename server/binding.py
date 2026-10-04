@@ -8,6 +8,7 @@ import re
 import shutil
 import unicodedata
 
+import authority
 import dates
 import db
 
@@ -29,43 +30,45 @@ def _bind(conn, account_id: str, label: str) -> None:
                  (account_id, label, dates.quarter_start(db.now()[:10]), db.now(), slug(label)))
 
 
-def bind_account(conn, account_id: str, label: str = "", token=None) -> dict:
-    import passes
-    with db.tx(conn):
-        passes.check_token(conn, token)
-        b = get(conn)
-        if b is not None:
-            if b["account_id"] != account_id:
-                raise db.Refusal("an account is already bound; rebinding to another one is "
-                                 "not offered in v1")
-            return {"bound": account_id, "changed": False}
-        _bind(conn, account_id, label)
-        return {"bound": account_id, "changed": True, "watermark": get(conn)["watermark"]}
+def bind_in_tx(conn, account_id: str, label: str, *, grant) -> dict:
+    """The operator names the business account, inside the caller's transaction, under a
+    tap's grant (S7 §8.1). passes.record_probe's automatic binding of a single company
+    account calls _bind: that is not an operator decision."""
+    authority.require(conn, grant)
+    b = get(conn)
+    if b is not None:
+        if b["account_id"] != account_id:
+            raise db.Refusal("an account is already bound; rebinding to another one is "
+                             "not offered in v1")
+        return {"bound": account_id, "changed": False}
+    _bind(conn, account_id, label)
+    return {"bound": account_id, "changed": True, "watermark": get(conn)["watermark"]}
 
 
-def acknowledge_ledger_reset(conn) -> dict:
+def acknowledge_ledger_reset_in_tx(conn, *, grant) -> dict:
     """The operator's word that the bank ledger was wiped on purpose
-    (delete_all_data, or everything purged before this plugin ever wrote). If
-    the next import cannot prove it is the ledger the store was built on, it
-    RE-BINDS the store to the ledger it reads (ledger._rebind); either way the
+    (delete_all_data, or everything purged before this plugin ever wrote), under a tap's
+    grant (S7 §8.1). If the next import cannot prove it is the ledger the store was built
+    on, it RE-BINDS the store to the ledger it reads (ledger._rebind); either way the
     word is consumed by that import (plan §D4)."""
-    with db.tx(conn):
-        if get(conn) is None:
-            raise db.Refusal("no account is bound yet")
-        conn.execute("UPDATE binding SET ledger_reset_ack=1 WHERE id=1")
+    authority.require(conn, grant)
+    if get(conn) is None:
+        raise db.Refusal("no account is bound yet")
+    conn.execute("UPDATE binding SET ledger_reset_ack=1 WHERE id=1")
     return {"acknowledged": True,
             "note": "At the next check, if the bank ledger is not the one I knew, every "
                     "payment I tracked is closed, its document freed, and I start again from "
                     "the ledger as it is now."}
 
 
-def set_package_name(conn, name: str) -> dict:
+def set_package_name_in_tx(conn, name: str, *, grant) -> dict:
+    """'Call the zips <name>', inside the caller's transaction, under a tap's grant."""
+    authority.require(conn, grant)
     s = slug(name)                  # a name that slugs to nothing falls back to "books"
-    with db.tx(conn):
-        if get(conn) is None:
-            raise db.Refusal("no account is bound yet")
-        conn.execute("UPDATE binding SET package_name=?, package_name_announced=1 WHERE id=1",
-                     (s,))
+    if get(conn) is None:
+        raise db.Refusal("no account is bound yet")
+    conn.execute("UPDATE binding SET package_name=?, package_name_announced=1 WHERE id=1",
+                 (s,))
     return {"package_name": s}
 
 

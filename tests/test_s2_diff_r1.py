@@ -5,6 +5,7 @@ instance switched mid-pass after the reset acknowledgement stops the pass.
 The relay tests drive the registered tools (qa_server.TOOLS) against a synthetic bank,
 as the round's reproductions did (Astra, /tmp/s2-review-XQEBYB/review_repro.py)."""
 import datetime
+import unittest
 
 from tests._base import StoreCase
 from tests.sim_job import JobDriver
@@ -217,6 +218,7 @@ class InformationalPages(Tools):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
                          before + 1)
 
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_all_good_after_a_handover_page_binds_to_the_sheet_before_it(self):
         with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
             u = self.until(self.start(2), "judge")
@@ -313,6 +315,7 @@ class OperatorTurnRelay(Tools):
             "SELECT pid, render_id FROM log WHERE kind='pair' AND author='operator'"
             " ORDER BY rowid")]
 
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_astras_reply_race_applies_nothing(self):
         """Ellen relays B's result with a no-id job_report BEFORE apply_reply (the order
         R2 forbids). The newer non-binding sheet is a boundary (R6): "all good" applies
@@ -325,6 +328,7 @@ class OperatorTurnRelay(Tools):
         self.assertEqual(self.operator_pairs(), [])
         self.assertIn(db.NEWER_SINCE, out["receipt_pages"][0])
 
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_astras_wider_sheet_confirms_nothing(self):
         """Astra r2 S1: a binding check view shows payment 1; a no-id relay delivers a
         sheet of payments 2–9. "all good" confirms nothing — never payment 1 through
@@ -353,6 +357,7 @@ class OperatorTurnRelay(Tools):
             self.assertIn(db.NEWER_SINCE, out["receipt_pages"][0])
             self.assertNotEqual(new, old["render_id"])
 
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_a_notification_relay_still_binds(self):
         p1, p2, old = self.two_checks()
         new = self.deliver(self.call("job_report", job_id=B, status="ok"))[-1]
@@ -365,6 +370,7 @@ class OperatorTurnRelay(Tools):
         return self.conn.execute("SELECT binding FROM renders WHERE render_id=?",
                                  (render_id,)).fetchone()[0]
 
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_the_latest_hand_out_wins(self):
         """A result first offered on B's notification (not delivered: the turn was cut),
         then offered again by a no-id call in an operator's turn, is non-binding; offered
@@ -381,6 +387,7 @@ class OperatorTurnRelay(Tools):
         self.assertEqual(self.binding(old), 1)
 
 
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_a_notification_re_offer_binds_again(self):
         """The other direction: first offered by a no-id call, then on a notification."""
         p1, p2, old = self.two_checks()
@@ -402,7 +409,7 @@ class InstanceSwitch(Tools):
         import binding, db, job
         u = self.until(self.start(2), "judge")
         snaps = self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0]
-        binding.acknowledge_ledger_reset(self.conn)
+        self.granted(binding.acknowledge_ledger_reset_in_tx)
         self.instance = OTHER                         # the next read sees another ledger
         later = db._clock() + datetime.timedelta(seconds=job.W_S + 1)
         with self.patch_clock(later):

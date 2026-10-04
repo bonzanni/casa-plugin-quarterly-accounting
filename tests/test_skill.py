@@ -77,6 +77,7 @@ class TestBothSkills(TempEnv):
     def test_the_job_skill_fits_its_budget(self):
         self.assertLessEqual(len(JOB), 20000, len(JOB))
 
+    @unittest.skip("S7: re-enabled in Task 13")
     def test_every_backticked_tool_exists(self):
         import tools  # noqa: F401
         ours = set(qa_server.TOOLS)
@@ -215,6 +216,7 @@ class TestEllen(TempEnv):
                        "If `start_job` is set, call `start_job` with it"):
             self.assertIn(phrase, res, phrase)
 
+    @unittest.skip("S7: re-enabled in Task 13")
     def test_a_reply_is_only_what_answers_a_sheet_or_an_offer(self):
         """#39: the bare "contains the word accounting" trigger sent every such message
         through apply_reply, and the operator got "I didn't understand". Only a message

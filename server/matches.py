@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+import authority
 import authorship
 import db
 import documents
@@ -272,15 +273,13 @@ def _operator_pid(conn, pid) -> int:
 def record_match(conn, *, pid, doc_id, author, expected_revision, render_id=None,
                  labels=("clean",), rationale="", runners_up=(), resolves=(), row_snapshot=None,
                  token=None, row_digest=None, document_date=None) -> dict:
-    if author == "auto":
-        return _machine(conn, "pair", pid, doc_id, expected_revision, labels, rationale,
-                        runners_up, resolves, row_snapshot, token, row_digest, document_date)
-    if author != "operator":
-        raise db.Refusal("author is 'auto' or 'operator'")
-    with db.tx(conn):
-        pid = _operator_pid(conn, pid)
-        authorship.require_projection_shown(conn, pid, render_id, expected_revision)
-        return _operator_pair(conn, pid, doc_id, render_id)
+    if author == "operator":
+        # S7 §8.1: an operator pairing is a tap's (matches.confirm_in_tx under a grant)
+        raise db.Refusal(authority.TAP_ONLY)
+    if author != "auto":
+        raise db.Refusal("author is 'auto'")
+    return _machine(conn, "pair", pid, doc_id, expected_revision, labels, rationale,
+                    runners_up, resolves, row_snapshot, token, row_digest, document_date)
 
 
 def propose_match(conn, *, pid, doc_id, expected_revision, labels=("clean",), rationale="",
@@ -290,33 +289,30 @@ def propose_match(conn, *, pid, doc_id, expected_revision, labels=("clean",), ra
                     runners_up, resolves, row_snapshot, token, row_digest, document_date)
 
 
-def confirm_match(conn, *, match_id, expected_revision, render_id) -> dict:
-    with db.tx(conn):
-        s = _state(conn, match_id)
-        pid = _operator_pid(conn, s["pid"])
-        authorship.require_match_shown(conn, pid, match_id, render_id, expected_revision)
-        if s["state"] == "rejected":
-            raise db.Refusal("that pairing was already removed")
-        if s["state"] == "conflicted":
-            other = conn.execute("SELECT pid FROM match_state WHERE doc_id=? AND pid<>? AND state"
-                                 " IN ('matched','proposed')", (s["doc_id"], pid)).fetchone()
-            if other is not None:
-                raise db.Refusal(f"that document has since been paired with payment #{other[0]}")
-        return _operator_pair(conn, pid, s["doc_id"], render_id, match_id=match_id)
-
-
-def reject_match(conn, *, match_id, expected_revision, render_id) -> dict:
-    with db.tx(conn):
-        return reject_in_tx(conn, match_id=match_id, expected_revision=expected_revision,
-                            render_id=render_id)
-
-
-def reject_in_tx(conn, *, match_id, expected_revision, render_id) -> dict:
-    """reject_match inside the caller's transaction (apply_reply sets aside
-    every displayed candidate of a payment, all or none)."""
+def confirm_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="shown") -> dict:
+    """The operator approves a pairing they were shown, inside the caller's transaction,
+    under a tap's grant (S7 §8.1)."""
+    authority.require(conn, grant)
     s = _state(conn, match_id)
     pid = _operator_pid(conn, s["pid"])
-    authorship.require_match_shown(conn, pid, match_id, render_id, expected_revision)
+    authorship.require_match(conn, pid, match_id, render_id, expected_revision, bind=bind)
+    if s["state"] == "rejected":
+        raise db.Refusal("that pairing was already removed")
+    if s["state"] == "conflicted":
+        other = conn.execute("SELECT pid FROM match_state WHERE doc_id=? AND pid<>? AND state"
+                             " IN ('matched','proposed')", (s["doc_id"], pid)).fetchone()
+        if other is not None:
+            raise db.Refusal(f"that document has since been paired with payment #{other[0]}")
+    return _operator_pair(conn, pid, s["doc_id"], render_id, match_id=match_id)
+
+
+def reject_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="shown") -> dict:
+    """The operator removes a pairing they were shown, inside the caller's transaction,
+    under a tap's grant (S7 §8.1)."""
+    authority.require(conn, grant)
+    s = _state(conn, match_id)
+    pid = _operator_pid(conn, s["pid"])
+    authorship.require_match(conn, pid, match_id, render_id, expected_revision, bind=bind)
     if s["state"] not in ("matched", "proposed", "conflicted"):
         raise db.Refusal("there is no pairing to remove there")
     before = _states(conn, pid)
@@ -339,12 +335,13 @@ def _append_rejection(conn, pid, s, render_id) -> None:
                    render_id=render_id, fp=snap, detail=documents.fingerprint(doc))
 
 
-def reject_all_in_tx(conn, pid, bound) -> list:
-    """apply_reply's "wrong" over every displayed candidate, inside the caller's
-    transaction, each already checked against the revision the operator was shown: every
+def reject_all_in_tx(conn, pid, bound, *, grant) -> list:
+    """"Wrong" over every displayed candidate, inside the caller's transaction, under a
+    tap's grant, each already checked against the revision the operator was shown: every
     rejection is recorded, then the payment settles ONCE (C3, Astra S1: settling between
     them let the store rule retire a merged duplicate of the same document and move the
     revision the next rejection was bound to). Returns the effects."""
+    authority.require(conn, grant)
     pid = _operator_pid(conn, pid)
     before = _states(conn, pid)
     for match_id, render_id in bound:
@@ -356,20 +353,23 @@ def reject_all_in_tx(conn, pid, bound) -> list:
     return _effects(before, _states(conn, pid))
 
 
-def set_exemption(conn, *, pid, exempt, expected_revision, render_id) -> dict:
-    with db.tx(conn):
-        pid = _operator_pid(conn, pid)
-        authorship.require_projection_shown(conn, pid, render_id, expected_revision)
-        st = lineage.fold_of(conn, pid)
-        before = _states(conn, pid)
-        if exempt:
-            lineage.append(conn, pid, "exempt", "operator", render_id=render_id)
-        else:
-            if st.exemption is None:
-                raise db.Refusal("no exemption stands on this payment")
-            lineage.append(conn, pid, "lift", "operator", render_id=render_id)
-        red = lineage.settle(conn, pid)
-        return _result(conn, pid, red, None, _effects(before, _states(conn, pid)))
+def set_exemption_in_tx(conn, *, grant, pid, exempt, expected_revision, render_id,
+                        bind="shown") -> dict:
+    """The operator says one payment needs no document (exempt) or needs one after all,
+    inside the caller's transaction, under a tap's grant (S7 §8.1)."""
+    authority.require(conn, grant)
+    pid = _operator_pid(conn, pid)
+    authorship.require_projection(conn, pid, render_id, expected_revision, bind=bind)
+    st = lineage.fold_of(conn, pid)
+    before = _states(conn, pid)
+    if exempt:
+        lineage.append(conn, pid, "exempt", "operator", render_id=render_id)
+    else:
+        if st.exemption is None:
+            raise db.Refusal("no exemption stands on this payment")
+        lineage.append(conn, pid, "lift", "operator", render_id=render_id)
+    red = lineage.settle(conn, pid)
+    return _result(conn, pid, red, None, _effects(before, _states(conn, pid)))
 
 
 def relabel_match(conn, *, match_id, labels, rationale=None, runners_up=None, token) -> dict:

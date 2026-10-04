@@ -381,7 +381,7 @@ class TestSheet(Base):
     def test_an_item_no_longer_chased_stays_missing_even_if_never_searched(self):
         self.add(counterparty="Found")
         self.add(counterparty="Dropped", searched=False)
-        work.stop_chasing(self.conn, "2026-Q3")
+        self.granted(work.stop_chasing_in_tx, "2026-Q3")
         text = self.render()["text"]
         self.assertIn("Dropped · EUR 100.00 · 14 Sep\nNo longer chased.", text)
         self.assertIn("2 transactions, 2 missing a document.", flat(text))

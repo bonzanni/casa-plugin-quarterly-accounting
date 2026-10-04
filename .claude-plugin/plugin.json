@@ -21,12 +21,6 @@
     "resultContract": {
       "version": 1,
       "tools": {
-        "apply_reply": {
-          "result": "safe"
-        },
-        "bind_account": {
-          "result": "safe"
-        },
         "build_quarterly_package": {
           "result": "safe"
         },
@@ -34,9 +28,6 @@
           "result": "safe"
         },
         "check_setup": {
-          "result": "safe"
-        },
-        "confirm_match": {
           "result": "safe"
         },
         "get_counterparty": {
@@ -96,9 +87,6 @@
         "record_search": {
           "result": "safe"
         },
-        "reject_match": {
-          "result": "safe"
-        },
         "relabel_match": {
           "result": "safe"
         },
@@ -111,22 +99,10 @@
         "reset_store": {
           "result": "safe"
         },
-        "set_exemption": {
-          "result": "safe"
-        },
         "set_expectation": {
           "result": "safe"
         },
-        "set_package_name": {
-          "result": "safe"
-        },
-        "set_watermark": {
-          "result": "safe"
-        },
         "stage_for_delivery": {
-          "result": "safe"
-        },
-        "stop_chasing": {
           "result": "safe"
         },
         "update_document_metadata": {
@@ -138,12 +114,9 @@
       }
     },
     "provides_tools": [
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__apply_reply",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__bind_account",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_quarterly_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_review",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__check_setup",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__confirm_match",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__get_counterparty",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__import_ledger_export",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__ingest_document",
@@ -163,17 +136,12 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_observation",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_probe",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_search",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__reject_match",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__relabel_match",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__request_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__request_work",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__reset_store",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__set_exemption",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__set_expectation",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__set_package_name",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__set_watermark",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__stage_for_delivery",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__stop_chasing",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__update_document_metadata",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__upsert_counterparty"
     ],

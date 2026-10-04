@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 
+import authority
 import db
 import expectation as ex
 
@@ -151,10 +152,14 @@ def _require_delivered_render(conn, render_id) -> None:
 def set_expectation(conn, *, scope_type, scope, kind, tier=None, author, render_id=None,
                     token=None) -> dict:
     import passes
+    if author == "operator":
+        # S7 §8.1: the operator's expectation is set by a tap (set_expectation_in_tx under
+        # a grant), never by a tool call
+        raise db.Refusal(authority.TAP_ONLY)
+    if author != "specialist":
+        raise db.Refusal("author is 'specialist'")
     if scope_type not in ("counterparty", "chain"):
         raise db.Refusal("scope_type is 'counterparty' or 'chain'")
-    if author not in ("operator", "specialist"):
-        raise db.Refusal("author is 'operator' or 'specialist'")
     if kind != "default":
         if kind not in ex.KINDS + ("none",):
             raise db.Refusal(f"kind is one of {', '.join(ex.KINDS)}, 'none' or 'default'")
@@ -169,13 +174,15 @@ def set_expectation(conn, *, scope_type, scope, kind, tier=None, author, render_
 
 
 def set_expectation_in_tx(conn, *, scope_type, scope, kind, tier=None, author,
-                          render_id=None) -> dict:
-    """The override inside the caller's transaction, so apply_reply can check,
-    in that same transaction, that every payment it changes was shown."""
+                          render_id=None, grant=None) -> dict:
+    """The override inside the caller's transaction, so a reading can check, in that same
+    transaction, that every payment it changes was shown. An operator author needs a tap's
+    grant (S7 §8.1)."""
     import lineage
     if kind == "none":
         tier = None
     if author == "operator":
+        authority.require(conn, grant)
         _require_delivered_render(conn, render_id)
     if scope_type == "chain":
         if author != "operator":

@@ -37,8 +37,8 @@ class Base(StoreCase):
 
     def reject(self, mid, pid=None):
         rid = self.show(pid or self.pid)
-        matches.reject_match(self.conn, match_id=mid, expected_revision=self.rev(match_id=mid),
-                             render_id=rid)
+        self.granted(matches.reject_in_tx, match_id=mid, expected_revision=self.rev(match_id=mid),
+                     render_id=rid)
 
 
 class TestARejectionSticks(Base):
@@ -161,7 +161,6 @@ class TestARejectionSticks(Base):
         # C3 (Astra S1): rejecting the first must not move the revision the second is
         # bound to — every rejection is recorded, then the payment settles once
         import fold as F
-        import reply
         doc = self.doc()
         first = self.machine(doc)["match_id"]
         self.row(2)
@@ -178,11 +177,12 @@ class TestARejectionSticks(Base):
             lineage.settle(self.conn, self.pid)
         d = work.describe(self.conn, self.pid)
         self.assertEqual(sorted(c["match_id"] for c in d["candidates"]), sorted([first, second]))
-        self.show(self.pid)
-        out = reply._set_aside_all(self.conn, work.describe(self.conn, self.pid))
-        self.assertEqual(sorted(out["set_aside"]), sorted([first, second]))
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE kind='unpair' AND"
-                                           " author='operator'").fetchone()[0], 2)
+        rid = self.show(self.pid)
+        # S7: reply._set_aside_all's write is reject_all_in_tx under a tap's grant
+        self.granted(matches.reject_all_in_tx, self.pid, [(first, rid), (second, rid)])
+        self.assertEqual(sorted(r[0] for r in self.conn.execute(
+            "SELECT match_id FROM log WHERE kind='unpair' AND author='operator'")),
+            sorted([first, second]))
 
     def test_the_same_rate_written_differently_is_the_same_evidence(self):
         # C1 (Astra S1)
@@ -238,8 +238,8 @@ class TestARejectionSticks(Base):
         mid = self.machine(doc)["match_id"]
         self.reject(mid)
         rid = self.show(self.pid)
-        matches.record_match(self.conn, pid=self.pid, doc_id=doc, author="operator",
-                             expected_revision=self.rev(self.pid), render_id=rid)
+        self.operator_pair(pid=self.pid, doc_id=doc, expected_revision=self.rev(self.pid),
+                           render_id=rid)
         self.assertIsNone(matches.rejected_by_operator(
             self.conn, self.pid, documents._doc(self.conn, doc),
             R.facts_of(self.snapshot(self.pid)), "invoice", None))

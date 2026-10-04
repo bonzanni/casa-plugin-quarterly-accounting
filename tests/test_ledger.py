@@ -132,7 +132,7 @@ class TestResolution(Base):
         import binding
         self.imp([{"row_id": 2}])
         (old,) = self.live()
-        binding.acknowledge_ledger_reset(self.conn)
+        self.granted(binding.acknowledge_ledger_reset_in_tx)
         self.token = self.pass_(instance="c" * 32)
         self.instance = "c" * 32
         self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z"}])       # re-bound
@@ -226,7 +226,7 @@ class TestDeliveredBankHalf(Base):
         (pid,) = self.live()
         self.deliver(1, dict(self.conn.execute("SELECT * FROM bank_rows WHERE row_id=1")
                              .fetchone()), pid=pid)
-        binding.acknowledge_ledger_reset(self.conn)
+        self.granted(binding.acknowledge_ledger_reset_in_tx)
         other = "b" * 32
         self.token = self.pass_(instance=other)
         self.instance = other
@@ -352,7 +352,7 @@ class TestInstance(Base):
         import binding
         self.imp([{"row_id": 1}])
         (old,) = self.live()
-        binding.acknowledge_ledger_reset(self.conn)
+        self.granted(binding.acknowledge_ledger_reset_in_tx)
         self.token = self.pass_(instance=self.OTHER)
         self.instance = self.OTHER
         out = self.imp([{"row_id": 1, "first_seen": "2026-09-01T00:00:00Z",
@@ -375,7 +375,7 @@ class TestInstance(Base):
         import binding
         import passes
         self.imp([{"row_id": 1}])
-        binding.acknowledge_ledger_reset(self.conn)
+        self.granted(binding.acknowledge_ledger_reset_in_tx)
         self.token = self.pass_()
         self.imp([{"row_id": 1}])                         # the same instance
         self.assertEqual(binding.get(self.conn)["ledger_reset_ack"], 0)

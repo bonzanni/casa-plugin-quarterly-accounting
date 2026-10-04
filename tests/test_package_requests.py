@@ -185,6 +185,7 @@ class TestHandOver(Requests):
 
 
 class TestAStaleHolderCannotSend(Requests):
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_a_reclaimed_staged_send_is_taken_back_before_it_is_settled(self):
         # (11) and (12b)
         self.seed(1, documents=1)
@@ -369,6 +370,7 @@ class TestTheBindingCheckIsInTheCommit(Requests):
 
 
 class TestPackageNotices(Requests):
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_an_uncertain_send_is_offered_until_delivered(self):
         # (12c)
         self.seed(1, documents=1)

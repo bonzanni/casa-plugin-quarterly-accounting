@@ -593,10 +593,10 @@ def _apply(conn, run, verb, m, items):
             run.unresolved += 1
             return
         for d, cur in waiting:
-            run.guarded(d, lambda d=d, cur=cur: matches.confirm_match(
-                conn, match_id=cur["match_id"],
+            run.guarded(d, lambda d=d, cur=cur: _ungranted(conn, lambda: matches.confirm_in_tx(
+                conn, grant=None, match_id=cur["match_id"],
                 expected_revision=_bind_match(conn, d, cur["match_id"])[1],
-                render_id=_bind_match(conn, d, cur["match_id"])[0]),
+                render_id=_bind_match(conn, d, cur["match_id"])[0])),
                 lambda res, d=d: f"Confirmed {views.headline(d)}.")
         if len(run.lines) == said:
             run.lines.append("Nothing on that sheet was waiting for your approval.")
@@ -636,19 +636,20 @@ def _apply(conn, run, verb, m, items):
             name = known["name"]
         _broad(conn, run, lambda: kb.set_expectation_in_tx(
                    conn, scope_type="counterparty", scope=name, kind="none",
-                   author="operator", render_id=_last_delivered(conn)),
+                   author="operator", render_id=_last_delivered(conn), grant=None),
                f"{views.field(name)}: never needs a document.")
         return
     if verb == "class_none":
         k = m.group("k")
         _broad(conn, run, lambda: [kb.set_expectation_in_tx(
                    conn, scope_type="chain", scope=scope, kind="none", author="operator",
-                   render_id=_last_delivered(conn)) for scope in CLASS_SCOPES[k]],
+                   render_id=_last_delivered(conn), grant=None) for scope in CLASS_SCOPES[k]],
                f"{k.capitalize()} are no longer needed.")
         return
     if verb == "stop":
         q = _quarter(m.group("q"))
-        if run.setting(lambda: work.stop_chasing(conn, q),
+        if run.setting(lambda: _ungranted(conn, lambda: work.stop_chasing_in_tx(
+                           conn, q, grant=None)),
                        lambda res: f"Stopped chasing {dates.quarter_label(q)}: "
                        f"{len(res['accepted_missing'])} still missing, no longer searched.",
                        f"Still chasing {dates.quarter_label(q)}"):
@@ -656,18 +657,20 @@ def _apply(conn, run, verb, m, items):
         return
     if verb == "start":
         q = _quarter(m.group("q"))
-        run.setting(lambda: work.set_watermark(conn, q),
+        run.setting(lambda: _ungranted(conn, lambda: work.set_watermark_in_tx(conn, q, grant=None)),
                     lambda res: f"Starting from {dates.quarter_label(q)}; its payments come in "
                     "at the next check.",
                     f"Not changing where the books start ({dates.quarter_label(q)})")
         return
     if verb == "name":
-        run.setting(lambda: binding.set_package_name(conn, m.group("n")),
+        run.setting(lambda: _ungranted(conn, lambda: binding.set_package_name_in_tx(
+                        conn, m.group("n"), grant=None)),
                     lambda res: f"The zips are now called {views.field(res['package_name'])}-….zip.",
                     "The zip name")
         return
     if verb == "ledger_reset":
-        run.setting(lambda: binding.acknowledge_ledger_reset(conn),
+        run.setting(lambda: _ungranted(conn, lambda: binding.acknowledge_ledger_reset_in_tx(
+                        conn, grant=None)),
                     lambda res: res["note"], "The bank ledger reset")
         return
     if verb == "rebuild":
@@ -746,6 +749,14 @@ def _broad(conn, run, change, ok_line) -> None:
             run.touched_quarters.add(q)
 
 
+def _ungranted(conn, write):
+    """S7 §8.1 (temporary, Task 4): an operator write in its own transaction with no grant,
+    so it refuses with authority.TAP_ONLY. apply_reply has left the tool surface; Task 6
+    replaces it with a reading applied under a tap's grant."""
+    with db.tx(conn):
+        return write()
+
+
 def _last_delivered(conn):
     """The provenance stamp of an operator's broad rule ("no invoices ever for X", "X
     are no longer needed"): a view the operator was shown. The rule is name-scoped and
@@ -764,9 +775,10 @@ def _set_aside_all(conn, d) -> dict:
         bound = []
         for c in d["candidates"]:
             rid, rev = _bind_match(conn, d, c["match_id"])
-            authorship.require_match_shown(conn, d["pid"], c["match_id"], rid, rev)
+            authorship.require_match(conn, d["pid"], c["match_id"], rid, rev)
             bound.append((c["match_id"], rid, rev))
-        effects = matches.reject_all_in_tx(conn, d["pid"], [(mid, rid) for mid, rid, _ in bound])
+        effects = matches.reject_all_in_tx(conn, d["pid"], [(mid, rid) for mid, rid, _ in bound],
+                                           grant=None)
         return {"set_aside": [b[0] for b in bound], "effects": effects}
 
 
@@ -774,10 +786,10 @@ def _one(conn, run, verb, d, m):
     cur = d["current"]
     if verb == "unpair":
         if cur is not None:
-            run.guarded(d, lambda: matches.reject_match(
-                conn, match_id=cur["match_id"],
+            run.guarded(d, lambda: _ungranted(conn, lambda: matches.reject_in_tx(
+                conn, grant=None, match_id=cur["match_id"],
                 expected_revision=_bind_match(conn, d, cur["match_id"])[1],
-                render_id=_bind_match(conn, d, cur["match_id"])[0]),
+                render_id=_bind_match(conn, d, cur["match_id"])[0])),
                 lambda res: f"Unpaired {views.headline(d)}.")
         elif d["candidates"]:
             n = len(d["candidates"])
@@ -795,10 +807,10 @@ def _one(conn, run, verb, d, m):
         elif not views._needs_check(d):
             run.lines.append(f"{views.headline(d)} was already fine.")
         else:
-            run.guarded(d, lambda: matches.confirm_match(
-                conn, match_id=cur["match_id"],
+            run.guarded(d, lambda: _ungranted(conn, lambda: matches.confirm_in_tx(
+                conn, grant=None, match_id=cur["match_id"],
                 expected_revision=_bind_match(conn, d, cur["match_id"])[1],
-                render_id=_bind_match(conn, d, cur["match_id"])[0]),
+                render_id=_bind_match(conn, d, cur["match_id"])[0])),
                 lambda res: f"Confirmed {views.headline(d)}.")
     elif verb in ("exempt", "lift"):
         def line(res):
@@ -807,10 +819,10 @@ def _one(conn, run, verb, d, m):
             dropped = [e for e in res["effects"] if e.startswith("unpaired")]
             return (f"{views.headline(d)}: needs no document"
                     + ("; dropped its pairing." if dropped else "."))
-        run.guarded(d, lambda: matches.set_exemption(
-            conn, pid=d["pid"], exempt=(verb == "exempt"),
+        run.guarded(d, lambda: _ungranted(conn, lambda: matches.set_exemption_in_tx(
+            conn, grant=None, pid=d["pid"], exempt=(verb == "exempt"),
             expected_revision=_bind_projection(conn, d)[1],
-            render_id=_bind_projection(conn, d)[0]), line)
+            render_id=_bind_projection(conn, d)[0])), line)
     elif verb == "revive":
         run.guarded(d, lambda: work.record_search(conn, pid=d["pid"], token=None, revive=True),
                     lambda res: f"{views.headline(d)}: I'll look again at the next check.")

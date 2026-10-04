@@ -66,9 +66,9 @@ class TestBindingDefaults(StoreCase):
         self.assertEqual(binding.slug("Café Zakelijk"), "cafe-zakelijk")
 
     def test_rebinding_to_another_account_is_refused(self):
-        binding.bind_account(self.conn, "c1", "A")
+        self.granted(binding.bind_in_tx, "c1", "A")
         with self.assertRaises(db.Refusal):
-            binding.bind_account(self.conn, "c2", "B")
+            self.granted(binding.bind_in_tx, "c2", "B")
 
 
 class TestBankWriteGate(StoreCase):
@@ -183,7 +183,7 @@ class TestBankWriteGate(StoreCase):
         self.pass_(generation=0, registered={}, instance=other)      # still refused, next pass
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
 
-        binding.acknowledge_ledger_reset(self.conn)
+        self.granted(binding.acknowledge_ledger_reset_in_tx)
         self.pass_(generation=0, registered={}, instance=other)      # allowed after the ack
         self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
 

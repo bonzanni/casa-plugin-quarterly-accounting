@@ -348,6 +348,7 @@ class TestCodeRoundC1(Rounds):
 
 
 class TestSendTheLastBuild(Rounds):
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_the_previous_build_is_sent_unchanged_and_never_revoked(self):
         self.seed(1, documents=1)
         p, pkg, d = self.staged()

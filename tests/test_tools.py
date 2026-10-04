@@ -17,18 +17,18 @@ sys.modules.setdefault("qa_server", qa_server)
 EXPECTED = {
     "ingest_document", "update_document_metadata", "mark_irrelevant", "list_unmatched_documents",
     "get_counterparty", "upsert_counterparty", "set_expectation",
-    "record_match", "propose_match", "confirm_match", "reject_match", "relabel_match",
-    "set_exemption",
+    "record_match", "propose_match", "relabel_match",
     "import_ledger_export", "list_projections", "record_observation",
-    "record_probe", "check_setup", "bind_account", "set_watermark",
-    "set_package_name", "reset_store",
-    "record_search", "stop_chasing",
-    "list_quarter_state", "build_review", "mark_rendering_delivered", "apply_reply",
+    "record_probe", "check_setup", "reset_store",
+    "record_search",
+    "list_quarter_state", "build_review", "mark_rendering_delivered",
     "build_quarterly_package", "stage_for_delivery", "record_delivery", "read_document",
     # S2 (spec §8, §13): the job's tools replace begin_pass, end_pass, continue_pass,
     # record_step and more_work
     "job_next", "job_status", "job_report", "request_work", "request_package",
     "record_filing",
+    # S7 §8.1: confirm_match, reject_match, set_exemption, bind_account, set_watermark,
+    # set_package_name, stop_chasing and apply_reply left the surface (a tap's grant only)
 }
 
 
@@ -86,14 +86,14 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 38)             # S2: 37 - 5 removed + 6 added
+        self.assertEqual(len(EXPECTED), 30)             # S2: 38; S7 Task 4: - 8 (§8.1)
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 38)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 30)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
@@ -118,7 +118,7 @@ class TestSurface(TempEnv):
     def test_missing_argument_is_a_refusal_not_a_crash(self):
         import tools  # noqa: F401
         out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                "params": {"name": "apply_reply", "arguments": {}}})
+                                "params": {"name": "get_counterparty", "arguments": {}}})
         self.assertTrue(out["result"]["content"][0]["text"].startswith("refused:"))
 
     def test_a_refusal_is_not_an_error(self):
@@ -139,7 +139,6 @@ class TestDeliverableBoundary(TempEnv):
         from unittest import mock
         import asks
         import delivery
-        import reply
         import views
         big = "x" * 4097
         cases = [("build_review", views, "build_review", {"render_id": "r1", "text": big},
@@ -150,14 +149,12 @@ class TestDeliverableBoundary(TempEnv):
                              {"render_id": "r2", "text": big}], "speak": None}, {}),
                  ("job_report", asks, "job_report",
                   {"texts": [], "speak": {"render_id": "r1", "text": big}}, {}),
-                 ("apply_reply", reply, "apply_reply",
-                  {"receipt": "ok", "receipt_pages": ["ok", big]}, {"text": "all good"}),
                  # fix wave F: the offer an uncertain package send returns
                  ("record_delivery", delivery, "record_delivery",
                   {"speak": {"render_id": "r1", "text": big}},
-                  {"delivery_id": 1, "outcome": "uncertain"}),
-                 ("apply_reply", reply, "apply_reply",
-                  {"receipt": big, "receipt_pages": [big]}, {"text": "all good"})]
+                  {"delivery_id": 1, "outcome": "uncertain"})]
+        # S7 Task 4: apply_reply (receipt, receipt_pages) left the surface; Task 6's
+        # reading tools carry the receipt keys again
         for tool, mod, fn, out, args in cases:
             with mock.patch.object(mod, fn, lambda *a, _o=out, **k: _o):
                 res = _tool(tool, **args)
@@ -247,6 +244,7 @@ class TestResend(ToolCase):
         _json("mark_rendering_delivered", render_id=r["render_id"])
         return r["text"]
 
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_send_it_again_stages_the_offered_package(self):
         self.send(self.a["package_id"], "uncertain")
         self.send(self.b["package_id"], "delivered")
@@ -334,7 +332,7 @@ class TestMachineWritesNeedAPass(ToolCase):
                     and "pass_token" not in t["schema"]["required"]
                     # S2: job_next's first call claims with job_id; its token is not a write's
                     and n != "job_next"]
-        self.assertEqual(len(optional), 11, optional)       # + list_quarter_state (the clock)
+        self.assertEqual(len(optional), 10, optional)       # + list_quarter_state (the clock); S7: - bind_account
         for n in optional:
             self.assertIn("During a pass, pass the pass_token.",
                           qa_server.TOOLS[n]["description"], n)
@@ -390,8 +388,9 @@ class TestArgumentTypes(ToolCase):
         bools = [(n, k) for n, t in qa_server.TOOLS.items()
                  for k, v in t["schema"]["properties"].items() if v.get("type") == "boolean"]
         # fix wave F: + fresh_only; + failed; #10: + stopped_by_refusal, out_of_time; #15: +
-        # last_built; #22: + dates_unread; S2: - record_step's three, + record_probe's absent
-        self.assertEqual(len(bools), 15, bools)
+        # last_built; #22: + dates_unread; S2: - record_step's three, + record_probe's absent;
+        # S7 Task 4: - set_exemption's exempt
+        self.assertEqual(len(bools), 14, bools)
         for n, k in bools:
             res = _tool(n, **{k: "false"})
             text = res["content"][0]["text"]

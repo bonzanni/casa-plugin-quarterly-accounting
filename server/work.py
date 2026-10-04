@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+import authority
 import budget
 import dates
 import db
@@ -167,32 +168,34 @@ def quarter_pids(conn, quarter: str) -> list:
     return out
 
 
-def stop_chasing(conn, quarter: str) -> dict:
+def stop_chasing_in_tx(conn, quarter: str, *, grant) -> dict:
+    """'Stop chasing Q2', inside the caller's transaction, under a tap's grant (S7 §8.1)."""
+    authority.require(conn, grant)
     dates.parse_quarter(quarter)
-    with db.tx(conn):
-        done = []
-        for pid in quarter_pids(conn, quarter):
-            p = lineage.projection(conn, pid)
-            if p["status"] == "open" and p["exp_kind"] is not None:
-                conn.execute("UPDATE projections SET search_state='accepted-missing' WHERE pid=?",
-                             (pid,))
-                lineage.settle(conn, pid)
-                done.append(pid)
-        return {"quarter": quarter, "accepted_missing": done}
+    done = []
+    for pid in quarter_pids(conn, quarter):
+        p = lineage.projection(conn, pid)
+        if p["status"] == "open" and p["exp_kind"] is not None:
+            conn.execute("UPDATE projections SET search_state='accepted-missing' WHERE pid=?",
+                         (pid,))
+            lineage.settle(conn, pid)
+            done.append(pid)
+    return {"quarter": quarter, "accepted_missing": done}
 
 
-def set_watermark(conn, when: str) -> dict:
+def set_watermark_in_tx(conn, when: str, *, grant) -> dict:
+    """'Start from Q2', inside the caller's transaction, under a tap's grant (S7 §8.1)."""
+    authority.require(conn, grant)
     day = dates.quarter_bounds(when)[0] if "-Q" in (when or "") else when
     dates.parse_day(day)
-    with db.tx(conn):
-        b = conn.execute("SELECT watermark FROM binding WHERE id=1").fetchone()
-        if b is None:
-            raise db.Refusal("no account is bound yet")
-        if day >= b["watermark"]:
-            raise db.Refusal("moving the start later is not offered; it can only move earlier")
-        conn.execute("UPDATE binding SET watermark=?, watermark_announced=1 WHERE id=1", (day,))
-        lineage.settle_all(conn)
-        return {"watermark": day, "note": "Rows from then on are admitted at the next pass."}
+    b = conn.execute("SELECT watermark FROM binding WHERE id=1").fetchone()
+    if b is None:
+        raise db.Refusal("no account is bound yet")
+    if day >= b["watermark"]:
+        raise db.Refusal("moving the start later is not offered; it can only move earlier")
+    conn.execute("UPDATE binding SET watermark=?, watermark_announced=1 WHERE id=1", (day,))
+    lineage.settle_all(conn)
+    return {"watermark": day, "note": "Rows from then on are admitted at the next pass."}
 
 
 def _match_summary(conn, match_id) -> dict:

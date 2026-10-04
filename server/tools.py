@@ -14,7 +14,6 @@ import ledger
 import matches
 import package
 import passes
-import reply
 import steps
 import sweep
 import views
@@ -167,22 +166,6 @@ def _quarter(args, name="quarter"):
     return q
 
 
-def _when(args) -> str:
-    """set_watermark's start: a quarter (as _quarter) or a day, YYYY-MM-DD."""
-    v = args["when"]
-    q = dates.normalize_quarter(v, db.now()[:10])
-    if q is not None:
-        return q
-    try:
-        if not isinstance(v, str) or len(v) != 10:
-            raise ValueError
-        dates.parse_day(v)
-    except ValueError:
-        raise db.Refusal(f"the start is a quarter ({QUARTER_WORDS}) or a day like 2026-04-01, "
-                         f"not \"{v}\"") from None
-    return v
-
-
 def _pick(args, names):
     return {n: args[n] for n in names if n in args and args[n] is not None}
 
@@ -300,8 +283,8 @@ def t_upsert_cp(args):
 @register("set_expectation",
           "What document a counterparty or a classification chain needs: kind (invoice, "
           "sales-invoice, credit-note, payslip, statement, receipt, none, or default to remove) "
-          "and tier (required/optional). Chains are the operator's; an operator author needs the "
-          "render_id of a view they were shown. During a pass, pass the pass_token.",
+          "and tier (required/optional). author is 'specialist' (chains and the operator's own "
+          "rulings are theirs, set by a tap). During a pass, pass the pass_token.",
           obj({"scope_type": S, "scope": S, "kind": S, "tier": S, "author": S, "render_id": S,
                "pass_token": TOKEN}, ("scope_type", "scope", "kind", "author")))
 def t_set_exp(args):
@@ -325,9 +308,8 @@ def _date_read(args) -> None:
 @register("record_match",
           "Pair a payment (pid) with a document. author='auto' (the specialist, during a pass: "
           "pass_token, row_digest: the item's value from list_quarter_state, labels, resolves naming exactly "
-          "the payment's unresolved candidates — its candidate_ids, and document_date: " + DATE_READ + ") "
-          "or 'operator' (render_id and the revision the "
-          "operator was shown). expected_revision is the payment's revision. During a pass, pass the pass_token.",
+          "the payment's unresolved candidates — its candidate_ids, and document_date: " + DATE_READ + "). "
+          "expected_revision is the payment's revision. During a pass, pass the pass_token.",
           obj({"pid": I, "doc_id": I, "author": S, "expected_revision": I, "render_id": S,
                "labels": A, "rationale": S, "runners_up": A, "resolves": AI, "row_snapshot": O,
                "row_digest": S, "document_date": S, "pass_token": TOKEN},
@@ -365,31 +347,6 @@ def t_propose(args):
         token=_int(args, "pass_token"), document_date=args.get("document_date"))
 
 
-@register("confirm_match",
-          "The operator approves a pairing they were shown (proposed, or a candidate beside "
-          "another). render_id + the pairing's shown revision. Prefer apply_reply, which binds "
-          "these for you.",
-          obj({"match_id": I, "expected_revision": I, "render_id": S},
-              ("match_id", "expected_revision", "render_id")))
-def t_confirm(args):
-    _need(args, "match_id", "expected_revision", "render_id")
-    return matches.confirm_match(conn(), match_id=_int(args, "match_id"),
-                                 expected_revision=_int(args, "expected_revision"),
-                                 render_id=args["render_id"])
-
-
-@register("reject_match",
-          "The operator removes a pairing they were shown; payment and document both stay. "
-          "Prefer apply_reply.",
-          obj({"match_id": I, "expected_revision": I, "render_id": S},
-              ("match_id", "expected_revision", "render_id")))
-def t_reject(args):
-    _need(args, "match_id", "expected_revision", "render_id")
-    return matches.reject_match(conn(), match_id=_int(args, "match_id"),
-                                expected_revision=_int(args, "expected_revision"),
-                                render_id=args["render_id"])
-
-
 @register("relabel_match",
           "Change a machine pairing's confidence labels (clean, guessed, no-ref, partial-search, "
           "recipient?) when later evidence arrives — e.g. a competing invoice. Specialist, "
@@ -402,20 +359,6 @@ def t_relabel(args):
                                  labels=tuple(args["labels"]), rationale=args.get("rationale"),
                                  runners_up=args.get("runners_up"),
                                  token=_int(args, "pass_token"))
-
-
-@register("set_exemption",
-          "The operator says one payment needs no document (exempt=true; drops any pairing) or "
-          "needs one after all (exempt=false). render_id + the shown revision. Prefer "
-          "apply_reply.",
-          obj({"pid": I, "exempt": B, "expected_revision": I, "render_id": S},
-              ("pid", "exempt", "expected_revision", "render_id")))
-def t_exempt(args):
-    _need(args, "pid", "expected_revision", "render_id")
-    exempt = _bool(args, "exempt")
-    return matches.set_exemption(conn(), pid=_int(args, "pid"), exempt=exempt,
-                                 expected_revision=_int(args, "expected_revision"),
-                                 render_id=args["render_id"])
 
 
 # --- the ledger and the sweep --------------------------------------------------
@@ -587,34 +530,6 @@ def t_check(args):
     return binding.check_setup(conn())
 
 
-@register("bind_account",
-          "Bind the business account when the operator named it (only needed when several "
-          "company accounts exist; one is bound automatically). During a pass, pass the "
-          "pass_token.",
-          obj({"account_id": S, "label": S, "pass_token": TOKEN}, ("account_id",)))
-def t_bind(args):
-    _need(args, "account_id")
-    return binding.bind_account(conn(), args["account_id"], args.get("label", ""),
-                                _int(args, "pass_token"))
-
-
-@register("set_watermark",
-          "Move the start earlier (a quarter — YYYY-Qn, e.g. 2026-Q2; Qn and Qn YYYY accepted — "
-          "or YYYY-MM-DD): 'start from Q2'. Later is not offered.",
-          obj({"when": S}, ("when",)))
-def t_watermark(args):
-    _need(args, "when")
-    return work.set_watermark(conn(), _when(args))
-
-
-@register("set_package_name",
-          "Change the zip filename prefix: 'call the zips <name>'.",
-          obj({"name": S}, ("name",)))
-def t_pkg_name(args):
-    _need(args, "name")
-    return binding.set_package_name(conn(), args["name"])
-
-
 @register("reset_store",
           "PROTECTED (Casa asks the operator for one tap). Erase the whole accounting store: "
           "documents, decisions, views, packages. Used in the test-install reset loop after the "
@@ -643,15 +558,6 @@ def t_search(args):
         flags["identity_unknown"] = _bool(args, "identity_unknown")
     return work.record_search(conn(), pid=_int(args, "pid"), token=_int(args, "pass_token"),
                               **_pick(args, ("queries",)), **flags)
-
-
-@register("stop_chasing",
-          "'stop chasing Q2': that quarter's missing items stay listed and ship as MISSING but "
-          "are never searched again.",
-          obj({"quarter": Q}, ("quarter",)))
-def t_stop(args):
-    _need(args, "quarter")
-    return work.stop_chasing(conn(), _quarter(args))
 
 
 # --- views and replies -------------------------------------------------------------
@@ -707,21 +613,6 @@ def t_review(args):
 def t_delivered(args):
     _need(args, "render_id")
     return views.mark_rendering_delivered(conn(), args["render_id"])
-
-
-@register("apply_reply",
-          "Pass the operator's reply VERBATIM when it reads as a correction, approval, exemption "
-          "or instruction about the accounting. Applies only what resolves, bound to what they "
-          "were shown. Send EVERY entry of receipt_pages, in order, each as its own message "
-          "(receipt is the first page). Also returns items to show again (build_review item) "
-          "and instructions for you (rebuild, resend, show views; \"show item N\" is "
-          "build_review(view=\"item\", pid=N)). `understood: false`: nothing in the message "
-          "was read as a reply and nothing applied — unless it was plainly an approval or "
-          "correction, answer it as conversation and send none of it.",
-          obj({"text": S}, ("text",)))
-def t_reply(args):
-    _need(args, "text")
-    return _deliverable("apply_reply", reply.apply_reply(conn(), args["text"]))
 
 
 # --- packaging ---------------------------------------------------------------------

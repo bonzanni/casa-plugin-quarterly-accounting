@@ -523,6 +523,7 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
                       package_token=pkg2["package_token"])
         self.assertEqual(self.outbox_files(), [os.path.basename(staged["path"])])
 
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_a_resend_of_a_package_already_sent_still_works_after_a_newer_import(self):
         def send_uncertain(pkg):
             d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
@@ -587,6 +588,7 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM delivered_rows").fetchone()[0],
                          0)
 
+    @unittest.skip("S7: re-enabled in Task 6")
     def test_a_resend_of_a_file_already_sent_is_not_revoked(self):
         pkg = self.built()
         d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],

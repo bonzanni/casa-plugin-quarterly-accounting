@@ -476,8 +476,9 @@ class SweepLiveness(Tools):
         """Design r1 (Astra S1): one operator `stop_chasing` makes 400 rows due again
         under the same acquisition; the job's re-settlement earns, by the rows' new
         states."""
-        out = self.sweep_then_reopen(400, lambda t: self.call("stop_chasing",
-                                                             quarter="2026-Q3"))
+        import work         # S7 §8.1: the operator's tap, under its grant
+        out = self.sweep_then_reopen(400, lambda t: self.granted(work.stop_chasing_in_tx,
+                                                                 "2026-Q3"))
         for flag, units, settled in out:
             self.assertEqual(units, {"sweep"}, out)
             self.assertGreater(settled, 0, out)
@@ -591,7 +592,8 @@ class Credits(Tools):
     def test_a_write_outside_the_job_earns_nothing(self):
         u = self.until(self.start(2), "gmail-probe")
         before = credits(self)
-        self.call("stop_chasing", quarter="2026-Q3")    # Ellen, for the operator
+        import work
+        self.granted(work.stop_chasing_in_tx, "2026-Q3")    # the operator's tap (S7 §8.1)
         self.call("request_package", quarter="2026-Q2", channel="telegram")
         upsert(name="Adobe", source="portal")
         self.assertEqual(credits(self), before)

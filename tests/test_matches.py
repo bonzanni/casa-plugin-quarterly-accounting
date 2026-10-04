@@ -49,8 +49,8 @@ class TestMachineWrites(Base):
 
     def test_exempt_lineage_refuses_and_leaves_a_residue_line(self):
         rid = self.show(self.pid)
-        matches.set_exemption(self.conn, pid=self.pid, exempt=True,
-                              expected_revision=self.rev(self.pid), render_id=rid)
+        self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=True,
+                     expected_revision=self.rev(self.pid), render_id=rid)
         r = self.auto(doc_id=self.doc())
         self.assertFalse(r["applied"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM residue WHERE reason='exempt-doc'")
@@ -104,8 +104,8 @@ class TestMachineWrites(Base):
     def test_a_machine_write_on_the_operators_own_pairing_is_refused(self):
         d = self.doc()
         rid = self.show(self.pid)
-        mid = matches.record_match(self.conn, pid=self.pid, doc_id=d, author="operator",
-                                   expected_revision=self.rev(self.pid), render_id=rid)["match_id"]
+        mid = self.operator_pair(pid=self.pid, doc_id=d, expected_revision=self.rev(self.pid),
+                                 render_id=rid)["match_id"]
         with self.assertRaises(db.Refusal):
             self.auto(doc_id=d, kind="propose")
         self.assertEqual(self.conn.execute("SELECT state, author FROM match_state WHERE"
@@ -116,8 +116,8 @@ class TestMachineWrites(Base):
         a = self.auto(doc_id=self.doc())["match_id"]
         b = self.auto(doc_id=self.doc())["match_id"]
         rid = self.show(self.pid)
-        matches.confirm_match(self.conn, match_id=b, expected_revision=self.rev(match_id=b),
-                              render_id=rid)
+        self.granted(matches.confirm_in_tx, match_id=b, expected_revision=self.rev(match_id=b),
+                     render_id=rid)
         with self.assertRaises(db.Refusal):
             self.auto(doc_id=self.doc(), kind="propose", resolves=[a, b])
         self.assertEqual(self.state(b), "matched")
@@ -126,16 +126,16 @@ class TestMachineWrites(Base):
 class TestOperatorWrites(Base):
     def test_an_item_never_shown_cannot_be_decided(self):
         with self.assertRaises(authorship.NotShown):
-            matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(), author="operator",
-                                 expected_revision=self.rev(self.pid), render_id="nope")
+            self.operator_pair(pid=self.pid, doc_id=self.doc(),
+                               expected_revision=self.rev(self.pid), render_id="nope")
 
     def test_a_changed_item_is_refused_as_stale(self):
         rid = self.show(self.pid)
         shown_rev = self.rev(self.pid)
         self.auto(doc_id=self.doc())                            # the pass moved it
         with self.assertRaises(authorship.Stale):
-            matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(), author="operator",
-                                 expected_revision=shown_rev, render_id=rid)
+            self.operator_pair(pid=self.pid, doc_id=self.doc(), expected_revision=shown_rev,
+                               render_id=rid)
 
     def test_the_current_revision_with_an_old_render_is_refused(self):
         # the shown-revision comparison is what fails here: the caller passes the
@@ -145,11 +145,11 @@ class TestOperatorWrites(Base):
         rid = self.show(self.pid)
         matches.relabel_match(self.conn, match_id=mid, labels=("guessed",), token=self.token)
         with self.assertRaises(authorship.Stale):
-            matches.set_exemption(self.conn, pid=self.pid, exempt=True,
-                                  expected_revision=self.rev(self.pid), render_id=rid)
+            self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=True,
+                         expected_revision=self.rev(self.pid), render_id=rid)
         with self.assertRaises(authorship.Stale):
-            matches.reject_match(self.conn, match_id=mid,
-                                 expected_revision=self.rev(match_id=mid), render_id=rid)
+            self.granted(matches.reject_in_tx, match_id=mid,
+                         expected_revision=self.rev(match_id=mid), render_id=rid)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE author='operator'")
                          .fetchone()[0], 0)
 
@@ -163,7 +163,8 @@ class TestOperatorWrites(Base):
         self.settle(self.pid)
         self.assertGreater(self.rev(match_id=mid), shown)
         with self.assertRaises(authorship.Stale):
-            matches.confirm_match(self.conn, match_id=mid, expected_revision=shown, render_id=rid)
+            self.granted(matches.confirm_in_tx, match_id=mid, expected_revision=shown,
+                         render_id=rid)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE author='operator'")
                          .fetchone()[0], 0)
 
@@ -173,16 +174,16 @@ class TestOperatorWrites(Base):
         self.settle(other)
         rid = self.show(other)
         with self.assertRaises(authorship.NotShown):
-            matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(), author="operator",
-                                 expected_revision=self.rev(self.pid), render_id=rid)
+            self.operator_pair(pid=self.pid, doc_id=self.doc(),
+                               expected_revision=self.rev(self.pid), render_id=rid)
 
     def test_operator_record_match_on_an_exempt_lineage_lifts_then_pairs(self):
         rid = self.show(self.pid)
-        matches.set_exemption(self.conn, pid=self.pid, exempt=True,
-                              expected_revision=self.rev(self.pid), render_id=rid)
+        self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=True,
+                     expected_revision=self.rev(self.pid), render_id=rid)
         rid = self.show(self.pid)
-        r = matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(), author="operator",
-                                 expected_revision=self.rev(self.pid), render_id=rid)
+        r = self.operator_pair(pid=self.pid, doc_id=self.doc(),
+                               expected_revision=self.rev(self.pid), render_id=rid)
         self.assertEqual(r["status"], "matched")
         kinds = [k[0] for k in self.conn.execute("SELECT kind FROM log WHERE pid=? AND"
                                                  " author='operator' ORDER BY seq", (self.pid,))]
@@ -192,15 +193,15 @@ class TestOperatorWrites(Base):
         self.classify(self.pid, {"transport", "fuel"})
         self.settle(self.pid)
         rid = self.show(self.pid)
-        matches.set_exemption(self.conn, pid=self.pid, exempt=True,
-                              expected_revision=self.rev(self.pid), render_id=rid)
+        self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=True,
+                     expected_revision=self.rev(self.pid), render_id=rid)
         kb.upsert_counterparty(self.conn, "Adobe")
         kb.set_expectation(self.conn, scope_type="counterparty", scope="Adobe", kind="none",
                            author="specialist")
         rid = self.show(self.pid)
         with self.assertRaises(db.Refusal) as caught:
-            matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(), author="operator",
-                                 expected_revision=self.rev(self.pid), render_id=rid)
+            self.operator_pair(pid=self.pid, doc_id=self.doc(),
+                               expected_revision=self.rev(self.pid), render_id=rid)
         self.assertIn("Adobe", str(caught.exception))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE kind='lift'")
                          .fetchone()[0], 0)
@@ -212,35 +213,36 @@ class TestOperatorWrites(Base):
         self.classify(self.pid, {"income", "salary"})
         self.settle(self.pid)
         rid = self.show(self.pid)
-        mid = matches.record_match(self.conn, pid=self.pid, doc_id=slip, author="operator",
-                                   expected_revision=self.rev(self.pid),
-                                   render_id=rid)["match_id"]
+        mid = self.operator_pair(pid=self.pid, doc_id=slip, expected_revision=self.rev(self.pid),
+                                 render_id=rid)["match_id"]
         self.classify(self.pid, {"software"})              # the classifier now wants an invoice
         self.assertEqual(self.settle(self.pid).status, "proposed")   # shown, not retired
         rid = self.show(self.pid)
         shown = self.rev(match_id=mid)
         with self.assertRaises(db.Refusal) as caught:
-            matches.confirm_match(self.conn, match_id=mid, expected_revision=shown, render_id=rid)
+            self.granted(matches.confirm_in_tx, match_id=mid, expected_revision=shown,
+                         render_id=rid)
         self.assertNotIsInstance(caught.exception, authorship.Stale)
         self.assertIn("payslip", str(caught.exception))
         documents.update_document_metadata(self.conn, slip, kind="invoice")
         with self.assertRaises(authorship.Stale):
-            matches.confirm_match(self.conn, match_id=mid, expected_revision=shown, render_id=rid)
+            self.granted(matches.confirm_in_tx, match_id=mid, expected_revision=shown,
+                         render_id=rid)
         rid = self.show(self.pid)
-        r = matches.confirm_match(self.conn, match_id=mid,
-                                  expected_revision=self.rev(match_id=mid), render_id=rid)
+        r = self.granted(matches.confirm_in_tx, match_id=mid,
+                         expected_revision=self.rev(match_id=mid), render_id=rid)
         self.assertEqual(r["status"], "matched")
 
     def test_unpairing_a_conflicted_candidate_leaves_the_accepted_pairing(self):
         p_doc, q_doc = self.doc(), self.doc()
         rid = self.show(self.pid)
-        p = matches.record_match(self.conn, pid=self.pid, doc_id=p_doc, author="operator",
-                                 expected_revision=self.rev(self.pid), render_id=rid)["match_id"]
+        p = self.operator_pair(pid=self.pid, doc_id=p_doc, expected_revision=self.rev(self.pid),
+                               render_id=rid)["match_id"]
         q = self.auto(doc_id=q_doc, kind="propose")["match_id"]  # lands conflicted beside P
         self.assertEqual(self.state(q), "conflicted")
         rid = self.show(self.pid)
-        matches.reject_match(self.conn, match_id=q, expected_revision=self.rev(match_id=q),
-                             render_id=rid)
+        self.granted(matches.reject_in_tx, match_id=q, expected_revision=self.rev(match_id=q),
+                     render_id=rid)
         self.assertEqual((self.state(p), self.state(q)), ("matched", "rejected"))
 
     def test_confirming_a_conflicted_candidate_whose_document_moved_is_refused(self):
@@ -254,23 +256,23 @@ class TestOperatorWrites(Base):
         self.auto(pid=other, doc_id=d)                          # d is free (a conflicted) -> active on other
         rid = self.show(self.pid)
         with self.assertRaises(db.Refusal):
-            matches.confirm_match(self.conn, match_id=a, expected_revision=self.rev(match_id=a),
-                                  render_id=rid)
+            self.granted(matches.confirm_in_tx, match_id=a, expected_revision=self.rev(match_id=a),
+                         render_id=rid)
 
     def test_exemption_rejects_the_pairing_and_says_so(self):
         mid = self.auto(doc_id=self.doc(), kind="propose")["match_id"]
         rid = self.show(self.pid)
-        r = matches.set_exemption(self.conn, pid=self.pid, exempt=True,
-                                  expected_revision=self.rev(self.pid), render_id=rid)
+        r = self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=True,
+                         expected_revision=self.rev(self.pid), render_id=rid)
         self.assertEqual((r["status"], self.state(mid)), ("exempt", "rejected"))
         self.assertIn(f"unpaired {mid}", r["effects"])
         rid = self.show(self.pid)
-        matches.set_exemption(self.conn, pid=self.pid, exempt=False,
-                              expected_revision=self.rev(self.pid), render_id=rid)
+        self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=False,
+                     expected_revision=self.rev(self.pid), render_id=rid)
         rid = self.show(self.pid)
         with self.assertRaises(db.Refusal):                   # nothing stands to lift
-            matches.set_exemption(self.conn, pid=self.pid, exempt=False,
-                                  expected_revision=self.rev(self.pid), render_id=rid)
+            self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=False,
+                         expected_revision=self.rev(self.pid), render_id=rid)
 
 
 class TestRace(Base):
@@ -343,15 +345,15 @@ class TestFixRound1(Base):
     def test_relabelling_a_rejected_pairing_is_refused_and_moves_nothing(self):
         mid = self.auto(doc_id=self.doc(), kind="propose")["match_id"]
         rid = self.show(self.pid)
-        matches.reject_match(self.conn, match_id=mid, expected_revision=self.rev(match_id=mid),
-                             render_id=rid)
+        self.granted(matches.reject_in_tx, match_id=mid, expected_revision=self.rev(match_id=mid),
+                     render_id=rid)
         rid = self.show(self.pid)
         shown = self.rev(self.pid)
         with self.assertRaises(db.Refusal):
             matches.relabel_match(self.conn, match_id=mid, labels=("guessed",), token=self.token)
         self.assertEqual(self.rev(self.pid), shown)
-        r = matches.set_exemption(self.conn, pid=self.pid, exempt=True,
-                                  expected_revision=shown, render_id=rid)
+        r = self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=True,
+                         expected_revision=shown, render_id=rid)
         self.assertEqual(r["status"], "exempt")
 
     def test_a_standing_pairing_is_still_relabelled(self):
@@ -363,8 +365,8 @@ class TestFixRound1(Base):
 
     def test_exempt_residue_names_only_a_valid_document_once(self):
         rid = self.show(self.pid)
-        matches.set_exemption(self.conn, pid=self.pid, exempt=True,
-                              expected_revision=self.rev(self.pid), render_id=rid)
+        self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=True,
+                     expected_revision=self.rev(self.pid), render_id=rid)
         irrelevant = self.doc()
         with db.tx(self.conn):
             self.conn.execute("UPDATE documents SET irrelevant=1 WHERE doc_id=?", (irrelevant,))
@@ -415,14 +417,14 @@ class TestFixRound1(Base):
                               (other, self.pid))
         for rev in (self.rev(other), self.rev(self.pid)):   # survivor first: the hazard
             with self.assertRaises(authorship.NotShown):
-                matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(),
-                                     author="operator", expected_revision=rev, render_id=rid)
+                self.operator_pair(pid=self.pid, doc_id=self.doc(),
+                                   expected_revision=rev, render_id=rid)
             with self.assertRaises(authorship.NotShown):
-                matches.set_exemption(self.conn, pid=self.pid, exempt=True,
-                                      expected_revision=rev, render_id=rid)
-        for fn in (matches.confirm_match, matches.reject_match):
+                self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=True,
+                             expected_revision=rev, render_id=rid)
+        for fn in (matches.confirm_in_tx, matches.reject_in_tx):
             with self.assertRaises(authorship.NotShown):
-                fn(self.conn, match_id=mid, expected_revision=mrev, render_id=rid)
+                self.granted(fn, match_id=mid, expected_revision=mrev, render_id=rid)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE author='operator'")
                          .fetchone()[0], 0)
 
@@ -438,8 +440,8 @@ class TestFixRound1(Base):
         old = self.show(self.pid)
         self.show(self.pid)
         with self.assertRaises(authorship.NotShown):
-            matches.record_match(self.conn, pid=self.pid, doc_id=self.doc(), author="operator",
-                                 expected_revision=self.rev(self.pid), render_id=old)
+            self.operator_pair(pid=self.pid, doc_id=self.doc(),
+                               expected_revision=self.rev(self.pid), render_id=old)
 
 
 if __name__ == "__main__":
