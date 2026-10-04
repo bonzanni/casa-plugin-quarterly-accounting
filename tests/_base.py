@@ -47,6 +47,9 @@ class StoreCase(TempEnv):
         import db
         self.conn = db.open_store()
         self.addCleanup(self.conn.close)
+        import tools
+        tools._CONN = self.conn
+        self.addCleanup(setattr, tools, "_CONN", None)
 
     def bind(self, account="acc-biz", label="Zakelijk", watermark="2026-07-01"):
         import binding

@@ -2,7 +2,10 @@
 """Three-way tool-list agreement (spec §Tool surface, house disciplines): the
 server's registry, plugin.json casa.provides_tools and casa.resultContract.tools
 name exactly the same tools. Role allow-lists are not a third list here:
-Casa grants plugin tools by assignment (spec §Setup step 1)."""
+Casa grants plugin tools by assignment (spec §Setup step 1).
+Result contract (S7 §3): five tools deliver a slot through Casa's broker — show_view (view),
+post_results (results), propose_reading (reading), propose_account (accounts), post_package
+(package) — and every other entry stays `{"result": "safe"}`."""
 from __future__ import annotations
 
 import json
@@ -11,6 +14,20 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PREFIX = "mcp__plugin_quarterly-accounting_quarterly-accounting__"
+
+# S7 §3: the five delivered slots; every other tool is `safe`.
+CAPABILITY_ENTRIES = {
+    "show_view": {"result": "capability", "provides": ["view"],
+                  "delivers": {"view": "operator_proposal"}},
+    "post_results": {"result": "capability", "provides": ["results"],
+                     "delivers": {"results": "operator_message"}},
+    "propose_reading": {"result": "capability", "provides": ["reading"],
+                        "delivers": {"reading": "operator_proposal"}},
+    "propose_account": {"result": "capability", "provides": ["accounts"],
+                        "delivers": {"accounts": "operator_proposal"}},
+    "post_package": {"result": "capability", "provides": ["package"],
+                     "delivers": {"package": "operator_file"}, "filename": True},
+}
 
 
 def main() -> int:
@@ -34,8 +51,9 @@ def main() -> int:
         for t in sorted(other - server):
             problems.append(f"{name} lists {t} but the server does not register it")
     for t, c in casa["resultContract"]["tools"].items():
-        if c != {"result": "safe"}:
-            problems.append(f"resultContract for {t} must be {{'result': 'safe'}}")
+        want = CAPABILITY_ENTRIES.get(t, {"result": "safe"})
+        if c != want:
+            problems.append(f"resultContract for {t} must be {want}")
     for key in ("eraseTool",):
         if key in casa and casa[key] not in server:
             problems.append(f"casa.{key} names {casa[key]}, which the server does not register")

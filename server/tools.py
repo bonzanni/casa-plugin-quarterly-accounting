@@ -116,6 +116,41 @@ def _deliverable(tool: str, out):
     return out
 
 
+NOT_POSTED = ("this could not be posted ({code}) — nothing was sent. Ask again; if it keeps "
+              "happening, say what you asked for")
+
+
+def capability(slot):
+    """A posting tool (S7 §3): Casa's result contract for a delivering tool. The result is
+    `{slot: <reference>, ...}` after a deposit, or the explicit no-post shape — every slot
+    present as null and nothing deposited (INV-PLUG-028) — for a refusal or a deposit Casa
+    refused, so the words reach the model instead of a withheld result. The function
+    deposits LAST (the store is committed first): nothing can raise after the deposit."""
+    import casa_broker
+
+    def wrap(fn):
+        def inner(args):
+            try:
+                return fn(args)
+            except db.Refusal as exc:
+                return {slot: None, "refused": str(exc)}
+            except casa_broker.DepositFailed as exc:
+                return {slot: None, "refused": NOT_POSTED.format(code=exc.code)}
+        return inner
+    return wrap
+
+
+def keyed(fn):
+    """A tap's handler (S7 §7.3, §8, §11): its answer is the tap's receipt, which Casa posts
+    from a JSON object's `receipt` (INV-PROP-002) — a refusal included, in the same shape."""
+    def inner(args):
+        try:
+            return fn(args)
+        except db.Refusal as exc:
+            return {"receipt": str(exc)}
+    return inner
+
+
 QUARTER_WORDS = "a quarter is written like 2026-Q3 (Q3 and Q3 2026 are fine too)"
 
 

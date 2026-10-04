@@ -35,10 +35,25 @@ def load() -> None:
     if _LOADED:
         return
     sys.path.append(str(plugin_root() / "server"))
-    import bank_feed_server  # noqa: F401
-    for mod in ("tools_read", "tools_auth", "tools_refresh", "tools_destructive",
-                "tools_annotate", "tools_aggregate", "tools_rules", "tools_backup"):
-        __import__(mod)
+    # bank-feed's own `casa_broker` (deposit_link, fit_caption) shares its name with ours
+    # (S7: deposit); its modules bind theirs at import, so swap it in only while they load
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "casa_broker", plugin_root() / "server" / "casa_broker.py")
+    theirs = importlib.util.module_from_spec(spec)
+    ours = sys.modules.get("casa_broker")
+    sys.modules["casa_broker"] = theirs
+    try:
+        spec.loader.exec_module(theirs)
+        import bank_feed_server  # noqa: F401
+        for mod in ("tools_read", "tools_auth", "tools_refresh", "tools_destructive",
+                    "tools_annotate", "tools_aggregate", "tools_rules", "tools_backup"):
+            __import__(mod)
+    finally:
+        if ours is not None:
+            sys.modules["casa_broker"] = ours
+        else:
+            del sys.modules["casa_broker"]
     _LOADED = True
 
 
