@@ -454,24 +454,6 @@ def t_job_status(args):
     return job.status(conn(), args["job_id"])
 
 
-@register("job_report",
-          "Ellen: on every notification about the accounting job (pass the id it names and "
-          "status: ok for a clean finish, cancelled when it says \"Cancelled by user\" — "
-          "nothing restarts — error for any other end) and at the end of every accounting "
-          "turn (no arguments) — "
-          "after the operator's message was answered or applied, never before. Send "
-          "`speak` first, then every `texts` entry in the order given, each verbatim and each "
-          "then mark_rendering_delivered (the operator's reply binds to the last one shown). "
-          "With `more: true`, call job_report again after sending what you got: more pages "
-          "wait. Do a `continue` as Packaging step 3 says; if `start_job` is set, call "
-          "start_job with it.",
-          obj({"job_id": S, "status": S}))
-def t_job_report(args):
-    import asks
-    return _deliverable("job_report", asks.job_report(conn(), job_id=args.get("job_id"),
-                                                      status=args.get("status")))
-
-
 @register("request_work",
           "Record a check (kind=check, trigger=operator) or a filed document handed over "
           "(kind=handover, trigger=operator, doc_ids) BEFORE start_job; then start_job with "

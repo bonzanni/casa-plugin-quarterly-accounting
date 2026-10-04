@@ -47,7 +47,6 @@ def check_claim(conn, token) -> None:
     assert conn.in_transaction
     if token is None:
         raise db.Refusal("a job turn starts with job_next(job_id=…): pass the pass_token it gave you")
-    passes.check_revoked(conn, token)                     # #38 R7-1: a cancelled job
     top = conn.execute("SELECT max(gen) FROM claims").fetchone()[0]
     if top is None or int(token) != top:
         raise db.Refusal("this job turn is no longer the current one (a newer turn claimed "
@@ -56,36 +55,97 @@ def check_claim(conn, token) -> None:
         passes.check_token(conn, token)
 
 
+LEFT_BEHIND = "the check stopped before it finished — ask again when you want it"
+
+
+def _queued_any(conn) -> bool:
+    return conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL SELECT 1"
+                        " FROM package_requests WHERE state IN ('queued', 'snapshot')"
+                        ).fetchone() is not None
+
+
+def _completed(conn, job_id) -> bool:
+    r = conn.execute("SELECT completed_at FROM runs WHERE job_id=?", (job_id,)).fetchone()
+    return r is not None and r[0] is not None
+
+
 def claim(conn, job_id) -> int:
+    """A job turn's token-less job_next (S7 §4.1, §10). Under the custody lock, taken
+    before the transaction (the store's lock order: the stalled-send recovery removes
+    staged bytes), in one transaction: the claim is recorded with its store sequence
+    (`claims.seq`); a job id's first claim with no live pass and nothing queued records
+    a cron check (§4.1); a live pass held by another job is adopted (§6.3); the
+    left-behind run's package asks are closed (§10); a stalled staged send is recovered
+    (§6.1). Nothing restarts a job: no drain, no orphan mark (§9)."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
-    with db.tx(conn):
-        if passes.is_cancelled(conn, job_id):
-            raise db.Refusal(passes.CANCELLED_JOB)        # #38 R7-1: never claims again
-        m = passes._marker(conn)
-        if m is not None and m["live"] and passes.protocol_of(conn, m["pass_id"]) != "job":
-            passes.close_delegation_pass_on_upgrade(conn)        # spec §8
-        token = passes.rotate(conn)
-        p = live_job_pass(conn)
-        changed = p is not None and p["holder_job"] != job_id
-        conn.execute("INSERT INTO claims(gen, job_id, at, batch) VALUES (?,?,?,?)",
-                     (token, job_id, db.now(), _batch_of(conn, job_id, token, changed)))
-        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain', ?)", (job_id,))
-        if p is not None:
+    import delivery, steps
+    with db.custody_lock():                 # the stalled-send recovery removes staged bytes
+        with db.tx(conn):
+            m = passes._marker(conn)
+            if m is not None and m["live"] and passes.protocol_of(conn, m["pass_id"]) != "job":
+                passes.close_delegation_pass_on_upgrade(conn)        # spec §8
+            first = conn.execute("SELECT 1 FROM claims WHERE job_id=?",
+                                 (job_id,)).fetchone() is None
+            prev = conn.execute("SELECT job_id FROM claims WHERE job_id<>? ORDER BY gen DESC"
+                                " LIMIT 1", (job_id,)).fetchone() if first else None
+            p = live_job_pass(conn)
+            implicit = first and p is None and not _queued_any(conn)          # §4.1
+            token = passes.rotate(conn)
+            changed = p is not None and p["holder_job"] != job_id
+            conn.execute("INSERT INTO claims(gen, job_id, at, batch, seq) VALUES (?,?,?,?,?)",
+                         (token, job_id, db.now(), _batch_of(conn, job_id, token, changed),
+                          db.next_seq(conn)))
+            if implicit:
+                conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json,"
+                             " created_seq, created_at, state) VALUES ('check', 'cron', '[]',"
+                             " ?, ?, 'queued')", (db.next_seq(conn), db.now()))
+            left = None
             if changed:
-                # spec §6.3, amended (design r1, Astra S2): every claim that takes the pass
-                # from a different job id spends the budget — a return of an earlier holder
-                # (A→B→A) too — since each needs a bank read of its own
-                if p["adoptions"] >= ADOPTIONS_MAX:
-                    stop_exhausted_pass(conn, token, p["pass_id"], job_id)
-                    return token
-                held = json.loads(p["adopters_json"])
-                conn.execute("UPDATE passes SET adoptions=adoptions+1, adopters_json=?"
-                             " WHERE pass_id=?", (json.dumps(held + [job_id]), p["pass_id"]))
-            conn.execute("UPDATE passes SET holder_job=?, orphaned_by=NULL WHERE pass_id=?",
-                         (job_id, p["pass_id"]))
-            conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
-        return token
+                left = p["holder_job"]
+            elif prev is not None and not _completed(conn, prev[0]):
+                left = prev[0]
+            if p is not None:
+                if changed:
+                    # spec §6.3, amended (design r1, Astra S2): every claim that takes the
+                    # pass from a different job id spends the budget — a return of an
+                    # earlier holder (A→B→A) too — since each needs a bank read of its own
+                    if p["adoptions"] >= ADOPTIONS_MAX:
+                        stop_exhausted_pass(conn, token, p["pass_id"], job_id)
+                    else:
+                        held = json.loads(p["adopters_json"])
+                        conn.execute("UPDATE passes SET adoptions=adoptions+1, adopters_json=?,"
+                                     " holder_job=? WHERE pass_id=?",
+                                     (json.dumps(held + [job_id]), job_id, p["pass_id"]))
+                        conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
+                else:
+                    conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
+            if left is not None:
+                _close_left_behind(conn, token, left)                         # §10
+            for d in delivery.stalled_sends(conn, steps.LEASE_S):             # §6.1
+                delivery.recover_staged(conn, d)
+                conn.execute("UPDATE package_requests SET state='withdrawn', updated_at=?"
+                             " WHERE delivery_id=? AND state='staged'",
+                             (db.now(), d["delivery_id"]))
+            return token
+
+
+def _close_left_behind(conn, token, left) -> None:
+    """§10 (G2): the left-behind run's package asks — queued or snapshot, asked before its
+    last claim (asked_seq below that claim's seq) — are closed `stopped` with LEFT_BEHIND,
+    each with its package-stopped notice; a closed snapshot request's live package pass
+    ends `stopped` with it. A renewed ask (asked_seq after) is served. Check and handover
+    asks are untouched."""
+    last = conn.execute("SELECT coalesce(max(seq), 0) FROM claims WHERE job_id=?",
+                        (left,)).fetchone()[0]
+    for req in conn.execute("SELECT * FROM package_requests WHERE state IN ('queued',"
+                            " 'snapshot') AND asked_seq < ? ORDER BY request_id",
+                            (last,)).fetchall():
+        passes._close(conn, req, "stopped", "stopped", reason=LEFT_BEHIND)
+        p = live_job_pass(conn)
+        if req["state"] == "snapshot" and p is not None and p["pass_id"] == req["pass_id"]:
+            passes._end_pass_tx(conn, token, "stopped", {"stopped_reason": LEFT_BEHIND},
+                                credit=False)
 
 
 def _batch_of(conn, job_id, token, holder_changed) -> int:
@@ -250,7 +310,6 @@ def _choose(conn, token) -> dict:
             p = live_job_pass(conn)
         if p is None:
             if done(conn, job_id):
-                conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain','none')")
                 conn.execute("INSERT OR IGNORE INTO runs(job_id, passes) VALUES (?, 0)",
                              (job_id,))
                 conn.execute("UPDATE runs SET completed_at=coalesce(completed_at, ?) WHERE"
@@ -297,8 +356,8 @@ def run_passes(conn, job_id) -> int:
 def done(conn, job_id) -> bool:
     """THE completion predicate, shared by job_next's `complete` and job_status's `done`
     (design r6, round 5): no job pass is live, and nothing is queued — or this run has
-    begun MAX_PASSES_PER_JOB passes, so what is queued waits for the next job (job_report's
-    standing retry starts it)."""
+    begun MAX_PASSES_PER_JOB passes, so what is queued waits for the next start (S7 §4.2:
+    nothing restarts a job)."""
     if live_job_pass(conn) is not None:
         return False
     queued = conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL"
@@ -715,7 +774,7 @@ def status(conn, job_id) -> dict:
 
 RUN_FINISHED = "Accounting work finished."
 TOPIC_MAX = 200     # one topic line: Casa keeps a summary's or completion's first line, cut
-                    # at 300 characters; the full stop line is the main chat's (job_report)
+                    # at 300 characters; the full stop line is posted by the job (S7 §5)
 
 
 def run_end(conn, job_id) -> tuple:

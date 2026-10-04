@@ -337,42 +337,11 @@ def _close(conn, req, state: str, outcome: str, reason=None):
                                 quarter=req["quarter"])
 
 
-CANCELLED_JOB = "this job was cancelled — nothing was done"
-
-
-def cancelled_key(job_id) -> str:
-    """#38 R7-1: the meta key recording that the operator cancelled job `job_id`."""
-    return f"cancelled:{job_id}"
-
-
-def is_cancelled(conn, job_id) -> bool:
-    """#38 R8-1: `job_id` is a job the operator cancelled — by the #17 matching rule of
-    asks._match_job: a recorded id equal to it, or a recorded prefix (≥ 8 characters, as
-    a notification may name it before the job ever claimed) it starts with."""
-    for (key,) in conn.execute("SELECT key FROM meta WHERE key LIKE 'cancelled:%'"):
-        rec = key[len("cancelled:"):]
-        if job_id == rec or (len(rec) >= 8 and job_id.startswith(rec)):
-            return True
-    return False
-
-
-def check_revoked(conn, token) -> None:
-    """#38 R7-1: a token whose claim belongs to a job the operator cancelled is refused —
-    every token that job was ever issued, so nothing it sent before the cancel lands."""
-    if token is None:
-        return
-    row = conn.execute("SELECT job_id FROM claims WHERE gen=?", (int(token),)).fetchone()
-    if row is not None and is_cancelled(conn, row[0]):
-        raise db.Refusal(CANCELLED_JOB)
-
-
 def check_token(conn, token) -> None:
     """A pass-only write's fence. Accepting a token inside a write transaction also
-    renews its holder's lease: a holder that keeps writing is never claimed over. A
-    cancelled job's token is refused (check_revoked)."""
+    renews its holder's lease: a holder that keeps writing is never claimed over."""
     if token is None:
         return
-    check_revoked(conn, token)
     m = _marker(conn)
     if m is None or not m["live"] or int(token) != m["generation"]:
         raise db.Refusal("this pass is no longer the current one (another turn continued it, "
@@ -390,11 +359,16 @@ def open_request(conn, request_id):
 def check_package_token(conn, request_id, token):
     """A package request's fence: the token end_pass or continue_pass handed over,
     and the request still open. Accepting it inside a write transaction renews the
-    request's lease. Returns the request row."""
+    request's lease. A token that is a job claim's gen must be the newest claim's (S7
+    §10: a superseded job turn writes nothing). Returns the request row."""
     req = open_request(conn, request_id)
     if token is None:
         raise db.Refusal("this package belongs to a package request: pass the package_token "
                          "job_report's `continue` gave you")
+    if conn.execute("SELECT 1 FROM claims WHERE gen=?", (int(token),)).fetchone() is not None \
+            and int(token) != conn.execute("SELECT max(gen) FROM claims").fetchone()[0]:
+        raise db.Refusal("this job turn is no longer the current one (a newer turn claimed "
+                         "the work); stop — nothing was written")
     if req is None or req["token"] is None or int(token) != req["token"] \
             or req["state"] in ("superseded", "withdrawn"):
         raise db.Refusal("this package request has been taken over by a later turn — stop, "
@@ -468,8 +442,9 @@ def _end_pass_tx(conn, token, outcome: str, report: dict, *, credit=True) -> dic
     """end_pass's transaction body, inside the caller's write transaction (end_pass's
     own, or the job cursor's): the pass is ended and its request handed over. Returns
     {ended, outcome, report, **handed} — `_notice` stays inside `handed` — with no reap
-    and no rendering (end_pass adds those after its commit). `credit=False` (#38: the
-    operator's cancel, which no job claim makes) earns no INV-J8 credit."""
+    and no rendering (end_pass adds those after its commit). `credit=False` (S7 §10: a
+    claim closing a left-behind run's package pass — no work, so no progress) earns no
+    INV-J8 credit."""
     assert conn.in_transaction, "a pass is ended inside the write transaction"
     if outcome not in OUTCOMES:
         raise db.Refusal(f"outcome is one of {', '.join(OUTCOMES)}")

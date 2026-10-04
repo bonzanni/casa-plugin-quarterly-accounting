@@ -45,9 +45,6 @@
         "job_next": {
           "result": "safe"
         },
-        "job_report": {
-          "result": "safe"
-        },
         "job_status": {
           "result": "safe"
         },
@@ -125,7 +122,6 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__import_ledger_export",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__ingest_document",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_next",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__job_report",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_status",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_projections",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_quarter_state",

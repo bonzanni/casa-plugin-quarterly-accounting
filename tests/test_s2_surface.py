@@ -3,6 +3,7 @@
 wording, the classification and freshness notes, and a queued check made visible."""
 import datetime as _dt
 import json, pathlib, subprocess, sys
+import unittest
 from tests._base import StoreCase, ROOT
 
 A_JOB = "aaaaaaaa-1"
@@ -14,9 +15,10 @@ class Surface(StoreCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         import qa_server, tools  # noqa: F401
-        for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work"):
+        for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work",
+                     "job_report"):                     # S7 §9: the relay is deleted
             self.assertNotIn(gone, qa_server.TOOLS)
-        for new in ("job_next", "job_status", "job_report", "request_work",
+        for new in ("job_next", "job_status", "request_work",
                     "request_package", "record_filing"):
             self.assertIn(new, qa_server.TOOLS)
 
@@ -82,12 +84,6 @@ class SurfaceBound(StoreCase):
                       "classified.", text)
         self.assertIn("A check is waiting to start, asked 12 minutes ago.", text)
         self.assertLess(text.index("A check is waiting"), text.index("Accounting ·"))
-        # a job that is draining the queue is not "waiting to start"
-        with db.tx(self.conn):
-            self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
-                              " ('drain', 'job-00000001')")
-        self.assertNotIn("waiting to start",
-                         views.build_review(self.conn, view="status")["text"])
 
     def test_the_gmail_absent_alert_is_not_a_reauthorisation(self):
         import alerts, passes
@@ -151,21 +147,15 @@ class ToolLayer(StoreCase):
         self.assertEqual(first["unit"], "probes")
         self.assertTrue(self.call("job_next").startswith("refused: "))
 
-    def test_request_package_and_job_report(self):
+    def test_request_package_returns_its_start(self):
         out = self.call("request_package", quarter="Q3 2026")
         self.assertEqual(out["status"], "asked")
-        rep = self.call("job_report")
-        self.assertEqual(rep["start_job"]["job"], "quarterly-accounting:work")
-        self.assertFalse(rep["more"])
+        self.assertEqual(out["start_job"]["job"], "quarterly-accounting:work")
 
     def test_the_descriptions_carry_the_echo_and_the_call_again(self):
         import qa_server, tools  # noqa: F401
         nxt = " ".join(qa_server.TOOLS["job_next"]["description"].split())
         self.assertIn("echo the judge unit's `judgment` and `after`", nxt)
-        rep = " ".join(qa_server.TOOLS["job_report"]["description"].split())
-        self.assertIn("`more: true`", rep)
-        self.assertIn("call job_report again", rep)
-        self.assertIn("speak` first", rep)
         status = " ".join(qa_server.TOOLS["job_status"]["description"].split())
         self.assertIn("never a claim", status)
 
@@ -226,6 +216,7 @@ class RefusalsNameNoRemovedTool(StoreCase):
 class ReportOrder(StoreCase):
     """Carry (Task 10): the operator's reply binds to the LAST delivered rendering, so
     job_report lists a status view after every handover and stop page."""
+    @unittest.skip("S7: re-enabled in Task 10")
     def test_status_views_come_last(self):
         import asks, db, views
         with db.tx(self.conn):

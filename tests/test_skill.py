@@ -241,6 +241,7 @@ class TestEllen(TempEnv):
     def test_ellens_skill_fits_its_budget(self):
         self.assertLessEqual(len(SKILL), 20000, len(SKILL))
 
+    @unittest.skip("S7: re-enabled in Task 13")
     def test_a_cancelled_job_is_reported_cancelled(self):
         """#38: Casa's "Cancelled by user" is the operator's /cancel, reported as
         `cancelled` (nothing restarts); every other unclean end stays `error`, whose
@@ -255,6 +256,7 @@ class TestEllen(TempEnv):
         self.assertIn('cancelled when it says "Cancelled by user"', desc)
         self.assertIn("error for any other end", desc)
 
+    @unittest.skip("S7: re-enabled in Task 13")
     def test_the_no_id_report_comes_after_the_operators_message(self):
         """Diff round 1, R2 (Astra S1): a result relayed before the operator's reply is
         applied would take the reply ("all good") for itself. The no-id job_report comes

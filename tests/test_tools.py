@@ -26,10 +26,11 @@ EXPECTED = {
     "build_quarterly_package", "stage_for_delivery", "record_delivery", "read_document",
     # S2 (spec §8, §13): the job's tools replace begin_pass, end_pass, continue_pass,
     # record_step and more_work
-    "job_next", "job_status", "job_report", "request_work", "request_package",
+    "job_next", "job_status", "request_work", "request_package",
     "record_filing",
     # S7 Task 8 (§4): will the running job take this ask?
     "ask_state",
+    # S7 Task 9 (§9): job_report left the surface (the job posts its own results)
     # S7 §8.1: confirm_match, reject_match, set_exemption, bind_account, set_watermark,
     # set_package_name, stop_chasing and apply_reply left the surface (a tap's grant only)
 }
@@ -89,14 +90,15 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 31)     # S2: 38; S7 Task 4: - 8 (§8.1); T8: + ask_state
+        self.assertEqual(len(EXPECTED), 30)     # S2: 38; S7 Task 4: - 8 (§8.1); T8: + ask_state;
+                                                # T9: - job_report (§9)
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 31)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 30)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
@@ -146,12 +148,7 @@ class TestDeliverableBoundary(TempEnv):
         big = "x" * 4097
         cases = [("build_review", views, "build_review", {"render_id": "r1", "text": big},
                   {}),
-                 # S2: job_report's result pages and its speak (end_pass's, before S2)
-                 ("job_report", asks, "job_report",
-                  {"texts": [{"render_id": "r1", "text": "ok"},
-                             {"render_id": "r2", "text": big}], "speak": None}, {}),
-                 ("job_report", asks, "job_report",
-                  {"texts": [], "speak": {"render_id": "r1", "text": big}}, {}),
+                 # S7 Task 9 (§9): job_report (texts, speak) left the surface
                  # fix wave F: the offer an uncertain package send returns
                  ("record_delivery", delivery, "record_delivery",
                   {"speak": {"render_id": "r1", "text": big}},

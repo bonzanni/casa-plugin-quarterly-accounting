@@ -147,6 +147,7 @@ class InformationalPages(Tools):
     """R3: handover case lines and stop lines never move the reply binding; R5/R6: a
     non-binding offer is a refusal boundary."""
 
+    @unittest.skip("S7: re-enabled in Task 11")
     def test_an_offer_relayed_in_an_operators_turn_is_a_boundary(self):
         """R5/R6: the same resend offer, handed out by a no-id job_report (an operator's
         turn) and delivered, is non-binding: "send it again" in the next message refuses
@@ -163,6 +164,7 @@ class InformationalPages(Tools):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
                          before)
 
+    @unittest.skip("S7: re-enabled in Task 11")
     def test_astras_q2_offer_after_a_q3_offer_sends_nothing(self):
         """Astra r2 S1: a binding Q3 resend offer, then a NON-binding Q2 offer delivered
         after it. "Send it again" must not fall back to the Q3 offer."""
@@ -191,6 +193,7 @@ class InformationalPages(Tools):
                   package_token=tok)
         return pkg
 
+    @unittest.skip("S7: re-enabled in Task 11")
     def test_a_handover_page_after_the_resend_offer_keeps_it(self):
         """Astra's reproduction: an uncertain package send, then a finished handover;
         `speak` (the resend offer) and the handover page, relayed on the job's

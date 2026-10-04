@@ -261,6 +261,26 @@ class StoreCase(TempEnv):
                               (lapsed,))
         return token
 
+    def stage_stalled_package(self, quarter="2026-Q3"):
+        """A package's first send staged and never settled, its holder gone: package_built_
+        unsent(), staged under its package_token, then the delivery's lease set to a lapsed
+        time — the stalled send any claim recovers (S7 §6.1; S2's job_report recovery case,
+        moved here). Returns its delivery_id."""
+        import datetime as _dt
+        import db
+        import delivery
+        import steps
+        token = self.package_built_unsent(quarter)
+        pkg = self.conn.execute("SELECT package_id FROM package_requests WHERE state='built'"
+                                ).fetchone()[0]
+        d = delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg,
+                                        package_token=token)
+        lapsed = steps._stamp(db._clock() - _dt.timedelta(seconds=steps.LEASE_S + 60))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE deliveries SET lease_at=?, created_at=? WHERE"
+                              " delivery_id=?", (lapsed, lapsed, d["delivery_id"]))
+        return d["delivery_id"]
+
     def check_round(self, token, gmail_ok=True, triage_remaining=0):
         """The rest of a package round (issue #15): Ellen's Gmail round (its probe) and
         the judge step, finished whole."""

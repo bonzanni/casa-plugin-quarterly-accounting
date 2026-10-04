@@ -98,8 +98,6 @@ class Claim(StoreCase):
             passes.record_probe(self.conn, tA, "bank_tools", True)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM probes WHERE kind='bank_tools'")
                          .fetchone()[0], 0)
-        self.assertEqual(self.conn.execute("SELECT value FROM meta WHERE key='drain'")
-                         .fetchone()[0], B)
 
     def test_check_claim_runs_the_pass_fence_while_a_job_pass_is_live(self):
         import db, job
@@ -115,16 +113,6 @@ class Claim(StoreCase):
         with self.assertRaises(db.Refusal):
             with db.tx(self.conn):
                 job.check_claim(self.conn, t)
-
-    def test_an_adoption_clears_orphaned_by(self):
-        import db, job
-        tA = job.claim(self.conn, A)
-        pid = self.start_job_pass(tA)
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE passes SET orphaned_by=? WHERE pass_id=?", (A, pid))
-        job.claim(self.conn, B)
-        self.assertIsNone(self.conn.execute("SELECT orphaned_by FROM passes WHERE pass_id=?",
-                                            (pid,)).fetchone()[0])
 
     def test_the_stopping_claim_does_not_take_the_pass(self):
         import job
