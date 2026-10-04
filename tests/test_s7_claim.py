@@ -171,3 +171,19 @@ class Claim(StoreCase):
         with db.tx(self.conn):
             pages = asks._result_tx(self.conn, rid)
         self.assertEqual([p["text"] for p in pages], [asks.KEPT_STOPPING])
+
+    def test_an_exhausted_adoption_at_a_first_claim_records_no_check(self):
+        """Fix r2 ruling: a claim that spends the adoption budget is told "kept stopping —
+        ask again"; §4.1 never fires on it (no restart, G2)."""
+        import db, job
+        t = job.claim(self.conn, A)                   # §4.1: A's cron check
+        pid = self.start_job_pass(t)
+        with db.tx(self.conn):
+            __import__("asks").take_queued(self.conn, pid)
+        for j in (B, "cccccccc-3"):
+            job.claim(self.conn, j)
+        job.claim(self.conn, "dddddddd-4")            # a first claim; the third adoption
+        self.assertIsNone(job.live_job_pass(self.conn))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM work_requests WHERE"
+                                           " state='queued'").fetchone()[0], 0)
+        self.assertTrue(job.done(self.conn, "dddddddd-4"))

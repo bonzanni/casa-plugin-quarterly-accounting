@@ -95,7 +95,7 @@ def claim(conn, job_id) -> int:
             conn.execute("INSERT INTO claims(gen, job_id, at, batch, seq) VALUES (?,?,?,?,?)",
                          (token, job_id, db.now(), _batch_of(conn, job_id, token, changed),
                           db.next_seq(conn)))
-            left = None
+            left, exhausted = None, False
             if changed:
                 left = p["holder_job"]
             elif prev is not None and not _completed(conn, prev[0]):
@@ -107,6 +107,7 @@ def claim(conn, job_id) -> int:
                     # earlier holder (A→B→A) too — since each needs a bank read of its own
                     if p["adoptions"] >= ADOPTIONS_MAX:
                         stop_exhausted_pass(conn, token, p["pass_id"], job_id)
+                        exhausted = True
                     else:
                         held = json.loads(p["adopters_json"])
                         conn.execute("UPDATE passes SET adoptions=adoptions+1, adopters_json=?,"
@@ -118,8 +119,11 @@ def claim(conn, job_id) -> int:
             if left is not None:
                 _close_left_behind(conn, token, left)                         # §10
             # §4.1, on the state this run will work: after §10's closure and pass-ending
-            # (fix r1 ruling), so a launch left with nothing to do is still a check
-            if first and live_job_pass(conn) is None and not _queued_any(conn):
+            # (fix r1 ruling), so a launch left with nothing to do is still a check — but
+            # never on a claim that spent the adoption budget: the operator was just told
+            # "kept stopping — ask again", and a check now would be a restart (G2; r2 ruling)
+            if first and not exhausted and live_job_pass(conn) is None \
+                    and not _queued_any(conn):
                 conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json,"
                              " created_seq, created_at, state) VALUES ('check', 'cron', '[]',"
                              " ?, ?, 'queued')", (db.next_seq(conn), db.now()))

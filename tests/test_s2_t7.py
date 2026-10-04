@@ -193,21 +193,15 @@ class RunEnd(StoreCase):
         self.take_the_cron_check(pid)
         job.claim(self.conn, B)
         job.claim(self.conn, C)
-        job.claim(self.conn, D)                            # the third adoption: stopped
+        tD = job.claim(self.conn, D)                       # the third adoption: stopped
         row = self.conn.execute("SELECT holder_job, outcome, report_json FROM passes WHERE"
                                 " pass_id=?", (pid,)).fetchone()
         self.assertEqual((row["holder_job"], row["outcome"]), (C, "stopped"))
         self.assertEqual(json.loads(row["report_json"])["stopped_by"], D)
         want = "Accounting check stopped: it kept stopping."
-        # Task 9 fix r1 ruling: §4.1 reads the state after the pass ended, so D's first
-        # claim, left with nothing live or queued, records a cron check, and D's run
-        # serves it before it completes; the stopped pass is still D's to name
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM work_requests WHERE"
-                                           " trigger='cron' AND state='queued'"
-                                           ).fetchone()[0], 1)
-        last = self.run_job_to_complete(D)[-1]
-        self.assertEqual((last["unit"], last["text"]), ("complete", want))
         self.assertEqual(job.status(self.conn, D)["text"], want)
+        u = job.next_unit(self.conn, tD)
+        self.assertEqual((u["unit"], u["text"]), ("complete", want))
 
     def test_a_long_reason_is_kept_to_one_topic_line(self):
         import job
