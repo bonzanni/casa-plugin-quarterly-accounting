@@ -825,8 +825,17 @@ def _capped(parts, cap):
 MORE_LINE = 'There is more — say "more".'
 
 
+def _day_ordinal(day) -> int:
+    """A block's date as an int for the paging cursor (S7 §7.6: a stored More button's
+    `after` holds only ints, never bank text); a missing or malformed date is 0."""
+    try:
+        return dates.parse_day(day).toordinal() if day else 0
+    except ValueError:
+        return 0
+
+
 def _key(i, blk) -> list:
-    return [i, blk.order[0], blk.order[1]]
+    return [i, _day_ordinal(blk.order[0]), blk.order[1]]
 
 
 def _page(parts, after, first):
@@ -836,8 +845,9 @@ def _page(parts, after, first):
     delivering an earlier page removed (residue) do not shift later pages.
     The continuation phrase is never the one that asked for the whole list
     (spec: "the rest stays one word away")."""
-    flat = [(i, blk) for i, sec in enumerate(parts["sections"])
-            for blk in sorted(sec.blocks, key=lambda b: b.order)]
+    # ordered by the cursor's own key, so the cursor and the page order always agree
+    flat = sorted(((i, blk) for i, sec in enumerate(parts["sections"]) for blk in sec.blocks),
+                  key=lambda e: _key(*e))
     if after is not None:
         flat = [e for e in flat if _key(*e) > list(after)]
 
@@ -1015,7 +1025,9 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
         raise db.Refusal("page is 1, 2, 3, ...")
     if view == "all" and page is None:
         page = 1
-    if after is not None and (page is None or page < 2 or not isinstance(after, list)):
+    if after is not None and (page is None or page < 2 or not isinstance(after, list)
+                              or not all(isinstance(x, int) and not isinstance(x, bool)
+                                         for x in after)):
         raise db.Refusal("after is the cursor a previous page's `next` returned")
     q = quarter or dates.quarter_of(db.now()[:10])
     dates.parse_quarter(q)
