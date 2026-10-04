@@ -9,6 +9,14 @@ from unittest import mock
 from tests._base import StoreCase
 import db  # noqa: E402
 import delivery  # noqa: E402
+
+
+def _record(conn, **kw):
+    """record_delivery, after the post a delivered outcome needs (r3 #2): these tests stage
+    and record directly; in S7 the send between them is post_package, which marks it."""
+    from tests import legacy_tools
+    legacy_tools.posted_first("record_delivery", kw)
+    return delivery.record_delivery(conn, **kw)
 import ledger  # noqa: E402
 import package  # noqa: E402
 import reducer  # noqa: E402
@@ -54,7 +62,7 @@ class TestTelegram(Base):
     def test_delivered_records_the_rows_the_accountant_now_holds(self):
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="delivered")
+        _record(self.conn, delivery_id=out["delivery_id"], outcome="delivered")
         rows = self.conn.execute("SELECT row_id, pid FROM delivered_rows").fetchall()
         self.assertEqual([tuple(r) for r in rows], [(1, self.pid)])
         self.assertEqual(self.conn.execute("SELECT package_name_announced FROM binding")
@@ -63,7 +71,7 @@ class TestTelegram(Base):
     def test_delivered_rows_carry_the_facts_the_delivered_check_compares(self):
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="delivered")
+        _record(self.conn, delivery_id=out["delivery_id"], outcome="delivered")
         bank = dict(self.conn.execute("SELECT * FROM bank_rows WHERE row_id=1").fetchone())
         fp, kind = self.conn.execute("SELECT facts_fp, kind FROM delivered_rows").fetchone()
         self.assertEqual(fp, db.canonical(reducer.facts_of(bank)))
@@ -78,7 +86,7 @@ class TestTelegram(Base):
     def test_uncertain_is_offered_in_words_and_never_resent_by_itself(self):
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
+        _record(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 1)
         text = views.build_review(self.conn, view="status", quarter="2026-Q3")["text"]
         self.assertIn(views.field(self.pkg["filename"]), text)
@@ -93,10 +101,10 @@ class TestTelegram(Base):
     def test_the_offer_goes_once_the_resend_is_delivered(self):
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
+        _record(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
         again = delivery.stage_for_delivery(self.conn, channel="telegram",
                                             package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=again["delivery_id"],
+        _record(self.conn, delivery_id=again["delivery_id"],
                                  outcome="delivered")
         text = views.build_review(self.conn, view="status", quarter="2026-Q3")["text"]
         self.assertNotIn("send it again", text)
@@ -104,7 +112,7 @@ class TestTelegram(Base):
     def test_the_offer_goes_through_the_view_machinery(self):
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
+        _record(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
         for view, page in (("status", None), ("all", 1)):
             text = views.build_review(self.conn, view=view, quarter="2026-Q3", page=page)["text"]
             self.assertIn('say "send it again"', text, view)
@@ -121,12 +129,12 @@ class TestTelegram(Base):
     def test_resend_follows_each_packages_latest_send(self):
         old = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=old["delivery_id"], outcome="delivered")
+        _record(self.conn, delivery_id=old["delivery_id"], outcome="delivered")
         newer = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
         for outcome in ("uncertain", "failed"):
             d = delivery.stage_for_delivery(self.conn, channel="telegram",
                                             package_id=newer["package_id"])
-            delivery.record_delivery(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
+            _record(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
         # one predicate (resend_refusal): a package that arrived is never resent; the newer
         # one, whose latest send failed under the current snapshot, is the one owed
         self.assertEqual(delivery.resendable(self.conn), newer["package_id"])
@@ -150,13 +158,13 @@ class TestPassFence(Base):
         stale = self.token
         live = self.pass_()
         with self.assertRaises(db.Refusal):
-            delivery.record_delivery(self.conn, delivery_id=out["delivery_id"],
+            _record(self.conn, delivery_id=out["delivery_id"],
                                      outcome="delivered", pass_token=stale)
         self.assertEqual(self.conn.execute("SELECT status FROM deliveries").fetchone()[0],
                          "staged")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delivered_rows")
                          .fetchone()[0], 0)
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"],
+        _record(self.conn, delivery_id=out["delivery_id"],
                                  outcome="delivered", pass_token=live)
         self.assertEqual(self.conn.execute("SELECT status FROM deliveries").fetchone()[0],
                          "delivered")
@@ -223,7 +231,7 @@ class TestNoEmail(Base):
 class TestResendTarget(Base):
     def send(self, pkg_id, outcome):
         d = delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg_id)
-        delivery.record_delivery(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
+        _record(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
         for f in os.listdir(self.outbox):          # Casa consumes the outbox copy on send
             os.unlink(self.outbox / f)
 

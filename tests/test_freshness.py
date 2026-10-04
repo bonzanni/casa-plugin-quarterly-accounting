@@ -728,6 +728,8 @@ class TestWithdrawalUnderTheCustodyLock(ToolPass):
 
 def _raw(name, **args):
     import qa_server
+    from tests import legacy_tools
+    legacy_tools.posted_first(name, args)          # r3 #2: as post_package marks it
     out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                             "params": {"name": name, "arguments": args}})
     return out["result"]["content"][0]["text"]

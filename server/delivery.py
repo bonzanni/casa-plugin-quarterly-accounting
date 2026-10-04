@@ -297,7 +297,8 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
         "SELECT d.delivery_id, d.channel, d.staged_path, d.package_id, p.quarter"
         " FROM deliveries d JOIN packages p"
         " ON p.package_id=d.package_id WHERE d.status='staged' AND d.revoked_at IS NULL"
-        " AND d.as_built=0 AND (p.snapshot_id IS NULL OR p.snapshot_id<>?)"
+        " AND d.as_built=0 AND d.posted_at IS NULL"     # r3 #1: a posted send has left
+        " AND (p.snapshot_id IS NULL OR p.snapshot_id<>?)"
         " AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.package_id=d.package_id"
         "  AND e.status IN ('delivered', 'uncertain'))", (snapshot_id,)).fetchall()
     now = db.now()
@@ -367,6 +368,19 @@ def stalled_sends(conn, lease_s: float) -> list:
         " WHERE d.status='staged' AND d.revoked_at IS NULL AND d.withdrawn_at IS NULL"
         " ORDER BY d.delivery_id").fetchall()
         if steps._age(r["lease_at"] or r["created_at"]) >= lease_s]
+
+
+NEVER_POSTED = ("this package was never posted, so it cannot have arrived — nothing was "
+                "recorded; post it first, or record it uncertain")
+
+
+def posted_unrecorded(conn) -> list:
+    """r3 #1: staged package sends post_package deposited (posted_at) whose outcome nobody
+    recorded — they have left the plugin, whatever their lease."""
+    return conn.execute(
+        "SELECT d.*, p.quarter FROM deliveries d JOIN packages p ON p.package_id=d.package_id"
+        " WHERE d.status='staged' AND d.posted_at IS NOT NULL AND d.revoked_at IS NULL AND"
+        " d.withdrawn_at IS NULL ORDER BY d.delivery_id").fetchall()
 
 
 OFFER_KINDS = ("package-uncertain", "package-send-failed")
@@ -443,6 +457,10 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
                              "(a package you asked for follows its check)")
         if d["status"] == "delivered":
             return {"delivery_id": delivery_id, "status": "delivered", "already": True}
+        if (outcome == "delivered" and d["package_id"] is not None
+                and d["channel"] == "telegram" and d["posted_at"] is None):
+            # r3 #2 (Terra S1): a package never posted did not arrive — its ask stays open
+            raise db.Refusal(NEVER_POSTED)
         req = conn.execute("SELECT * FROM package_requests WHERE delivery_id=?",
                            (delivery_id,)).fetchone()
         # Evidence wins over the recovery's guess: a send recovery settled `uncertain`

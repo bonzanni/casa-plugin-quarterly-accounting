@@ -82,6 +82,11 @@ def claim(conn, job_id) -> int:
     import delivery, steps
     with db.custody_lock():                 # the stalled-send recovery removes staged bytes
         with db.tx(conn):
+            # r3 #1 (INV-S7-6): a posted send has left the plugin — before anything can
+            # requeue its ask, it is settled `uncertain`, whatever its lease (a late
+            # receipt still upgrades it; "send it again" is the only second file)
+            for d in delivery.posted_unrecorded(conn):
+                _settle_recovered(conn, d)
             m = passes._marker(conn)
             if m is not None and m["live"] and passes.protocol_of(conn, m["pass_id"]) != "job":
                 passes.close_delegation_pass_on_upgrade(conn)        # spec §8
@@ -128,11 +133,17 @@ def claim(conn, job_id) -> int:
                              " created_seq, created_at, state) VALUES ('check', 'cron', '[]',"
                              " ?, ?, 'queued')", (db.next_seq(conn), db.now()))
             for d in delivery.stalled_sends(conn, steps.LEASE_S):             # §6.1
-                delivery.recover_staged(conn, d)
-                conn.execute("UPDATE package_requests SET state='withdrawn', updated_at=?"
-                             " WHERE delivery_id=? AND state='staged'",
-                             (db.now(), d["delivery_id"]))
+                _settle_recovered(conn, d)
             return token
+
+
+def _settle_recovered(conn, d) -> None:
+    """A staged send nobody recorded: settled `uncertain` with its notice, its request
+    withdrawn (inside the claim's transaction, under the custody lock)."""
+    import delivery
+    delivery.recover_staged(conn, d)
+    conn.execute("UPDATE package_requests SET state='withdrawn', updated_at=? WHERE"
+                 " delivery_id=? AND state='staged'", (db.now(), d["delivery_id"]))
 
 
 def _close_left_behind(conn, token, left) -> None:

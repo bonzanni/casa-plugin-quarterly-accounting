@@ -240,3 +240,130 @@ class NotPostedNotice(StoreCase):
             "SELECT text FROM renders WHERE kind='alert'")).split())
         self.assert_plain(posted)
         self.assertIn("20 MB", posted)
+
+
+# --- Codex r3 (frozen 3f76ff3): Astra's reproductions, ported as stdlib pins -------------
+
+class R3PostedSendLeftThePlugin(StoreCase):
+    """r3 #1 (Astra S1, INV-S7-6): a posted send has left the plugin. A new run's claim
+    settles it `uncertain` before anything can requeue its ask; no import revokes it; one
+    ask gets exactly one file. Port of DuplicateAsk (the real-outbox capture is replaced
+    by counting package deposits: one deposit is one claimable file)."""
+
+    def test_one_ask_one_deposit_across_an_interrupted_turn(self):
+        import asks, tools, qa_server  # noqa: F401
+        asks.request_package(self.conn, "2026-Q3")
+        did, tok = self.drive_to_staged(A)
+        with FakeBroker() as b:
+            qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
+            # the turn dies before record_delivery; a new run starts within the lease
+            units = self.drive(B, deliver=True)
+        kinds = [u["unit"] for u in units]
+        self.assertNotIn("build", kinds)
+        self.assertNotIn("deliver", kinds)
+        self.assertEqual(sum(1 for d in b.deposits if d["slot"] == "package"), 1)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT status FROM deliveries WHERE delivery_id=?",
+                                           (did,)).fetchone()[0], "uncertain")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM package_requests"
+                                           ).fetchone()[0], 1)
+
+    def test_the_late_receipt_still_upgrades_it(self):
+        import asks, delivery, job, tools, qa_server  # noqa: F401
+        asks.request_package(self.conn, "2026-Q3")
+        did, tok = self.drive_to_staged(A)
+        with FakeBroker():
+            qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
+        job.claim(self.conn, B)
+        out = delivery.record_delivery(self.conn, delivery_id=did, outcome="delivered")
+        self.assertEqual(out["status"], "delivered")
+
+    def test_an_import_does_not_revoke_a_posted_send(self):
+        import asks, db, delivery, tools, qa_server  # noqa: F401
+        asks.request_package(self.conn, "2026-Q3")
+        did, tok = self.drive_to_staged(A)
+        with FakeBroker():
+            qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
+        with db.tx(self.conn):
+            sid = self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows,"
+                                    " max_row_id) VALUES (NULL, ?, 0, 0)",
+                                    (db.now(),)).lastrowid
+            self.assertEqual(delivery.revoke_superseded_first_sends(self.conn, sid), [])
+        self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
+                         "staged")
+
+
+class R3DeliveredNeedsAPost(StoreCase):
+    """r3 #2 (Terra S1): a package send never posted cannot be recorded delivered."""
+
+    def test_delivered_without_a_post_is_refused(self):
+        import asks, db, delivery
+        asks.request_package(self.conn, "2026-Q3")
+        did, tok = self.drive_to_staged(A)
+        with self.assertRaises(db.Refusal) as cm:
+            delivery.record_delivery(self.conn, delivery_id=did, outcome="delivered",
+                                     package_token=tok)
+        self.assertIn("never posted", str(cm.exception))
+        self.assertIn("uncertain", str(cm.exception))
+        self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
+                         "staged")
+        out = delivery.record_delivery(self.conn, delivery_id=did, outcome="uncertain",
+                                       package_token=tok)
+        self.assertEqual(out["status"], "uncertain")
+
+
+class R3LegacyMore(_Q3):
+    """r3 #4 (Astra S2): a page delivered by v0.9.0 code stored no `next` key; "more" on it
+    returns a fresh paged view of the same view and quarter, never "nothing more". Port of
+    LegacyMore (the v0.9.0 store is replaced by a delivered page with its `next` key
+    removed, which is what that code stored)."""
+    from tests.test_s7_views_buttons import PagedSheet as _P
+    big_sheet = _P.big_sheet
+    del _P
+
+    def test_more_on_a_legacy_page(self):
+        import db
+        self.big_sheet()
+        page1 = self.show(view="check", page=1)
+        self.assertIsNotNone(page1["next"])
+        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                             " render_id=?", (page1["render_id"],)).fetchone()[0])
+        del scope["next"]
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
+                              (db.canonical(scope), page1["render_id"]))
+        r, _ = self.propose("more")
+        self.assertEqual(r["instructions"],
+                         [{"show_view": {"view": "check", "quarter": "2026-Q3", "page": 1}}])
+
+    def test_an_explicit_null_next_still_says_nothing_more(self):
+        self.big_sheet(n=2)
+        page1 = self.show(view="check", page=1)
+        self.assertIsNone(page1["next"])
+        r, _ = self.propose("more")
+        self.assertEqual(r["instructions"], [])
+
+
+class R3Minors(_Q3):
+    """r3 #5: plain refusal words; typed "more" on an item page keeps the walk."""
+
+    def test_already_posted_and_refused_words_name_no_tool_and_no_code(self):
+        import posting
+        self.assertEqual(posting.ALREADY_POSTED,
+                         "That package was already sent once — nothing was posted again.")
+        self.assertNotIn("{code}", posting.PKG_REFUSED)
+        self.assertNotIn("record_delivery", posting.PKG_REFUSED)
+
+    def test_typed_more_on_an_item_page_keeps_the_walk(self):
+        import db
+        fx = self.sheet_fixture()
+        out = self.show(view="item", pid=fx["pid"], walk=fx["render_id"])
+        nxt = {"view": "item", "pid": fx["pid"], "page": 2, "after": [1]}
+        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                             " render_id=?", (out["render_id"],)).fetchone()[0])
+        scope["next"] = nxt
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
+                              (db.canonical(scope), out["render_id"]))
+        r, _ = self.propose("more")
+        self.assertEqual(r["instructions"], [{"show_view": dict(nxt, walk=fx["render_id"])}])
