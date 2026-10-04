@@ -84,38 +84,60 @@ class StoreCase(TempEnv):
             authorship.require_projection(self.conn, pid, render_id, expected_revision)
             return matches._operator_pair(self.conn, pid, doc_id, render_id)
 
-    def sheet_fixture(self, payee="Zapier", amount=9900, day="2026-09-17"):
-        """A bound store with one payment holding one guessed machine pairing, and a
-        delivered check view that shows it (S7 sheet tests, under a Q3 clock — Ruling F3).
-        Returns {render_id, pid, match_id, doc_id, revision, match_revision, payee}."""
+    EXTRA_PAYEES = ("Notion", "Figma", "Slack", "Linear")
+
+    def sheet_fixture(self, payee="Zapier", amount=9900, day="2026-09-17", guesses=1):
+        """A bound store with `guesses` payments each holding one guessed machine pairing
+        (the first to `payee`, the rest to EXTRA_PAYEES), and a delivered check view that
+        shows them (S7 sheet tests, under a Q3 clock — Ruling F3). Returns {render_id, pid,
+        match_id, doc_id, revision, match_revision, payee} for the first payment, and
+        `pids`: every guessed payment, in printed order."""
         import datetime as dt
         import db
         import matches
         import views
+        made = []
         with self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc)):
             self.bind()
-            token = self.pass_()
+            token = self._fixture_token = self.pass_()
             with db.tx(self.conn):
                 self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
                                   " bank_through) VALUES ('p', 'x', 0, 0, '2026-09-20')")
-            n = 1 + (self.conn.execute("SELECT max(row_id) FROM bank_rows").fetchone()[0] or 0)
-            self.row(n, counterparty=payee, amount_minor=amount, booking_date=day,
-                     value_date=day)
-            pid = self.lineage_for(n)
-            self.classify(pid, {"software"})
-            self.settle(pid)
-            doc_id = self.doc(counterparty=payee, issuer=payee, amount_minor=amount,
-                              document_date=day)
-            mid = matches.record_match(self.conn, pid=pid, doc_id=doc_id, author="auto",
-                                       expected_revision=self.rev(pid),
-                                       row_snapshot=StoreCase.snapshot(self, pid), token=token,
-                                       labels=("guessed",))["match_id"]
+            for i in range(guesses):
+                who = payee if i == 0 else self.EXTRA_PAYEES[i - 1]
+                cents = amount + 1000 * i
+                n = 1 + (self.conn.execute("SELECT max(row_id) FROM bank_rows").fetchone()[0]
+                         or 0)
+                self.row(n, counterparty=who, amount_minor=cents, booking_date=day,
+                         value_date=day)
+                pid = self.lineage_for(n)
+                self.classify(pid, {"software"})
+                self.settle(pid)
+                doc_id = self.doc(counterparty=who, issuer=who, amount_minor=cents,
+                                  document_date=day)
+                mid = matches.record_match(self.conn, pid=pid, doc_id=doc_id, author="auto",
+                                           expected_revision=self.rev(pid),
+                                           row_snapshot=StoreCase.snapshot(self, pid),
+                                           token=token, labels=("guessed",))["match_id"]
+                made.append((who, pid, mid, doc_id))
             r = views.build_review(self.conn, view="check", quarter="2026-Q3")
             views.mark_rendering_delivered(self.conn, r["render_id"])
-        assert pid in views.render_items(self.conn, r["render_id"]), r["text"]
+        listed = views.render_items(self.conn, r["render_id"])
+        assert all(m[1] in listed for m in made), r["text"]
+        who, pid, mid, doc_id = made[0]
         return {"render_id": r["render_id"], "pid": pid, "match_id": mid, "doc_id": doc_id,
                 "revision": self.rev(pid), "match_revision": self.rev(match_id=mid),
-                "payee": payee}
+                "payee": payee,
+                "pids": [m[1] for m in sorted(made, key=lambda m: r["text"].index(m[0]))]}
+
+    def rejudge(self, pid):
+        """A machine relabel of `pid`'s current pairing under the fixture's pass token, as
+        the job re-judging a payment would: it moves that match's revision."""
+        import matches
+        mid = self.conn.execute("SELECT match_id FROM match_state WHERE pid=? AND state IN"
+                                " ('matched','proposed')", (pid,)).fetchone()[0]
+        return matches.relabel_match(self.conn, match_id=mid, labels=("no-ref",),
+                                     token=self._fixture_token)
 
     LEDGER = "a" * 32             # the bank-feed ledger instance id the fixtures bind to
 

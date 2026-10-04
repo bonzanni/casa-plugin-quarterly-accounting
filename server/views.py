@@ -1081,6 +1081,25 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
             if page in (None, 1):
                 scope["residue_silent"] = parts["silent"]
     printed = _bindable(chosen, text)
+    # S7 §7.2: what the page's buttons act on, recorded with the rendering so a stored
+    # rendering rebuilds them. Its own map, defined on every branch: `by_pid` below exists
+    # only when names were composed, and a setup-stop page composes none (`items` is []).
+    # `printed` keeps the printed order (_bindable builds it from `chosen` in order).
+    described = {d["pid"]: d for d in items}
+    scope["proposed"] = [p for p in printed if p in described
+                         and _needs_check(described[p])
+                         and described[p]["current"] is not None
+                         and described[p]["current"]["match_id"] in printed[p]]
+    if view == "item" and items and items[0]["pid"] in printed:
+        # an item that is not bound (its text was cut, or ambiguous) records no state: a
+        # verdict on it would refuse, so its page offers none (buttons_for)
+        d0 = items[0]
+        scope["item_state"] = ("exempt" if d0["status"] == "exempt"
+                               else "proposed" if d0["pid"] in scope["proposed"]
+                               else "paired" if d0["current"] is not None
+                               and d0["current"]["match_id"] in printed[d0["pid"]]
+                               else "none")
+    scope["next"] = nxt
     if _NAMES is not None:
         # the generated refs this rendering printed on payments it binds: a reply's
         # "ref <hex>" is honoured only against these (round 6)
@@ -1111,6 +1130,62 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
                      " match_revisions_json) VALUES (?,?,?,?)",
                      (rid, p, prev, db.canonical(mrevs)))
     return {"render_id": rid, "text": text, "printed": len(printed), "next": nxt}
+
+
+SHEET_VIEWS = ("check", "missing")
+
+
+def fits_proposal(text: str) -> bool:
+    """A stored rendering can be posted with buttons (S7 §7.1): its deposited body fits the
+    proposal budget, and Casa's proposal text bound."""
+    body = deposit_safe(text)
+    return utf16_len(body) <= BODY_LIMIT and len(body) <= 4000
+
+
+def buttons_for(conn, r, walk=None) -> list:
+    """S7 §7.2: the stored calls of a posted rendering `r` (a renders row), in order, at
+    most six, at least one, as (label, tool, args, key_spec). A writing button carries
+    key_spec=(action, pid); the caller mints and stores its key."""
+    scope = json.loads(r["scope_json"])
+    rid, kind = r["render_id"], r["kind"]
+    proposed, nxt = scope.get("proposed") or [], scope.get("next")
+    more = [("More", "show_view", dict(nxt), None)] if nxt else []
+    if kind in SHEET_VIEWS and proposed:
+        out = [("All good", "verdict", {"render_id": rid, "action": "all-good"},
+                ("all-good", None)),
+               ("One by one", "show_view", {"view": "item", "pid": proposed[0], "walk": rid},
+                None)] + more
+    elif kind == "item":
+        pid = scope.get("pid")
+        verdicts = {"proposed": ("right", "wrong", "no-invoice"),
+                    "paired": ("wrong", "no-invoice"),
+                    "none": ("no-invoice",)}.get(scope.get("item_state"), ())
+        words = {"right": "Right", "wrong": "Wrong", "no-invoice": "No invoice needed"}
+        out = [(words[a], "verdict", {"render_id": rid, "action": a, "pid": pid}, (a, pid))
+               for a in verdicts]
+        nxt_pid = _walk_next(conn, walk, pid)
+        if nxt_pid is not None:
+            out.append(("Next", "show_view", {"view": "item", "pid": nxt_pid, "walk": walk},
+                        None))
+        out += more
+    else:
+        out = more or [("What's missing", "show_view", {"view": "missing"}, None),
+                       ("Anything to check?", "show_view", {"view": "check"}, None)]
+    return (out or [("What's missing", "show_view", {"view": "missing"}, None)])[:6]
+
+
+def _walk_next(conn, walk, pid):
+    """The proposed pid after `pid` on the sheet rendering `walk` (One by one), or None."""
+    if not walk:
+        return None
+    w = conn.execute("SELECT kind, scope_json FROM renders WHERE render_id=?",
+                     (walk,)).fetchone()
+    if w is None or w["kind"] not in SHEET_VIEWS:
+        return None
+    proposed = json.loads(w["scope_json"]).get("proposed") or []
+    if pid in proposed and proposed.index(pid) + 1 < len(proposed):
+        return proposed[proposed.index(pid) + 1]
+    return None
 
 
 def _norm(s: str) -> str:

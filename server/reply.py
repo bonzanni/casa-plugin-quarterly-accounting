@@ -317,6 +317,18 @@ def _delivered_package_for(conn, quarter):
                         " ORDER BY d.settled_at DESC LIMIT 1", (quarter,)).fetchone()
 
 
+def package_lines(conn, quarters) -> list:
+    """A receipt's closing lines: for each touched quarter whose package was already sent,
+    say it no longer matches (a reply's receipt and a verdict's, S7 §7.3)."""
+    out = []
+    for q in sorted(quarters):
+        pk = _delivered_package_for(conn, q)
+        if pk is not None:
+            out.append(f"The package sent on {dates.short_day(pk['settled_at'])} no "
+                       "longer matches — say \"rebuild it\" for a fresh one.")
+    return out
+
+
 def _split(line: str) -> list:
     """A line over the limit (a "Which one?" listing a hundred charges) as
     pieces that each fit a message: broken between words, a word longer than a
@@ -388,11 +400,7 @@ class _Run:
                     qs = [_quarter(q)] if q else (sorted(self.touched_quarters)
                                                   or [_quarter(None)])
                     self.instructions.extend(f"rebuild {x}" for x in qs)
-        for q in sorted(self.touched_quarters):
-            pk = _delivered_package_for(self.conn, q)
-            if pk is not None:
-                self.lines.append(f"The package sent on {dates.short_day(pk['settled_at'])} no "
-                                  "longer matches — say \"rebuild it\" for a fresh one.")
+        self.lines += package_lines(self.conn, self.touched_quarters)
         pages = _pages(self.lines)
         return {"receipt": pages[0] if pages else "", "receipt_pages": pages,
                 "applied": self.applied, "asks": self.asks,

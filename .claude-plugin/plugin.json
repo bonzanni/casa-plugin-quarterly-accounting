@@ -102,6 +102,15 @@
         "set_expectation": {
           "result": "safe"
         },
+        "show_view": {
+          "result": "capability",
+          "provides": [
+            "view"
+          ],
+          "delivers": {
+            "view": "operator_proposal"
+          }
+        },
         "stage_for_delivery": {
           "result": "safe"
         },
@@ -109,6 +118,9 @@
           "result": "safe"
         },
         "upsert_counterparty": {
+          "result": "safe"
+        },
+        "verdict": {
           "result": "safe"
         }
       }
@@ -141,9 +153,11 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__request_work",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__reset_store",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__set_expectation",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__show_view",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__stage_for_delivery",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__update_document_metadata",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__upsert_counterparty"
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__upsert_counterparty",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__verdict"
     ],
     "eraseTool": "reset_store",
     "protectedTools": [

@@ -606,6 +606,37 @@ def t_review(args):
         pid=_int(args, "pid"), page=_int(args, "page"), after=after))
 
 
+@register("show_view",
+          "Post a view to the operator, with its buttons (Casa posts it, labelled; never "
+          "retell it). view: status, missing, check, rest, older, all, item (with pid), "
+          "quarter; page/after from a previous `next`. render_id: post that stored "
+          "rendering again (the job's `view` unit). After Casa's receipt "
+          "(casa_delivery.status delivered), call mark_rendering_delivered(render_id).",
+          obj({"view": S, "quarter": Q, "pid": I, "page": I, "walk": S, "render_id": S,
+               "after": {"type": "array", "description": "the cursor from a `next`, unchanged"}}))
+@capability("view")
+def t_show_view(args):
+    import posting
+    after = args.get("after")
+    if after is not None and not isinstance(after, list):
+        raise db.Refusal("after is the cursor a previous page's `next` returned")
+    return posting.show_view(conn(), view=args.get("view"), quarter=_quarter(args),
+                             pid=_int(args, "pid"), page=_int(args, "page"), after=after,
+                             walk=args.get("walk"), render_id=args.get("render_id"))
+
+
+@register("verdict",
+          "A button's call: only a tap on the operator's own button makes it. Never call it "
+          "yourself — it refuses without the button's key.",
+          obj({"render_id": S, "action": S, "pid": I, "key": S},
+              ("render_id", "action", "key")))
+@keyed
+def t_verdict(args):
+    import taps
+    return taps.verdict(conn(), args.get("render_id"), args.get("action"),
+                        _int(args, "pid"), args.get("key"))
+
+
 @register("mark_rendering_delivered",
           "Call right after a rendering (or a `speak`, or a job_report text) was sent successfully. Only this "
           "makes it count as shown.",

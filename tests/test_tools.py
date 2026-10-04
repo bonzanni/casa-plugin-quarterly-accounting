@@ -30,6 +30,8 @@ EXPECTED = {
     "record_filing",
     # S7 §8.1: confirm_match, reject_match, set_exemption, bind_account, set_watermark,
     # set_package_name, stop_chasing and apply_reply left the surface (a tap's grant only)
+    # S7 §7 (Task 5): a view posted with its buttons, and the verdict a button carries
+    "show_view", "verdict",
 }
 
 
@@ -87,14 +89,14 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 30)             # S2: 38; S7 Task 4: - 8 (§8.1)
+        self.assertEqual(len(EXPECTED), 32)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 30)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 32)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
