@@ -12,6 +12,7 @@ from tests import _base  # noqa: F401  (puts server/ on sys.path)
 from tests import sim
 from tests.test_package_requests import Requests
 import db  # noqa: E402
+import reply  # noqa: E402
 import work  # noqa: E402
 
 
@@ -348,7 +349,6 @@ class TestCodeRoundC1(Rounds):
 
 
 class TestSendTheLastBuild(Rounds):
-    @unittest.skip("S7: re-enabled in Task 6")
     def test_the_previous_build_is_sent_unchanged_and_never_revoked(self):
         self.seed(1, documents=1)
         p, pkg, d = self.staged()
@@ -356,7 +356,8 @@ class TestSendTheLastBuild(Rounds):
         # be refused once the bank moved on, and a staged first send would be revoked
         self.call("record_delivery", delivery_id=d["delivery_id"], outcome="failed",
                   package_token=p)
-        out = self.call("apply_reply", text="send me the last package you built for Q3")
+        # S7: the tool left the surface; Task 6 ports this line to propose_reading
+        out = reply.apply_reply(self.conn, "send me the last package you built for Q3")
         self.assertEqual(out["instructions"], ["send last 2026-Q3"])
         again = self.call("stage_for_delivery", channel="telegram", last_built=True,
                           quarter="2026-Q3")

@@ -9,6 +9,7 @@ import unittest
 
 from tests._base import ROOT, StoreCase, TempEnv
 import db  # noqa: E402
+import reply  # noqa: E402
 import qa_server  # noqa: E402
 import views  # noqa: E402
 
@@ -244,12 +245,13 @@ class TestResend(ToolCase):
         _json("mark_rendering_delivered", render_id=r["render_id"])
         return r["text"]
 
-    @unittest.skip("S7: re-enabled in Task 6")
     def test_send_it_again_stages_the_offered_package(self):
         self.send(self.a["package_id"], "uncertain")
         self.send(self.b["package_id"], "delivered")
         self.assertIn(views.field(self.a["filename"]), self.show())
-        self.assertIn("resend", _json("apply_reply", text="send it again")["instructions"])
+        # S7: the tool left the surface; Task 6 ports this line to propose_reading
+        self.assertIn("resend",
+                      reply.apply_reply(self.conn, "send it again")["instructions"])
         staged = _json("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(staged["filename"], self.a["filename"])
         self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),

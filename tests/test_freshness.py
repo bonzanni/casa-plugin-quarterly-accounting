@@ -23,6 +23,7 @@ import zipfile
 from tests import test_e2e
 from tests import _procs, sim, test_sweep_real
 import db  # noqa: E402
+import reply  # noqa: E402
 import lineage  # noqa: E402
 import matches  # noqa: E402
 import package  # noqa: E402
@@ -523,7 +524,6 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
                       package_token=pkg2["package_token"])
         self.assertEqual(self.outbox_files(), [os.path.basename(staged["path"])])
 
-    @unittest.skip("S7: re-enabled in Task 6")
     def test_a_resend_of_a_package_already_sent_still_works_after_a_newer_import(self):
         def send_uncertain(pkg):
             d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
@@ -536,7 +536,9 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
         r = call("build_review", view="status", quarter="2026-Q3")
         self.assertIn(views.field(pkg["filename"]), r["text"])                     # offered again
         call("mark_rendering_delivered", render_id=r["render_id"])
-        self.assertIn("resend", call("apply_reply", text="send it again")["instructions"])
+        # S7: the tool left the surface; Task 6 ports this line to propose_reading
+        self.assertIn("resend",
+                      reply.apply_reply(self.conn, "send it again")["instructions"])
         staged = call("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(staged["filename"], pkg["filename"])
         self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),
@@ -588,7 +590,6 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM delivered_rows").fetchone()[0],
                          0)
 
-    @unittest.skip("S7: re-enabled in Task 6")
     def test_a_resend_of_a_file_already_sent_is_not_revoked(self):
         pkg = self.built()
         d = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
@@ -599,7 +600,9 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
             os.unlink(self.outbox / f)
         r = call("build_review", view="status", quarter="2026-Q3")
         call("mark_rendering_delivered", render_id=r["render_id"])
-        self.assertIn("resend", call("apply_reply", text="send it again")["instructions"])
+        # S7: the tool left the surface; Task 6 ports this line to propose_reading
+        self.assertIn("resend",
+                      reply.apply_reply(self.conn, "send it again")["instructions"])
         again = call("stage_for_delivery", channel="telegram", resend=True)
         token = self.begin("cron")                                  # import N+1
         self.end(token, "interrupted")
