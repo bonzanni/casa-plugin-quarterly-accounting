@@ -205,6 +205,34 @@ class Verdict(_Q3):
         nxt = next(x for x in item["buttons"] if x["label"] == "Next")["call"]["arguments"]
         self.assertEqual(nxt["pid"], fx["pids"][1])
 
+    def test_after_right_the_item_is_paired_not_proposed(self):
+        """T5b / spec 7.3: a verdict acts on PROPOSED pairings; an operator-confirmed pairing
+        is not one, though its match label row stays "guessed"."""
+        import posting
+        fx = self.sheet_fixture(guesses=1)
+
+        def item():
+            with FakeBroker() as b:
+                out = posting.show_view(self.conn, view="item", pid=fx["pid"])
+            scope = json.loads(self.conn.execute(
+                "SELECT scope_json FROM renders WHERE render_id=?",
+                (out["render_id"],)).fetchone()[0])
+            return b.proposal(), scope
+
+        prop, scope = item()
+        self.assertEqual(scope["item_state"], "proposed")
+        self.assertIn("among several that fit", prop["text"])
+        self.tap(prop, "Right")
+        prop, scope = item()
+        self.assertEqual(scope["item_state"], "paired")
+        self.assertEqual(scope["proposed"], [])
+        self.assertEqual([x["label"] for x in prop["buttons"]], ["Wrong", "No invoice needed"])
+        self.assertNotIn("among several that fit", prop["text"])
+        self.assertNotIn("also fits", prop["text"])
+        with FakeBroker() as b:
+            posting.show_view(self.conn, view="check")
+        self.assertNotIn("All good", [x["label"] for x in b.proposal()["buttons"]])
+
     def test_a_verdict_on_a_pid_the_rendering_did_not_list_refuses(self):
         import keys, db
         fx = self.sheet_fixture()

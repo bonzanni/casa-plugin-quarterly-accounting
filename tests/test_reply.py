@@ -532,6 +532,19 @@ class TestPreflightRulings(Base):
             self.assertIn(said, out["receipt"])
             self.assertIn("not applied", out["receipt"])
 
+    def test_a_typed_right_on_an_already_confirmed_item_is_a_no_op(self):
+        """T5b: a confirmed pairing is no proposal (its label row stays "guessed"), so a
+        second "right" says it was already fine and writes nothing."""
+        z = self.item("Zapier", 9900, "2026-09-17")
+        self.deliver()
+        apply_now(self.conn, "the Zapier one is good")
+        self.assertEqual(self.author(z)[0], "operator")
+        n = self.conn.execute("SELECT count(*) FROM log WHERE pid=?", (z,)).fetchone()[0]
+        out = apply_now(self.conn, "the Zapier one is good")
+        self.assertIn("already fine", out["receipt"])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE pid=?",
+                                           (z,)).fetchone()[0], n)
+
     def test_a_question_beside_a_correction_changes_only_the_correction(self):
         z = self.item("Zapier", 9900, "2026-09-17")
         v = self.item("Vercel", 1210, "2026-09-18")

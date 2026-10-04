@@ -330,11 +330,11 @@ def evidence(d: dict, cands=None) -> list:
         elif "kind-changed" in d["reasons"]:
             out.append(f"Its category changed since it was paired — still {name}?")
         labels = cur["labels"]
-        if "guessed" not in labels:
+        if "guessed" not in labels or cur["author"] == "operator":
             # a line that asks for a verdict names what it is asking about (round p7:
             # a no-ref line never named its invoice, yet "all good" confirmed it)
             out.insert(0, f"Paired with {ident(doc)}.")
-        if "guessed" in labels:
+        if "guessed" in labels and cur["author"] != "operator":
             rs = cur["runners_up"]
             others = "; ".join(field(x) for x in rs[:RUNNERS_MAX])
             if len(rs) > RUNNERS_MAX:
@@ -432,7 +432,10 @@ def _needs_check(d):
         return False
     if d["candidates"] or d["status"] == "proposed":
         return True
-    return d["status"] == "matched" and d["current"] is not None and d["current"]["labels"] != ["clean"]
+    # an operator-confirmed pairing is not a proposal (S7 §7.3), whatever its label row says:
+    # a confirmation appends an operator pair but leaves the match's "guessed" label
+    return (d["status"] == "matched" and d["current"] is not None
+            and d["current"]["author"] != "operator" and d["current"]["labels"] != ["clean"])
 
 
 def _missing_detail(d) -> list:
