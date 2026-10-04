@@ -311,7 +311,7 @@ def _choose(conn, token) -> dict:
             _take(conn, token, p)
             p = live_job_pass(conn)
         if p is None:
-            u = _sends(conn, token, job_id)           # Task 11: build / deliver
+            u = _sends(conn, token, job_id)           # §6.1: build / deliver
             if u is None:
                 u = _posts(conn, job_id)
             if u is not None:
@@ -399,8 +399,55 @@ LEFT_WAITING = "Some asks are waiting: ask again to start them."
 
 
 def _sends(conn, token, job_id):
-    """§6.1's build/deliver units — Task 11."""
+    """§6.1: a package whose check is done is built, then posted — by this claim, which
+    holds its request (the token is the claim's gen; passes.check_package_token refuses it
+    once a newer claim exists). A request whose check no longer describes the bank goes
+    back to its check here (D2). A `staged` request is never handed out again (INV-S7-6):
+    its send is recorded in the same turn, or recovered `uncertain` at a later claim.
+    Called with token=None by job.status, through done()'s savepoint, which is rolled back:
+    what it writes then is seen and never kept."""
+    import lineage
+    latest = lineage.latest_import(conn)
+    for req in conn.execute("SELECT * FROM package_requests WHERE state IN ('snapshot-done',"
+                            " 'built') ORDER BY request_id").fetchall():
+        if req["checked_snapshot"] is None or req["checked_snapshot"] != latest:
+            passes.requeue(conn, req["request_id"])
+            continue
+        if req["state"] == "built" and _oversize(conn, req["package_id"]):
+            # plan round 2, Astra S2: Telegram refuses it forever (delivery._stage) — the
+            # request ends with its notice instead of a deliver unit handed out again
+            _close_oversize(conn, req)
+            continue
+        conn.execute("UPDATE package_requests SET token=?, lease_at=?, updated_at=? WHERE"
+                     " request_id=?", (token, db.now(), db.now(), req["request_id"]))
+        if req["state"] == "snapshot-done":
+            return {"unit": "build", "quarter": req["quarter"], "package_token": token,
+                    "request_id": req["request_id"]}
+        return {"unit": "deliver", "package_id": req["package_id"], "package_token": token,
+                "request_id": req["request_id"]}
     return None
+
+
+def _oversize(conn, package_id) -> bool:
+    import package
+    pk = conn.execute("SELECT oversize, size FROM packages WHERE package_id=?",
+                      (package_id,)).fetchone()
+    return pk is not None and (bool(pk["oversize"]) or pk["size"] > package.MAX_ZIP_BYTES)
+
+
+def _close_oversize(conn, req) -> None:
+    """A built package over Telegram's 20 MB cannot be posted (delivery._stage refuses it,
+    every time): the request ends `stopped` with its package-stopped notice, which the next
+    `post` carries. The zip is kept; notes.md names the largest files (its caption says so)."""
+    import alerts
+    pk = conn.execute("SELECT size FROM packages WHERE package_id=?",
+                      (req["package_id"],)).fetchone()
+    reason = (f"it is {pk['size'] / 1e6:.1f} MB, over Telegram's 20 MB limit — it is kept "
+              "here, and notes.md names the largest files")
+    conn.execute("UPDATE package_requests SET state='stopped', reason=?, updated_at=? WHERE"
+                 " request_id=?", (reason, db.now(), req["request_id"]))
+    alerts.raise_package(conn, "package-stopped", f"request:{req['request_id']}:oversize",
+                         quarter=req["quarter"], reason=reason)
 
 
 def offers(conn, render_id, job_id) -> int:

@@ -75,7 +75,6 @@ class TestBothSkills(TempEnv):
     def test_the_job_skill_fits_its_budget(self):
         self.assertLessEqual(len(JOB), 20000, len(JOB))
 
-    @unittest.expectedFailure  # S7-merge: needs post_package (Task 11)
     def test_every_backticked_tool_exists(self):
         import tools  # noqa: F401
         ours = set(qa_server.TOOLS)
@@ -102,7 +101,6 @@ class TestBothSkills(TempEnv):
                 for kw in re.findall(r"(?:^|[(,\s])([a-z_]+)=", args):
                     self.assertIn(kw, props, f"{name}({kw}=)")
 
-    @unittest.expectedFailure  # S7-merge: needs post_package (Task 11)
     def test_the_skills_call_only_the_s7_surface(self):
         """The S7 tools both skills call are on the surface (§15), so the backticked-tool
         pin above is not vacuous for them."""
@@ -459,7 +457,7 @@ class TestJob(TempEnv):
         self.assertIn("`propose_account()` instead (nothing to mark)", view)
         build = self.units("build", "### `deliver`")
         self.assertIn("`build_quarterly_package(quarter=<the unit's quarter>, "
-                      "package_token=<its token>)`", build)
+                      "package_token=<its token>, request_id=<its request_id>)`", build)
         deliver = self.units("deliver", "## Never")
         order = ["`stage_for_delivery(package_id=…, package_token=…)`",
                  "`post_package(delivery_id=<the staged delivery_id>, package_token=…)`",

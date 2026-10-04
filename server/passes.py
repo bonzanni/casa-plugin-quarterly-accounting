@@ -364,7 +364,7 @@ def check_package_token(conn, request_id, token):
     req = open_request(conn, request_id)
     if token is None:
         raise db.Refusal("this package belongs to a package request: pass the package_token "
-                         "job_report's `continue` gave you")
+                         "the job's build or deliver unit gave you")
     if conn.execute("SELECT 1 FROM claims WHERE gen=?", (int(token),)).fetchone() is not None \
             and int(token) != conn.execute("SELECT max(gen) FROM claims").fetchone()[0]:
         raise db.Refusal("this job turn is no longer the current one (a newer turn claimed "
@@ -378,7 +378,7 @@ def check_package_token(conn, request_id, token):
         import dates
         raise db.Refusal(f"the {dates.quarter_label(req['quarter'])} package was already "
                          f"{CLOSED_WORD.get(req['state'], 'dealt with')} — nothing changed. To "
-                         "have it again, or by email, ask for the package again.")
+                         "have it again, ask for the package again.")
     if conn.in_transaction:
         conn.execute("UPDATE package_requests SET lease_at=? WHERE request_id=?",
                      (db.now(), request_id))

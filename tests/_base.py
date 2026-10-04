@@ -83,12 +83,15 @@ class StoreCase(TempEnv):
         return self._job_driver.run_job(job_id)
 
     def drive(self, job_id, deliver=True, bank_tools=True, stop_before=None,
-              spend_before_posts=None) -> list:
+              spend_before_posts=None, stop_after=None, package_receipt=True) -> list:
         """Job run `job_id` through the S2 simulator (S7 §5): `deliver` — each posted
         rendering's receipt arrives and is marked; `bank_tools=False` — the probes find no
         bank-feed tools; `stop_before` — return when a unit of that kind is handed out (not
         done); `spend_before_posts=n` — before the first post/view hand-out, the batch's
-        spend is raised so that unit is swapped for end-batch once. The units handed out."""
+        spend is raised so that unit is swapped for end-batch once; `stop_after="stage"` —
+        a deliver unit stages its send and the turn ends there (§6.1);
+        `package_receipt=False` — a posted package's receipt is withheld (recorded
+        uncertain). The units handed out."""
         if getattr(self, "_job_driver", None) is None:
             from tests.sim_job import JobDriver
             if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
@@ -97,11 +100,45 @@ class StoreCase(TempEnv):
         drv = self._job_driver
         drv.deliver, drv._no_tools, drv.spend_before_posts = (deliver, not bank_tools,
                                                               spend_before_posts)
+        drv.stop_after, drv.package_receipt = stop_after, package_receipt
         if stop_before is not None:
             n = len(drv.units)
             drv.run_until(job_id, stop_before)
             return drv.units[n:]
         return drv.run_job(job_id)
+
+    def drive_to_staged(self, job_id) -> tuple:
+        """S7 §6.1: a package ask's job run up to its deliver unit's staging (the turn ends
+        there). Returns (delivery_id, package_token)."""
+        self.drive(job_id, deliver=True, stop_after="stage")
+        return self._job_driver.staged
+
+    def delivered_package(self, first_outcome="delivered", quarter="2026-Q3", job_id="aaaaaaaa-1"):
+        """A package asked for, built and posted by the job, its first send recorded
+        `first_outcome` (`uncertain`: the receipt was withheld; its notice is posted by the
+        job's next `post` and delivered). Returns the package_id."""
+        import asks
+        from tests.fakebroker import FakeBroker
+        asks.request_package(self.conn, quarter)
+        with FakeBroker():
+            self.drive(job_id, deliver=True, package_receipt=first_outcome == "delivered")
+        return self.conn.execute("SELECT package_id FROM packages ORDER BY package_id DESC"
+                                 " LIMIT 1").fetchone()[0]
+
+    def import_again(self):
+        """A newer import lands (a bare snapshots row): every check done before it no
+        longer describes the bank (issue #15, D2)."""
+        import db
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
+                              " VALUES (NULL, ?, 0, 0)", (db.now(),))
+
+    def patch(self, obj, name, value):
+        """`obj.name = value` for this test, restored at cleanup."""
+        from unittest import mock
+        p = mock.patch.object(obj, name, value)
+        p.start()
+        self.addCleanup(p.stop)
 
     def insert_render(self, kind, text) -> str:
         """A stored rendering of `kind` holding `text`, undelivered. Its render id."""

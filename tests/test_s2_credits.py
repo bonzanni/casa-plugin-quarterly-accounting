@@ -11,7 +11,6 @@ after three batches (INV-BGJOB-002), or its run completes (MAX_PASSES_PER_JOB).
 The reproductions are the design and diff review rounds' (rounds-2026-10-02-s2-diff),
 each named on its test."""
 import datetime
-import unittest
 
 from tests._base import StoreCase
 from tests.sim_job import JobDriver
@@ -423,8 +422,9 @@ class ManyPasses(StoreCase):
             if not self.conn.execute("SELECT 1 FROM package_requests WHERE state='queued'"
                                      ).fetchone():
                 break
+        # S7 §6.1: each is built and posted by the run that checked it
         self.assertEqual(self.conn.execute("SELECT count(*) FROM package_requests WHERE"
-                                           " state='snapshot-done'").fetchone()[0], 16)
+                                           " state='delivered'").fetchone()[0], 16)
         self.assertEqual(len(runs), 4)                  # four passes per run
 
 
@@ -571,20 +571,16 @@ class SweepLiveness(Tools):
 class Credits(Tools):
     """What earns, and what never does."""
 
-    @unittest.skip("S7: re-enabled in Task 11")
     def test_an_import_alone_earns_nothing_whatever_it_requeues(self):
-        """Diff r3 (R8): an import that revokes a staged first send puts its package ask
-        back in the queue; it earns nothing and loses nothing — there is no baseline."""
+        """Diff r3 (R8), on S7's units (§6.1): an import that revokes a staged first send
+        puts its package ask back in the queue; it earns nothing and loses nothing — there
+        is no baseline."""
         self.call("request_package", quarter="2026-Q3")
-        self.until(self.call("job_next", job_id=A), "complete")
-        tok = self.call("job_report", job_id=A, status="ok")["continue"]["package_token"]
-        pkg = self.call("build_quarterly_package", quarter="2026-Q3", package_token=tok)
-        self.call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
-                  package_token=tok)                    # staged, never sent
+        u = self.until(self.call("job_next", job_id=A), "deliver")
+        self.call("stage_for_delivery", package_id=u["package_id"],
+                  package_token=u["package_token"])     # staged, never sent
         self.call("request_work", kind="check", trigger="cron")
-        u = self.call("job_next", job_id=A)
-        u = self.do(u)                                  # probes
-        self.assertEqual(u["unit"], "snapshot")
+        u = self.until(self.call("job_next", job_id=A), "snapshot")
         before = credits(self)
         queued = self.conn.execute("SELECT count(*) FROM package_requests WHERE"
                                    " state='queued'").fetchone()[0]
@@ -615,8 +611,12 @@ class Credits(Tools):
         self.call("request_package", quarter="2026-Q3")
         self.until(self.call("job_next", job_id=A), "complete")
         rid = self.conn.execute("SELECT request_id, state FROM package_requests").fetchone()
-        self.assertEqual(rid["state"], "snapshot-done")
-        self.assertEqual(credits(self, f"req:pkg:{rid['request_id']}"), 1)
+        # S7 §6.1: the job builds and posts it too, each earning its own credit
+        self.assertEqual(rid["state"], "delivered")
+        n = rid["request_id"]
+        self.assertEqual({r[0] for r in self.conn.execute(
+            "SELECT key FROM credits WHERE key LIKE 'req:pkg:%'")},
+            {f"req:pkg:{n}", f"req:pkg:{n}:built", f"req:pkg:{n}:delivered"})
 
 
 class BatchIdentity(StoreCase):

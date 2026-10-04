@@ -18,8 +18,15 @@ everything; the driver never chooses a unit, an outcome or a token of its own.
   post        S7 §5: post_results(render_ids); on the receipt (`deliver`), each marked
   view        show_view(render_id) (or propose_account for accounts); on the receipt
               (`deliver`), marked
+  build       S7 §6.1: build_quarterly_package(quarter, package_token, request_id)
+  deliver     stage_for_delivery(package_id, package_token), post_package (to the test's
+              broker, else a tests.fakebroker of its own), then record_delivery — `delivered` on the
+              receipt (`package_receipt`), else `uncertain`. `stop_after="stage"`: the
+              turn ends right after staging (nothing posted, nothing recorded)
 """
 from __future__ import annotations
+
+import os
 
 import binding
 import job
@@ -32,6 +39,7 @@ import work
 from tests import bankfeed, sim
 
 CUT = object()          # the unit's turn ended part-way (cut_after_import)
+STOP = object()         # the driver stops here (stop_after)
 MAX_UNITS = 600         # a cursor that never finishes is a failure, never a hang
 
 
@@ -84,6 +92,9 @@ class JobDriver:
         self.units = []
         self.deliver = True             # S7 §5: Casa's receipt arrives for every post
         self.spend_before_posts = None
+        self.package_receipt = True     # Casa's receipt arrives for a posted package
+        self.stop_after = None
+        self.staged = None              # (delivery_id, package_token) of the last staging
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
 
     # --- the bank, as the operator's bank has it ------------------------------------
@@ -159,6 +170,8 @@ class JobDriver:
                 self.token = job.claim(self.conn, job_id)
                 continue
             r = self.do(u, self.token)
+            if r is STOP:
+                return units
             if r is CUT:
                 self.token = job.claim(self.conn, job_id)
                 continue
@@ -205,6 +218,30 @@ class JobDriver:
         import views
         if self.deliver and not u.get("accounts"):
             views.mark_rendering_delivered(self.conn, u["render_id"])
+        return None
+
+    def _build(self, u, token):
+        import package
+        package.build_quarterly_package(self.conn, u["quarter"], u["package_token"],
+                                        request_id=u["request_id"])
+        return None
+
+    def _deliver(self, u, token):
+        import delivery, posting
+        st = delivery.stage_for_delivery(self.conn, package_id=u["package_id"],
+                                         package_token=u["package_token"])
+        self.staged = (st["delivery_id"], u["package_token"])
+        if self.stop_after == "stage":
+            return STOP
+        if os.environ.get("CASA_BROKER_SOCKET"):        # the test's own broker listens
+            posting.post_package(self.conn, st["delivery_id"], u["package_token"])
+        else:
+            from tests.fakebroker import FakeBroker
+            with FakeBroker():
+                posting.post_package(self.conn, st["delivery_id"], u["package_token"])
+        delivery.record_delivery(self.conn, delivery_id=st["delivery_id"],
+                                 outcome="delivered" if self.package_receipt else "uncertain",
+                                 package_token=u["package_token"])
         return None
 
     def _probes(self, u, token):

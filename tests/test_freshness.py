@@ -499,17 +499,15 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
     def test_the_first_send_of_a_superseded_package_is_refused(self):
         pkg = self.built_then_superseded()
         handoff_before = self.handoff_files()
-        # a request is staged by the channel it was asked for (its email variant is a
-        # request of its own, and meets the same snapshot check)
         out = _raw("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
                    package_token=pkg["package_token"])
         # issue #15 (design D2): its request goes back to its check; the old build is
-        # never sent as a first send again, by any channel (D3)
+        # never sent as a first send again (D3)
         self.assertEqual(out, "refused: the bank was re-read since the check — the check "
-                              "runs again, and the package follows it; call job_report")
+                              "runs again, and the package follows it; call job_next")
         self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
                          "queued")
-        self.assertTrue(_raw("stage_for_delivery", channel="email",
+        self.assertTrue(_raw("stage_for_delivery", channel="telegram",
                              package_id=pkg["package_id"],
                              package_token=pkg["package_token"]).startswith(
                                  "refused: this package is no longer the one its request"))
@@ -556,32 +554,27 @@ class TestImportRevokesAnUnsentFirstSend(ToolPass):
         self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])
         return pkg
 
-    def handoff_entries(self):
-        d = self.handoff / "quarterly-accounting"
-        return sorted(os.listdir(d)) if d.exists() else []
-
     def test_a_first_send_staged_before_an_import_is_revoked(self):
         pkg = self.built()
         tg = call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
                   package_token=pkg["package_token"])
-        # one staged send per request, and a second request would import again: the emailed
+        # one staged send per request, and a second request would import again: the second
         # copy is a package built outside any request under the same import (its first send
         # is revoked all the same, with its notice)
         import package
         pkg2 = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
-        em = call("stage_for_delivery", channel="email", package_id=pkg2["package_id"])
-        self.assertEqual(os.listdir(self.outbox), [os.path.basename(tg["path"])])
-        self.assertEqual(len(self.handoff_entries()), 1)
+        other = call("stage_for_delivery", channel="telegram", package_id=pkg2["package_id"])
+        self.assertEqual(sorted(os.listdir(self.outbox)),
+                         sorted(os.path.basename(d["path"]) for d in (tg, other)))
         token = self.begin("cron")                                  # import N+1
         self.end(token, "interrupted")
         self.assertEqual(os.listdir(self.outbox), [])                # nothing left to send
-        self.assertEqual(self.handoff_entries(), [])
-        for d in (tg, em):
+        for d in (tg, other):
             out = _raw("record_delivery", delivery_id=d["delivery_id"], outcome="delivered",
                        message_id="m-1")
             self.assertEqual(out, "refused: the bank was re-read before this was sent — "
-                                  "nothing was recorded; call job_report (a package you "
-                                  "asked for follows its check)")
+                                  "nothing was recorded (a package you asked for "
+                                  "follows its check)")
         rows = self.conn.execute("SELECT status, revoked_at IS NOT NULL FROM deliveries"
                                  " ORDER BY delivery_id").fetchall()
         self.assertEqual([tuple(r) for r in rows], [("failed", 1), ("failed", 1)])
@@ -681,16 +674,16 @@ class TestWithdrawalUnderTheCustodyLock(ToolPass):
         self.assertEqual(os.listdir(self.outbox), [])
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores the mode")
-    def test_a_failed_withdrawal_refuses_the_whole_import_on_either_channel(self):
+    def test_a_failed_withdrawal_refuses_the_whole_import(self):
         # round E7 (Terra, Astra S1): a withdrawal that fails must not leave the
         # superseded package sendable under a committed newer snapshot
-        for channel in ("telegram", "email"):
+        for channel in ("telegram",):             # email went with S7 §6.2
             with self.subTest(channel=channel):
-                pkg = self.built() if channel == "telegram" else self.rebuilt(channel)
+                pkg = self.built()
                 d = call("stage_for_delivery", channel=channel, package_id=pkg["package_id"],
                          package_token=pkg["package_token"])
                 staged = pathlib.Path(d["path"])
-                locked = staged.parent          # the outbox, or the handoff entry's own dir
+                locked = staged.parent          # the outbox
                 os.chmod(locked, 0o500)                      # the withdrawal will fail
                 self.addCleanup(lambda p=locked: p.exists() and os.chmod(p, 0o770))
                 token = self.begin("cron", do_import=False)
@@ -710,13 +703,6 @@ class TestWithdrawalUnderTheCustodyLock(ToolPass):
                 self.assertFalse(staged.exists())
                 self.assertEqual(self.state(d["delivery_id"]), ("failed", True))
                 self.end(token, "interrupted")
-
-    def rebuilt(self, channel="telegram"):
-        """A fresh package built after a complete sweep, under the latest import."""
-        token = self.begin("package", channel=channel)
-        self.assertEqual(self.sweep(token), 0)
-        self.end(token, "complete")
-        return self.zip_of()[0]
 
     def test_imports_and_builds_in_two_processes_never_deadlock(self):
         self.built()

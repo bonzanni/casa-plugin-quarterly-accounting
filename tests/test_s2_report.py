@@ -3,9 +3,8 @@
 job_report's tests. S7 §9 deleted job_report, the orphan handoff, the standing retry and
 the cancel records; the stalled-send recovery moved to the claim (test_s7_claim). The
 result cases are ported onto the job's own `post` and `view` units (S7 §5); the package
-recovery waits for the build/deliver units (Task 11)."""
+recovery onto its `build` and `deliver` units (§6.1)."""
 import json
-import unittest
 
 from tests._base import StoreCase
 
@@ -69,12 +68,23 @@ class Report(StoreCase):
         self.assertEqual([r[0] for r in self.conn.execute("SELECT state FROM work_requests")],
                          ["reported", "reported"])
 
-    @unittest.skip("S7: re-enabled in Task 11")
     def test_buildable_and_built_packages_are_recovered(self):
-        import asks
-        self.package_built_unsent()          # existing package helpers, request state 'built'
-        out = asks.job_report(self.conn)
-        self.assertEqual(out["continue"]["next"], "stage")
+        """S7 §6.1 (was: job_report's `continue`): a buildable request, its holder gone, is
+        handed out as `build` by the next claim; a built one as `deliver` — each under that
+        claim's own token, the request named."""
+        import job
+        self.bind()
+        self.package_token()                 # request state 'snapshot-done'
+        t = job.claim(self.conn, A)
+        u = job.next_unit(self.conn, t)
+        rid = self.conn.execute("SELECT request_id FROM package_requests").fetchone()[0]
+        self.assertEqual((u["unit"], u["package_token"], u["request_id"]), ("build", t, rid))
+        import package
+        package.build_quarterly_package(self.conn, u["quarter"], t, request_id=rid)
+        t2 = job.claim(self.conn, B)
+        u = job.next_unit(self.conn, t2)
+        self.assertEqual((u["unit"], u["package_token"], u["request_id"]),
+                         ("deliver", t2, rid))
 
     def test_the_answer_is_deliverable_text_by_text(self):
         import tools, views

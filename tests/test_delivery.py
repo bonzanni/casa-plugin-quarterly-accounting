@@ -1,13 +1,12 @@
 # tests/test_delivery.py
 import contextlib
-import importlib.util
 import os
 import pathlib
 import unittest
 import zipfile  # noqa: F401
 from unittest import mock
 
-from tests._base import ROOT, StoreCase
+from tests._base import StoreCase
 import db  # noqa: E402
 import delivery  # noqa: E402
 import ledger  # noqa: E402
@@ -31,13 +30,13 @@ class Base(StoreCase):
 class TestTelegram(Base):
     def test_staged_atomically_into_the_outbox_under_a_name_of_its_own(self):
         # issue #2: the staged file's name is random and never reused; the operator sees
-        # the package's name through send_media's filename argument
+        # the package's name through post_package's deposit `filename` (S7a)
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
         self.assertEqual(os.path.dirname(out["path"]), str(self.outbox))
         self.assertRegex(os.path.basename(out["path"]), r"^qa-[0-9a-f]{16}\.zip$")
         self.assertEqual(out["filename"], self.pkg["filename"])
-        self.assertIn("filename=<filename>", out["note"])
+        self.assertIn("post_package(delivery_id)", out["note"])
         self.assertEqual(pathlib.Path(out["path"]).read_bytes(),
                          pathlib.Path(self.pkg["path"]).read_bytes())
         self.assertFalse([f for f in os.listdir(self.outbox) if ".part" in f])
@@ -193,60 +192,21 @@ class TestCustody(Base):
             package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
 
 
-class TestEmail(Base):
-    def test_published_to_the_handoff_with_a_request_id(self):
-        out = delivery.stage_for_delivery(self.conn, channel="email",
-                                          package_id=self.pkg["package_id"])
-        self.assertTrue(out["path"].startswith(str(self.handoff)))
-        self.assertTrue(out["request_id"])
-        self.assertIn("operator's own address", out["note"])
+class TestNoEmail(Base):
+    """S7 §6.2: packages come as a file on Telegram; the email staging path is deleted."""
 
-    def test_an_email_over_the_handoff_cap_is_refused(self):
-        with mock.patch.object(delivery, "GMAIL_ATTACHMENT_LIMIT", 10):
-            with self.assertRaises(db.Refusal) as cm:
-                delivery.stage_for_delivery(self.conn, channel="email",
-                                            package_id=self.pkg["package_id"])
-        self.assertIn("25 MB", str(cm.exception))
+    def test_email_is_refused_and_nothing_is_staged(self):
+        with self.assertRaises(db.Refusal) as cm:
+            delivery.stage_for_delivery(self.conn, channel="email",
+                                        package_id=self.pkg["package_id"])
+        self.assertEqual(str(cm.exception), delivery.EMAIL_GONE)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 0)
+        self.assertEqual(list(self.handoff.iterdir()), [])
 
-    def test_a_package_too_large_for_telegram_can_still_be_emailed(self):
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE packages SET oversize=1")
-        out = delivery.stage_for_delivery(self.conn, channel="email",
-                                          package_id=self.pkg["package_id"])
-        self.assertTrue(out["request_id"])
-
-    def test_email_is_delivered_only_with_a_message_id(self):
-        out = delivery.stage_for_delivery(self.conn, channel="email",
-                                          package_id=self.pkg["package_id"])
-        with self.assertRaises(db.Refusal):
-            delivery.record_delivery(self.conn, delivery_id=out["delivery_id"],
-                                     outcome="delivered")
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="delivered",
-                                 message_id="18c0f")
-
-    def test_a_retry_after_a_timeout_sends_twice_which_is_why_we_never_retry(self):
-        spec = importlib.util.spec_from_file_location(
-            "gmail_sent_log", ROOT / "tests/upstream/gmail-v0.9.0/sent_log.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        log = mod.SentLog(str(self.tmp / "sent_log.json"))
-        sends = []
-
-        def send_email(request_id, to, subject, fail_after_send):
-            # gmail 0.9.0's send path: check, send, THEN record (server.py 571-577)
-            if request_id and log.check(request_id, to, subject):
-                return "dedup"
-            sends.append(request_id)
-            if fail_after_send:
-                raise TimeoutError("transport timeout after the request was accepted")
-            log.record(request_id, "msg-%d" % len(sends), to, subject)
-            return "sent"
-
-        with self.assertRaises(TimeoutError):
-            send_email("qa-1", "me@example.org", "Q3", True)
-        send_email("qa-1", "me@example.org", "Q3", False)
-        self.assertEqual(len(sends), 2)
+    def test_channel_defaults_to_telegram(self):
+        out = delivery.stage_for_delivery(self.conn, package_id=self.pkg["package_id"])
+        self.assertEqual(out["channel"], "telegram")
+        self.assertIn("post_package(delivery_id)", out["note"])
 
     def test_a_single_invoice_can_be_staged(self):
         import documents
