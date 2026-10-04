@@ -136,8 +136,12 @@ def _refuse_shared_bank_text(conn, entry, texts) -> None:
             continue
         shared = set(mine) & _texts(r["name"], json.loads(r["patterns_json"]))
         if shared:
-            raise db.Refusal(f"the bank text {mine[min(shared)]!r} already belongs to "
-                             f"{r['name']}; change {r['name']} instead, or give this "
+            # the names are printed escaped (S7 INV-S7-7): this refusal reaches the
+            # operator's receipt through reply._say
+            import views
+            owner = views.field(r["name"])
+            raise db.Refusal(f"the bank text '{views.field(mine[min(shared)])}' already "
+                             f"belongs to {owner}; change {owner} instead, or give this "
                              "counterparty another name")
 
 
@@ -219,8 +223,9 @@ def set_expectation_in_tx(conn, *, scope_type, scope, kind, tier=None, author,
         if author == "specialist" and e["exp_author"] == "operator":
             # the operator's ruling on this payee ("no invoices ever for X") is theirs
             # to change; a specialist's write never silently replaces it (fix wave F)
-            raise db.Refusal(f"the operator set what {e['name']} needs; only the operator "
-                             "changes it — nothing was changed")
+            import views
+            raise db.Refusal(f"the operator set what {views.field(e['name'])} needs; only "
+                             "the operator changes it — nothing was changed")
         if kind == "default":
             conn.execute("UPDATE counterparties SET exp_kind=NULL, exp_tier=NULL,"
                          " exp_author=NULL, updated_at=? WHERE cp_id=?", (db.now(), e["cp_id"]))

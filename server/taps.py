@@ -156,7 +156,7 @@ def apply_reading(conn, reading_id, key) -> dict:
                      (db.now(), reading_id))
         lines = [x for x in out["receipt"] if not x.startswith("Not rebuilding yet")]
         lines += reply.package_lines(conn, out["quarters"])
-    return {"receipt": views.fit_message(lines)}
+    return {"receipt": views.fit_message(lines, views.FIT_CLOSING)}
 
 
 def cancel_reading(conn, reading_id, key) -> dict:

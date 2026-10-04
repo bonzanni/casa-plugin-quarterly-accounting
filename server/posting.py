@@ -94,13 +94,15 @@ def post_results(conn, render_ids) -> dict:
 
 CAPTION_MAX = 900          # 1024 − views.LABEL_ALLOWANCE − 1, rounded down (§6.1)
 PKG_REFUSED = "the package could not be sent under its name ({code}) — ask again"
+ALREADY_POSTED = ("that package was already sent — nothing was posted again; wait for its "
+                  "receipt, then record_delivery")
 
 
 def post_package(conn, delivery_id, package_token=None) -> dict:
     """§6.1: deposit a staged package as an operator_file — the staged path (Casa claims and
     consumes it), kind zip, the package's filename as the delivered name (S7a), and one
     caption line. A deposit Casa refuses settles the send `failed` (the staged copy taken
-    back) and closes its request with a package-stopped notice — never a send under the
+    back) and closes its request with a package-not-sent notice — never a send under the
     storage name."""
     import alerts, dates, delivery, passes
     with db.tx(conn):
@@ -111,6 +113,10 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
         if (d["status"] != "staged" or d["revoked_at"] or d["withdrawn_at"]
                 or d["channel"] != "telegram"):
             raise db.Refusal("that send is no longer waiting to go out — nothing was posted")
+        if d["posted_at"] is not None:
+            # at most one deposit per send: Casa consumes the staged copy, so a second
+            # deposit's claim fails after a send that went out (Codex r2 S2)
+            raise db.Refusal(ALREADY_POSTED)
         req = conn.execute("SELECT * FROM package_requests WHERE delivery_id=?",
                            (delivery_id,)).fetchone()
         if req is not None:
@@ -121,8 +127,11 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
         if d["as_built"]:
             line += f" · built {dates.short_day(pk['built_at'])}, as it was then"
         caption = views.clip(views.caption_safe(views.esc(line, plain=True)), CAPTION_MAX)
-        conn.execute("UPDATE deliveries SET lease_at=? WHERE delivery_id=?",
-                     (db.now(), delivery_id))
+        # the post mark commits before the deposit: a turn that dies after it leaves the
+        # send staged, recovered `uncertain` at a later claim (delivery.stalled_sends);
+        # only record_delivery, on Casa's receipt, settles it delivered
+        conn.execute("UPDATE deliveries SET lease_at=?, posted_at=? WHERE delivery_id=?",
+                     (db.now(), db.now(), delivery_id))
     try:
         ref = casa_broker.deposit("package", d["staged_path"], caption=caption, kind="zip",
                                   filename=pk["filename"])
@@ -138,10 +147,9 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
                     conn.execute("UPDATE package_requests SET state='stopped', reason=?,"
                                  " updated_at=? WHERE request_id=?",
                                  (PKG_REFUSED.format(code=exc.code), now, req["request_id"]))
-                    alerts.raise_package(conn, "package-stopped",
+                    alerts.raise_package(conn, "package-not-sent",
                                          f"request:{req['request_id']}:posted",
-                                         quarter=pk["quarter"],
-                                         reason=f"it could not be posted ({exc.code})")
+                                         quarter=pk["quarter"])
         raise db.Refusal(PKG_REFUSED.format(code=exc.code))
     return {"package": ref, "delivery_id": delivery_id, "filename": pk["filename"]}
 
@@ -162,7 +170,8 @@ def propose_reading(conn, text, quoted=None) -> dict:
         base = {k: out[k] for k in ("instructions", "reshow", "understood", "not_a_reply")}
         if not out["plan"]:
             say = "\n".join(out["receipt"])
-            return {"reading": None, "say": views.fit_message(say) if say else "", **base}
+            return {"reading": None,
+                    "say": views.fit_message(say, views.FIT_CLOSING) if say else "", **base}
         body = ["I read this as:"] + [f"· {x}" for x in out["propose"]]
         if out["unresolved"]:
             body += ["", "Not included:"] + [f"· {x}" for x in out["unresolved"]]

@@ -332,6 +332,11 @@ def package_lines(conn, quarters) -> list:
                        "longer matches — say \"rebuild it\" for a fresh one.")
     return out
 
+# A step records every binding column that decides a verdict; import bookkeeping and the
+# announce flags are not among them, so an unrelated bank import (or a delivered rendering
+# announcing the watermark) never stales an open reading (final fix wave T6-c, M-2)
+BINDING_NOT_READ = ("row_high_water", "watermark_announced", "package_name_announced")
+NOTHING_MORE = "There is nothing more to show on that list."
 REBUILD_PENDING = "Not rebuilding yet: apply the change first, then say \"rebuild it\"."
 REBUILD_BLOCKED = ("Not rebuilding yet: a correction in this message did not apply. Say "
                    "\"rebuild it\" again once it has.")
@@ -416,7 +421,8 @@ class _Run:
                 check(read)
             args = phrase_args(res) if callable(phrase_args) else phrase_args
         step = {"op": op, **params, "read": {str(p): r for p, r in sorted(read.items())},
-                "binding": dict(b) if b is not None else None}
+                "binding": ({k: b[k] for k in b.keys() if k not in BINDING_NOT_READ}
+                            if b is not None else None)}
         self.plan.append(json.loads(db.canonical(step)))
         self.propose.append(PHRASE[op][0].format(**args))
         self.lines.append(PHRASE[op][1].format(**args))
@@ -751,6 +757,16 @@ def _apply(conn, run, verb, m, items):
         run.instructions.append(f"send last {_quarter(q)}" if q else "send last")
         return
     if verb == "show":
+        if m.group("s") in ("more", "all of them"):
+            # a desk turn is a fresh session (S7 §2): it cannot know the cursor, so the
+            # bound rendering's own `next` is returned as ready show_view arguments
+            nxt = (json.loads(run.bound["scope_json"]).get("next")
+                   if run.bound is not None else None)
+            if nxt:
+                run.instructions.append({"show_view": nxt})
+            else:
+                run.note(NOTHING_MORE, unresolved=False)
+            return
         run.instructions.append(m.group("s"))
         return
     if verb == "candidates":

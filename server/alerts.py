@@ -50,6 +50,9 @@ def evaluate(conn) -> None:
 # package, so "send it again" binds to the rendering that printed them (D3).
 PACKAGE = {
     "package-stopped": "I couldn't build the {quarter} package: {reason}.",
+    # a BUILT package that could not be posted (Casa refused the deposit, or it is over
+    # Telegram's limit): no Casa code reaches the operator (final fix wave T11-d)
+    "package-not-sent": "I couldn't send the {quarter} package{why} — ask again when you want it.",
     "package-failed": "I couldn't read the bank for the {quarter} package — ask for it again.",
     "package-revoked": "The bank was re-read before I could send the {quarter} package — ask "
                        "for it again and I'll rebuild it.",
@@ -138,7 +141,8 @@ def _units(conn, rows) -> list:
             else:
                 reason = views.field((c.get("reason") or "").rstrip(". "), 300)
                 lines = views._wrap(PACKAGE[a["kind"]].format(
-                    quarter=dates.quarter_label(c["quarter"]), reason=reason))
+                    quarter=dates.quarter_label(c["quarter"]), reason=reason,
+                    why=f" ({reason})" if reason else ""))
             out.append((a["alert_id"], None, lines))
     changed = []
     for a in rows:

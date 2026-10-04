@@ -87,11 +87,13 @@ class Report(StoreCase):
                          ("deliver", t2, rid))
 
     def test_the_answer_is_deliverable_text_by_text(self):
+        # final fix wave T10-c: job_report's `texts` left with the tool (no server code
+        # returns it); the per-page check is pinned on `receipt_pages`
         import tools, views
-        out = {"texts": [{"render_id": "r1", "text": "x" * (views.TELEGRAM_LIMIT + 1)}]}
+        out = {"receipt_pages": ["ok", "x" * (views.TELEGRAM_LIMIT + 1)]}
         with self.assertRaises(tools.Undeliverable):
-            tools._deliverable("job_report", out)
-        tools._deliverable("job_report", {"texts": [{"render_id": "r1", "text": "ok"}]})
+            tools._deliverable("record_delivery", out)
+        tools._deliverable("record_delivery", {"receipt_pages": ["ok", "ok"]})
 
 
 class Handover(StoreCase):

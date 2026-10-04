@@ -442,16 +442,16 @@ def _oversize(conn, package_id) -> bool:
 
 def _close_oversize(conn, req) -> None:
     """A built package over Telegram's 20 MB cannot be posted (delivery._stage refuses it,
-    every time): the request ends `stopped` with its package-stopped notice, which the next
+    every time): the request ends `stopped` with its package-not-sent notice, which the next
     `post` carries. The zip is kept; notes.md names the largest files (its caption says so)."""
     import alerts
     pk = conn.execute("SELECT size FROM packages WHERE package_id=?",
                       (req["package_id"],)).fetchone()
-    reason = (f"it is {pk['size'] / 1e6:.1f} MB, over Telegram's 20 MB limit — it is kept "
+    reason = (f"it is {pk['size'] / 1e6:.1f} MB, over Telegram's 20 MB limit; it is kept "
               "here, and notes.md names the largest files")
     conn.execute("UPDATE package_requests SET state='stopped', reason=?, updated_at=? WHERE"
                  " request_id=?", (reason, db.now(), req["request_id"]))
-    alerts.raise_package(conn, "package-stopped", f"request:{req['request_id']}:oversize",
+    alerts.raise_package(conn, "package-not-sent", f"request:{req['request_id']}:oversize",
                          quarter=req["quarter"], reason=reason)
 
 

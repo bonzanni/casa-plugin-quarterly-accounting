@@ -1164,6 +1164,8 @@ def buttons_for(conn, r, walk=None) -> list:
     rid, kind = r["render_id"], r["kind"]
     proposed, nxt = scope.get("proposed") or [], scope.get("next")
     more = [("More", "show_view", dict(nxt), None)] if nxt else []
+    if more and kind == "item" and walk:
+        more[0][2]["walk"] = walk          # page 2 of a One by one item still offers Next
     if kind in SHEET_VIEWS and proposed:
         out = [("All good", "verdict", {"render_id": rid, "action": "all-good"},
                 ("all-good", None)),

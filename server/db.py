@@ -346,7 +346,8 @@ CREATE TABLE IF NOT EXISTS deliveries (
   revoked_at TEXT,               -- an unsent first send an import superseded (fix E5)
   withdrawn_at TEXT,             -- staged bytes taken back when a stalled send was recovered
   lease_at TEXT,                 -- a staged send's lease: past LEASE_S it is recovered
-  as_built INTEGER NOT NULL DEFAULT 0);   -- "send me the last package you built" (#15)
+  as_built INTEGER NOT NULL DEFAULT 0,   -- "send me the last package you built" (#15)
+  posted_at TEXT);               -- S7 §6.1: post_package deposited it (at most once)
 -- every delivery has a path of its own: a holder that was superseded can never hold
 -- the path of a later copy
 CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_staged_path ON deliveries(staged_path);
@@ -517,7 +518,7 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE probes ADD COLUMN gen INTEGER",
         CLAIMS_DDL_V10, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL_V10],
     # 10 -> 11 (S7): tap keys, readings, account choices, post offers; the run's stamps;
-    # the request's latest ask. Data steps follow in migrate (after_10_to_11)
+    # the request's latest ask; a send's post mark. Data steps follow in migrate (after_10_to_11)
     10: ["ALTER TABLE claims ADD COLUMN seq INTEGER",
          "ALTER TABLE runs ADD COLUMN completed_at TEXT",
          "ALTER TABLE package_requests ADD COLUMN asked_seq INTEGER NOT NULL DEFAULT 0",
@@ -525,6 +526,7 @@ MIGRATIONS: dict[int, list[str]] = {
          "UPDATE package_requests SET channel='telegram' WHERE channel='email' AND state IN"
          " ('queued', 'snapshot', 'snapshot-done', 'built')",
          "DELETE FROM meta WHERE key='drain' OR key LIKE 'cancelled:%'",
+         "ALTER TABLE deliveries ADD COLUMN posted_at TEXT",
          READINGS_DDL, RENDER_KEYS_DDL, ACCOUNT_CHOICES_DDL, POST_OFFERS_DDL],
 }
 

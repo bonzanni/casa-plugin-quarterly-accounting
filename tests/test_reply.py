@@ -374,10 +374,13 @@ class TestGrammar(Base):
                          .fetchone()[0], 0)
 
     def test_more_asks_for_the_next_page(self):
+        # final fix wave I-1: "more" returns the bound rendering's `next` as show_view
+        # arguments; a one-page list has none, and the receipt says there is nothing more
         self.item("Zapier", 9900, "2026-09-17")
         self.deliver(view="all")
         out = apply_now(self.conn, "more")
-        self.assertEqual((out["instructions"], out["applied"]), (["more"], []))
+        self.assertEqual((out["instructions"], out["applied"]), ([], []))
+        self.assertIn(reply.NOTHING_MORE, out["receipt"])
 
     def test_instructions_are_returned_not_performed(self):
         # S7 §8: a rebuild beside a write waits for its Apply (the proposal says so); a

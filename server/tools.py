@@ -93,17 +93,13 @@ class Undeliverable(RuntimeError):
 
 
 def _deliverable(tool: str, out):
-    """The final invariant (fix wave D round 2): every operator-facing text a
-    tool returns — a view's `text`, a `speak.text`, a `receipt` and each of its
-    `receipt_pages`, job_report's `texts[i].text` — is at
-    most TELEGRAM_LIMIT UTF-16 units; otherwise the call fails loudly (isError)."""
+    """The final invariant (fix wave D round 2): every text a tool returns — a view's
+    `text`, a `speak.text`, a `receipt` and each of its `receipt_pages` — is at most
+    TELEGRAM_LIMIT UTF-16 units; otherwise the call fails loudly (isError)."""
     if not isinstance(out, dict):
         return out
     texts = [("text", out.get("text")), ("receipt", out.get("receipt"))]
     texts += [(f"receipt_pages[{i}]", t) for i, t in enumerate(out.get("receipt_pages") or [])]
-    # job_report's results (S2 §6.4): every page is a message of its own
-    texts += [(f"texts[{i}].text", t.get("text") if isinstance(t, dict) else t)
-              for i, t in enumerate(out.get("texts") or [])]
     speak = out.get("speak")
     if isinstance(speak, dict):
         texts.append(("speak.text", speak.get("text")))
@@ -580,8 +576,8 @@ def t_search(args):
           "its payments whose paired document's date was never read on the document "
           "(`dates_unread`, paged the same way): read each and confirm its date with "
           "update_document_metadata. Read it fresh for every "
-          "question; never answer from memory. Counts and totals come from build_review."
-          " During a pass, pass the pass_token.",
+          "question; never answer from memory. It posts nothing: show_view posts a view to "
+          "the operator. During a pass, pass the pass_token.",
           obj({"quarter": Q, "triage": B, "fresh_only": B, "limit": I, "pass_token": TOKEN,
                "pid": I, "dates_unread": B,
                "after": {"type": "array", "description": "the cursor from the previous `next`, "
@@ -596,11 +592,10 @@ def t_state(args):
 
 
 @register("build_review",
-          "Render a view (status, missing, check, rest, older, all, item, quarter) as finished "
-          "text. Send the text VERBATIM — do not retell, reorder or add figures — then call "
-          "mark_rendering_delivered with its render_id. If the send fails, do not. When the "
-          "operator says \"all of them\" or \"more\", call build_review again with exactly the "
-          "arguments in `next` (view, quarter, page, after); `next` is null when nothing is left.",
+          "Read-only: renders a view (status, missing, check, rest, older, all, item, quarter) "
+          "as text for your own reading. It posts nothing: never send its text to the operator "
+          "and never mark it delivered — show_view posts a view, with its buttons. `next` is "
+          "the arguments of the following page (null when nothing is left).",
           obj({"view": S, "quarter": Q, "pid": I, "page": I,
                "after": {"type": "array", "description": "the cursor from the previous `next`, "
                                                           "passed back unchanged"}}))
@@ -649,7 +644,9 @@ def t_verdict(args):
           "of a delegation): pass them VERBATIM as text, and the quoted post's text as "
           "quoted when your context has one. Nothing is applied: a change is posted to "
           "the operator to Apply. `say`: say it as your answer, verbatim. `instructions`: "
-          "run each (show_view for \"more\", \"all of them\", \"show item N\"; "
+          "run each (an instruction {\"show_view\": {…}} is show_view with exactly those "
+          "arguments — \"more\" and \"all of them\" come so; show_view for \"show the rest\", "
+          "\"show older\", \"show item N\"; "
           "request_package then start_job for \"rebuild Qn\"; resend and send-last as "
           "your skill says). `reshow`: show_view(view=\"item\", pid=…) for each. "
           "`understood: false`: nothing was read as an accounting reply.",
@@ -769,18 +766,22 @@ def t_build(args):
           "names, if any) and neither id: the last package built, unchanged. A package built "
           "for a package request needs its package_token; staging it again returns the same "
           "send. channel is telegram (the default). During a pass, pass the pass_token.",
-          obj({"channel": S, "package_id": I, "doc_id": I, "resend": B, "last_built": B,
+          obj({"channel": S, "package_id": I, "resend": B, "last_built": B,
                "quarter": Q, "pass_token": TOKEN, "package_token": PKG_TOKEN}))
 def t_stage(args):
+    if args.get("doc_id") is not None:
+        # final fix wave T11-a: post_package posts packages only, so a staged document
+        # could never go out (and nothing would recover it); the server path stays
+        raise db.Refusal("a single document is not sent from here — nothing was staged")
     resend = _bool(args, "resend", False)
-    package_id, doc_id = _int(args, "package_id"), _int(args, "doc_id")
+    package_id = _int(args, "package_id")
     if resend:
-        if package_id is not None or doc_id is not None:
+        if package_id is not None:
             raise db.Refusal("resend stages what the operator was offered: name no package "
-                             "or document with it")
+                             "with it")
         package_id = delivery.resend_target(conn())
     return delivery.stage_for_delivery(conn(), channel=args.get("channel") or "telegram",
-                                       package_id=package_id, doc_id=doc_id,
+                                       package_id=package_id,
                                        pass_token=_int(args, "pass_token"),
                                        package_token=_int(args, "package_token"),
                                        resend=resend,

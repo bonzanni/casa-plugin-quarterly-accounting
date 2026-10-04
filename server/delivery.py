@@ -606,12 +606,18 @@ def uncertain(conn, quarter=None) -> list:
 
 def resend_target(conn) -> int:
     """What "send it again" resends: the package the most recent DELIVERED
-    rendering offered (D3: an operator's words bind to what they were shown).
+    rendering that offers a package offered (D3: an operator's words bind to what they
+    were shown; S7 §6.3: "last saw" is the latest delivered rendering that offers one —
+    a view, a post or a status sheet delivered after it offers nothing and hides nothing).
     An offered package that is no longer eligible (resend_refusal) is answered
     with its own reason. None waiting, or several, is a refusal in the operator's words —
     several are told apart by the date in their filenames (spec §"What the
     operator never has to learn")."""
-    last = db.last_delivered(conn)
+    last = conn.execute(
+        "SELECT scope_json FROM renders WHERE delivered_at IS NOT NULL AND kind NOT IN (%s)"
+        " AND json_array_length(scope_json, '$.offers') > 0 ORDER BY delivered_seq DESC,"
+        " delivered_at DESC, rowid DESC LIMIT 1" % ",".join("?" * len(db.INFORMATIONAL_KINDS)),
+        db.INFORMATIONAL_KINDS).fetchone()
     offered = json.loads(last["scope_json"]).get("offers", []) if last else []
     waiting, why = [], None
     for pid in offered:

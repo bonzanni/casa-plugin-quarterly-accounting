@@ -244,19 +244,30 @@ class TestResendTarget(Base):
         self.assertEqual(delivery.resendable(self.conn), a["package_id"])
 
     def test_the_offer_binds_to_the_rendering_delivered_last_within_one_second(self):
-        # fix wave D: sheet A offers nothing, sheet B offers the uncertain package;
-        # B then A delivered in one second — "send it again" answers A, which offered
-        # nothing, never B by creation order.
+        # fix wave D: sheet A offers package a, sheet B offers a and b; B then A delivered
+        # in one second — "send it again" answers A (a), never B by creation order (which
+        # would ask "which one"). Final fix wave I-2 (§6.3): a rendering that offers
+        # nothing no longer hides an earlier offer, so both sheets here offer something.
+        a = self.pkg
+        self.send(a["package_id"], "uncertain")
         sheet_a = views.build_review(self.conn, view="status", quarter="2026-Q3")
-        self.send(self.pkg["package_id"], "uncertain")
+        b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        self.send(b["package_id"], "uncertain")
         sheet_b = views.build_review(self.conn, view="status", quarter="2026-Q3")
-        self.assertIn("send it again", sheet_b["text"])
+        self.assertIn(views.field(b["filename"]), sheet_b["text"])
         with mock.patch.object(db, "now", lambda: "2026-09-27T10:00:00Z"):
             views.mark_rendering_delivered(self.conn, sheet_b["render_id"])
             views.mark_rendering_delivered(self.conn, sheet_a["render_id"])
-        with self.assertRaises(db.Refusal) as cm:
-            delivery.resend_target(self.conn)
-        self.assertIn("nothing is waiting to be sent again", str(cm.exception))
+        self.assertEqual(delivery.resend_target(self.conn), a["package_id"])
+
+    def test_a_later_rendering_without_offers_keeps_the_earlier_offer(self):
+        # final fix wave I-2 (§6.3): "last saw" is the latest delivered rendering that
+        # offers a package; a sheet delivered after it that offers nothing hides nothing
+        self.send(self.pkg["package_id"], "uncertain")
+        self.shown()
+        later = views.build_review(self.conn, view="missing", quarter="2026-Q3")
+        views.mark_rendering_delivered(self.conn, later["render_id"])
+        self.assertEqual(delivery.resend_target(self.conn), self.pkg["package_id"])
 
     def test_two_offered_asks_which_by_the_names(self):
         a = self.pkg

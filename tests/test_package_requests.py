@@ -1238,8 +1238,11 @@ class TestReviewC7(Requests):
         view = self.call("build_review", view="status", quarter="2026-Q3")
         self.assertNotIn(pkg["filename"], view["text"])
         self.call("mark_rendering_delivered", render_id=view["render_id"])
-        self.assertTrue(self.text("stage_for_delivery", channel="telegram",
-                                  resend=True).startswith("refused: nothing is waiting"))
+        # final fix wave I-2 (§6.3): "send it again" binds to the latest delivered rendering
+        # that OFFERS a package — the failed send's notice, not the status view after it —
+        # and that offer, no longer eligible, is answered with its own reason
+        self.assertEqual(self.text("stage_for_delivery", channel="telegram", resend=True),
+                         "refused: " + self.STALE)
 
     def test_an_untold_failed_offer_is_told_without_the_invitation(self):
         self.seed(1, documents=1)
