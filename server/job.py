@@ -73,10 +73,10 @@ def claim(conn, job_id) -> int:
     """A job turn's token-less job_next (S7 §4.1, §10). Under the custody lock, taken
     before the transaction (the store's lock order: the stalled-send recovery removes
     staged bytes), in one transaction: the claim is recorded with its store sequence
-    (`claims.seq`); a job id's first claim with no live pass and nothing queued records
-    a cron check (§4.1); a live pass held by another job is adopted (§6.3); the
-    left-behind run's package asks are closed (§10); a stalled staged send is recovered
-    (§6.1). Nothing restarts a job: no drain, no orphan mark (§9)."""
+    (`claims.seq`); a live pass held by another job is adopted (§6.3); the left-behind
+    run's package asks are closed (§10); then a job id's first claim that leaves no live
+    pass and nothing queued records a cron check (§4.1); a stalled staged send is
+    recovered (§6.1). Nothing restarts a job: no drain, no orphan mark (§9)."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
     import delivery, steps
@@ -90,16 +90,11 @@ def claim(conn, job_id) -> int:
             prev = conn.execute("SELECT job_id FROM claims WHERE job_id<>? ORDER BY gen DESC"
                                 " LIMIT 1", (job_id,)).fetchone() if first else None
             p = live_job_pass(conn)
-            implicit = first and p is None and not _queued_any(conn)          # §4.1
             token = passes.rotate(conn)
             changed = p is not None and p["holder_job"] != job_id
             conn.execute("INSERT INTO claims(gen, job_id, at, batch, seq) VALUES (?,?,?,?,?)",
                          (token, job_id, db.now(), _batch_of(conn, job_id, token, changed),
                           db.next_seq(conn)))
-            if implicit:
-                conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json,"
-                             " created_seq, created_at, state) VALUES ('check', 'cron', '[]',"
-                             " ?, ?, 'queued')", (db.next_seq(conn), db.now()))
             left = None
             if changed:
                 left = p["holder_job"]
@@ -122,6 +117,12 @@ def claim(conn, job_id) -> int:
                     conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
             if left is not None:
                 _close_left_behind(conn, token, left)                         # §10
+            # §4.1, on the state this run will work: after §10's closure and pass-ending
+            # (fix r1 ruling), so a launch left with nothing to do is still a check
+            if first and live_job_pass(conn) is None and not _queued_any(conn):
+                conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json,"
+                             " created_seq, created_at, state) VALUES ('check', 'cron', '[]',"
+                             " ?, ?, 'queued')", (db.next_seq(conn), db.now()))
             for d in delivery.stalled_sends(conn, steps.LEASE_S):             # §6.1
                 delivery.recover_staged(conn, d)
                 conn.execute("UPDATE package_requests SET state='withdrawn', updated_at=?"

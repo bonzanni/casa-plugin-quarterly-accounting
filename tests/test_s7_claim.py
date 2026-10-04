@@ -129,3 +129,45 @@ class Claim(StoreCase):
         job.claim(self.conn, B)
         self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
                          "queued")
+
+    def test_a_cron_launch_after_a_dead_run_still_checks(self):
+        """Fix r1 (ruling): §4.1 reads the state after §10's closure — a launch whose only
+        queued ask was a dead run's unrenewed package ask is a check, not a no-op."""
+        import asks, job
+        asks.request_package(self.conn, "2026-Q3")
+        job.claim(self.conn, A)                       # A dies
+        job.claim(self.conn, B)                       # the cron launch
+        self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
+                         "stopped")
+        self.assertEqual([tuple(r) for r in self.conn.execute(
+            "SELECT kind, trigger, state FROM work_requests")], [("check", "cron", "queued")])
+        self.assertFalse(job.done(self.conn, B))
+
+    def test_a_cron_launch_adopting_a_dead_package_pass_still_checks(self):
+        import asks, job
+        asks.request_package(self.conn, "2026-Q3")
+        job.next_unit(self.conn, job.claim(self.conn, A))   # A's package pass begins, A dies
+        job.claim(self.conn, B)                       # adopts; §10 ends the pass stopped
+        self.assertIsNone(job.live_job_pass(self.conn))
+        self.assertEqual([tuple(r) for r in self.conn.execute(
+            "SELECT kind, trigger, state FROM work_requests")], [("check", "cron", "queued")])
+        self.assertFalse(job.done(self.conn, B))
+
+    def test_an_exhausted_adoption_reads_kept_stopping(self):
+        """Ported from test_s2_report's test_a_pass_stopped_on_adoption_never_offers_a_
+        restart (its stop-line part): the check the pass served is stopped, and its result
+        is asks.KEPT_STOPPING."""
+        import asks, db, job
+        rid = asks.request_work(self.conn, "check", "operator")["request_id"]
+        t = job.claim(self.conn, A)
+        pid = self.start_job_pass(t)
+        with db.tx(self.conn):
+            asks.take_queued(self.conn, pid)
+        for j in (B, "cccccccc-3", "dddddddd-4"):     # the third adoption stops the pass
+            job.claim(self.conn, j)
+        r = self.conn.execute("SELECT state, outcome FROM work_requests WHERE request_id=?",
+                              (rid,)).fetchone()
+        self.assertEqual(tuple(r), ("done", "stopped"))
+        with db.tx(self.conn):
+            pages = asks._result_tx(self.conn, rid)
+        self.assertEqual([p["text"] for p in pages], [asks.KEPT_STOPPING])

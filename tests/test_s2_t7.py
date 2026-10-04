@@ -25,9 +25,10 @@ class FailedSync(StoreCase):
         self.bind()
         self.drv = JobDriver(self, payments=2)
 
-    @unittest.skip("S7: re-enabled in Task 10")
-    def test_a_failed_sync_imports_sweeps_and_judges_with_bank_through_unchanged(self):
-        import asks, dates, db, job, views
+    def failed_sync_run(self):
+        """A good sync (job A), then a failed one three days later (job B). Returns
+        (bank_through after A, B's clock, B's units)."""
+        import asks, db
         asks.request_work(self.conn, "check", "operator")
         self.drv.run_job(A)                               # a good sync: checked through today
         first = self.conn.execute("SELECT bank_through FROM snapshots ORDER BY snapshot_id"
@@ -39,6 +40,10 @@ class FailedSync(StoreCase):
             self.drv.fail_next_sync(DEAD_LINK)
             asks.request_work(self.conn, "check", "operator")
             units = self.drv.run_job(B)
+        return first, later, units
+
+    def test_a_failed_sync_imports_sweeps_and_judges_with_bank_through_unchanged(self):
+        first, later, units = self.failed_sync_run()
         kinds = [u["unit"] for u in units]
         for k in ("probes", "snapshot", "sweep", "judge"):
             self.assertIn(k, kinds)
@@ -60,6 +65,11 @@ class FailedSync(StoreCase):
         self.assertTrue(any(k.startswith("sweep:") for k in keys), keys)
         self.assertTrue(any(k.startswith("judge:") for k in keys), keys)
         self.assertEqual((units[-1]["text"], units[-1]["progress"]["summary"]), FINISHED)
+
+    @unittest.skip("S7: re-enabled in Task 10")
+    def test_a_failed_sync_is_still_told_to_the_operator(self):
+        import asks, dates, views
+        first, later, _ = self.failed_sync_run()
         # the operator still sees it: the bank-connection alert, and how far the bank
         # was checked (the date before the failed sync)
         out = asks.job_report(self.conn, job_id=B, status="ok")
@@ -183,15 +193,21 @@ class RunEnd(StoreCase):
         self.take_the_cron_check(pid)
         job.claim(self.conn, B)
         job.claim(self.conn, C)
-        tD = job.claim(self.conn, D)                       # the third adoption: stopped
+        job.claim(self.conn, D)                            # the third adoption: stopped
         row = self.conn.execute("SELECT holder_job, outcome, report_json FROM passes WHERE"
                                 " pass_id=?", (pid,)).fetchone()
         self.assertEqual((row["holder_job"], row["outcome"]), (C, "stopped"))
         self.assertEqual(json.loads(row["report_json"])["stopped_by"], D)
         want = "Accounting check stopped: it kept stopping."
+        # Task 9 fix r1 ruling: §4.1 reads the state after the pass ended, so D's first
+        # claim, left with nothing live or queued, records a cron check, and D's run
+        # serves it before it completes; the stopped pass is still D's to name
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM work_requests WHERE"
+                                           " trigger='cron' AND state='queued'"
+                                           ).fetchone()[0], 1)
+        last = self.run_job_to_complete(D)[-1]
+        self.assertEqual((last["unit"], last["text"]), ("complete", want))
         self.assertEqual(job.status(self.conn, D)["text"], want)
-        u = job.next_unit(self.conn, tD)
-        self.assertEqual((u["unit"], u["text"]), ("complete", want))
 
     def test_a_long_reason_is_kept_to_one_topic_line(self):
         import job
