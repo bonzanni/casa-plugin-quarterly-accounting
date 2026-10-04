@@ -230,10 +230,8 @@ class Review(StoreCase):
             self.drive(A, deliver=True)
             did = self.conn.execute("SELECT delivery_id FROM deliveries").fetchone()[0]
             out = qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did})
-            n = len(b.deposits)
         self.assertIsNone(out["package"])
         self.assertIn("no longer waiting", out["refused"])
-        self.assertEqual(n, len([d for d in b.deposits]))     # nothing more deposited
         self.assertEqual(sum(1 for d in b.deposits if d["slot"] == "package"), 1)
 
     def test_post_package_checks_the_package_token(self):

@@ -234,10 +234,105 @@ class Verdict(_Q3):
         self.assertNotIn("All good", [x["label"] for x in b.proposal()["buttons"]])
 
     def test_a_verdict_on_a_pid_the_rendering_did_not_list_refuses(self):
+        # final fix wave T5-a: the key matches (render_id, action, pid), so the key check
+        # passes and the rendering's render_items check is what refuses
         import keys, db
         fx = self.sheet_fixture()
         prop = self.sheet()
-        args = dict(prop["buttons"][0]["call"]["arguments"])
+        rid = prop["buttons"][0]["call"]["arguments"]["render_id"]
+        stray, key = fx["pid"] + 999, keys.mint()
+        with db.tx(self.conn):
+            keys.store_render(self.conn, rid, "right", stray, key)
+        spent, real = [], keys.spend_render
+
+        def spy(*a):
+            real(*a)
+            spent.append(a[1:])
+        self.patch(keys, "spend_render", spy)
         import tools, qa_server  # noqa: F401
-        out = qa_server.TOOLS["verdict"]["fn"](dict(args, action="right", pid=fx["pid"] + 999))
+        out = qa_server.TOOLS["verdict"]["fn"]({"render_id": rid, "action": "right",
+                                                "pid": stray, "key": key})
         self.assertEqual(out["receipt"], keys.NO_LONGER)
+        self.assertEqual(len(spent), 1)                  # the key check passed
+        self.assertIsNone(self.conn.execute("SELECT spent_at FROM render_keys WHERE key=?",
+                                            (key,)).fetchone()[0])   # the spend rolled back
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE author='operator'"
+                                           ).fetchone()[0], 0)
+
+    def item(self, pid):
+        import posting
+        with FakeBroker() as b:
+            out = posting.show_view(self.conn, view="item", pid=pid)
+        return out, b.proposal()
+
+    def test_right_on_an_item_confirms_its_pairing(self):
+        """T5-b: taps._apply_one `right`."""
+        fx = self.sheet_fixture()
+        _, prop = self.item(fx["pid"])
+        out = self.tap(prop, "Right")
+        self.assertTrue(out["receipt"].startswith("Confirmed "), out)
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM log WHERE author='operator' AND kind='pair' AND match_id=?",
+            (fx["match_id"],)).fetchone()[0], 1)
+
+    def test_no_invoice_needed_exempts_and_drops_the_guess(self):
+        """T5-b: taps._apply_one `no-invoice`."""
+        fx = self.sheet_fixture()
+        _, prop = self.item(fx["pid"])
+        out = self.tap(prop, "No invoice needed")
+        self.assertIn("needs no document; dropped its pairing.", out["receipt"])
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM log WHERE author='operator' AND kind='exempt'").fetchone()[0], 1)
+        _, again = self.item(fx["pid"])
+        self.assertEqual([x["label"] for x in again["buttons"]], ["What's missing"])
+
+    def candidates_only(self):
+        """A payment with two displayed candidates and no current pairing."""
+        import db
+        self.sheet_fixture()
+        self.row(90, counterparty="Two Fits", amount_minor=5000, booking_date="2026-09-10",
+                 value_date="2026-09-10")
+        pid = self.lineage_for(90)
+        self.classify(pid, {"software"})
+        self.settle(pid)
+        mids = []
+        docs = [self.doc(counterparty="Two Fits", issuer=f"Issuer {n}", document_number=n,
+                         amount_minor=5000, document_date="2026-09-09")
+                for n in ("INV-A", "INV-B")]
+        with db.tx(self.conn):
+            for doc in docs:
+                mid = self.conn.execute(
+                    "INSERT INTO matches(pid_created, doc_id, label, runners_up_json,"
+                    " created_seq) VALUES (?,?,'clean','[]',?)",
+                    (pid, doc, db.next_seq(self.conn))).lastrowid
+                self.conn.execute("INSERT INTO match_state(match_id, pid, doc_id, state,"
+                                  " author, activation) VALUES (?,?,?,'conflicted','auto',0)",
+                                  (mid, pid, doc))
+                mids.append(mid)
+        return pid, mids
+
+    def test_an_item_with_no_pairing_offers_only_no_invoice_needed(self):
+        """T5-b: the `none` button set (the `paired` set is pinned above)."""
+        import json as _json
+        pid, _ = self.candidates_only()
+        out, prop = self.item(pid)
+        scope = _json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                              " render_id=?", (out["render_id"],)).fetchone()[0])
+        self.assertEqual(scope["item_state"], "none")
+        self.assertEqual([x["label"] for x in prop["buttons"]], ["No invoice needed"])
+
+    def test_wrong_with_no_current_pairing_sets_every_shown_candidate_aside(self):
+        """T5-b: taps._apply_one `wrong` over candidates (reject_all_in_tx)."""
+        import db, taps, views, work
+        pid, mids = self.candidates_only()
+        out, _ = self.item(pid)
+        views.mark_rendering_delivered(self.conn, out["render_id"])
+        d = work.describe(self.conn, pid)
+        self.assertIsNone(d["current"])
+        self.assertEqual(sorted(c["match_id"] for c in d["candidates"]), sorted(mids))
+        with db.tx(self.conn):
+            res, line = taps._apply_one(self.conn, self.grant(), out["render_id"], "wrong", d)
+        self.assertEqual(sorted(res["set_aside"]), sorted(mids))
+        self.assertTrue(line.startswith("Set aside both candidates for "), line)
+        self.assertEqual(sorted(r[0] for r in self.conn.execute(
+            "SELECT match_id FROM log WHERE kind='unpair' AND author='operator'")), sorted(mids))

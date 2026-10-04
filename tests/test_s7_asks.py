@@ -49,6 +49,70 @@ class Asks(StoreCase):
         self.assertTrue(s["live_run"])
         self.assertEqual(s["line"], asks.LINES["check"])
 
+    def test_job_status_stamps_completed_at_only_when_done(self):
+        """T8-a (§10): job_status stamps the run complete exactly when it may end — a run
+        completed through a topic turn is not live, so its asks are closed at the next
+        claim; a run that may not end stays live."""
+        import asks, db, job
+        self.bind()
+        job.claim(self.conn, "aaaaaaaa-1")
+        with db.tx(self.conn):
+            self.conn.execute("INSERT OR IGNORE INTO runs(job_id, passes) VALUES (?, 0)",
+                              ("aaaaaaaa-1",))
+        asks.request_work(self.conn, "check", "operator")      # work left: not done
+        self.assertFalse(job.status(self.conn, "aaaaaaaa-1")["done"])
+        self.assertIsNone(self.conn.execute("SELECT completed_at FROM runs WHERE job_id=?",
+                                            ("aaaaaaaa-1",)).fetchone()[0])
+        self.run_job_to_complete("bbbbbbbb-2")
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE runs SET completed_at=NULL WHERE job_id=?",
+                              ("bbbbbbbb-2",))
+        out = job.status(self.conn, "bbbbbbbb-2")
+        self.assertTrue(out["done"])
+        stamp = self.conn.execute("SELECT completed_at FROM runs WHERE job_id=?",
+                                  ("bbbbbbbb-2",)).fetchone()[0]
+        self.assertIsNotNone(stamp)
+        job.status(self.conn, "bbbbbbbb-2")                   # a second answer keeps it
+        self.assertEqual(self.conn.execute("SELECT completed_at FROM runs WHERE job_id=?",
+                                           ("bbbbbbbb-2",)).fetchone()[0], stamp)
+        self.assertFalse(asks._live_run(self.conn))
+
+    def test_ask_state_taken_done_and_refusals(self):
+        """T8-a: a taken work ask says its line; a finished one is done; unknown kinds and
+        ids are refused in words."""
+        import asks, db
+        r = asks.request_work(self.conn, "check", "operator")
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE work_requests SET state='taken' WHERE request_id=?",
+                              (r["request_id"],))
+        s = asks.ask_state(self.conn, "work", r["request_id"])
+        self.assertEqual((s["state"], s["line"]), ("taken", asks.LINES["check"]))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE work_requests SET state='done' WHERE request_id=?",
+                              (r["request_id"],))
+        s = asks.ask_state(self.conn, "work", r["request_id"])
+        self.assertEqual((s["state"], s["line"]), ("done", asks.DONE_ALREADY))
+        for kind, rid in (("email", r["request_id"]), ("work", 9999)):
+            with self.assertRaises(db.Refusal):
+                asks.ask_state(self.conn, kind, rid)
+
+    def test_ask_state_for_a_package_ask(self):
+        """T8-a: a package ask being checked is `taken` with its own line; delivered, done."""
+        import asks, db
+        p = asks.request_package(self.conn, "2026-Q3")
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE package_requests SET state='snapshot' WHERE"
+                              " request_id=?", (p["request_id"],))
+        s = asks.ask_state(self.conn, "package", p["request_id"])
+        self.assertEqual(s["state"], "taken")
+        self.assertIn("for Q3 2026", s["line"])
+        self.assertIn("the package follows", s["line"])
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE package_requests SET state='delivered' WHERE"
+                              " request_id=?", (p["request_id"],))
+        self.assertEqual(asks.ask_state(self.conn, "package", p["request_id"])["line"],
+                         asks.DONE_ALREADY)
+
     def test_desk_filing_needs_no_token_and_resident_is_refused(self):
         import documents, db
         path = self.publish("inv.pdf", b"%PDF-1.4 x", producer="casa")
