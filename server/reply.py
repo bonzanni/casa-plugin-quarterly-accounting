@@ -347,15 +347,34 @@ def _survivor(conn, pid):
         return pid
 
 
+class _Lacks(Exception):
+    """r5: the bound view rendering lacks a grammar-read field (an earlier version never
+    recorded it): the clause reading it is refused, with a fresh rendering as recovery."""
+
+    def __init__(self, field):
+        super().__init__(field)
+        self.field = field
+
+
+_EMPTY = {"names": {}, "refs": {}, "proposed": [], "offers": [], "next": None, "walk": None,
+          "quarter": None, "pid": None}
+
+
 class _Scope:
     """THE bound rendering R's own record (binding §1): every resolution step reads only
     this — R's render_items rows (`rev`, `mrevs`, by the pid R recorded) and the scope
     fields the grammar reads (views.FACT_FIELDS; an AST pin holds this module to that
-    list). With no R it is empty. A recorded pid maps to its lineage survivor in `pids`,
-    `names` and `refs`; R recorded no row for the survivor, so a merge fails closed at bind
-    (matches._operator_pid's shape)."""
+    list), each through ONE helper, `get`. With no R it is empty. A recorded pid maps to its
+    lineage survivor in `pids`, `names` and `refs`; R recorded no row for the survivor, so a
+    merge fails closed at bind (matches._operator_pid's shape).
+
+    r5 (generalising r3 #4's legacy `next`): a VIEW rendering whose scope lacks a field
+    raises _Lacks on its read — the clause is refused with a fresh rendering of that view;
+    an explicitly present empty value stays empty. Other kinds (alerts) never carry these
+    fields: absent reads as empty."""
 
     def __init__(self, conn, bound):
+        self.conn = conn
         self.rid = bound["render_id"] if bound is not None else None
         self.kind = bound["kind"] if bound is not None else None
         scope = json.loads(bound["scope_json"]) if bound is not None else {}
@@ -364,18 +383,46 @@ class _Scope:
         self.rev = {r["pid"]: r["projection_revision"] for r in rows}
         self.mrevs = {r["pid"]: json.loads(r["match_revisions_json"]) for r in rows}
         self.pids = {_survivor(conn, p) for p in self.rev}
-        self.names = {str(_survivor(conn, int(k))): v
-                      for k, v in (scope.get("names") or {}).items()}
-        self.refs = {}
-        for k, v in (scope.get("refs") or {}).items():
-            self.refs[k] = {_survivor(conn, p) for p in (v if isinstance(v, list) else [v])}
-        self.proposed = list(scope.get("proposed") or [])
-        self.offers = list(scope.get("offers") or [])
-        self.has_next = "next" in scope        # a pre-S7 page stored no `next` (r3 #4)
-        self.next = scope.get("next")
-        self.walk = scope.get("walk")
-        self.quarter = scope.get("quarter")
-        self.pid = scope.get("pid")
+        self._vals = {"names": scope.get("names"), "refs": scope.get("refs"),
+                      "proposed": scope.get("proposed"), "offers": scope.get("offers"),
+                      "next": scope.get("next"), "walk": scope.get("walk"),
+                      "quarter": scope.get("quarter"), "pid": scope.get("pid")}
+        self._present = {k for k in self._vals if k in scope}
+
+    def get(self, field):
+        """THE read of a grammar field of R (r5)."""
+        if field not in self._present:
+            if self.kind in views.VIEWS:
+                raise _Lacks(field)
+            return _EMPTY[field]
+        v = self._vals[field]
+        if field == "names":
+            return {str(_survivor(self.conn, int(k))): n for k, n in (v or {}).items()}
+        if field == "refs":
+            return {k: {_survivor(self.conn, p) for p in (ps if isinstance(ps, list) else [ps])}
+                    for k, ps in (v or {}).items()}
+        if field in ("proposed", "offers"):
+            return list(v or [])
+        return v
+
+    def recovery(self, more=False) -> dict:
+        """The show_view arguments of a fresh rendering of R's view (r5; page 1 for "more",
+        as r3 #4's legacy page answered)."""
+        out = {"view": self.kind}
+        if self._vals["quarter"]:
+            out["quarter"] = self._vals["quarter"]
+        if self.kind == "item":
+            out["pid"] = self._vals["pid"]
+        if more:
+            out["page"] = 1
+        return out
+
+    names = property(lambda self: self.get("names"))
+    refs = property(lambda self: self.get("refs"))
+    proposed = property(lambda self: self.get("proposed"))
+    offers = property(lambda self: self.get("offers"))
+    next = property(lambda self: self.get("next"))
+    walk = property(lambda self: self.get("walk"))
 
 
 class _Run:
@@ -404,6 +451,15 @@ class _Run:
             return f"“{views.field(phrase)}” isn't on the message you replied to — nothing applied."
         return (f"“{views.field(phrase)}” isn't on the last list I sent — reply to the list "
                 "you mean.")
+
+    def lacks(self, clause, more=False) -> None:
+        """r5: the clause read a field the bound rendering lacks — refused in plain words,
+        with a fresh rendering of its view as the recovery (once per reading)."""
+        self.understood = True
+        self.note(f"“{views.field(clause)}”: {views.LACKS}", unresolved=not more)
+        rec = {"show_view": self.scope.recovery(more)}
+        if rec not in self.instructions:
+            self.instructions.append(rec)
 
     def recorded(self, d, cur) -> bool:
         """§2 #10: the pairing a named verdict judges is the one R recorded — False when R
@@ -576,29 +632,13 @@ def _run(conn, text, grant, bound, quoted=False) -> "_Run":
     sheet_wide = []
     for clause, verb, m in parsed:
         if verb == "all_good":
-            sheet_wide.append(m)          # R5 (Terra): applied after every other clause
+            sheet_wide.append((clause, m))     # R5 (Terra): applied after every other clause
             run.understood = True
             continue
-        if clause.endswith("?"):
-            run.note(f"“{views.field(clause)}” is a question — nothing changed for it.",
-                     unresolved=False)
-            continue
-        if _NUMBERED.fullmatch(clause):
-            run.note(f"“{views.field(clause)}”: there are no numbered lines — name the payee, "
-                     "e.g. \"the Zapier one is wrong\".")
-            continue
-        if verb is None:
-            names = _targets(clause)
-            if names and all(_resolve(run, n, items)[0] is not None for n in names):
-                run.understood = True
-                pretty = " and ".join(views.field(n.title() if n.islower() else n) for n in names)
-                run.note(f"Nothing applied for “{views.field(clause)}”: are they wrong or good? "
-                         f"Say \"{pretty} are wrong\".")
-            else:
-                run.note(f"I didn't understand “{views.field(clause)}” — nothing applied for it.")
-            continue
-        run.understood = True
-        _apply(conn, run, verb, m, items)
+        try:
+            _clause(conn, run, clause, verb, m, items)
+        except _Lacks:
+            run.lacks(clause, more=verb == "show")
     # A sheet as a whole is approved last, and only for what no other clause judged:
     # "All good. The Zapier one is wrong." unpairs Zapier and confirms the rest. Any
     # other clause left unresolved (ambiguous, stale, refused) and it approves nothing
@@ -608,12 +648,39 @@ def _run(conn, text, grant, bound, quoted=False) -> "_Run":
         # R8 (Astra): a collective ("those two guesses", "all those proposals") beside a
         # verdict on a single pairing may refer back to the pairings just judged —
         # only the bare "all good" names the whole sheet whatever else is said
-        collective = any(m.re is not _ALL_GOOD for m in sheet_wide)
+        collective = any(m.re is not _ALL_GOOD for _, m in sheet_wide)
         if run.unresolved > 0 or (collective and run.named):
             run.excepted = True
-        run.stated = set().union(*(_counts(m.group(0)) for m in sheet_wide))
-        _apply(conn, run, "all_good", sheet_wide[0], items)
+        run.stated = set().union(*(_counts(m.group(0)) for _, m in sheet_wide))
+        try:
+            _apply(conn, run, "all_good", sheet_wide[0][1], items)
+        except _Lacks:
+            run.lacks(sheet_wide[0][0])
     return run
+
+
+def _clause(conn, run, clause, verb, m, items) -> None:
+    """One clause that is not a sheet-wide approval."""
+    if clause.endswith("?"):
+        run.note(f"“{views.field(clause)}” is a question — nothing changed for it.",
+                 unresolved=False)
+        return
+    if _NUMBERED.fullmatch(clause):
+        run.note(f"“{views.field(clause)}”: there are no numbered lines — name the payee, "
+                 "e.g. \"the Zapier one is wrong\".")
+        return
+    if verb is None:
+        names = _targets(clause)
+        if names and all(_resolve(run, n, items)[0] is not None for n in names):
+            run.understood = True
+            pretty = " and ".join(views.field(n.title() if n.islower() else n) for n in names)
+            run.note(f"Nothing applied for “{views.field(clause)}”: are they wrong or good? "
+                     f"Say \"{pretty} are wrong\".")
+        else:
+            run.note(f"I didn't understand “{views.field(clause)}” — nothing applied for it.")
+        return
+    run.understood = True
+    _apply(conn, run, verb, m, items)
 
 
 def _is_quote(quoted) -> bool:
@@ -821,15 +888,11 @@ def _apply(conn, run, verb, m, items):
             # a desk turn is a fresh session (S7 §2): it cannot know the cursor, so the
             # bound rendering's own `next` is returned as ready show_view arguments — it
             # names R as `prev` (binding V1)
+            # r3 #4, generalised in r5: a page that stored no `next` raises _Lacks here and is
+            # answered with a fresh page 1 of its view (an explicit null is "nothing more")
             sc = run.scope
             nxt = sc.next
-            if run.bound is not None and sc.kind in views.VIEWS and not sc.has_next:
-                # r3 #4: a page delivered before S7 stored no `next` (an explicit null is
-                # "nothing more"): a fresh paged view of the same view and quarter
-                nxt = {"view": sc.kind, "quarter": sc.quarter, "page": 1}
-                if sc.kind == "item":
-                    nxt["pid"] = sc.pid
-            elif nxt and sc.kind == "item" and sc.walk:
+            if nxt and sc.kind == "item" and sc.walk:
                 nxt = dict(nxt, walk=sc.walk)            # r3 #5: as the More button does
             if nxt:
                 run.instructions.append({"show_view": nxt})

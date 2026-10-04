@@ -1006,6 +1006,138 @@ class QuotedResend(_Q3):
 
 
 # ---------------------------------------------------------------------------------------
+# r5 (Astra S2) — a rendering that LACKS a field a clause reads refuses that clause
+# ---------------------------------------------------------------------------------------
+class LegacyFields(_Q3):
+    """Round 5 ruling: a reading bound to a view rendering whose scope lacks a grammar-read
+    field (views.FACT_FIELDS) refuses the clause that reads it in plain words, with a fresh
+    show_view of that rendering's view and quarter (pid for an item) as the recovery. An
+    explicitly present empty value stays empty. Generalises r3 #4's legacy `next`."""
+
+    def _legacy(self, rid, keep=("quarter", "pid", "names", "refs")):
+        """What v0.9.0 (a404990) stored for a view: no first-line tag; quarter and pid, and
+        names/refs only when non-empty — no proposed, next, offers or walk."""
+        import db
+        self.make_legacy(rid)
+        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                             " render_id=?", (rid,)).fetchone()[0])
+        old = {k: v for k, v in scope.items() if k in keep and (k in ("quarter", "pid") or v)}
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
+                              (db.canonical(old), rid))
+
+    def _migrated(self):
+        """The store copied into the v10 schema and opened (10 -> 11), as
+        review_migrated_sheet.py does."""
+        import db
+        import tools
+        from tests.schema_history import DDL_V10
+        path = self.tmp / "schema10.sqlite"
+        c = sqlite3.connect(path)
+        c.executescript(DDL_V10)
+        tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'"
+                                          " AND name NOT LIKE 'sqlite_%'")]
+        for table in tables:
+            cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
+            names = ",".join(cols)
+            rows = self.conn.execute(f"SELECT {names} FROM {table}").fetchall()
+            c.execute(f"DELETE FROM {table}")
+            c.executemany(f"INSERT INTO {table} ({names}) VALUES"
+                          f" ({','.join('?' for _ in cols)})", [tuple(r) for r in rows])
+        c.execute("UPDATE meta SET value='10' WHERE key='schema_version'")
+        c.commit()
+        c.close()
+        migrated = db.open_store(path)
+        self.addCleanup(migrated.close)
+        old = tools._CONN
+        tools._CONN = migrated
+        self.addCleanup(setattr, tools, "_CONN", old)
+        return migrated
+
+    def test_all_good_on_a_migrated_v090_sheet_refuses_with_a_recovery(self):
+        """Astra r5 S2 (review_migrated_sheet.py): the sheet has no `proposed`."""
+        import views
+        f = self.sheet_fixture()
+        self._legacy(f["render_id"])
+        quote = self.text_of(f["render_id"])
+        m = self._migrated()
+        with FakeBroker() as b:
+            out = call("propose_reading", text="all good", quoted=quote)
+            self.assertEqual(len(b.deposits), 0)
+            self.assertEqual(m.execute("SELECT count(*) FROM readings").fetchone()[0], 0)
+            self.assertEqual(m.execute("SELECT count(*) FROM log WHERE author='operator'"
+                                       ).fetchone()[0], 0)
+            rec = [i["show_view"] for i in out["instructions"]
+                   if isinstance(i, dict) and "show_view" in i]
+            self.assertEqual(rec, [{"view": "check", "quarter": "2026-Q3"}], out)
+            self.assertIn(views.LACKS, out["say"])
+            call("show_view", **rec[0])                       # the recovery, then its quote
+            out = call("propose_reading", text="all good",
+                       quoted=views.unesc(b.proposal()["text"]))
+            self.assertIsNotNone(out["reading"])
+            tap(b.proposal(), "Apply")
+        self.assertEqual(m.execute("SELECT count(*) FROM readings").fetchone()[0], 1)
+        self.assertEqual(m.execute("SELECT count(*) FROM log WHERE author='operator'"
+                                   ).fetchone()[0], 1)
+
+    def test_a_named_verdict_on_a_rendering_without_names(self):
+        import db
+        import views
+        f = self.sheet_fixture()
+        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                             " render_id=?", (f["render_id"],)).fetchone()[0])
+        del scope["names"]
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
+                              (db.canonical(scope), f["render_id"]))
+        out, _ = self.propose("the Zapier one is wrong", quoted=self.text_of(f["render_id"]))
+        self.assertIsNone(out["reading"])
+        self.assertIn(views.LACKS, out["say"])
+        self.assertIn({"show_view": {"view": "check", "quarter": "2026-Q3"}},
+                      out["instructions"])
+        self.assertEqual(self.operator_rows(), 0)
+
+    def test_an_item_rendering_without_refs_recovers_its_item(self):
+        import views
+        f = self.sheet_fixture()
+        r = views.build_review(self.conn, view="item", pid=f["pid"])
+        views.mark_rendering_delivered(self.conn, r["render_id"])
+        self._legacy(r["render_id"])
+        out, _ = self.propose("the Zapier one is wrong", quoted=self.text_of(r["render_id"]))
+        self.assertIsNone(out["reading"])
+        self.assertIn({"show_view": {"view": "item", "quarter": "2026-Q3", "pid": f["pid"]}},
+                      out["instructions"])
+        self.assertEqual(self.operator_rows(), 0)
+
+    def test_a_present_empty_value_stays_empty(self):
+        import db
+        f = self.sheet_fixture()
+        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                             " render_id=?", (f["render_id"],)).fetchone()[0])
+        self.assertIn("names", scope)
+        self.assertIn("refs", scope)                  # composed explicitly, even when empty
+        self.assertIn("offers", scope)
+        scope["names"] = {}
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
+                              (db.canonical(scope), f["render_id"]))
+        out, prop = self.propose("the Zapier one is wrong", quoted=self.text_of(f["render_id"]))
+        self.assertIsNotNone(out["reading"])          # stored names still resolve it
+        self.assertEqual(scope["refs"], {})
+
+    def test_every_view_composes_every_grammar_field(self):
+        import views
+        f = self.sheet_fixture()
+        for view in views.VIEWS:
+            kw = {"pid": f["pid"]} if view == "item" else {"quarter": "2026-Q3"}
+            r = views.build_review(self.conn, view=view, **kw)
+            scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                                 " render_id=?", (r["render_id"],)).fetchone()[0])
+            with self.subTest(view=view):
+                self.assertEqual(set(views.FACT_FIELDS) - set(scope), set())
+
+
+# ---------------------------------------------------------------------------------------
 # Red case 17 — grep pins; §1's one "seen" predicate
 # ---------------------------------------------------------------------------------------
 class GrepPins(unittest.TestCase):

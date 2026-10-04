@@ -1192,6 +1192,10 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
         seen = {str(p): field_raw(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
         if seen:
             scope["names"] = seen
+    # r5: every grammar-read field (FACT_FIELDS) is stored, an empty one explicitly — a
+    # field a rendering LACKS is one an earlier version never recorded (reply._Lacks)
+    for k, empty in (("names", {}), ("refs", {}), ("offers", []), ("walk", None)):
+        scope.setdefault(k, empty)
     conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                  " membership_json) VALUES (?,?,?,?,?,?)",
                  (rid, view, db.canonical(scope), db.now(), text, json.dumps(members)))
@@ -1310,6 +1314,8 @@ QUOTE_CAP = 2000                   # Casa quotes a post's first 2,000 characters
 FACT_FIELDS = ("names", "refs", "proposed", "offers", "next", "walk", "quarter", "pid")
 AMBIGUOUS = "I sent more than one version of that list — reply to the newest one."
 UNMATCHED = "I can't find the message you replied to — here is the list as it is now."
+LACKS = ("that message is from an earlier version of me and lacks what this needs — here is "
+         "the list as it is now; nothing applied for it.")
 
 
 class QuoteRefusal(Exception):

@@ -564,7 +564,7 @@ class StoreCase(TempEnv):
             self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
                               " delivered_at, text, membership_json, delivered_seq)"
                               " VALUES (?,?,?,?,?,?,?,?)",
-                              (rid, "status", "{}", db.now(), db.now(), "",
+                              (rid, "status", S7_EMPTY_SCOPE, db.now(), db.now(), "",
                                json.dumps(list(pids)), db.next_seq(self.conn)))
             for pid in pids:
                 prev = self.conn.execute("SELECT revision FROM projections WHERE pid=?",
@@ -587,6 +587,12 @@ class StoreCase(TempEnv):
     def snapshot(self, pid):
         import lineage
         return lineage.live_row(self.conn, lineage.projection(self.conn, pid))
+
+
+# what an S7 rendering stores for its grammar-read fields when it prints nothing that fills
+# them (reply r5: a view that LACKS one was composed by an earlier version)
+S7_EMPTY_SCOPE = ('{"names": {}, "next": null, "offers": [], "pid": null, "proposed": [],'
+                  ' "quarter": null, "refs": {}, "walk": null}')
 
 
 def untag(text: str) -> str:
