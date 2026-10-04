@@ -5,6 +5,7 @@ instance switched mid-pass after the reset acknowledgement stops the pass.
 The relay tests drive the registered tools (qa_server.TOOLS) against a synthetic bank,
 as the round's reproductions did (Astra, /tmp/s2-review-XQEBYB/review_repro.py)."""
 import datetime
+import unittest
 
 from tests._base import StoreCase, apply_now
 from tests.sim_job import JobDriver
@@ -147,52 +148,20 @@ class InformationalPages(Tools):
     the R5/R6 non-binding boundary: "send it again" binds to the offer last delivered
     (§6.3), whoever handed it out."""
 
-    def resent(self):
-        before = self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]
-        again = self.call("stage_for_delivery", channel="telegram", resend=True)
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
-                         before + 1)
-        return self.conn.execute("SELECT package_id FROM deliveries WHERE delivery_id=?",
-                                 (again["delivery_id"],)).fetchone()[0]
+    # S7-merge: test_an_offer_relayed_in_an_operators_turn_is_resent and
+    # test_astras_q2_offer_after_a_q3_offer_resends_q2 are deleted. Task 6 rewrote them for
+    # §9's deleted R5/R6 boundary (NEWER_SINCE), and both were built on job_report, which §9
+    # also deletes (the job posts its own results); the offer they pinned has no hand-out
+    # left to relay. "Send it again" binding to the last delivered offer stays pinned in
+    # LastDelivered and in the Task 11 skip below.
 
-    def test_an_offer_relayed_in_an_operators_turn_is_resent(self):
-        """The resend offer, handed out by a no-id job_report (an operator's turn) and
-        delivered: "send it again" resends the offered package (it was the boundary R6
-        refused at; §9 deletes it)."""
-        pkg = self.uncertain_package()
-        relay = self.call("job_report")
-        self.assertIn("send it again", relay["speak"]["text"])
-        self.deliver(relay)
-        self.assertEqual(self.resent(), pkg["package_id"])
-
-    def test_astras_q2_offer_after_a_q3_offer_resends_q2(self):
-        """Astra r2 S1: a Q3 resend offer, then a Q2 offer delivered after it. "Send it
-        again" never falls back to the Q3 offer: it resends the one last seen (§6.3)."""
-        self.uncertain_package("2026-Q3", A)
-        self.deliver(self.call("job_report", job_id=A, status="ok"))
-        q2 = self.uncertain_package("2026-Q2", B)
-        r2 = self.call("job_report")
-        self.assertIn("send it again", r2["speak"]["text"])
-        self.deliver(r2)
-        self.assertEqual(self.resent(), q2["package_id"])
-
-    def uncertain_package(self, quarter="2026-Q3", job_id=A):
-        self.call("request_package", quarter=quarter, channel="telegram")
-        self.until(self.call("job_next", job_id=job_id), "complete", job_id=job_id)
-        tok = self.call("job_report", job_id=job_id, status="ok")["continue"]["package_token"]
-        pkg = self.call("build_quarterly_package", quarter=quarter, package_token=tok)
-        staged = self.call("stage_for_delivery", channel="telegram",
-                           package_id=pkg["package_id"], package_token=tok)
-        self.call("record_delivery", delivery_id=staged["delivery_id"], outcome="uncertain",
-                  package_token=tok)
-        return pkg
-
+    @unittest.skip("S7: re-enabled in Task 11")
     def test_a_handover_page_after_the_resend_offer_keeps_it(self):
         """Astra's reproduction: an uncertain package send, then a finished handover;
         `speak` (the resend offer) and the handover page, relayed on the job's
         notification, delivered in that order. "Send it again" still resends the
         offered package."""
-        self.call("request_package", quarter="2026-Q3", channel="telegram")
+        self.call("request_package", quarter="2026-Q3")
         self.until(self.call("job_next", job_id=A), "complete")
         tok = self.call("job_report")["continue"]["package_token"]
         pkg = self.call("build_quarterly_package", quarter="2026-Q3", package_token=tok)
@@ -214,6 +183,7 @@ class InformationalPages(Tools):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
                          before + 1)
 
+    @unittest.skip("S7: re-enabled in Task 10")     # S7-merge: job_report is gone (§9)
     def test_all_good_after_a_handover_page_binds_to_the_sheet_before_it(self):
         with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
             u = self.until(self.start(2), "judge")
@@ -311,6 +281,7 @@ class OperatorTurnRelay(Tools):
     # refusal at a non-binding rendering, a mechanism §9 deletes (the quoted binding and
     # the proposal shown before Apply replace it, §8).
 
+    @unittest.skip("S7: re-enabled in Task 10")     # S7-merge: job_report is gone (§9)
     def test_a_notification_relay_still_binds(self):
         p1, p2, old = self.two_checks()
         new = self.deliver(self.call("job_report", job_id=B, status="ok"))[-1]
@@ -319,37 +290,10 @@ class OperatorTurnRelay(Tools):
         self.assertEqual({p for p, _ in pairs}, {p1, p2})
         self.assertEqual({r for _, r in pairs}, {new})
 
-    def binding(self, render_id):
-        return self.conn.execute("SELECT binding FROM renders WHERE render_id=?",
-                                 (render_id,)).fetchone()[0]
-
-    def test_the_latest_hand_out_wins(self):
-        """A result first offered on B's notification (not delivered: the turn was cut),
-        then offered again by a no-id call in an operator's turn, is non-binding; offered
-        once more on a notification, it binds again."""
-        p1, p2, old = self.two_checks()
-        first = self.call("job_report", job_id=B, status="ok")["texts"][-1]["render_id"]
-        self.assertEqual(self.binding(first), 1)
-        again = self.call("job_report")["texts"][-1]["render_id"]
-        self.assertEqual(again, first)                 # the same rendering, re-offered
-        self.assertEqual(self.binding(first), 0)
-        self.call("mark_rendering_delivered", render_id=first)
-        # S7 §9: no boundary — the reading binds to the rendering delivered last
-        apply_now(self.conn, "all good")
-        self.assertEqual({r for _, r in self.operator_pairs()}, {first})
-        self.assertEqual(self.binding(old), 1)
-
-
-    def test_a_notification_re_offer_binds_again(self):
-        """The other direction: first offered by a no-id call, then on a notification."""
-        p1, p2, old = self.two_checks()
-        first = self.call("job_report")["texts"][-1]["render_id"]
-        self.assertEqual(self.binding(first), 0)
-        again = self.call("job_report", job_id=B, status="ok")["texts"][-1]["render_id"]
-        self.assertEqual((again, self.binding(first)), (first, 1))
-        self.call("mark_rendering_delivered", render_id=first)
-        apply_now(self.conn, "all good")
-        self.assertEqual({r for _, r in self.operator_pairs()}, {first})
+    # S7-merge: test_the_latest_hand_out_wins and test_a_notification_re_offer_binds_again
+    # are deleted (§9 deletes this mechanism): both pinned renders.binding, the stamp
+    # job_report's hand-out wrote (1 notification, 0 operator turn); §9 deletes job_report
+    # and leaves the column unused, so nothing writes it any more.
 
 
 class InstanceSwitch(Tools):

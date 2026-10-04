@@ -182,8 +182,7 @@ def reset_store(conn) -> dict:
             db.set_epoch(conn)
             conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
             # S2 §6.3 (Astra plan-r3 S1): with `claims` empty every old job token is refused
-            # (check_claim), and the drain names no job of the wiped store
-            conn.execute("DELETE FROM meta WHERE key='drain'")
+            # (check_claim)
             # the marker row carries the last pass's trigger, id and start time —
             # operator data (fix wave B, Astra S2); the monotonic generation that
             # fences a running pass lives in counters, bumped above

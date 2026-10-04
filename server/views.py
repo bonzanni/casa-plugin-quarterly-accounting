@@ -541,8 +541,7 @@ def _status_notes(conn) -> list:
                    + " checked again once classified.")
     asked = conn.execute("SELECT min(created_at) FROM work_requests WHERE state='queued'"
                          ).fetchone()[0]
-    drain = conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
-    if asked is not None and (drain is None or drain[0] == "none"):
+    if asked is not None:
         out.append(f"A check is waiting to start, asked {passes.ago(asked)}.")
     return out
 

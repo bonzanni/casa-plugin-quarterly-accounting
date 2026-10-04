@@ -449,11 +449,11 @@ class TestAChunkTurnFitsEllensTurn(Check):
         self.seed(1)
         body = self.publish("same.pdf", b"%PDF-1.4 the same bytes")
         a = documents.ingest_document(self.conn, source_path=body, kind="invoice",
-                                      source="gmail", extraction_author="resident",
+                                      source="gmail", extraction_author="desk",
                                       source_ref="m-item")
         body = self.publish("same.pdf", b"%PDF-1.4 the same bytes")
         b = documents.ingest_document(self.conn, source_path=body, kind="invoice",
-                                      source="manual-telegram", extraction_author="resident",
+                                      source="manual-telegram", extraction_author="desk",
                                       source_ref="/inbox/same.pdf")
         self.assertEqual((a["doc_id"], b["created"]), (b["doc_id"], False))
         self.assertEqual(self.swept()["filed_refs"], ["/inbox/same.pdf"])

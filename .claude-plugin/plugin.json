@@ -24,6 +24,9 @@
         "apply_reading": {
           "result": "safe"
         },
+        "ask_state": {
+          "result": "safe"
+        },
         "bind_account": {
           "result": "safe"
         },
@@ -49,9 +52,6 @@
           "result": "safe"
         },
         "job_next": {
-          "result": "safe"
-        },
-        "job_report": {
           "result": "safe"
         },
         "job_status": {
@@ -154,6 +154,7 @@
     },
     "provides_tools": [
       "mcp__plugin_quarterly-accounting_quarterly-accounting__apply_reading",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__ask_state",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__bind_account",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_quarterly_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_review",
@@ -163,7 +164,6 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__import_ledger_export",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__ingest_document",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_next",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__job_report",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_status",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_projections",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_quarter_state",

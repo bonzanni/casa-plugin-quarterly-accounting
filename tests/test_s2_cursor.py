@@ -97,7 +97,7 @@ class CheckPass(StoreCase):
         self.drv.bankfeed.restore_since_install()        # every pass stops at its probes
         for q in ("2025-Q1", "2025-Q2", "2025-Q3", "2025-Q4",
                   "2026-Q1", "2026-Q2", "2026-Q3", "2026-Q4"):
-            asks.request_package(self.conn, q, "telegram")
+            asks.request_package(self.conn, q)
         asks.request_work(self.conn, "check", "operator")
         # one Casa job run begins at most MAX_PASSES_PER_JOB passes (spec §15); the
         # standing retry starts the next job, which takes the rest
