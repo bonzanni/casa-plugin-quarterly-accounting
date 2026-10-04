@@ -261,7 +261,7 @@ render_id>)`; on its receipt, `mark_rendering_delivered(render_id)`. With `accou
 
 The unit carries `quarter`, `package_token` and `request_id`.
 `build_quarterly_package(quarter=<the unit's quarter>, package_token=<its token>, request_id=<its request_id>)`. A refusal
-that the bank was re-read changed nothing: call `job_next`. Then `job_next`.
+that the bank was re-read changed nothing. Then `job_next`.
 
 ### `deliver`
 

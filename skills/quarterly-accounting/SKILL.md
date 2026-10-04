@@ -21,8 +21,9 @@ a withheld notice. Only a receipt means it arrived. A posting tool's answer with
 "How are the books?", "what's missing?", "anything to check?", "show me Q2", "more",
 "all of them", "show item N": `show_view(view=…, quarter=…, page=…, after=…)`, the view
 the question asks for (`status`, `missing`, `check`, `rest`, `older`, `all`, `quarter`,
-`item` with `pid`). For "more" or "all of them", pass the `next` of the view you posted
-last, unchanged. After its receipt, `mark_rendering_delivered(render_id)`. The view carries
+`item` with `pid`). For "more" or "all of them", call `propose_reading` (below), then call
+`show_view` with the arguments the reading returns, unchanged: you cannot know them
+yourself. After its receipt, `mark_rendering_delivered(render_id)`. The view carries
 the operator's buttons; you never press them and never call a button's tool.
 
 ## The operator's words about the books
@@ -36,7 +37,9 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
 - `say`: say it, verbatim, as your answer.
 - `reshow`: `show_view(view="item", pid=…)` for each.
 - `instructions`: do each one:
-  - "more", "all of them", "show the rest", "show older", "show item N": `show_view`;
+  - `{"show_view": {…}}` (for "more", "all of them"): call `show_view` with the arguments
+    the reading returns, exactly;
+  - "show the rest", "show older", "show item N": `show_view`;
   - "check emailed invoices": the check ask below;
   - "rebuild Qn": the package ask below;
   - "resend", "send last": Sending again, below.
@@ -79,7 +82,8 @@ is filed by you, without being asked:
 - "Send me the last package you built (for Qn)": `stage_for_delivery(last_built=true,
   quarter=…)`, then the same.
 - `record_delivery` may return `speak` (a notice) or `note_render_id` (the package's
-  details): `post_results(render_ids=[…])`, then `mark_rendering_delivered` on its receipt.
+  details): `post_results(render_ids=[…])` — `render_ids=[speak.render_id]` or
+  `render_ids=[note_render_id]` — then `mark_rendering_delivered` on its receipt.
 
 ## Setup
 

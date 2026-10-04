@@ -165,8 +165,13 @@ class TestDesk(TempEnv):
     def test_more_and_all_of_them_follow_next(self):
         ans = flat(section(SKILL, "## Answering", "## The operator's words"))
         self.assertIn("`show_view(view=…, quarter=…, page=…, after=…)`", ans)
-        self.assertIn('For "more" or "all of them", pass the `next` of the view you posted '
-                      "last, unchanged.", ans)
+        # final fix wave I-1: a fresh desk session cannot know the last view's `next`;
+        # the reading returns it as show_view arguments
+        self.assertIn('For "more" or "all of them", call `propose_reading` (below), then call '
+                      "`show_view` with the arguments the reading returns, unchanged", ans)
+        words = flat(section(SKILL, "## The operator's words", "## Asks"))
+        self.assertIn('`{"show_view": {…}}` (for "more", "all of them"): call `show_view` with '
+                      "the arguments the reading returns, exactly", words)
         self.assertIn("After its receipt, `mark_rendering_delivered(render_id)`.", ans)
         self.assertIn("you never press them and never call a button's tool", ans)
 
@@ -190,8 +195,10 @@ class TestDesk(TempEnv):
     def test_every_receipt_page_is_sent(self):
         # S7 §5: receipt pages are now render_ids posted by post_results, then marked.
         s = flat(section(SKILL, "## Sending again", "## Setup"))
+        # final fix wave T13-a: which id goes in render_ids is named
         self.assertIn("`record_delivery` may return `speak` (a notice) or `note_render_id` "
-                      "(the package's details): `post_results(render_ids=[…])`, then "
+                      "(the package's details): `post_results(render_ids=[…])` — "
+                      "`render_ids=[speak.render_id]` or `render_ids=[note_render_id]` — then "
                       "`mark_rendering_delivered` on its receipt.", s)
 
     def test_the_quarter_format_and_the_uncertain_offer(self):
