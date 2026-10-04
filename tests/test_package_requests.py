@@ -959,7 +959,8 @@ class TestEveryCallTellsItsOwnNotice(Requests):
     returns that notice in its own `speak`, however many older alerts wait. The audit
     of every place a notice is raised is pinned so a new one cannot go unlisted."""
     RAISERS = {("passes", "_close"), ("delivery", "revoke_superseded_first_sends"),
-               ("delivery", "record_delivery"), ("delivery", "recover_staged")}
+               ("delivery", "record_delivery"), ("delivery", "recover_staged"),
+               ("db", "_settle_staged_email_on_upgrade")}
 
     def test_every_notice_raising_site_is_audited(self):
         import ast

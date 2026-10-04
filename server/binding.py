@@ -143,7 +143,7 @@ _TABLES_TO_WIPE = ("binding", "passes", "probes", "documents", "counterparties",
                    "matches", "log", "match_state", "residue", "renders", "render_items",
                    "shown", "packages", "deliveries", "delivered_rows", "alerts", "pass_steps",
                    "package_requests", "operator_refs", "claims", "work_requests", "credits",
-                   "runs")
+                   "runs", "readings", "render_keys", "account_choices", "post_offers")
 
 
 ERASE_REPORT_KEEPS = (
