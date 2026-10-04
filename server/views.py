@@ -1251,18 +1251,20 @@ def _qnorm(s: str) -> str:
 
 def bound_rendering(conn, quoted):
     """S7 §8: the rendering a reading binds to — the most recently delivered one (any kind
-    that offers something) whose displayed text, normalised, has the same first 200
-    characters as the quoted post (Casa quotes a post's first 2,000 characters, §2: a
-    shorter post is quoted whole, so a later sheet that merely extends it never matches);
-    with no quote, or no match among the latest 200, db.last_delivered."""
-    q = _qnorm(quoted)[:QUOTE_UNITS] if isinstance(quoted, str) else ""
+    that offers something) whose displayed text's first 200 characters, normalised, begin
+    the quoted post (Casa quotes a post's first 2,000 characters, §2). The quote may be
+    longer than the rendering: a post joins up to job.POST_MAX renderings (§5), and a
+    quote of it binds to its first, even one shorter than 200 characters. With no quote,
+    or no match among the latest 200, db.last_delivered."""
+    q = _qnorm(quoted) if isinstance(quoted, str) else ""
     if q:
         for r in conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND kind"
                               " NOT IN (%s) ORDER BY delivered_seq DESC, delivered_at DESC,"
                               " rowid DESC LIMIT %d"
                               % (",".join("?" * len(db.INFORMATIONAL_KINDS)), BOUND_SCAN),
                               db.INFORMATIONAL_KINDS):
-            if _qnorm(unesc(r["text"] or ""))[:QUOTE_UNITS] == q:
+            head = _qnorm(unesc(r["text"] or ""))[:QUOTE_UNITS]
+            if head and q.startswith(head):
                 return r
     return db.last_delivered(conn)
 
@@ -1284,12 +1286,10 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
         conn.execute("UPDATE renders SET delivered_at=?, delivered_seq=? WHERE render_id=?",
                      (now, db.next_seq(conn), render_id))
         scope = json.loads(r["scope_json"])
-        # a NON-binding rendering (handed out last by an operator turn's job_report:
-        # diff round 1, R5) is recorded delivered but never becomes any payment's shown
-        # revision (`shown`, a reading's fallback binding); S7 §9 retires the column
-        binds = r["binding"] is None or r["binding"] == 1
-        for it in (conn.execute("SELECT * FROM render_items WHERE render_id=?",
-                                (render_id,)).fetchall() if binds else ()):
+        # every delivered rendering's items become `shown` (S7 §9 retires renders.binding,
+        # the stamp job_report's hand-out wrote: it is ignored, whatever it holds)
+        for it in conn.execute("SELECT * FROM render_items WHERE render_id=?",
+                               (render_id,)).fetchall():
             mrevs = it["match_revisions_json"]
             if scope.get("continues"):
                 # a later page of one item view: the operator has now been shown the

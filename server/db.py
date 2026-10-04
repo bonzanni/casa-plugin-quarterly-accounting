@@ -676,11 +676,12 @@ def next_seq(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT value FROM counters WHERE name='seq'").fetchone()[0]
 
 
-# Renderings that offer nothing to answer (S2 §6.4): a handover's case lines and a stop
-# line. Delivered after a view or an offer, they never take the operator's reply from it
+# Renderings that offer nothing to answer (S2 §6.4): a handover's case lines, a stop
+# line, a package's details note and the run's asks-waiting line (S7 §4.2, §6.1).
+# Delivered after a view or an offer, they never take the operator's reply from it
 # (diff round 1, R3; Astra S2: a handover page delivered after `speak`'s resend offer
 # made "send it again" refuse).
-INFORMATIONAL_KINDS = ("handover", "job-stop")
+INFORMATIONAL_KINDS = ("handover", "job-stop", "package-note", "job-left")
 
 
 def last_delivered(conn: sqlite3.Connection):

@@ -65,6 +65,87 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
 
 
+def post_results(conn, render_ids) -> dict:
+    """§5: post stored renderings as ONE operator_message (joined by a blank line) —
+    the job's `post` unit, or a desk turn's notice to post. Already delivered ones are
+    skipped; with none left, nothing is deposited (the no-post shape)."""
+    import job
+    if (not isinstance(render_ids, list) or not 1 <= len(render_ids) <= job.POST_MAX
+            or not all(isinstance(r, str) for r in render_ids)):
+        raise db.Refusal(f"render_ids is a list of 1 to {job.POST_MAX} render ids")
+    with db.tx(conn):
+        rows = []
+        for rid in render_ids:
+            r = conn.execute("SELECT render_id, text, delivered_at FROM renders WHERE"
+                             " render_id=?", (rid,)).fetchone()
+            if r is None:
+                raise db.Refusal(f"there is no rendering {rid}")
+            if r["delivered_at"] is None:
+                rows.append(r)
+        if not rows:
+            return {"results": None, "render_ids": []}
+        body = views.deposit_safe("\n\n".join(r["text"] for r in rows))
+        if len(body) > job.POST_CHARS:
+            raise db.Refusal("those renderings are too long for one message: post them one "
+                             "at a time")
+    ref = casa_broker.deposit("results", body)
+    return {"results": ref, "render_ids": [r["render_id"] for r in rows]}
+
+
+CAPTION_MAX = 900          # 1024 − views.LABEL_ALLOWANCE − 1, rounded down (§6.1)
+PKG_REFUSED = "the package could not be sent under its name ({code}) — ask again"
+
+
+def post_package(conn, delivery_id, package_token=None) -> dict:
+    """§6.1: deposit a staged package as an operator_file — the staged path (Casa claims and
+    consumes it), kind zip, the package's filename as the delivered name (S7a), and one
+    caption line. A deposit Casa refuses settles the send `failed` (the staged copy taken
+    back) and closes its request with a package-stopped notice — never a send under the
+    storage name."""
+    import alerts, dates, delivery, passes
+    with db.tx(conn):
+        d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?",
+                         (delivery_id,)).fetchone()
+        if d is None or d["package_id"] is None:
+            raise db.Refusal("post_package posts a staged package: pass its delivery_id")
+        if (d["status"] != "staged" or d["revoked_at"] or d["withdrawn_at"]
+                or d["channel"] != "telegram"):
+            raise db.Refusal("that send is no longer waiting to go out — nothing was posted")
+        req = conn.execute("SELECT * FROM package_requests WHERE delivery_id=?",
+                           (delivery_id,)).fetchone()
+        if req is not None:
+            passes.check_package_token(conn, req["request_id"], package_token)
+        pk = conn.execute("SELECT * FROM packages WHERE package_id=?",
+                          (d["package_id"],)).fetchone()
+        line = pk["caption"].split("\n", 1)[0]
+        if d["as_built"]:
+            line += f" · built {dates.short_day(pk['built_at'])}, as it was then"
+        caption = views.clip(views.caption_safe(views.esc(line, plain=True)), CAPTION_MAX)
+        conn.execute("UPDATE deliveries SET lease_at=? WHERE delivery_id=?",
+                     (db.now(), delivery_id))
+    try:
+        ref = casa_broker.deposit("package", d["staged_path"], caption=caption, kind="zip",
+                                  filename=pk["filename"])
+    except casa_broker.DepositFailed as exc:
+        with db.custody_lock():
+            with db.tx(conn):
+                delivery.withdraw(conn, [dict(d)], refusal="could not take back the staged "
+                                                           "package — nothing changed")
+                now = db.now()
+                conn.execute("UPDATE deliveries SET status='failed', settled_at=?,"
+                             " withdrawn_at=? WHERE delivery_id=?", (now, now, delivery_id))
+                if req is not None:
+                    conn.execute("UPDATE package_requests SET state='stopped', reason=?,"
+                                 " updated_at=? WHERE request_id=?",
+                                 (PKG_REFUSED.format(code=exc.code), now, req["request_id"]))
+                    alerts.raise_package(conn, "package-stopped",
+                                         f"request:{req['request_id']}:posted",
+                                         quarter=pk["quarter"],
+                                         reason=f"it could not be posted ({exc.code})")
+        raise db.Refusal(PKG_REFUSED.format(code=exc.code))
+    return {"package": ref, "delivery_id": delivery_id, "filename": pk["filename"]}
+
+
 READING_TOO_LONG = ("That is more than I can show for one Apply — nothing was read. Send it "
                     "in shorter parts.")
 

@@ -5,7 +5,6 @@ instance switched mid-pass after the reset acknowledgement stops the pass.
 The relay tests drive the registered tools (qa_server.TOOLS) against a synthetic bank,
 as the round's reproductions did (Astra, /tmp/s2-review-XQEBYB/review_repro.py)."""
 import datetime
-import unittest
 
 from tests._base import StoreCase, apply_now
 from tests.sim_job import JobDriver
@@ -55,6 +54,8 @@ class Tools(StoreCase):
         tools._CONN = self.conn
         self.addCleanup(setattr, tools, "_CONN", None)
         self.rows, self.bank, self.instance = [], {}, self.LEDGER
+        self.handed = []                # S7 §5: the post/view units, their receipts withheld
+        self.package_receipt = True     # S7 §6.1: a posted package's receipt arrives
 
     def call(self, name, **kw):
         import qa_server
@@ -120,6 +121,21 @@ class Tools(StoreCase):
                               "page_next": page["next"], "triage_remaining": page["remaining"],
                               "documents": {str(i): "no-payment-yet"
                                             for i in u["documents_first"]}}}
+        elif k in ("post", "view"):
+            self.handed.append(u)       # posted; its receipt arrives when deliver() says
+        elif k == "build":
+            self.call("build_quarterly_package", quarter=u["quarter"],
+                      package_token=u["package_token"], request_id=u["request_id"])
+        elif k == "deliver":
+            from tests.fakebroker import FakeBroker
+            st = self.call("stage_for_delivery", package_id=u["package_id"],
+                           package_token=u["package_token"])
+            with FakeBroker():
+                self.call("post_package", delivery_id=st["delivery_id"],
+                          package_token=u["package_token"])
+            self.call("record_delivery", delivery_id=st["delivery_id"],
+                      outcome="delivered" if self.package_receipt else "uncertain",
+                      package_token=u["package_token"])
         else:
             raise AssertionError(u)
         return self.call("job_next", pass_token=t, **ans)
@@ -131,11 +147,16 @@ class Tools(StoreCase):
             u = self.call("job_next", job_id=job_id) if u["unit"] == "end-batch" else self.do(u)
         self.fail(f"no {unit} unit")
 
-    def deliver(self, report):
+    def deliver(self):
+        """Casa's receipts for what the job posted since the last call (S7 §5), in the
+        order handed out: each rendering marked once. Returns their render ids."""
         out = []
-        for page in ([report["speak"]] if report.get("speak") else []) + report["texts"]:
-            self.call("mark_rendering_delivered", render_id=page["render_id"])
-            out.append(page["render_id"])
+        for u in self.handed:
+            for rid in u.get("render_ids") or [u["render_id"]]:
+                if rid not in out:
+                    self.call("mark_rendering_delivered", render_id=rid)
+                    out.append(rid)
+        self.handed = []
         return out
 
     def kind(self, render_id):
@@ -148,42 +169,40 @@ class InformationalPages(Tools):
     the R5/R6 non-binding boundary: "send it again" binds to the offer last delivered
     (§6.3), whoever handed it out."""
 
-    # S7-merge: test_an_offer_relayed_in_an_operators_turn_is_resent and
+    # At the S7 merge (§9): test_an_offer_relayed_in_an_operators_turn_is_resent and
     # test_astras_q2_offer_after_a_q3_offer_resends_q2 are deleted. Task 6 rewrote them for
     # §9's deleted R5/R6 boundary (NEWER_SINCE), and both were built on job_report, which §9
     # also deletes (the job posts its own results); the offer they pinned has no hand-out
     # left to relay. "Send it again" binding to the last delivered offer stays pinned in
-    # LastDelivered and in the Task 11 skip below.
+    # LastDelivered and in the handover case below.
 
-    @unittest.skip("S7: re-enabled in Task 11")
     def test_a_handover_page_after_the_resend_offer_keeps_it(self):
-        """Astra's reproduction: an uncertain package send, then a finished handover;
-        `speak` (the resend offer) and the handover page, relayed on the job's
-        notification, delivered in that order. "Send it again" still resends the
-        offered package."""
+        """Astra's reproduction, on S7's units (§5, §6.1): an uncertain package send (the
+        job posted it, its receipt withheld), then a finished handover; the job's posts
+        carry the resend offer and the handover page, delivered in that order. "Send it
+        again" still resends the offered package."""
+        self.package_receipt = False
         self.call("request_package", quarter="2026-Q3")
         self.until(self.call("job_next", job_id=A), "complete")
-        tok = self.call("job_report")["continue"]["package_token"]
-        pkg = self.call("build_quarterly_package", quarter="2026-Q3", package_token=tok)
-        staged = self.call("stage_for_delivery", channel="telegram",
-                           package_id=pkg["package_id"], package_token=tok)
-        self.call("record_delivery", delivery_id=staged["delivery_id"], outcome="uncertain",
-                  package_token=tok)
+        pkg = self.conn.execute("SELECT package_id FROM packages").fetchone()[0]
+        self.assertEqual(self.conn.execute("SELECT status FROM deliveries").fetchone()[0],
+                         "uncertain")
         self.call("request_work", kind="handover", trigger="operator", doc_ids=[self.doc()])
         self.until(self.call("job_next", job_id=B), "complete", job_id=B)
-        relay = self.call("job_report", job_id=B, status="ok")       # its notification
-        self.assertIn("send it again", relay["speak"]["text"])
-        shown = self.deliver(relay)
+        shown = self.deliver()
+        offer = self.conn.execute("SELECT render_id FROM alerts WHERE"
+                                  " kind='package-uncertain'").fetchone()[0]
+        self.assertIn("send it again", self.render_text(offer))
+        self.assertIn(offer, shown)
         self.assertEqual(self.kind(shown[-1]), "handover")
         before = self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]
-        again = self.call("stage_for_delivery", channel="telegram", resend=True)
+        again = self.call("stage_for_delivery", resend=True)
         self.assertEqual(self.conn.execute("SELECT package_id FROM deliveries WHERE"
                                            " delivery_id=?", (again["delivery_id"],)
-                                           ).fetchone()[0], pkg["package_id"])
+                                           ).fetchone()[0], pkg)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
                          before + 1)
 
-    @unittest.skip("S7: re-enabled in Task 10")     # S7-merge: job_report is gone (§9)
     def test_all_good_after_a_handover_page_binds_to_the_sheet_before_it(self):
         with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
             u = self.until(self.start(2), "judge")
@@ -194,12 +213,12 @@ class InformationalPages(Tools):
                       expected_revision=it["revision"], row_digest=it["row_digest"],
                       document_date="2026-07-02", labels=["no-ref"])
             self.until(self.do(u), "complete")
-            sheet = self.deliver(self.call("job_report", job_id=A, status="ok"))[-1]
+            sheet = self.deliver()[-1]                  # the job's view (S7 §5)
             self.assertEqual(self.kind(sheet), "status")
             self.call("request_work", kind="handover", trigger="operator",
                       doc_ids=[self.doc(amount_minor=55555)])
             self.until(self.call("job_next", job_id=B), "complete", job_id=B)
-            shown = self.deliver(self.call("job_report", job_id=B, status="ok"))
+            shown = self.deliver()
             self.assertIn("handover", [self.kind(r) for r in shown])
             self.assertEqual(self.kind(shown[-1]), "handover")
             apply_now(self.conn, "all good")
@@ -243,22 +262,21 @@ class LastDelivered(StoreCase):
 
 
 class OperatorTurnRelay(Tools):
-    """R5: a rendering handed out by job_report WITHOUT job_id (an operator's turn,
-    after the operator wrote) is stamped non-binding; one handed out on a notification
-    (job_id given) binds as before. The latest hand-out wins. S7 §9 deletes the R6
-    refusal boundary: a reading binds to what it quotes, else the last delivered
-    rendering, and its proposal shows what it would change."""
+    """Was R5 (job_report's non-binding stamp for an operator turn's hand-out) and R6
+    (the refusal boundary): S7 §9 deletes both with job_report. The job posts its own
+    results (§5), every delivered rendering binds, and a reading binds to what it
+    quotes, else the last delivered rendering; its proposal shows what it would change."""
 
     def two_checks(self):
-        """Job A pairs payment 1 and its sheet is relayed on A's notification and
-        delivered; job B (an operator's check) pairs payment 2 and completes, its result
-        not yet relayed. Returns (pid1, pid2, the delivered sheet)."""
+        """Job A pairs payment 1 and its status view, posted by the job, is delivered; job
+        B (an operator's check) pairs payment 2 and completes, its view posted and its
+        receipt not yet in. Returns (pid1, pid2, the delivered sheet)."""
         with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
             u = self.until(self.start(2), "judge")
             pids = [r[0] for r in self.conn.execute("SELECT pid FROM projections ORDER BY pid")]
             self.pair(u, pids[0], 10001)
             self.until(self.do(u), "complete")
-            old = self.deliver(self.call("job_report", job_id=A, status="ok"))[-1]
+            old = self.deliver()[-1]                    # A's status view (S7 §5)
             self.call("request_work", kind="check", trigger="operator")
             u = self.until(self.call("job_next", job_id=B), "judge", job_id=B)
             self.pair(u, pids[1], 10002)
@@ -281,16 +299,17 @@ class OperatorTurnRelay(Tools):
     # refusal at a non-binding rendering, a mechanism §9 deletes (the quoted binding and
     # the proposal shown before Apply replace it, §8).
 
-    @unittest.skip("S7: re-enabled in Task 10")     # S7-merge: job_report is gone (§9)
-    def test_a_notification_relay_still_binds(self):
+    def test_a_later_checks_sheet_binds(self):
+        """S7 §5 (was: a notification relay still binds): B's status view, posted by the
+        job and delivered after A's, takes "all good" for both payments it shows."""
         p1, p2, old = self.two_checks()
-        new = self.deliver(self.call("job_report", job_id=B, status="ok"))[-1]
+        new = self.deliver()[-1]
         apply_now(self.conn, "all good")
         pairs = self.operator_pairs()
         self.assertEqual({p for p, _ in pairs}, {p1, p2})
         self.assertEqual({r for _, r in pairs}, {new})
 
-    # S7-merge: test_the_latest_hand_out_wins and test_a_notification_re_offer_binds_again
+    # At the S7 merge (§9): test_the_latest_hand_out_wins and test_a_notification_re_offer_binds_again
     # are deleted (§9 deletes this mechanism): both pinned renders.binding, the stamp
     # job_report's hand-out wrote (1 notification, 0 operator turn); §9 deletes job_report
     # and leaves the column unused, so nothing writes it any more.
@@ -321,7 +340,8 @@ class InstanceSwitch(Tools):
             self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0],
                              snaps)
             u = self.call("job_next", pass_token=u["pass_token"])
-            self.assertIn(u["unit"], ("complete", "end-batch"))
+            # the pass ended: next, the job posts its stop line (S7 §5), not delivered here
+            self.assertEqual(u["unit"], "post")
         self.assertIsNone(job.live_job_pass(self.conn))
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
         self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))

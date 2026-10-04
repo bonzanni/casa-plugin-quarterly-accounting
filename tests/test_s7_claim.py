@@ -119,12 +119,15 @@ class Claim(StoreCase):
         """§4.2: a run that answers complete with its pass budget spent leaves its queued
         asks for the next start — completed, so they are not closed (asked before its
         last claim, they would be, had it not answered complete)."""
-        import asks, db, job
+        import asks, db, job, views
         asks.request_package(self.conn, "2026-Q3")
         tok = job.claim(self.conn, A)
         with db.tx(self.conn):          # the run has begun its MAX_PASSES_PER_JOB passes
             self.conn.execute("INSERT INTO runs(job_id, passes) VALUES (?, ?)",
                               (A, job.MAX_PASSES_PER_JOB))
+        u = job.next_unit(self.conn, tok)               # §4.2: the asks-waiting line first
+        self.assertEqual(self.render_text(u["render_ids"][0]), job.LEFT_WAITING)
+        views.mark_rendering_delivered(self.conn, u["render_ids"][0])
         self.assertEqual(job.next_unit(self.conn, tok)["unit"], "complete")
         job.claim(self.conn, B)
         self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
@@ -133,7 +136,7 @@ class Claim(StoreCase):
     def test_a_cron_launch_after_a_dead_run_still_checks(self):
         """Fix r1 (ruling): §4.1 reads the state after §10's closure — a launch whose only
         queued ask was a dead run's unrenewed package ask is a check, not a no-op."""
-        import asks, job
+        import asks, db, job
         asks.request_package(self.conn, "2026-Q3")
         job.claim(self.conn, A)                       # A dies
         job.claim(self.conn, B)                       # the cron launch
@@ -141,17 +144,19 @@ class Claim(StoreCase):
                          "stopped")
         self.assertEqual([tuple(r) for r in self.conn.execute(
             "SELECT kind, trigger, state FROM work_requests")], [("check", "cron", "queued")])
-        self.assertFalse(job.done(self.conn, B))
+        with db.tx(self.conn):                        # done() runs inside a transaction (S7 §5)
+            self.assertFalse(job.done(self.conn, B))
 
     def test_a_cron_launch_adopting_a_dead_package_pass_still_checks(self):
-        import asks, job
+        import asks, db, job
         asks.request_package(self.conn, "2026-Q3")
         job.next_unit(self.conn, job.claim(self.conn, A))   # A's package pass begins, A dies
         job.claim(self.conn, B)                       # adopts; §10 ends the pass stopped
         self.assertIsNone(job.live_job_pass(self.conn))
         self.assertEqual([tuple(r) for r in self.conn.execute(
             "SELECT kind, trigger, state FROM work_requests")], [("check", "cron", "queued")])
-        self.assertFalse(job.done(self.conn, B))
+        with db.tx(self.conn):                        # done() runs inside a transaction (S7 §5)
+            self.assertFalse(job.done(self.conn, B))
 
     def test_an_exhausted_adoption_reads_kept_stopping(self):
         """Ported from test_s2_report's test_a_pass_stopped_on_adoption_never_offers_a_
@@ -175,15 +180,21 @@ class Claim(StoreCase):
     def test_an_exhausted_adoption_at_a_first_claim_records_no_check(self):
         """Fix r2 ruling: a claim that spends the adoption budget is told "kept stopping —
         ask again"; §4.1 never fires on it (no restart, G2)."""
-        import db, job
+        import db, job, views
         t = job.claim(self.conn, A)                   # §4.1: A's cron check
         pid = self.start_job_pass(t)
         with db.tx(self.conn):
             __import__("asks").take_queued(self.conn, pid)
         for j in (B, "cccccccc-3"):
             job.claim(self.conn, j)
-        job.claim(self.conn, "dddddddd-4")            # a first claim; the third adoption
+        tD = job.claim(self.conn, "dddddddd-4")       # a first claim; the third adoption
         self.assertIsNone(job.live_job_pass(self.conn))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM work_requests WHERE"
                                            " state='queued'").fetchone()[0], 0)
-        self.assertTrue(job.done(self.conn, "dddddddd-4"))
+        u = job.next_unit(self.conn, tD)              # S7 §5: its stop line is posted first
+        self.assertEqual(u["unit"], "post", u)
+        self.assertIn("kept stopping", " ".join(self.render_text(r) for r in u["render_ids"]))
+        for rid in u["render_ids"]:
+            views.mark_rendering_delivered(self.conn, rid)
+        with db.tx(self.conn):                        # done() runs inside a transaction (S7 §5)
+            self.assertTrue(job.done(self.conn, "dddddddd-4"))

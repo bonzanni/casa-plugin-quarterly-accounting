@@ -81,7 +81,8 @@ class HandoverVerdicts(StoreCase):
         self.drv.next_until(t, "complete")
         r = self.conn.execute("SELECT state, outcome FROM work_requests WHERE request_id=?",
                               (rid,)).fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("done", "complete"))
+        # S7 §5: the job posted the result and its receipt was marked
+        self.assertEqual((r["state"], r["outcome"]), ("reported", "complete"))
 
     def test_a_verdict_recorded_earlier_in_the_judgment_counts(self):
         """A document judged on an earlier page of the same judgment needs no verdict
@@ -169,7 +170,7 @@ class RestoreMidPass(StoreCase):
             self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0],
                              snaps)
             u = job.next_unit(self.conn, t)             # the pass stops
-            self.assertIn(u["unit"], ("complete", "end-batch"))
+            self.assertEqual(u["unit"], "post")         # S7 §5: its stop line, not marked
             self.assertIsNone(job.live_job_pass(self.conn))
             r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
             self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))

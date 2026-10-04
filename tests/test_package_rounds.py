@@ -296,7 +296,7 @@ class TestTheCheckIsBoundToItsImport(Rounds):
         text = self.text("build_quarterly_package", quarter="2026-Q3",
                          package_token=end["package_token"])
         self.assertEqual(text, "refused: the bank was re-read since the check — the check "
-                               "runs again, and the package follows it; call job_report")
+                               "runs again, and the package follows it; call job_next")
         r = self.request()
         self.assertEqual((r["state"], r["token"], r["round"]), ("queued", None, 1))
         self.assertEqual(self.claim()["continue"]["next"], "snapshot")
@@ -361,8 +361,14 @@ class TestSendTheLastBuild(Rounds):
         again = self.call("stage_for_delivery", channel="telegram", last_built=True,
                           quarter="2026-Q3")
         self.assertEqual(again["filename"], pkg["filename"])
-        self.assertTrue(again["caption"].startswith("Built on "), again["caption"])
-        self.assertTrue(again["caption"].endswith(pkg["caption"]))
+        # S7 §6.1: post_package composes the one caption line, saying when it was built
+        from tests.fakebroker import FakeBroker
+        import posting
+        with FakeBroker() as b:
+            posting.post_package(self.conn, again["delivery_id"])
+        self.assertEqual(b.deposits[0]["filename"], pkg["filename"])
+        self.assertTrue(b.deposits[0]["caption"].startswith(pkg["caption"].split("\n")[0]))
+        self.assertIn(", as it was then", b.deposits[0]["caption"])
         sim.run_pass(self.conn, self.bf)                          # a newer import lands
         row = self.conn.execute("SELECT status, revoked_at, as_built FROM deliveries WHERE"
                                 " delivery_id=?", (again["delivery_id"],)).fetchone()

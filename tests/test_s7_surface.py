@@ -18,7 +18,6 @@ class Surface(StoreCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    @unittest.expectedFailure  # S7-merge: needs Tasks 10–11 surface (post_results, post_package)
     def test_removed_and_added(self):
         import qa_server, tools  # noqa: F401
         for t in REMOVED:

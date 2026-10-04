@@ -1,10 +1,8 @@
 # server/delivery.py
 """Delivery staging and the delivery log (spec §Packaging). A package or one
-invoice is staged, never rebuilt: Telegram through Casa's plugin outbox
-(atomic .part -> rename; consumed on send, reaped at 2 h), email through
-Casa's handoff folder for gmail's send_email, which Casa gates with one
-approval tap showing the recipient (the operator's own mailbox only — the
-skill says so; the tap is where it is checked). An ambiguous outcome is
+invoice is staged, never rebuilt: through Casa's plugin outbox (atomic .part ->
+rename; consumed on send, reaped at 2 h), posted to Telegram by post_package as an
+operator_file (S7 §6.1). No email (S7 §6.2). An ambiguous outcome is
 `uncertain`, never retried automatically; a resend is the exact retained file.
 
 Staging reads bytes out of packages/ or documents/, so it holds the custody
@@ -18,29 +16,24 @@ commits the write (a check before a lock wait is only an early refusal).
 Every delivery gets a staged path of its own, never reused: a Telegram copy is
 `qa-<16 hex>.<ext>`, drawn again on a collision and guarded by the UNIQUE
 staged_path, so a holder that was superseded never holds the path of a later
-copy. The operator-facing name travels as send_media's `filename`."""
+copy. The operator-facing name travels as the deposit's `filename` (S7a)."""
 from __future__ import annotations
 
 import json
 import os
 import pathlib
 import secrets
-import shutil
 import sqlite3
 import tempfile
 
-import casa_handoff
 import db
 import documents
 import views
 import package
 import passes
 
-GMAIL_ATTACHMENT_LIMIT = casa_handoff.MAX_FILE_BYTES      # the handoff folder's 25 MB per file
 STAGE_ATTEMPTS = 8
-# An email waits for the operator's one-tap approval, which can take far longer than a
-# Telegram send: its staged copy is not recovered for a day. Telegram keeps LEASE_S.
-EMAIL_RECOVERY_LEASE_S = 24 * 3600
+EMAIL_GONE = "Packages come here as a file now — forward it from Telegram."
 WITHDRAW_REFUSED = ("could not withdraw a staged package — nothing was imported ({why}); fix "
                     "that and import again")
 
@@ -93,14 +86,11 @@ def _to_outbox(path: pathlib.Path, data: bytes) -> pathlib.Path:
     return path
 
 
-def _remove_staged(channel: str, path: pathlib.Path) -> None:
-    if channel == "email":          # the handoff entry is its own directory
-        shutil.rmtree(path.parent, ignore_errors=True)
-    else:
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
+def _remove_staged(path: pathlib.Path) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
 
 
 def request_of_package(conn, package_id):
@@ -109,16 +99,19 @@ def request_of_package(conn, package_id):
                         " request_id DESC LIMIT 1", (package_id,)).fetchone()
 
 
-def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_token=None,
-                       package_token=None, resend=False, last_built=False,
+def stage_for_delivery(conn, *, channel="telegram", package_id=None, doc_id=None,
+                       pass_token=None, package_token=None, resend=False, last_built=False,
                        quarter=None) -> dict:
     """Stage one package or one document. A package's FIRST send is request-bound: its
     request must still own it (issue #15, D3) and hold the package_token, checked early
     and again in the transaction that records the delivery; staging it twice returns
     the same delivery. A resend ("send it again"), the last build asked for by name
-    (`last_built`, issue #15) and a single document are token-free."""
-    if channel not in ("telegram", "email"):
-        raise db.Refusal("channel is 'telegram' or 'email'")
+    (`last_built`, issue #15) and a single document are token-free. Telegram only
+    (S7 §6.2): email is refused with EMAIL_GONE."""
+    if channel == "email":
+        raise db.Refusal(EMAIL_GONE)
+    if channel != "telegram":
+        raise db.Refusal("channel is 'telegram'")
     if last_built:
         if package_id is not None or doc_id is not None or resend:
             raise db.Refusal("last_built names no package or document: it stages the last "
@@ -126,8 +119,7 @@ def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_toke
         package_id = last_built_package(conn, quarter)
         passes.check_token(conn, pass_token)
         with db.custody_lock():
-            return _stage(conn, channel, package_id, None, pass_token, None, None,
-                          as_built=True)
+            return _stage(conn, package_id, None, pass_token, None, None, as_built=True)
     if quarter is not None:
         raise db.Refusal("quarter goes with last_built")
     if (package_id is None) == (doc_id is None):
@@ -142,9 +134,6 @@ def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_toke
     req = None if resend or package_id is None else request_of_package(conn, package_id)
     if req is not None:
         passes.check_package_token(conn, req["request_id"], package_token)
-        if req["channel"] != channel:
-            raise db.Refusal(f"this package was asked for by {req['channel']} — stage it by "
-                             f"{req['channel']}, or ask for the package again by {channel}")
     built_for = None if package_id is None else conn.execute(
         "SELECT request_id FROM packages WHERE package_id=?", (package_id,)).fetchone()
     if not resend and built_for is not None and built_for[0] is not None and (
@@ -152,15 +141,15 @@ def stage_for_delivery(conn, *, channel, package_id=None, doc_id=None, pass_toke
             or req["state"] not in ("built", "staged")):
         # issue #15 (D3): a package built for a request is first sent only through that
         # request while it still owns it — never once the request went back to its check
-        raise db.Refusal("this package is no longer the one its request will send — call "
-                         "job_report: the package you asked for follows its check")
+        raise db.Refusal("this package is no longer the one its request will send — the "
+                         "package you asked for follows its check")
     if req is not None and req["state"] == "built":
         import package as _package
         if _package.stale_check(conn, req["request_id"], package_token):   # before an import
             raise db.Refusal(_package.RECHECK)
     try:
         with db.custody_lock():
-            return _stage(conn, channel, package_id, doc_id, pass_token,
+            return _stage(conn, package_id, doc_id, pass_token,
                           req["request_id"] if req is not None else None, package_token,
                           resend)
     except db.Refusal:
@@ -186,7 +175,7 @@ def last_built_package(conn, quarter=None) -> int:
     return row[0]
 
 
-def _stage(conn, channel, package_id, doc_id, pass_token, request_id, package_token,
+def _stage(conn, package_id, doc_id, pass_token, request_id, package_token,
            resend=False, as_built=False) -> dict:
     if request_id is not None:
         again = _staged_again(conn, request_id, package_token, pass_token)
@@ -196,7 +185,7 @@ def _stage(conn, channel, package_id, doc_id, pass_token, request_id, package_to
         pk = conn.execute("SELECT * FROM packages WHERE package_id=?", (package_id,)).fetchone()
         if pk is None:
             raise db.Refusal(f"there is no package #{package_id}")
-        if channel == "telegram" and (pk["oversize"] or pk["size"] > package.MAX_ZIP_BYTES):
+        if pk["oversize"] or pk["size"] > package.MAX_ZIP_BYTES:
             raise db.Refusal(f"{pk['filename']} is over Telegram's 20 MB limit "
                              f"({pk['size'] / 1e6:.1f} MB); it is kept here, and notes.md "
                              "names the largest files")
@@ -207,26 +196,11 @@ def _stage(conn, channel, package_id, doc_id, pass_token, request_id, package_to
             raise db.Refusal(f"there is no document #{doc_id}")
         name = package.doc_filename(dict(d), set(), (d["ingested_at"] or "")[:10])
         data, ext = documents.path_of(conn, doc_id).read_bytes(), d["ext"]
-    if channel == "email" and len(data) > GMAIL_ATTACHMENT_LIMIT:
-        raise db.Refusal(f"{name} is over the 25 MB email attachment limit "
-                         f"({len(data) / 1e6:.1f} MB); it is kept here")
     for _ in range(STAGE_ATTEMPTS):
-        request = None
-        if channel == "telegram":
-            # the staged file's own name is random and never reused; the operator sees
-            # `filename` (send_media's filename argument)
-            path = _to_outbox(_fresh_path(conn, ext), data)
-            note = ("send it with send_media(path, kind='zip' or 'pdf', filename=<filename>), "
-                    "then record_delivery")
-        else:
-            try:
-                path = pathlib.Path(casa_handoff.publish("quarterly-accounting", name,
-                                                         data=data)["path"])
-            except casa_handoff.HandoffError as exc:
-                raise db.Refusal(f"the handoff folder refused it ({exc.kind}): {exc}")
-            request = "qa-" + secrets.token_hex(8)
-            note = ("attach it with gmail's send_email to the operator's own address only, "
-                    "passing this request_id; Casa shows them the recipient before it sends")
+        # the staged file's own name is random and never reused; the operator sees
+        # `filename` (post_package deposits it as the delivered name, S7a)
+        path = _to_outbox(_fresh_path(conn, ext), data)
+        note = "post it with post_package(delivery_id), then record_delivery"
         # every copy written above is this call's own: nothing in the log names it
         # until the commit below, so any failure removes it before it can be sent
         try:
@@ -250,30 +224,21 @@ def _stage(conn, channel, package_id, doc_id, pass_token, request_id, package_to
                     "INSERT INTO deliveries(package_id, doc_id, channel, staged_path,"
                     " request_id, status, created_at, lease_at, as_built)"
                     " VALUES (?,?,?,?,?, 'staged', ?, ?, ?)",
-                    (package_id, doc_id, channel, str(path), request, db.now(),
+                    (package_id, doc_id, "telegram", str(path), None, db.now(),
                      db.now(), int(as_built))).lastrowid
                 if request_id is not None:
                     conn.execute("UPDATE package_requests SET delivery_id=?, state='staged',"
                                  " updated_at=? WHERE request_id=?", (did, db.now(), request_id))
         except sqlite3.IntegrityError as exc:
-            _remove_staged(channel, path)
+            _remove_staged(path)
             if "staged_path" not in str(exc):
                 raise
             continue                    # a path some delivery already named: draw again
         except BaseException:
-            _remove_staged(channel, path)
+            _remove_staged(path)
             raise
-        out = {"delivery_id": did, "channel": channel, "path": str(path), "filename": name,
-               "note": note}
-        if as_built:
-            import dates
-            pk = conn.execute("SELECT built_at, caption FROM packages WHERE package_id=?",
-                              (package_id,)).fetchone()
-            out["caption"] = (f"Built on {dates.short_day(pk['built_at'])}, as it was then.\n"
-                              + pk["caption"])
-        if request:
-            out["request_id"] = request
-        return out
+        return {"delivery_id": did, "channel": "telegram", "path": str(path),
+                "filename": name, "note": note}
     raise db.Refusal("could not find a free name to stage the file under — nothing was "
                      "staged; ask again")
 
@@ -291,12 +256,10 @@ def _staged_again(conn, request_id, package_token, pass_token):
                          (req["delivery_id"],)).fetchone()
         conn.execute("UPDATE deliveries SET lease_at=? WHERE delivery_id=?",
                      (db.now(), req["delivery_id"]))
-    out = {"delivery_id": d["delivery_id"], "channel": d["channel"], "path": d["staged_path"],
-           "filename": d["filename"], "already": True,
-           "note": "already staged: send this one, then record_delivery"}
-    if d["request_id"]:
-        out["request_id"] = d["request_id"]
-    return out
+    return {"delivery_id": d["delivery_id"], "channel": d["channel"],
+            "path": d["staged_path"], "filename": d["filename"], "already": True,
+            "note": "already staged: post this one with post_package(delivery_id), then "
+                    "record_delivery"}
 
 
 def _require_current_snapshot(conn, package_id) -> None:
@@ -362,16 +325,13 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
 
 def withdraw(conn, rows, *, refusal: str) -> None:
     """Remove the staged bytes of `rows` (deliveries) whose copy is still there —
-    the Telegram outbox file, or this plugin's own handoff entry (one `<id>/`
-    directory per publish; casa_handoff has no retract call). Inside the caller's
-    transaction, under the custody lock. A path a live, staged delivery still
+    the outbox file. Inside the caller's transaction, under the custody lock. A path a live, staged delivery still
     names is left alone. A removal that fails raises the caller's refusal, so
     its whole transaction rolls back; copies already removed stay removed, and
     their send fails visibly."""
     assert conn.in_transaction
     for r in rows:
-        path = pathlib.Path(r["staged_path"])
-        target = path.parent if r["channel"] == "email" else path
+        target = pathlib.Path(r["staged_path"])
         if not target.exists():
             continue
         if conn.execute("SELECT 1 FROM deliveries WHERE staged_path=? AND status='staged' AND"
@@ -379,10 +339,7 @@ def withdraw(conn, rows, *, refusal: str) -> None:
                         (r["staged_path"], r["delivery_id"])).fetchone() is not None:
             continue
         try:
-            if r["channel"] == "email":
-                shutil.rmtree(target)
-            else:
-                os.unlink(target)
+            os.unlink(target)
         except FileNotFoundError:
             pass
         except OSError as exc:
@@ -409,8 +366,7 @@ def stalled_sends(conn, lease_s: float) -> list:
         "SELECT d.*, p.quarter FROM deliveries d JOIN packages p ON p.package_id=d.package_id"
         " WHERE d.status='staged' AND d.revoked_at IS NULL AND d.withdrawn_at IS NULL"
         " ORDER BY d.delivery_id").fetchall()
-        if steps._age(r["lease_at"] or r["created_at"])
-        >= (EMAIL_RECOVERY_LEASE_S if r["channel"] == "email" else lease_s)]
+        if steps._age(r["lease_at"] or r["created_at"]) >= lease_s]
 
 
 OFFER_KINDS = ("package-uncertain", "package-send-failed")
@@ -469,18 +425,22 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
     checked in this one transaction, which also closes the request. A package send
     recorded uncertain or failed raises its package notice here and returns the
     rendering that says it as `speak` — always including that notice, and the
-    package in its scope's `offers`, so "send it again" binds to it (D3)."""
+    package in its scope's `offers`, so "send it again" binds to it (D3). A package
+    recorded delivered returns the caption's remaining lines as `note_render_id`
+    (S7 §6.1: the file's own caption is one line). A request-bound send earns
+    req:pkg:<id>:delivered for the job, whatever its outcome."""
     import alerts
     if outcome not in ("delivered", "uncertain", "failed"):
         raise db.Refusal("outcome is 'delivered', 'uncertain' or 'failed'")
     with db.tx(conn):
+        note = None
         passes.check_token(conn, pass_token)
         d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?", (delivery_id,)).fetchone()
         if d is None:
             raise db.Refusal(f"there is no delivery #{delivery_id}")
         if d["revoked_at"] is not None:
-            raise db.Refusal("the bank was re-read before this was sent — nothing was recorded; "
-                             "call job_report (a package you asked for follows its check)")
+            raise db.Refusal("the bank was re-read before this was sent — nothing was recorded "
+                             "(a package you asked for follows its check)")
         if d["status"] == "delivered":
             return {"delivery_id": delivery_id, "status": "delivered", "already": True}
         req = conn.execute("SELECT * FROM package_requests WHERE delivery_id=?",
@@ -496,14 +456,15 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
         if d["withdrawn_at"] is not None and not upgrade:
             raise db.Refusal("this send was taken back before it was recorded — nothing was "
                              "written")
-        if outcome == "delivered" and d["channel"] == "email" and not message_id:
-            raise db.Refusal("an email counts as delivered only when send_email returned a "
-                             "message id; otherwise record it 'uncertain'")
         conn.execute("UPDATE deliveries SET status=?, message_id=?, settled_at=? WHERE"
                      " delivery_id=?", (outcome, message_id, db.now(), delivery_id))
         if req is not None:
             conn.execute("UPDATE package_requests SET state=?, updated_at=? WHERE request_id=?",
                          (outcome, db.now(), req["request_id"]))
+            if package_token is not None:
+                import job
+                job.credit(conn, package_token, req["pass_id"],
+                           f"req:pkg:{req['request_id']}:delivered")
 
         if outcome == "delivered" and d["package_id"] is not None:
             # the rows exactly as the package froze them: facts_fp is
@@ -521,10 +482,13 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
             # the package arrived: no offer of it stays open, and the accountant's copy is
             # compared with the bank now (a late report may follow a newer import)
             close_offers(conn, d["package_id"])
+            note = _package_note(conn, d)
             import ledger
             changed = ledger.check_delivered_package(conn, d["package_id"])
         out = {"delivery_id": delivery_id, "status": outcome,
                "more": passes.queued_waiting(conn)}    # issue #15: continue_pass next
+        if note:
+            out["note_render_id"] = note
         if outcome == "delivered" and d["package_id"] is not None and changed:
             out["speak"] = alerts.pending_in_tx(conn, must=changed)
         if outcome in ("uncertain", "failed") and d["package_id"] is not None \
@@ -536,6 +500,22 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
                                           quarter=quarter, package_id=d["package_id"])
             out["speak"] = alerts.pending_in_tx(conn, must=notice)
         return out
+
+
+def _package_note(conn, d):
+    """§6.1: the caption's lines after the first, as a rendering the next post carries
+    (the file's own caption is one line). None when there are none."""
+    pk = conn.execute("SELECT caption FROM packages WHERE package_id=?",
+                      (d["package_id"],)).fetchone()
+    rest = [x for x in pk["caption"].split("\n")[1:] if x.strip()]
+    if not rest:
+        return None
+    rid = f"r{db.next_seq(conn)}"
+    conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
+                 " membership_json) VALUES (?, 'package-note', ?, ?, ?, '[]')",
+                 (rid, db.canonical({"delivery": d["delivery_id"]}), db.now(),
+                  views.fit_message(rest)))
+    return rid
 
 
 def offer_lines(filename: str, status: str = "uncertain") -> list:

@@ -177,8 +177,8 @@ O = {"type": "object"}
 A = {"type": "array", "items": {"type": "string"}}
 AI = {"type": "array", "items": {"type": "integer"}}
 TOKEN = {"type": "integer", "description": "the pass_token job_next gave you in this turn"}
-PKG_TOKEN = {"type": "integer", "description": "the package_token job_report's `continue` "
-                                               "gave you"}
+PKG_TOKEN = {"type": "integer", "description": "the package_token the job's build or deliver "
+                                               "unit gave you"}
 Q = {"type": "string", "description": "YYYY-Qn, e.g. 2026-Q3 (Qn and Qn YYYY accepted)"}
 
 
@@ -426,7 +426,14 @@ def t_observe(args):
           "out (an answer that does not is refused). Do exactly the unit it returns. When it "
           "says report=true, call report_job_progress with its `progress` verbatim; at "
           "end-batch, end your turn; at complete, report_job_progress then "
-          "emit_completion(status=\"ok\", text=<its text>).",
+          "emit_completion(status=\"ok\", text=<its text>). `post` → "
+          "post_results(render_ids); on its receipt mark_rendering_delivered(render_ids). "
+          "`view` → show_view(render_id) (or propose_account() when it says accounts); on "
+          "its receipt mark_rendering_delivered(render_id). A withheld post marks nothing — "
+          "call job_next: it is offered again, at most twice. `build` → "
+          "build_quarterly_package(quarter, package_token, request_id). `deliver` → "
+          "stage_for_delivery(package_id, package_token), post_package(delivery_id, "
+          "package_token), then record_delivery on its receipt.",
           obj({"job_id": S, "pass_token": TOKEN, "judged": O}))
 def t_job_next(args):
     import job
@@ -695,42 +702,76 @@ def t_bind_account(args):
     return taps.bind_account(conn(), args.get("choice"), args.get("key"))
 
 
+@register("post_results",
+          "Post stored renderings to the operator as one message (Casa posts it, labelled; "
+          "never retell it): the job's `post` unit's render_ids, or a render id a tool "
+          "returned for the operator (a notice, a package's details). After Casa's receipt "
+          "(casa_delivery.status delivered), call mark_rendering_delivered(render_ids=<the "
+          "returned render_ids>); with none returned, nothing was posted.",
+          obj({"render_ids": A}, ("render_ids",)))
+@capability("results")
+def t_post_results(args):
+    import posting
+    return posting.post_results(conn(), args.get("render_ids"))
+
+
 @register("mark_rendering_delivered",
-          "Call right after a rendering (or a `speak`, or a job_report text) was sent successfully. Only this "
-          "makes it count as shown.",
-          obj({"render_id": S}, ("render_id",)))
+          "Call after Casa's receipt for a post (casa_delivery.status delivered): "
+          "render_ids=<the render_ids post_results returned>, or render_id=<the view's "
+          "render_id>. Only this makes it count as shown; a withheld post marks nothing.",
+          obj({"render_id": S, "render_ids": A}))
 def t_delivered(args):
+    ids = args.get("render_ids")
+    if ids is not None:
+        if (not isinstance(ids, list) or not ids
+                or not all(isinstance(r, str) for r in ids)):
+            raise db.Refusal("render_ids is the list post_results returned")
+        return {"marked": [views.mark_rendering_delivered(conn(), r) for r in ids]}
     _need(args, "render_id")
     return views.mark_rendering_delivered(conn(), args["render_id"])
+
+
+@register("post_package",
+          "Post a staged package to the operator as a file (Casa posts it, labelled, under "
+          "the package's name). After Casa's receipt (casa_delivery.status delivered): "
+          "record_delivery(delivery_id, outcome=\"delivered\"); withheld or no receipt: "
+          "record_delivery(outcome=\"uncertain\") — never post it again yourself.",
+          obj({"delivery_id": I, "package_token": PKG_TOKEN}, ("delivery_id",)))
+@capability("package")
+def t_post_package(args):
+    import posting
+    _need(args, "delivery_id")
+    return posting.post_package(conn(), _int(args, "delivery_id"), _int(args, "package_token"))
 
 
 # --- packaging ---------------------------------------------------------------------
 @register("build_quarterly_package",
           "Build the quarter's zip from what is known now (partial while the quarter runs), for "
-          "the package request whose package_token job_report's `continue` gave you. Returns "
-          "its path and the caption to send with it.",
-          obj({"quarter": Q, "package_token": PKG_TOKEN}, ("quarter", "package_token")))
+          "the package request the job's build unit names: pass its quarter, package_token "
+          "and request_id. Returns the package_id.",
+          obj({"quarter": Q, "package_token": PKG_TOKEN,
+               "request_id": {"type": "integer",
+                              "description": "the request_id the job's build unit gave you"}},
+              ("quarter", "package_token")))
 def t_build(args):
     _need(args, "quarter", "package_token")
     return package.build_quarterly_package(conn(), _quarter(args),
-                                           _int(args, "package_token"))
+                                           _int(args, "package_token"),
+                                           request_id=_int(args, "request_id"))
 
 
 @register("stage_for_delivery",
-          "Stage a built package (package_id) or one invoice (doc_id) for telegram (send_media) or "
-          "email (gmail send_email to the operator's own address only, with the returned "
-          "request_id). Then record_delivery. For propose_reading's `resend` instruction (\"send it "
-          "again\") pass resend=true and neither id: it stages the exact file the last view the "
-          "operator saw offered, or refuses with the words to say. For its `send last` "
-          "instruction pass last_built=true (and the quarter it names, if any) and neither "
-          "id: the last package built, unchanged; send it with the returned caption. A package built for a "
-          "package request needs its package_token; staging it again returns the same send. "
-          "Telegram: pass the returned filename to send_media. During a pass, pass the "
-          "pass_token.",
+          "Stage a built package (package_id) to post to the operator. Then "
+          "post_package(delivery_id), then record_delivery. For propose_reading's `resend` "
+          "instruction (\"send it again\") pass resend=true and neither id: it stages the "
+          "exact file the last view the operator saw offered, or refuses with the words to "
+          "say. For its `send last` instruction pass last_built=true (and the quarter it "
+          "names, if any) and neither id: the last package built, unchanged. A package built "
+          "for a package request needs its package_token; staging it again returns the same "
+          "send. channel is telegram (the default). During a pass, pass the pass_token.",
           obj({"channel": S, "package_id": I, "doc_id": I, "resend": B, "last_built": B,
-               "quarter": Q, "pass_token": TOKEN, "package_token": PKG_TOKEN}, ("channel",)))
+               "quarter": Q, "pass_token": TOKEN, "package_token": PKG_TOKEN}))
 def t_stage(args):
-    _need(args, "channel")
     resend = _bool(args, "resend", False)
     package_id, doc_id = _int(args, "package_id"), _int(args, "doc_id")
     if resend:
@@ -738,7 +779,7 @@ def t_stage(args):
             raise db.Refusal("resend stages what the operator was offered: name no package "
                              "or document with it")
         package_id = delivery.resend_target(conn())
-    return delivery.stage_for_delivery(conn(), channel=args["channel"],
+    return delivery.stage_for_delivery(conn(), channel=args.get("channel") or "telegram",
                                        package_id=package_id, doc_id=doc_id,
                                        pass_token=_int(args, "pass_token"),
                                        package_token=_int(args, "package_token"),
@@ -748,12 +789,12 @@ def t_stage(args):
 
 
 @register("record_delivery",
-          "Record a send's outcome: delivered (email: only with the message id), uncertain (a "
-          "timeout — never resend by yourself), failed. A send staged for a package request "
-          "needs its package_token. For a package recorded uncertain or failed it returns "
-          "`speak`: send its text verbatim, then mark_rendering_delivered with its render_id — "
-          "it is what lets the operator say \"send it again\". During a pass, pass the "
-          "pass_token.",
+          "Record a send's outcome: delivered (on Casa's receipt), uncertain (withheld or no "
+          "receipt — never post it again yourself), failed. A send staged for a package "
+          "request needs its package_token. Returns `speak` (uncertain/failed) or "
+          "`note_render_id` (delivered): post it with post_results(render_ids=[…]), then mark "
+          "it delivered on the receipt — in a job turn the next `post` does it for you. "
+          "During a pass, pass the pass_token.",
           obj({"delivery_id": I, "outcome": S, "message_id": S, "pass_token": TOKEN,
                "package_token": PKG_TOKEN}, ("delivery_id", "outcome")))
 def t_record_delivery(args):
