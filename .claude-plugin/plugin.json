@@ -72,6 +72,15 @@
         "mark_rendering_delivered": {
           "result": "safe"
         },
+        "post_results": {
+          "result": "capability",
+          "provides": [
+            "results"
+          ],
+          "delivers": {
+            "results": "operator_message"
+          }
+        },
         "propose_account": {
           "result": "capability",
           "provides": [
@@ -170,6 +179,7 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_unmatched_documents",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__mark_irrelevant",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__mark_rendering_delivered",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__post_results",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__propose_account",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__propose_match",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__propose_reading",

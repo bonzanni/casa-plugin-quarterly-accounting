@@ -265,7 +265,8 @@ class HolderChanges(StoreCase):
                                                " pass_id=?", (pid,)).fetchone()[0],
                              1 + job.ADOPTIONS_MAX + job.W_REFRESH_MAX)
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
+        # S7 §5: the job posted the result and its receipt was marked
+        self.assertEqual((r["state"], r["outcome"]), ("reported", "stopped"))
 
 
 class ReopenedForever(Tools):
@@ -386,8 +387,13 @@ class UnboundedAsks(StoreCase):
         with db.tx(self.conn):
             self.conn.execute("UPDATE runs SET passes=? WHERE job_id=?",
                               (job.MAX_PASSES_PER_JOB, A))
-        self.assertTrue(job.status(self.conn, A)["done"])          # budget spent: done
+        self.assertFalse(job.status(self.conn, A)["done"])         # S7 §4.2: the left line
         t = job.claim(self.conn, A)
+        u = job.next_unit(self.conn, t)
+        self.assertEqual(u["unit"], "post")
+        import views
+        views.mark_rendering_delivered(self.conn, u["render_ids"][0])
+        self.assertTrue(job.status(self.conn, A)["done"])          # budget spent: done
         self.assertEqual(job.next_unit(self.conn, t)["unit"], "complete")
 
 

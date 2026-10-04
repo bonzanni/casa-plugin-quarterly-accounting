@@ -215,10 +215,10 @@ class RefusalsNameNoRemovedTool(StoreCase):
 
 class ReportOrder(StoreCase):
     """Carry (Task 10): the operator's reply binds to the LAST delivered rendering, so
-    job_report lists a status view after every handover and stop page."""
-    @unittest.skip("S7: re-enabled in Task 10")
+    the job posts every handover and stop page before a status view (S7 §5: the status
+    sheet only when nothing else is owed)."""
     def test_status_views_come_last(self):
-        import asks, db, views
+        import asks, db, job, views
         with db.tx(self.conn):
             for kind, trigger, outcome in (("check", "operator", "complete"),
                                            ("handover", "operator", "complete"),
@@ -228,11 +228,21 @@ class ReportOrder(StoreCase):
                     " created_at, state, outcome) VALUES (?,?,?,?,?, 'done', ?)",
                     (kind, trigger, "[999]" if kind == "handover" else "[]",
                      db.next_seq(self.conn), db.now(), outcome))
-        rep = asks.job_report(self.conn)
+        tok = job.claim(self.conn, "aaaaaaaa-1")
+        units = []
+        for _ in range(4):
+            u = job.next_unit(self.conn, tok)
+            units.append(u)
+            if u["unit"] == "complete" or u["unit"] == "view":
+                break
+            for rid in u["render_ids"]:
+                views.mark_rendering_delivered(self.conn, rid)
+        handed = [r for u in units if u["unit"] == "post" for r in u["render_ids"]]
+        handed += [u["render_id"] for u in units if u["unit"] == "view"]
         kinds = [self.conn.execute("SELECT kind FROM renders WHERE render_id=?",
-                                   (t["render_id"],)).fetchone()[0] for t in rep["texts"]]
+                                   (r,)).fetchone()[0] for r in handed]
         self.assertEqual(kinds, ["handover", "job-stop", "status"])
-        self.assertIn(asks.NOT_FOUND, rep["texts"][0]["text"])
+        self.assertIn(asks.NOT_FOUND, self.render_text(handed[0]))
 
     def test_the_not_found_line_offers_no_resend(self):
         import asks, reply

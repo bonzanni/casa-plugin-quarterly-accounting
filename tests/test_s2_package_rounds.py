@@ -26,7 +26,7 @@ class PackageRounds(StoreCase):
         asks.request_package(self.conn, "2026-Q3")
         self.drv.run_job(A)
         self.assertEqual(self.conn.execute("SELECT state FROM work_requests").fetchone()[0],
-                         "done")
+                         "reported")                    # S7 §5: posted by the job, marked
         self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
                          "snapshot-done")
 

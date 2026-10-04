@@ -119,12 +119,15 @@ class Claim(StoreCase):
         """§4.2: a run that answers complete with its pass budget spent leaves its queued
         asks for the next start — completed, so they are not closed (asked before its
         last claim, they would be, had it not answered complete)."""
-        import asks, db, job
+        import asks, db, job, views
         asks.request_package(self.conn, "2026-Q3")
         tok = job.claim(self.conn, A)
         with db.tx(self.conn):          # the run has begun its MAX_PASSES_PER_JOB passes
             self.conn.execute("INSERT INTO runs(job_id, passes) VALUES (?, ?)",
                               (A, job.MAX_PASSES_PER_JOB))
+        u = job.next_unit(self.conn, tok)               # §4.2: the asks-waiting line first
+        self.assertEqual(self.render_text(u["render_ids"][0]), job.LEFT_WAITING)
+        views.mark_rendering_delivered(self.conn, u["render_ids"][0])
         self.assertEqual(job.next_unit(self.conn, tok)["unit"], "complete")
         job.claim(self.conn, B)
         self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],

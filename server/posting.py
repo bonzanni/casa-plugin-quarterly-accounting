@@ -65,6 +65,33 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
 
 
+def post_results(conn, render_ids) -> dict:
+    """§5: post stored renderings as ONE operator_message (joined by a blank line) —
+    the job's `post` unit, or a desk turn's notice to post. Already delivered ones are
+    skipped; with none left, nothing is deposited (the no-post shape)."""
+    import job
+    if (not isinstance(render_ids, list) or not 1 <= len(render_ids) <= job.POST_MAX
+            or not all(isinstance(r, str) for r in render_ids)):
+        raise db.Refusal(f"render_ids is a list of 1 to {job.POST_MAX} render ids")
+    with db.tx(conn):
+        rows = []
+        for rid in render_ids:
+            r = conn.execute("SELECT render_id, text, delivered_at FROM renders WHERE"
+                             " render_id=?", (rid,)).fetchone()
+            if r is None:
+                raise db.Refusal(f"there is no rendering {rid}")
+            if r["delivered_at"] is None:
+                rows.append(r)
+        if not rows:
+            return {"results": None, "render_ids": []}
+        body = views.deposit_safe("\n\n".join(r["text"] for r in rows))
+        if len(body) > job.POST_CHARS:
+            raise db.Refusal("those renderings are too long for one message: post them one "
+                             "at a time")
+    ref = casa_broker.deposit("results", body)
+    return {"results": ref, "render_ids": [r["render_id"] for r in rows]}
+
+
 READING_TOO_LONG = ("That is more than I can show for one Apply — nothing was read. Send it "
                     "in shorter parts.")
 

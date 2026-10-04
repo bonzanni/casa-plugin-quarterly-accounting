@@ -55,6 +55,7 @@ class Tools(StoreCase):
         tools._CONN = self.conn
         self.addCleanup(setattr, tools, "_CONN", None)
         self.rows, self.bank, self.instance = [], {}, self.LEDGER
+        self.handed = []                # S7 §5: the post/view units, their receipts withheld
 
     def call(self, name, **kw):
         import qa_server
@@ -120,6 +121,8 @@ class Tools(StoreCase):
                               "page_next": page["next"], "triage_remaining": page["remaining"],
                               "documents": {str(i): "no-payment-yet"
                                             for i in u["documents_first"]}}}
+        elif k in ("post", "view"):
+            self.handed.append(u)       # posted; its receipt arrives when deliver() says
         else:
             raise AssertionError(u)
         return self.call("job_next", pass_token=t, **ans)
@@ -131,11 +134,16 @@ class Tools(StoreCase):
             u = self.call("job_next", job_id=job_id) if u["unit"] == "end-batch" else self.do(u)
         self.fail(f"no {unit} unit")
 
-    def deliver(self, report):
+    def deliver(self):
+        """Casa's receipts for what the job posted since the last call (S7 §5), in the
+        order handed out: each rendering marked once. Returns their render ids."""
         out = []
-        for page in ([report["speak"]] if report.get("speak") else []) + report["texts"]:
-            self.call("mark_rendering_delivered", render_id=page["render_id"])
-            out.append(page["render_id"])
+        for u in self.handed:
+            for rid in u.get("render_ids") or [u["render_id"]]:
+                if rid not in out:
+                    self.call("mark_rendering_delivered", render_id=rid)
+                    out.append(rid)
+        self.handed = []
         return out
 
     def kind(self, render_id):
@@ -183,7 +191,6 @@ class InformationalPages(Tools):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
                          before + 1)
 
-    @unittest.skip("S7: re-enabled in Task 10")     # S7-merge: job_report is gone (§9)
     def test_all_good_after_a_handover_page_binds_to_the_sheet_before_it(self):
         with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
             u = self.until(self.start(2), "judge")
@@ -194,12 +201,12 @@ class InformationalPages(Tools):
                       expected_revision=it["revision"], row_digest=it["row_digest"],
                       document_date="2026-07-02", labels=["no-ref"])
             self.until(self.do(u), "complete")
-            sheet = self.deliver(self.call("job_report", job_id=A, status="ok"))[-1]
+            sheet = self.deliver()[-1]                  # the job's view (S7 §5)
             self.assertEqual(self.kind(sheet), "status")
             self.call("request_work", kind="handover", trigger="operator",
                       doc_ids=[self.doc(amount_minor=55555)])
             self.until(self.call("job_next", job_id=B), "complete", job_id=B)
-            shown = self.deliver(self.call("job_report", job_id=B, status="ok"))
+            shown = self.deliver()
             self.assertIn("handover", [self.kind(r) for r in shown])
             self.assertEqual(self.kind(shown[-1]), "handover")
             apply_now(self.conn, "all good")
@@ -243,22 +250,21 @@ class LastDelivered(StoreCase):
 
 
 class OperatorTurnRelay(Tools):
-    """R5: a rendering handed out by job_report WITHOUT job_id (an operator's turn,
-    after the operator wrote) is stamped non-binding; one handed out on a notification
-    (job_id given) binds as before. The latest hand-out wins. S7 §9 deletes the R6
-    refusal boundary: a reading binds to what it quotes, else the last delivered
-    rendering, and its proposal shows what it would change."""
+    """Was R5 (job_report's non-binding stamp for an operator turn's hand-out) and R6
+    (the refusal boundary): S7 §9 deletes both with job_report. The job posts its own
+    results (§5), every delivered rendering binds, and a reading binds to what it
+    quotes, else the last delivered rendering; its proposal shows what it would change."""
 
     def two_checks(self):
-        """Job A pairs payment 1 and its sheet is relayed on A's notification and
-        delivered; job B (an operator's check) pairs payment 2 and completes, its result
-        not yet relayed. Returns (pid1, pid2, the delivered sheet)."""
+        """Job A pairs payment 1 and its status view, posted by the job, is delivered; job
+        B (an operator's check) pairs payment 2 and completes, its view posted and its
+        receipt not yet in. Returns (pid1, pid2, the delivered sheet)."""
         with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
             u = self.until(self.start(2), "judge")
             pids = [r[0] for r in self.conn.execute("SELECT pid FROM projections ORDER BY pid")]
             self.pair(u, pids[0], 10001)
             self.until(self.do(u), "complete")
-            old = self.deliver(self.call("job_report", job_id=A, status="ok"))[-1]
+            old = self.deliver()[-1]                    # A's status view (S7 §5)
             self.call("request_work", kind="check", trigger="operator")
             u = self.until(self.call("job_next", job_id=B), "judge", job_id=B)
             self.pair(u, pids[1], 10002)
@@ -281,10 +287,11 @@ class OperatorTurnRelay(Tools):
     # refusal at a non-binding rendering, a mechanism §9 deletes (the quoted binding and
     # the proposal shown before Apply replace it, §8).
 
-    @unittest.skip("S7: re-enabled in Task 10")     # S7-merge: job_report is gone (§9)
-    def test_a_notification_relay_still_binds(self):
+    def test_a_later_checks_sheet_binds(self):
+        """S7 §5 (was: a notification relay still binds): B's status view, posted by the
+        job and delivered after A's, takes "all good" for both payments it shows."""
         p1, p2, old = self.two_checks()
-        new = self.deliver(self.call("job_report", job_id=B, status="ok"))[-1]
+        new = self.deliver()[-1]
         apply_now(self.conn, "all good")
         pairs = self.operator_pairs()
         self.assertEqual({p for p, _ in pairs}, {p1, p2})
@@ -321,7 +328,8 @@ class InstanceSwitch(Tools):
             self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0],
                              snaps)
             u = self.call("job_next", pass_token=u["pass_token"])
-            self.assertIn(u["unit"], ("complete", "end-batch"))
+            # the pass ended: next, the job posts its stop line (S7 §5), not delivered here
+            self.assertEqual(u["unit"], "post")
         self.assertIsNone(job.live_job_pass(self.conn))
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
         self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))

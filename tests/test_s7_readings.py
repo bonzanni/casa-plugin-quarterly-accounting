@@ -136,6 +136,29 @@ class Readings(StoreCase):
         long = "📊 Finance\n" + views.unesc(r["text"]) + "\n" + "x " * 300
         self.assertEqual(views.bound_rendering(self.conn, long)["render_id"], fx["render_id"])
 
+    def test_a_quote_of_a_joined_post_binds_to_its_first_rendering(self):
+        """Task 6 ruling (§8's literal rule, §5): a post joins up to POST_MAX renderings; a
+        quote of it binds to the first, even one under 200 normalised characters — not to
+        the later ones delivered with it (the fallback, last delivered)."""
+        import db, job, views
+        texts = ["The bank connection stopped — new payments aren't coming in.",
+                 "a" * 900, "b" * 900]
+        rids = []
+        with db.tx(self.conn):
+            for kind, text in zip(("alert", "status", "check"), texts):
+                rid = f"r{db.next_seq(self.conn)}"
+                self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
+                                  " text, membership_json) VALUES (?,?, '{}', ?, ?, '[]')",
+                                  (rid, kind, db.now(), text))
+                rids.append(rid)
+        self.assertEqual(len(rids), job.POST_MAX)
+        self.assertLess(len(views._qnorm(texts[0])), views.QUOTE_UNITS)
+        for rid in rids:                                  # one post: marked in order
+            views.mark_rendering_delivered(self.conn, rid)
+        quoted = "📊 Finance\n" + "\n\n".join(texts)
+        self.assertEqual(views.bound_rendering(self.conn, quoted)["render_id"], rids[0])
+        self.assertEqual(db.last_delivered(self.conn)["render_id"], rids[-1])
+
     def test_a_refused_deposit_leaves_no_reading_to_apply(self):
         """§7.5: a key Casa never took can never be spent — the reading is stale, and the
         tool answers the no-post shape."""

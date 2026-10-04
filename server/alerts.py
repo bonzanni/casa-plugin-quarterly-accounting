@@ -216,7 +216,7 @@ def pending_rendering(conn, must=None):
         return pending_in_tx(conn, must)
 
 
-def pending_in_tx(conn, must=None):
+def pending_in_tx(conn, must=None, skip=()):
     """evaluate(), the read of undelivered alerts, composition and the renders
     INSERT all run under ONE db.tx: end_pass frees the pass marker before
     calling here, so a fresh pass can begin, re-observe the same still-failing
@@ -237,11 +237,17 @@ def pending_in_tx(conn, must=None):
     Runs inside the caller's write transaction: record_delivery raises its
     package notice and composes the rendering that says it in one commit. A
     rendering that prints a notice offering a package names that package in its
-    scope's `offers`, so "send it again" binds to it (D3)."""
+    scope's `offers`, so "send it again" binds to it (D3).
+
+    `skip` (S7 §5): alert ids left out — the job's cursor passes the occurrences whose
+    rendering this run already handed out job.OFFER_MAX times, so the next rendering
+    composes the following ones."""
     assert conn.in_transaction
     evaluate(conn)
-    rows = conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL"
-                         " ORDER BY alert_id").fetchall()
+    skip = set(skip)
+    rows = [r for r in conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL"
+                                    " ORDER BY alert_id").fetchall()
+            if r["alert_id"] not in skip]
     if not rows:
         return None
     text, ids = _batch(_units(conn, rows), must)
@@ -259,9 +265,11 @@ def pending_in_tx(conn, must=None):
         r = conn.execute("SELECT text, scope_json FROM renders WHERE render_id=? AND"
                          " delivered_at IS NULL", (rid,)).fetchone()
         # reused only if it is still deliverable: a rendering saved oversized by
-        # earlier code is re-composed through the fit instead (round 3)
+        # earlier code is re-composed through the fit instead (round 3) — measured
+        # against the deposit body's budget (S7 §7.6), so a pre-S7 one up to Telegram's
+        # limit is re-fitted and three always join within job.POST_CHARS
         if r is not None and json.loads(r["scope_json"]) == scope \
-                and views.utf16_len(r["text"]) <= views.TELEGRAM_LIMIT:
+                and views.utf16_len(r["text"]) <= views.BODY_LIMIT:
             return {"render_id": rid, "text": r["text"]}
     rid = f"r{db.next_seq(conn)}"
     conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"

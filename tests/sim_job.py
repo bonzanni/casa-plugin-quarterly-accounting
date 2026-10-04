@@ -15,6 +15,9 @@ everything; the driver never chooses a unit, an outcome or a token of its own.
   item        at most 4 queries, nothing found; record_search with them
   judge       one triage page (limit 8; a package also one dates_unread page); then
               job_next(judged={page_next, triage_remaining, documents})
+  post        S7 §5: post_results(render_ids); on the receipt (`deliver`), each marked
+  view        show_view(render_id) (or propose_account for accounts); on the receipt
+              (`deliver`), marked
 """
 from __future__ import annotations
 
@@ -79,6 +82,8 @@ class JobDriver:
         self.last = None
         self.token = None
         self.units = []
+        self.deliver = True             # S7 §5: Casa's receipt arrives for every post
+        self.spend_before_posts = None
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
 
     # --- the bank, as the operator's bank has it ------------------------------------
@@ -136,6 +141,8 @@ class JobDriver:
         units, judged = [], None
         job_id = self._job_of(token)
         for _ in range(MAX_UNITS):
+            if self.spend_before_posts is not None:
+                self._spend_before(judged)
             u = job.next_unit(self.conn, self.token, judged=judged)
             judged = None
             units.append(u)
@@ -164,6 +171,41 @@ class JobDriver:
         """Carry out unit `u` under claim `token`. Returns the judge's `judged`, CUT when
         the unit's turn ended part-way, else None."""
         return getattr(self, "_" + u["unit"].replace("-", "_"))(u, token)
+
+    def _spend_before(self, judged) -> None:
+        """When the next unit would be the run's first post/view, raise the batch's spend
+        to `spend_before_posts` − BATCH_RESERVE − 1, so _account swaps that unit for
+        end-batch exactly once. Read off the cursor in a savepoint rolled back."""
+        import db
+        with db.tx(self.conn):
+            self.conn.execute("SAVEPOINT peek")
+            try:
+                if judged is not None:
+                    job._judged(self.conn, self.token, judged)
+                nxt = job._choose(self.conn, self.token)["unit"]
+            finally:
+                self.conn.execute("ROLLBACK TO peek")
+                self.conn.execute("RELEASE peek")
+            if nxt in ("post", "view"):
+                self.conn.execute("UPDATE claims SET spent=? WHERE gen=?",
+                                  (self.spend_before_posts - job.BATCH_RESERVE - 1, self.token))
+                self.spend_before_posts = None
+
+    def _post(self, u, token):
+        """post_results(render_ids); on Casa's receipt, mark_rendering_delivered each."""
+        import views
+        if self.deliver:
+            for rid in u["render_ids"]:
+                views.mark_rendering_delivered(self.conn, rid)
+        return None
+
+    def _view(self, u, token):
+        """show_view(render_id) — or propose_account() when it says accounts (nothing to
+        mark); on Casa's receipt, mark_rendering_delivered(render_id)."""
+        import views
+        if self.deliver and not u.get("accounts"):
+            views.mark_rendering_delivered(self.conn, u["render_id"])
+        return None
 
     def _probes(self, u, token):
         conn, bf = self.conn, self.bf

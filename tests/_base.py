@@ -82,6 +82,41 @@ class StoreCase(TempEnv):
             self._job_driver = JobDriver(self)
         return self._job_driver.run_job(job_id)
 
+    def drive(self, job_id, deliver=True, bank_tools=True, stop_before=None,
+              spend_before_posts=None) -> list:
+        """Job run `job_id` through the S2 simulator (S7 §5): `deliver` — each posted
+        rendering's receipt arrives and is marked; `bank_tools=False` — the probes find no
+        bank-feed tools; `stop_before` — return when a unit of that kind is handed out (not
+        done); `spend_before_posts=n` — before the first post/view hand-out, the batch's
+        spend is raised so that unit is swapped for end-batch once. The units handed out."""
+        if getattr(self, "_job_driver", None) is None:
+            from tests.sim_job import JobDriver
+            if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
+                self.bind()
+            self._job_driver = JobDriver(self)
+        drv = self._job_driver
+        drv.deliver, drv._no_tools, drv.spend_before_posts = (deliver, not bank_tools,
+                                                              spend_before_posts)
+        if stop_before is not None:
+            n = len(drv.units)
+            drv.run_until(job_id, stop_before)
+            return drv.units[n:]
+        return drv.run_job(job_id)
+
+    def insert_render(self, kind, text) -> str:
+        """A stored rendering of `kind` holding `text`, undelivered. Its render id."""
+        import db
+        with db.tx(self.conn):
+            rid = f"r{db.next_seq(self.conn)}"
+            self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
+                              " text, membership_json) VALUES (?,?, '{}', ?, ?, '[]')",
+                              (rid, kind, db.now(), text))
+        return rid
+
+    def render_text(self, render_id) -> str:
+        return self.conn.execute("SELECT text FROM renders WHERE render_id=?",
+                                 (render_id,)).fetchone()[0]
+
     def operator_pair(self, *, pid, doc_id, expected_revision, render_id):
         """The operator pairs a document with a payment they were shown (what
         record_match(author="operator") did before S7 §8.1: in the server only a tap's

@@ -426,7 +426,11 @@ def t_observe(args):
           "out (an answer that does not is refused). Do exactly the unit it returns. When it "
           "says report=true, call report_job_progress with its `progress` verbatim; at "
           "end-batch, end your turn; at complete, report_job_progress then "
-          "emit_completion(status=\"ok\", text=<its text>).",
+          "emit_completion(status=\"ok\", text=<its text>). `post` → "
+          "post_results(render_ids); on its receipt mark_rendering_delivered(render_ids). "
+          "`view` → show_view(render_id) (or propose_account() when it says accounts); on "
+          "its receipt mark_rendering_delivered(render_id). A withheld post marks nothing — "
+          "call job_next: it is offered again, at most twice.",
           obj({"job_id": S, "pass_token": TOKEN, "judged": O}))
 def t_job_next(args):
     import job
@@ -695,11 +699,31 @@ def t_bind_account(args):
     return taps.bind_account(conn(), args.get("choice"), args.get("key"))
 
 
+@register("post_results",
+          "Post stored renderings to the operator as one message (Casa posts it, labelled; "
+          "never retell it): the job's `post` unit's render_ids, or a render id a tool "
+          "returned for the operator (a notice, a package's details). After Casa's receipt "
+          "(casa_delivery.status delivered), call mark_rendering_delivered(render_ids=<the "
+          "returned render_ids>); with none returned, nothing was posted.",
+          obj({"render_ids": A}, ("render_ids",)))
+@capability("results")
+def t_post_results(args):
+    import posting
+    return posting.post_results(conn(), args.get("render_ids"))
+
+
 @register("mark_rendering_delivered",
-          "Call right after a rendering (or a `speak`, or a job_report text) was sent successfully. Only this "
-          "makes it count as shown.",
-          obj({"render_id": S}, ("render_id",)))
+          "Call after Casa's receipt for a post (casa_delivery.status delivered): "
+          "render_ids=<the render_ids post_results returned>, or render_id=<the view's "
+          "render_id>. Only this makes it count as shown; a withheld post marks nothing.",
+          obj({"render_id": S, "render_ids": A}))
 def t_delivered(args):
+    ids = args.get("render_ids")
+    if ids is not None:
+        if (not isinstance(ids, list) or not ids
+                or not all(isinstance(r, str) for r in ids)):
+            raise db.Refusal("render_ids is the list post_results returned")
+        return {"marked": [views.mark_rendering_delivered(conn(), r) for r in ids]}
     _need(args, "render_id")
     return views.mark_rendering_delivered(conn(), args["render_id"])
 

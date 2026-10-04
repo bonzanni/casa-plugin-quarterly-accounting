@@ -25,7 +25,6 @@ class FailedSync(StoreCase):
         self.bind()
         self.drv = JobDriver(self, payments=2)
 
-    @unittest.skip("S7: re-enabled in Task 10")
     def test_a_failed_sync_imports_sweeps_and_judges_with_bank_through_unchanged(self):
         import asks, dates, db, job, views
         asks.request_work(self.conn, "check", "operator")
@@ -60,13 +59,21 @@ class FailedSync(StoreCase):
         self.assertTrue(any(k.startswith("sweep:") for k in keys), keys)
         self.assertTrue(any(k.startswith("judge:") for k in keys), keys)
         self.assertEqual((units[-1]["text"], units[-1]["progress"]["summary"]), FINISHED)
-        # the operator still sees it: the bank-connection alert, and how far the bank
-        # was checked (the date before the failed sync)
-        out = asks.job_report(self.conn, job_id=B, status="ok")
-        speak = " ".join(out["speak"]["text"].split())     # the rendering wraps its lines
+        # the operator still sees it, posted by the job (S7 §5): the bank-connection
+        # alert, and how far the bank was checked (the date before the failed sync)
+        def text(rid):
+            return self.conn.execute("SELECT text FROM renders WHERE render_id=?",
+                                     (rid,)).fetchone()[0]
+        posted = [text(r) for u in units if u["unit"] == "post" for r in u["render_ids"]]
+        alert = [x for x in posted if x.startswith("The bank connection stopped")]
+        self.assertEqual(len(alert), 1, posted)
+        speak = " ".join(alert[0].split())                 # the rendering wraps its lines
         self.assertIn(f"The bank connection stopped ({views.field(DEAD_LINK)}) — new payments aren't "
                       "coming in.", speak)
-        texts = " ".join(" ".join(x["text"] for x in out["texts"]).split())
+        sheets = [text(u["render_id"]) for u in units if u["unit"] == "view"]
+        self.assertEqual(len(sheets), 1)
+        self.assertLess(kinds.index("post"), kinds.index("view"))   # the alert first
+        texts = " ".join(" ".join(sheets).split())
         # the view's coverage line ("First review · bank checked through …" on a first
         # sheet, else "Bank checked through …"): the date before the failed sync
         said = texts.lower()
@@ -74,7 +81,7 @@ class FailedSync(StoreCase):
         today = dates.short_day(later.strftime("%Y-%m-%d")).lower()
         self.assertNotIn(f"bank checked through {today}", said)
         for word in views.FORBIDDEN:
-            self.assertNotIn(word, out["speak"]["text"])
+            self.assertNotIn(word, alert[0])
 
     def test_an_import_alone_earns_nothing(self):
         """The credit rule is unchanged: a failed-sync pass's import earns no credit of
@@ -101,6 +108,23 @@ class RunEnd(StoreCase):
         import asks, db
         with db.tx(self.conn):
             asks.take_queued(self.conn, pass_id)
+
+    def deliver_posts(self, token):
+        """S7 §5: the job posts what the run owes before it may end; each post's receipt
+        arrives and is marked."""
+        import db, job, views
+        while True:
+            with db.tx(self.conn):
+                if job.done(self.conn, self._job_of(token), token):
+                    return
+            u = job.next_unit(self.conn, token)
+            assert u["unit"] in ("post", "view"), u
+            for rid in u.get("render_ids") or [u["render_id"]]:
+                views.mark_rendering_delivered(self.conn, rid)
+
+    def _job_of(self, token):
+        return self.conn.execute("SELECT job_id FROM claims WHERE gen=?",
+                                 (token,)).fetchone()[0]
 
     def assert_operator_text(self, text):
         import job, views
@@ -189,6 +213,8 @@ class RunEnd(StoreCase):
         self.assertEqual((row["holder_job"], row["outcome"]), (C, "stopped"))
         self.assertEqual(json.loads(row["report_json"])["stopped_by"], D)
         want = "Accounting check stopped: it kept stopping."
+        self.assertFalse(job.status(self.conn, D)["done"])  # S7 §5: its stop line is owed
+        self.deliver_posts(tD)
         self.assertEqual(job.status(self.conn, D)["text"], want)
         u = job.next_unit(self.conn, tD)
         self.assertEqual((u["unit"], u["text"]), ("complete", want))
@@ -204,4 +230,5 @@ class RunEnd(StoreCase):
         import passes
         with db.tx(self.conn):
             passes._end_pass_tx(self.conn, t, "stopped", rep)
+        self.deliver_posts(t)                             # S7 §5: the stop line first
         self.assert_operator_text(job.status(self.conn, A)["text"])
