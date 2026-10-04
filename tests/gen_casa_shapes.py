@@ -5,11 +5,14 @@ with Casa's REAL validators and renderer under Casa's interpreter. Stdlib only.
 
     python3 tests/gen_casa_shapes.py [OUT.jsonl]      (default: tests/casa_shapes.jsonl)
 
-One line per deposit: {"case", "tool", "body", "display_expect"}. `body` is the deposit
-request exactly as the plugin sent it (FakeBroker records it). `display_expect` is the
-composition with every field unescaped — what Casa's renderer must display — or null where
-no display is promised (a legacy rendering, stored before S7: spec §7.6 leaves it
-un-re-escaped). Every button of every proposal adds a {"case": "stored_call", "tool",
+The first line is a header the checker holds the rest to: {"case": "header", "kinds":
+{kind: deposits}, "cases": [every deposit case], "display_checked": n} — so an empty or
+truncated file fails. Then one line per deposit: {"case", "tool", "body", and exactly one of
+"display_expect" | "display_skip"}. `body` is the deposit request exactly as the plugin sent
+it (FakeBroker records it). `display_expect` is the composition with every field unescaped —
+what Casa's renderer must display; `display_skip` names why no display is promised (a legacy
+rendering, stored before S7: spec §7.6 leaves it un-re-escaped; a file caption is plain
+text). Every button of every proposal adds a {"case": "stored_call", "tool",
 "arguments"} line, and every WRITING button (one whose arguments carry a key) is tapped here
 through qa_server.TOOLS on the generator's own store: its receipt must not be keys.NO_LONGER
 (§7.6's successful keyed tap per shape, asserted in stdlib; the store is restored after).
@@ -61,9 +64,11 @@ class _Store(StoreCase):
         pass
 
 
-# each posting tool's delivered slot (§3); 14b adds results/reading/accounts/package
+# each posting tool's delivered slot and its kind (§3); 14b adds results/reading/accounts/
+# package with their kinds
 SLOTS = {"show_view": "view"}
-PROPOSALS = {"show_view"}             # operator_proposal tools; 14b adds the two propose_*
+KINDS = {"show_view": "operator_proposal"}
+PROPOSALS = {t for t, k in KINDS.items() if k == "operator_proposal"}
 
 
 class Shapes:
@@ -76,7 +81,8 @@ class Shapes:
         """Run posting tool `tool` through qa_server.TOOLS and record its one deposit. A
         proposal's buttons are recorded too, every writing button is tapped (the store is
         restored after each), and the buttons are returned; otherwise the body is.
-        `display`: the display check applies (the text is composed through views.esc)."""
+        `display`: True when the display check applies (the text is composed through
+        views.esc), else the reason it does not (recorded as `display_skip`)."""
         import qa_server
         import tools                                    # noqa: F401 — registers the tools
         import views
@@ -88,15 +94,24 @@ class Shapes:
         if len(new) != 1:
             raise AssertionError(f"{case}: expected one deposit, saw {len(new)}")
         body = {k: v for k, v in new[0].items() if k != "client"}
+        if KINDS[tool] == "operator_file" and display is True:
+            display = "a file caption is sent as plain text"
+        if any(r["case"] == case for r in self.records):
+            raise AssertionError(f"{case}: a case name is used twice")
+        rec = {"case": case, "tool": tool, "body": body}
         if tool not in PROPOSALS:
-            # an operator_message's text is its value; a file's caption is plain text
-            self.records.append({"case": case, "tool": tool, "body": body,
-                                 "display_expect": views.unesc(body["value"])
-                                 if display and SLOTS[tool] == "results" else None})
+            if display is True:          # an operator_message's text is its value
+                rec["display_expect"] = views.unesc(body["value"])
+            else:
+                rec["display_skip"] = display
+            self.records.append(rec)
             return body
         prop = json.loads(body["value"])
-        self.records.append({"case": case, "tool": tool, "body": body,
-                             "display_expect": views.unesc(prop["text"]) if display else None})
+        if display is True:
+            rec["display_expect"] = views.unesc(prop["text"])
+        else:
+            rec["display_skip"] = display
+        self.records.append(rec)
         for b in prop["buttons"]:
             self.records.append({"case": "stored_call", "tool": b["call"]["tool"],
                                  "arguments": b["call"]["arguments"]})
@@ -268,12 +283,13 @@ def gen_show_view_setup_stop(sh, st, b):
 
 
 LEGACY = [
-    # (case, stored text, display promised): a rendering stored before S7 — raw control
-    # characters, never escaped for the dialect (§7.6: deposit_safe is its only step)
+    # (case, stored text, display): a rendering stored before S7 — raw control characters,
+    # never escaped for the dialect (§7.6: deposit_safe is its only step). `display` is True
+    # (checked) or the reason no display is promised
     ("legacy:ctrl", "Accounting · Q3 2026\nACME\x01Corp owes 12.00\x7f and\x1bmore", True),
     ("legacy:hostile", "Accounting · Q3 2026\n" + "\n".join(
         v.replace("\n", "\x01")[:300] for v in HOSTILE) + "\n" + "\x01".join(["*"] * 1200),
-     False),
+     "legacy text is not re-escaped for the dialect (spec 7.6)"),
 ]
 
 
@@ -289,7 +305,7 @@ def gen_legacy_rendering(sh, st, b):
                             (rid, text))
         sh.call(st, b, case, "show_view", {"render_id": rid}, display=display)
         posted = next(r for r in reversed(sh.records) if r["case"] == case)
-        if display and posted["display_expect"] != views.deposit_safe(text):
+        if display is True and posted["display_expect"] != views.deposit_safe(text):
             raise AssertionError(f"{case}: a legacy text is displayed as itself, cleaned")
 
 
@@ -311,11 +327,23 @@ def generate() -> Shapes:
     return sh
 
 
+def header(records) -> dict:
+    """What the checker must find judged: every deposit case, the deposits per kind, and
+    how many display checks — so an empty, truncated or thinned file fails."""
+    deposits = [r for r in records if r["case"] != "stored_call"]
+    kinds: dict = {}
+    for r in deposits:
+        kinds[KINDS[r["tool"]]] = kinds.get(KINDS[r["tool"]], 0) + 1
+    return {"case": "header", "kinds": kinds, "cases": [r["case"] for r in deposits],
+            "display_checked": sum(1 for r in deposits if "display_expect" in r)}
+
+
 def main(argv) -> int:
     out = pathlib.Path(argv[1]) if len(argv) > 1 else ROOT / "tests" / "casa_shapes.jsonl"
     sh = generate()
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in sh.records))
+    out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
+                           for r in [header(sh.records)] + sh.records))
     deposits = sum(1 for r in sh.records if r["case"] != "stored_call")
     print(f"{len(sh.records)} records ({deposits} deposits, {sh.taps} keyed taps) -> {out}")
     return 0

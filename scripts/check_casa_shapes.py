@@ -4,6 +4,12 @@ predicate), Casa's real message plan (render_paged ≤ MAX_MESSAGE_PAGES) and Ca
 renderer (tg_richtext.render: the displayed text equals the unescaped composition; no
 entity). Runs under Casa's interpreter; never imported by the stdlib suite.
 
+The file's first line is the generator's header; every deposit case it names must be judged
+and accepted, the accepted deposits per kind must equal its counts, every kind in
+REQUIRED_KINDS must be present, and every deposit must carry either a display expectation or
+an explicit `display_skip` reason — the checked count must reach the header's. An empty,
+truncated or thinned file fails.
+
     python3 tests/gen_casa_shapes.py OUT.jsonl && CASA_TREE=… CASA_TESTS=… \\
         <Casa's python> scripts/check_casa_shapes.py OUT.jsonl"""
 import importlib.util, json, os, pathlib, sys
@@ -31,6 +37,20 @@ our_arguments_ok = _fb.arguments_ok
 NAME = "quarterly-accounting"
 DISPLAY = "F" * 40                                           # a long display name
 casa_tools._display_name_for_role = lambda role: DISPLAY
+# the kinds that must be judged at least once (part 14b: all three, when post_results and
+# post_package join the generator)
+REQUIRED_KINDS = ("operator_proposal",)
+
+
+def _display(rec):
+    """("check", expected) | ("skip", reason) | (None, None) for a record with neither, or
+    with both."""
+    has_e, has_s = "display_expect" in rec, "display_skip" in rec
+    if has_e and not has_s and isinstance(rec["display_expect"], str):
+        return "check", rec["display_expect"]
+    if has_s and not has_e and isinstance(rec["display_skip"], str) and rec["display_skip"]:
+        return "skip", rec["display_skip"]
+    return None, None
 
 
 def main(path) -> int:
@@ -40,9 +60,17 @@ def main(path) -> int:
         manifest=manifest, manifest_name=NAME)])
     cmap = result_contract_map(res)
     by_wire = {e.wire_name: (rt, e) for rt, e in cmap.tools.items()}
-    bad, n, kinds = [], -1, {}
-    for n, line in enumerate(pathlib.Path(path).read_text().splitlines()):
+    bad, n, kinds, judged, checked, skipped = [], 0, {}, [], 0, 0
+    lines = pathlib.Path(path).read_text().splitlines()
+    head = json.loads(lines[0]) if lines else None
+    if not isinstance(head, dict) or head.get("case") != "header":
+        print("FAIL: no header line: an empty or foreign file")
+        return 1
+    for n, line in enumerate(lines[1:], 1):
         rec = json.loads(line)
+        if rec["case"] == "header":
+            bad.append((n, "a second header", ""))
+            continue
         if rec["case"] == "stored_call":
             if sc.arguments_ok(rec["arguments"]) != our_arguments_ok(rec["arguments"]):
                 bad.append((n, "grammar copy disagrees", rec["tool"]))
@@ -62,6 +90,11 @@ def main(path) -> int:
             continue
         dkind = entry.delivers[b["slot"]]
         kinds[dkind] = kinds.get(dkind, 0) + 1
+        judged.append(rec["case"])
+        mode, expect = _display(rec)
+        if mode is None:
+            bad.append((n, "neither a display expectation nor an explicit skip", rec["case"]))
+            continue
         label = rb.post_label("finance")
         if dkind == rb.OPERATOR_MESSAGE:
             pages = render_paged(rb.compose_operator_message(b["value"], label))
@@ -69,14 +102,38 @@ def main(path) -> int:
                 bad.append((n, f"{len(pages)} pages", rec["case"]))
         text = (json.loads(b["value"])["text"] if dkind == rb.OPERATOR_PROPOSAL
                 else b["value"] if dkind == rb.OPERATOR_MESSAGE else None)
-        if text is not None and rec.get("display_expect") is not None:
+        if mode == "skip":
+            skipped += 1
+        elif text is None:
+            bad.append((n, f"a display expectation on a {dkind}, which has no text", rec["case"]))
+        else:
+            checked += 1
             shown, entities = render(text)
-            if shown != rec["display_expect"] or entities:
+            if shown != expect or entities:
                 bad.append((n, "display differs or an entity was produced", rec["case"]))
+    # the header's promises: every case judged once, the kinds' counts, the display floor
+    want = head.get("cases") or []
+    if not want:
+        bad.append((0, "the header names no deposit", ""))
+    missing = [c for c in want if c not in judged]
+    if missing:
+        bad.append((0, f"{len(missing)} declared cases not accepted", ", ".join(missing[:5])))
+    extra = sorted({c for c in judged if c not in want or judged.count(c) > 1})
+    if extra:
+        bad.append((0, "cases judged but not declared once", ", ".join(extra[:5])))
+    if kinds != head.get("kinds"):
+        bad.append((0, f"accepted per kind {kinds} != declared {head.get('kinds')}", ""))
+    for k in REQUIRED_KINDS:
+        if not kinds.get(k):
+            bad.append((0, f"no {k} deposit was judged", ""))
+    floor = head.get("display_checked")
+    if not isinstance(floor, int) or floor < 1 or checked < floor:
+        bad.append((0, f"{checked} display checks, the header declares {floor}", ""))
     for b_ in bad:
         print("FAIL", *b_)
-    print(f"{'FAIL' if bad else 'OK'}: {n + 1} records "
-          f"({', '.join(f'{v} {k}' for k, v in sorted(kinds.items())) or 'no deposit accepted'})")
+    print(f"{'FAIL' if bad else 'OK'}: {n} records "
+          f"({', '.join(f'{v} {k}' for k, v in sorted(kinds.items())) or 'no deposit accepted'}"
+          f"; display checked {checked}, skipped {skipped})")
     return 1 if bad else 0
 
 
