@@ -367,3 +367,40 @@ class R3Minors(_Q3):
                               (db.canonical(scope), out["render_id"]))
         r, _ = self.propose("more")
         self.assertEqual(r["instructions"], [{"show_view": dict(nxt, walk=fx["render_id"])}])
+
+
+class R3QuoteBindsAPostedPage(_Q3):
+    """r3 #3 (Astra S2), ruling (a): a view posted by a navigation tap (the More button's
+    stored show_view, a turn with no room for mark_rendering_delivered) is stamped posted;
+    an explicit quote binds it. Port of Astra's Navigation repro."""
+    from tests.test_s7_views_buttons import PagedSheet as _P
+    big_sheet = _P.big_sheet
+    del _P
+
+    def test_quoting_page_two_binds_page_two(self):
+        import tools, qa_server, views  # noqa: F401
+        self.big_sheet()
+        call = lambda name, **a: qa_server.TOOLS[name]["fn"](a)
+        with FakeBroker() as b:
+            first = call("show_view", view="check", page=1)
+            call("mark_rendering_delivered", render_id=first["render_id"])
+            more = next(x["call"] for x in b.proposal()["buttons"] if x["label"] == "More")
+            second = call(more["tool"], **more["arguments"])        # the tap: no mark follows
+            shown = b.proposal()["text"]
+            typed = call("propose_reading", text="more", quoted=shown)
+        self.assertEqual(views.bound_rendering(self.conn, shown)["render_id"],
+                         second["render_id"])
+        self.assertEqual(typed["instructions"],
+                         [{"show_view": second["next"]}] if second["next"] else [])
+        self.assertEqual(views.bound_rendering(self.conn, None)["render_id"],
+                         first["render_id"])                   # the unquoted fallback
+
+    def test_a_refused_deposit_clears_the_stamp(self):
+        import posting
+        self.sheet_fixture()
+        with FakeBroker() as b:
+            b.refuse = "bad_value"
+            with self.assertRaises(Exception):
+                posting.show_view(self.conn, view="check")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE posted_seq IS"
+                                           " NOT NULL").fetchone()[0], 0)

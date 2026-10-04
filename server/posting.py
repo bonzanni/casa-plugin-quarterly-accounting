@@ -66,7 +66,18 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
         buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r, walk))
         revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
         value = _proposal(r["text"], buttons, revision)
-    ref = casa_broker.deposit("view", value)
+        # r3 #3: stamped posted before the deposit (which stays last) — a view posted by a
+        # tap's stored call is never marked delivered, and a quote of it binds it
+        conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
+                     (db.next_seq(conn), r["render_id"]))
+    try:
+        ref = casa_broker.deposit("view", value)
+    except casa_broker.DepositFailed:
+        with db.tx(conn):
+            # back to what it was: a re-post Casa refused leaves an earlier post's stamp
+            conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
+                         (r["posted_seq"], r["render_id"]))
+        raise
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
 
 

@@ -322,7 +322,8 @@ CREATE TABLE IF NOT EXISTS renders (
   created_at TEXT NOT NULL, delivered_at TEXT, text TEXT NOT NULL,
   membership_json TEXT NOT NULL,
   delivered_seq INTEGER,         -- store sequence at delivery: what "most recent delivered" orders by
-  binding INTEGER);              -- job_report's latest hand-out: 1 notification, 0 operator turn (R5)
+  binding INTEGER,               -- job_report's latest hand-out: 1 notification, 0 operator turn (R5)
+  posted_seq INTEGER);           -- S7 r3 #3: show_view deposited it (attempted; cleared on refusal)
 CREATE TABLE IF NOT EXISTS render_items (
   render_id TEXT NOT NULL, pid INTEGER NOT NULL, projection_revision INTEGER NOT NULL,
   match_revisions_json TEXT NOT NULL, PRIMARY KEY (render_id, pid));
@@ -518,7 +519,7 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE probes ADD COLUMN gen INTEGER",
         CLAIMS_DDL_V10, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL_V10],
     # 10 -> 11 (S7): tap keys, readings, account choices, post offers; the run's stamps;
-    # the request's latest ask; a send's post mark. Data steps follow in migrate (after_10_to_11)
+    # the request's latest ask; a send's and a view's post marks. Data steps follow in migrate (after_10_to_11)
     10: ["ALTER TABLE claims ADD COLUMN seq INTEGER",
          "ALTER TABLE runs ADD COLUMN completed_at TEXT",
          "ALTER TABLE package_requests ADD COLUMN asked_seq INTEGER NOT NULL DEFAULT 0",
@@ -527,6 +528,7 @@ MIGRATIONS: dict[int, list[str]] = {
          " ('queued', 'snapshot', 'snapshot-done', 'built')",
          "DELETE FROM meta WHERE key='drain' OR key LIKE 'cancelled:%'",
          "ALTER TABLE deliveries ADD COLUMN posted_at TEXT",
+         "ALTER TABLE renders ADD COLUMN posted_seq INTEGER",
          READINGS_DDL, RENDER_KEYS_DDL, ACCOUNT_CHOICES_DDL, POST_OFFERS_DDL],
 }
 

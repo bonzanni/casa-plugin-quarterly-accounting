@@ -1257,12 +1257,17 @@ def bound_rendering(conn, quoted):
     the quoted post (Casa quotes a post's first 2,000 characters, §2). The quote may be
     longer than the rendering: a post joins up to job.POST_MAX renderings (§5), and a
     quote of it binds to its first, even one shorter than 200 characters. With no quote,
-    or no match among the latest 200, db.last_delivered."""
+    or no match among the latest 200, db.last_delivered.
+
+    r3 #3: a quote is the operator's own evidence of what they saw, so it also matches a
+    rendering show_view posted (posted_seq) that nobody marked delivered — a view posted by
+    a tap's stored call, whose turn has no room for the mark."""
     q = _qnorm(quoted) if isinstance(quoted, str) else ""
     if q:
-        for r in conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND kind"
-                              " NOT IN (%s) ORDER BY delivered_seq DESC, delivered_at DESC,"
-                              " rowid DESC LIMIT %d"
+        for r in conn.execute("SELECT * FROM renders WHERE (delivered_at IS NOT NULL OR"
+                              " posted_seq IS NOT NULL) AND kind NOT IN (%s) ORDER BY"
+                              " max(coalesce(delivered_seq, 0), coalesce(posted_seq, 0)) DESC,"
+                              " delivered_at DESC, rowid DESC LIMIT %d"
                               % (",".join("?" * len(db.INFORMATIONAL_KINDS)), BOUND_SCAN),
                               db.INFORMATIONAL_KINDS):
             head = _qnorm(unesc(r["text"] or ""))[:QUOTE_UNITS]
