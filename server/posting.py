@@ -109,3 +109,52 @@ def propose_reading(conn, text, quoted=None) -> dict:
                          " AND state='open'", (db.now(), rid))
         raise
     return {"reading": ref, "reading_id": rid, **base}
+
+
+ACCOUNTS_PER_PAGE = 5
+ACCOUNT_Q = "Which one is the business account? Tap it below."
+
+
+def _company_accounts(conn) -> list:
+    p = conn.execute("SELECT data_json FROM probes WHERE kind='bank_accounts'").fetchone()
+    accounts = (json.loads(p["data_json"] or "{}").get("accounts") or []) if p else []
+    return [a for a in accounts if isinstance(a, dict) and a.get("category") == "company"
+            and isinstance(a.get("account_id"), str)]
+
+
+def propose_account(conn, after=0) -> dict:
+    """§11: ask which company account is the business account — at most five choices a
+    page, listed in the body; each button carries only (choice, key), and the account id
+    and label are frozen under the key (§7.6). `after` is the page number already shown
+    (an int: the More button's only argument)."""
+    if isinstance(after, bool) or not isinstance(after, int) or after < 0:
+        raise db.Refusal("after is the page number the More button carried")
+    with db.tx(conn):
+        if conn.execute("SELECT 1 FROM binding WHERE id=1").fetchone() is not None:
+            raise db.Refusal("the business account is already set")
+        company = _company_accounts(conn)
+        if len(company) < 2:
+            raise db.Refusal("there is no choice to make: one company account is bound "
+                             "automatically at the next check")
+        page = company[after * ACCOUNTS_PER_PAGE:(after + 1) * ACCOUNTS_PER_PAGE]
+        if not page:
+            raise db.Refusal("there are no more accounts")
+        key, now = keys.mint(), db.now()
+        lines, buttons = [ACCOUNT_Q], []
+        for n, a in enumerate(page, 1):
+            label = a.get("label") or ""
+            if not isinstance(label, str):
+                label = ""
+            conn.execute("INSERT INTO account_choices(key, n, account_id, label, created_at)"
+                         " VALUES (?,?,?,?,?)", (key, n, a["account_id"], label, now))
+            lines.append(f"Account {n}: {views.field(label) or '(no name)'} "
+                         f"(…{views.esc(a['account_id'][-4:])})")
+            buttons.append((f"Account {n}", "bind_account", {"choice": n, "key": key}))
+        more = len(company) > (after + 1) * ACCOUNTS_PER_PAGE
+        if more:
+            buttons.append(("More", "propose_account", {"after": after + 1}))
+        text = "\n".join(lines)
+        assert views.fits_proposal(text)   # 6 lines of ≤ 2×60+20 units: far within budget
+        value = _proposal(text, buttons, "accounts")
+    ref = casa_broker.deposit("accounts", value)
+    return {"accounts": ref, "page": after + 1, "more": more}

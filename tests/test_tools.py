@@ -33,6 +33,8 @@ EXPECTED = {
     "show_view", "verdict",
     # S7 §8 (Task 6): typed words read into a reading, and its Apply / Cancel buttons
     "propose_reading", "apply_reading", "cancel_reading",
+    # S7 §11 (Task 7): the business account chosen by button
+    "propose_account", "bind_account",
 }
 
 
@@ -90,14 +92,14 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 35)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3
+        self.assertEqual(len(EXPECTED), 37)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3; Task 7: + 2
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 35)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 37)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])

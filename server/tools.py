@@ -524,7 +524,8 @@ def t_probe(args):
 @register("check_setup",
           "What the pass can reach, as timestamped observations; whether it can run; whether "
           "bank-feed writes are allowed and with which expected_generation; the self-check "
-          "sentences to say when it cannot run.",
+          "sentences to say when it cannot run; when it asks which account is the business "
+          "account, call propose_account().",
           obj({}))
 def t_check(args):
     return binding.check_setup(conn())
@@ -672,6 +673,27 @@ def t_apply_reading(args):
 def t_cancel_reading(args):
     import taps
     return taps.cancel_reading(conn(), _int(args, "reading_id"), args.get("key"))
+
+
+@register("propose_account",
+          "Ask the operator which company account is the business account (check_setup says "
+          "when): posts the choices with buttons. Never bind it yourself.",
+          obj({"after": I}))
+@capability("accounts")
+def t_propose_account(args):
+    import posting
+    after = args.get("after")
+    return posting.propose_account(conn(), 0 if after is None else after)
+
+
+@register("bind_account",
+          "A button's call: only a tap on the operator's own button makes it. Never call it "
+          "yourself — it refuses without the button's key.",
+          obj({"choice": I, "key": S}, ("choice", "key")))
+@keyed
+def t_bind_account(args):
+    import taps
+    return taps.bind_account(conn(), args.get("choice"), args.get("key"))
 
 
 @register("mark_rendering_delivered",

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 
 import authority
+import binding
 import db
 import keys
 import matches
@@ -166,3 +167,23 @@ def cancel_reading(conn, reading_id, key) -> dict:
         conn.execute("UPDATE readings SET state='cancelled', settled_at=? WHERE reading_id=?",
                      (db.now(), reading_id))
     return {"receipt": "Cancelled — nothing was applied."}
+
+
+def bind_account(conn, choice, key) -> dict:
+    """§11: a tap on `Account n` binds the account frozen under the key at n (§7.6). The
+    key is spent with the binding, in ONE transaction: a refusal from binding.bind_in_tx
+    (an account already bound) rolls the spend back too."""
+    if isinstance(choice, bool) or not isinstance(choice, int) or not 1 <= choice <= 5:
+        raise db.Refusal(keys.NO_LONGER)
+    with db.tx(conn):
+        rows = conn.execute("SELECT * FROM account_choices WHERE key=?", (key,)).fetchall() \
+            if isinstance(key, str) and keys.KEY_RE.fullmatch(key) else []
+        pick = next((r for r in rows if r["n"] == choice), None)
+        if pick is None or any(r["spent_at"] for r in rows):
+            raise db.Refusal(keys.NO_LONGER)
+        conn.execute("UPDATE account_choices SET spent_at=? WHERE key=?", (db.now(), key))
+        grant = authority.OperatorGrant("bind_account", key)
+        binding.bind_in_tx(conn, pick["account_id"], pick["label"], grant=grant)
+    return {"receipt": f"The business account is {views.field(pick['label']) or 'set'} "
+                       f"(…{views.esc(pick['account_id'][-4:])}). Ask me to check when you "
+                       "want the first check."}

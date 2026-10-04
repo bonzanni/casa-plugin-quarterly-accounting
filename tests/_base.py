@@ -186,6 +186,12 @@ class StoreCase(TempEnv):
                                   "instance": instance or self.LEDGER})
         return token
 
+    def accounts_probe(self, accounts):
+        """A bank_accounts probe carrying `accounts`, recorded in a pass of its own (then
+        ended), as a check records list_accounts' answer."""
+        self.pass_("operator", accounts=accounts)
+        self.end_live_pass()
+
     def start_job_pass(self, token, trigger="operator"):
         """A job pass started under claim `token` (S2 §3), held by that claim's job id —
         as the job cursor's _begin_next starts one. Returns its pass_id."""

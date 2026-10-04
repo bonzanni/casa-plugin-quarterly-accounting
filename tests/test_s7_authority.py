@@ -4,7 +4,6 @@ expectation, the account binding, the watermark, stop-chasing, the package name,
 ledger-reset word — is written only under an OperatorGrant, which only the three keyed
 handlers construct. Structural, over the whole registry."""
 import itertools
-import unittest
 
 from tests._base import StoreCase, ROOT
 
@@ -133,7 +132,6 @@ class Authority(StoreCase):
                 self.assertEqual(self.snapshot(), before, f"{name} {dict(zip(keys, combo))}")
         self.assertGreater(calls, len(qa_server.TOOLS))   # the registry was really walked
 
-    @unittest.expectedFailure     # Ruling F1: taps.py's three handlers land by Task 7
     def test_operator_grant_is_constructed_only_in_the_keyed_handlers(self):
         hits = []
         for p in sorted((ROOT / "server").glob("*.py")):
@@ -160,7 +158,7 @@ class Authority(StoreCase):
         for gone in ("confirm_match", "reject_match", "set_exemption", "stop_chasing",
                      "set_watermark", "set_package_name", "apply_reply"):
             self.assertNotIn(gone, qa_server.TOOLS)
-        # bind_account leaves too, and comes back keyed in Task 7
+        # bind_account left too, and came back keyed in Task 7 (test_s7_accounts)
 
     def test_record_match_and_set_expectation_refuse_the_operator_author(self):
         import authority, db, qa_server, tools  # noqa: F401,E401
