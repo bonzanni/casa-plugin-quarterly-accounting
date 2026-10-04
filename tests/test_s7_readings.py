@@ -154,7 +154,7 @@ class Readings(StoreCase):
                                   (rid, kind, db.now(), text))
                 rids.append(rid)
         self.assertEqual(len(rids), job.POST_MAX)
-        self.assertLess(len(views._qnorm(texts[0])), 200)
+        self.assertLess(len(views._bnorm(texts[0])), 200)
         for rid in rids:                                  # one post: marked in order
             views.mark_rendering_delivered(self.conn, rid)
         quoted = "📊 Finance\n" + "\n\n".join(texts)

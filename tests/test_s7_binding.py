@@ -633,14 +633,14 @@ class LegacyAmbiguity(_Long):
         import views
         self.deliver(page=1)                 # the first review's announcements, once
         a = self.deliver(page=1)
-        text_a = views._qnorm(self.text_of(a["render_id"]))
+        text_a = views._bnorm(self.text_of(a["render_id"]))
         last = max(self.pids, key=lambda p: text_a.find("Vendor%02d" % (p - self.pids[0])))
         mid = self.conn.execute("SELECT match_id FROM match_state WHERE pid=? AND state IN"
                                 " ('matched','proposed')", (last,)).fetchone()[0]
         self.repair_late(last, mid)
         b = self.deliver(page=1)
         self.make_legacy_both(a["render_id"], b["render_id"])
-        na, nb = (views._qnorm(self.text_of(r)) for r in (a["render_id"], b["render_id"]))
+        na, nb = (views._bnorm(self.text_of(r)) for r in (a["render_id"], b["render_id"]))
         self.assertNotEqual(na, nb)
         diff = next(i for i, (x, y) in enumerate(zip(na, nb)) if x != y)
         self.assertGreater(diff, 2000)
@@ -1135,6 +1135,37 @@ class LegacyFields(_Q3):
                                                  " render_id=?", (r["render_id"],)).fetchone()[0])
             with self.subTest(view=view):
                 self.assertEqual(set(views.FACT_FIELDS) - set(scope), set())
+
+
+# ---------------------------------------------------------------------------------------
+# r6 (Astra S2) — Casa's label is stripped from the quote only, never from a stored body
+# ---------------------------------------------------------------------------------------
+class LabelOnlyOnTheQuote(_Q3):
+    """review_label_control.py: a payee named "📊 Analytics" heads its item view; the stored
+    body's first line (its heading, with the tag) is data, not Casa's label. The quote is
+    Casa's label line + the deposited text, unescaped (what tg_richtext renders)."""
+
+    def test_a_payee_that_looks_like_the_label_binds(self):
+        import views
+        f = self.sheet_fixture(payee="\U0001f4ca Analytics")
+        with FakeBroker() as b:
+            s = call("show_view", view="item", pid=f["pid"])
+            quote = LABEL + views.unesc(b.proposal()["text"])
+            call("mark_rendering_delivered", render_id=s["render_id"])
+            self.assertEqual(views.bound_rendering(self.conn, quote)["render_id"],
+                             s["render_id"])
+            out = call("propose_reading", text="the \U0001f4ca Analytics one is wrong",
+                       quoted=quote)
+            self.assertIsNotNone(out["reading"], out)
+            self.assertEqual(self.readings(), 1)
+            tap(b.proposal(), "Apply")
+        self.assertEqual(self.operator_rows(), 1)
+
+    def test_the_label_is_dropped_only_from_the_quote(self):
+        import views
+        body = "\U0001f4ca Analytics \u00b7 EUR 99.00 \u00b7 17 Sep \u00b7 12\nmore"
+        self.assertEqual(views._qnorm(LABEL + body), views._bnorm(body))
+        self.assertTrue(views._bnorm(body).startswith("\U0001f4ca Analytics"))
 
 
 # ---------------------------------------------------------------------------------------

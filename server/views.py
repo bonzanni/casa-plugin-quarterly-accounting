@@ -1327,13 +1327,20 @@ class QuoteRefusal(Exception):
         self.line, self.view = line, view
 
 
+def _bnorm(s: str) -> str:
+    """A text as compared for binding: whitespace runs collapsed to one space, stripped.
+    A stored rendering's body is compared this way, whole — its first line is data (a
+    payee named "📊 Analytics" heads its item view), never Casa's label (r6)."""
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def _qnorm(s: str) -> str:
-    """A post's text as compared for binding: Casa's label line dropped, whitespace runs
-    collapsed to one space, stripped."""
+    """The incoming QUOTE as compared for binding: Casa's label line (which Casa adds to
+    the post, never to the stored body) dropped, then _bnorm."""
     lines = s.split("\n")
     if lines and lines[0].startswith(_LABEL_LINE):
         lines = lines[1:]
-    return re.sub(r"\s+", " ", "\n".join(lines)).strip()
+    return _bnorm("\n".join(lines))
 
 
 def binding_facts(conn, r) -> str:
@@ -1389,7 +1396,7 @@ def bound_rendering(conn, quoted):
                           " IS NOT NULL) AND kind NOT IN (%s)"
                           % ",".join("?" * len(db.INFORMATIONAL_KINDS)),
                           db.INFORMATIONAL_KINDS):
-        t = _qnorm(unesc(r["text"] or ""))[:QUOTE_CAP]
+        t = _bnorm(unesc(r["text"] or ""))[:QUOTE_CAP]
         n = min(len(t), len(q))
         if db.seen_render(r) and n and t[:n] == q[:n]:
             found.append(r)
