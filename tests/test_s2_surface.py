@@ -29,7 +29,7 @@ class Surface(StoreCase):
             "summary": "Checks the bank and Gmail, judges documents, prepares packages",
             "batches": "unlimited", "turnsPerBatch": 80, "session": "fresh",
             "host": "specialist"}])
-        self.assertEqual(m["version"], "0.9.0")
+        self.assertEqual(m["version"], "0.10.0")
         import job                  # the batch budget and the batch window's claim count
         self.assertEqual(job.TURNS_PER_BATCH, m["casa"]["jobs"][0]["turnsPerBatch"])
 

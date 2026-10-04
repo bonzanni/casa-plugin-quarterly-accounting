@@ -4,7 +4,7 @@ A Casa plugin that prepares a B.V.'s quarterly accounting. It matches every tran
 business bank account (from bank-feed) to the document it needs, keeps `acct::` tags and
 accounting notes current in the bank ledger, answers from its own store when asked, and builds
 a quarter's zip (SnelStart-ready `invoices/`, `ledger.csv`, `ledger.xlsx`, `notes.md`) on
-request. The server registers 38 tools. Design: `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.md`.
+request. The server registers 39 tools. Design: `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.md`.
 
 The checking runs as one Casa job on the finance specialist, `quarterly-accounting:work`
 ("Accounting check", skill `skills/quarterly-job/SKILL.md`): the bank read, the ledger sweep,
@@ -16,9 +16,11 @@ job's filing step. The 0.8.0 pass tools (`begin_pass`, `end_pass`, `continue_pas
 `record_step`, `more_work`) are gone.
 
 ## Requirements
-- Casa **0.337.0** or newer: the job needs `"session": "fresh"` and the brief's `Job id:` line
-  (0.336.0) and `"host": "specialist"` (0.337.0). Below it the job would run on Ellen, without
-  bank-feed or Gmail — do not install this version on an older Casa.
+- Casa 0.344.0 or newer (S7a: the file's delivered name, `operator_file` `filename`; a
+  specialist starts its own job). An older Casa refuses the manifest — the plugin is not
+  loaded there. Live use also needs ha-casa-app#1220 fixed (buttons on a specialist whose
+  plugin tools are deferred) and ha-casa-app#1228 fixed (Ellen delegates a specialist's job
+  instead of starting it).
 - bank-feed **0.20.0** or newer (casa-specialist-finance component 0.21.0) — unchanged —
   installed on the finance specialist with the business account linked, labelled `company`,
   and synced.
@@ -27,10 +29,13 @@ job's filing step. The 0.8.0 pass tools (`begin_pass`, `end_pass`, `continue_pas
   say "Gmail isn't connected for the finance specialist — invoices aren't being searched."
 
 ## Install
-1. "Install the quarterly accounting plugin from `bonzanni/casa-plugin-quarterly-accounting`,
-   for Ellen and the finance specialist."
-2. The one trigger in `skills/quarterly-accounting/SKILL.md` ("Install"), on Ellen. Rewriting
-   the trigger later cancels nothing this plugin relies on (it asks no button questions).
+1. Update the plugin on finance first (it is already assigned there in S2).
+2. Assign the plugin to `specialist:finance` only. Unassign it from Ellen; the configurator
+   states the consequence once: "Ellen will no longer answer accounting herself; she sends it
+   to Finance."
+3. Replace the old cron (if present) with the job trigger:
+   `name: quarterly-check, type: cron, schedule: "0 9 * * 1", channel: telegram,`
+   `job: "quarterly-accounting:work", task: "Weekly accounting check."`
 
 Nothing is asked at install. The account binds itself when exactly one company account exists.
 The package name and the start quarter are defaulted and changeable by asking.
@@ -51,7 +56,7 @@ already written into bank-feed's ledger, nor Home Assistant backups.
   below-floor case) and gmail's sent log. Refresh with `scripts/vendor-bankfeed.sh <tag>`.
 - `git config core.hooksPath .githooks` — tool-list agreement and the identifier scan.
 - `scripts/check_tool_agreement.py` — the server's registry, `casa.provides_tools` and
-  `casa.resultContract.tools` must name exactly the same 38 tools.
+  `casa.resultContract.tools` must name exactly the same 39 tools.
 - `scripts/scan_identifiers.py .` — fails the build on an IBAN-shaped token anywhere outside
   `tests/upstream/`. No IBAN, company name, vendor list or operator identity belongs in this
   tree; when in doubt, run the script.
