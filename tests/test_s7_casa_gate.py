@@ -4,6 +4,7 @@ on an empty, truncated or thinned file, and on a deposit with no display expecta
 explicit skip (review r1)."""
 import json, os, subprocess, sys, tempfile, unittest
 from tests._base import ROOT
+from tests.gen_casa_shapes import KINDS as KIND
 
 
 @unittest.skipUnless(os.environ.get("CASA_TREE") and os.environ.get("CASA_TESTS")
@@ -68,3 +69,30 @@ class CasaGate(unittest.TestCase):
         r = self.check(lines)
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("display checks, the header declares", r.stdout)
+
+    def thinned(self, drop):
+        """The real file without every deposit `drop(rec)` selects, its header rewritten to
+        match — so only the coverage floor can catch the loss."""
+        head, *recs = [json.loads(line) for line in self.lines]
+        keep = [r for r in recs if r["case"] == "stored_call" or not drop(r)]
+        deposits = [r for r in keep if r["case"] != "stored_call"]
+        kinds = {}
+        for r in deposits:
+            k = KIND[r["tool"]]
+            kinds[k] = kinds.get(k, 0) + 1
+        head.update(cases=[r["case"] for r in deposits], kinds=kinds,
+                    display_checked=sum(1 for r in deposits if "display_expect" in r))
+        return [json.dumps(r, ensure_ascii=False) for r in [head] + keep]
+
+    def test_a_capability_tool_with_no_deposit_fails(self):
+        """Part 14b: every capability tool the manifest declares must be judged."""
+        r = self.check(self.thinned(lambda rec: rec["tool"] == "propose_account"))
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("no propose_account deposit was judged", r.stdout)
+
+    def test_a_deposit_kind_with_no_deposit_fails(self):
+        r = self.check(self.thinned(lambda rec: rec["tool"] == "post_package"))
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("no operator_file deposit was judged", r.stdout)
+        self.assertIn("no post_package deposit was judged", r.stdout)
+

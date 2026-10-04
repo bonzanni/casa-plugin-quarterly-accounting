@@ -17,16 +17,10 @@ text). Every button of every proposal adds a {"case": "stored_call", "tool",
 through qa_server.TOOLS on the generator's own store: its receipt must not be keys.NO_LONGER
 (§7.6's successful keyed tap per shape, asserted in stdlib; the store is restored after).
 
-Each shape is one generator function over a fresh store (`SHAPES`). Part 14a covers brief
-items 1–2. TODO (part 14b, one function each, appended to SHAPES once the tool exists):
-  - gen_propose_reading  — item 3: a reading of eight writes over hostile payees (Task 6)
-  - gen_propose_account  — item 4: pages 1 and 2 over 7 hostile accounts, Task 7's LABELS,
-                           ids with `<` (Task 7)
-  - gen_post_results     — item 5: three BODY_LIMIT renderings of hostile lines, two legacy
-                           4,096-unit renderings, one package note, the job-left line (Task 10)
-  - gen_post_package     — item 6: first send, resend, send-last, a hostile quarter caption
-                           line and a 2,000-character count line; operator_file with filename
-                           (Task 11). Then the brief's Step 2 filename mutant.
+Each shape is one generator function over a fresh store (`SHAPES`), one per brief item:
+show_view (items 1–2), propose_reading (3), propose_account (4), post_results (5; its package
+note comes from post_package's delivered send) and post_package (6). The checker requires a
+deposit of every capability tool the manifest declares, and of every deposit kind.
 """
 from __future__ import annotations
 
@@ -64,10 +58,12 @@ class _Store(StoreCase):
         pass
 
 
-# each posting tool's delivered slot and its kind (§3); 14b adds results/reading/accounts/
-# package with their kinds
-SLOTS = {"show_view": "view"}
-KINDS = {"show_view": "operator_proposal"}
+# each posting tool's delivered slot and its kind (§3)
+SLOTS = {"show_view": "view", "propose_reading": "reading", "propose_account": "accounts",
+         "post_results": "results", "post_package": "package"}
+KINDS = {"show_view": "operator_proposal", "propose_reading": "operator_proposal",
+         "propose_account": "operator_proposal", "post_results": "operator_message",
+         "post_package": "operator_file"}
 PROPOSALS = {t for t, k in KINDS.items() if k == "operator_proposal"}
 
 
@@ -309,9 +305,201 @@ def gen_legacy_rendering(sh, st, b):
             raise AssertionError(f"{case}: a legacy text is displayed as itself, cleaned")
 
 
+# -- the shapes (brief items 3–6) ------------------------------------------------------
+READING_WRITES = 8
+# the operator's own words, echoed in the reading's "Not included" lines: a question (it
+# changes nothing, and a correction beside it still applies) with every marker, a control
+# character and 2,000+ characters; no dot (a dot ends a clause — the payees carry `www.`)
+ECHO = "is *Acme* _x_ `y` [a](b) a<b>c ACME\x01Corp 1) " + "Z" * 2000 + "?"
+
+
+def gen_propose_reading(sh, st, b):
+    """Item 3: a reading of eight writes ("all good": confirm the sheet's eight guesses,
+    seven of whose payees are hostile). Then a reading that echoes the operator's hostile
+    words as not included, beside one write (a question beside a correction leaves the
+    correction standing; beside "all good" it would approve nothing). Apply and Cancel are
+    tapped on each."""
+    import views
+    build(st, {"guessed": [hostile(i) for i in range(READING_WRITES - 1)] + ["Zapier"]})
+    r = views.build_review(st.conn, view="check", quarter=QUARTER)
+    views.mark_rendering_delivered(st.conn, r["render_id"])
+    for case, text, writes in (("reading:eight", "all good", READING_WRITES),
+                               ("reading:echo", f"the Zapier one is wrong. {ECHO}", 1)):
+        n0 = len(sh.records)
+        buttons = sh.call(st, b, case, "propose_reading", {"text": text})
+        if [x["label"] for x in buttons] != ["Apply", "Cancel"]:
+            raise AssertionError(f"{case}: the buttons are {buttons}")
+        rid = buttons[0]["call"]["arguments"]["reading_id"]
+        plan = json.loads(st.conn.execute("SELECT plan_json FROM readings WHERE"
+                                          " reading_id=?", (rid,)).fetchone()[0])
+        if len(plan) != writes:
+            raise AssertionError(f"{case}: {len(plan)} writes, not {writes}")
+        if writes == 1 and "Not included:" not in sh.records[n0]["display_expect"]:
+            raise AssertionError(f"{case}: the operator's hostile words are not echoed")
+
+
+ACCOUNT_SETS = [
+    # (tag, labels, id of account i): Task 7's LABELS with ids carrying `<`, then the
+    # hostile set itself (every marker, a link, a control character, 2,100+ characters)
+    # with ids whose last four characters — the ones printed — are hostile too
+    ("task7", ["Zakelijk <B.V.>", "www.bank.example", "x\x01y", "L" * 4050, "Ops", "Tax",
+               "Payroll"], lambda i: f"acc<{i}>"),
+    ("hostile", [hostile(i) for i in range(7)], lambda i: f"acc*_`\x01<{i}>"),
+]
+
+
+def gen_propose_account(sh, st, b):
+    """Item 4: the account question, pages 1 and 2 (page 2 by page 1's More button's stored
+    call), over 7 hostile accounts; every Account button is tapped."""
+    for tag, labels, acc in ACCOUNT_SETS:
+        snap = sqlite3.connect(":memory:")
+        st.conn.backup(snap)
+        st.accounts_probe([{"account_id": acc(i), "category": "company", "label": label}
+                           for i, label in enumerate(labels)])
+        p1 = sh.call(st, b, f"accounts:{tag}:1", "propose_account", {})
+        if [x["label"] for x in p1] != [f"Account {i}" for i in range(1, 6)] + ["More"]:
+            raise AssertionError(f"accounts:{tag}: page 1 offers {p1}")
+        p2 = sh.call(st, b, f"accounts:{tag}:2", "propose_account", p1[-1]["call"]["arguments"])
+        if [x["label"] for x in p2] != ["Account 1", "Account 2"]:
+            raise AssertionError(f"accounts:{tag}: page 2 offers {p2}")
+        snap.backup(st.conn)
+        snap.close()
+
+
+def _units(text: str, n: int) -> str:
+    """`text` repeated and cut to exactly `n` UTF-16 units (whole code points)."""
+    import views
+    out, used = [], 0
+    while used < n:
+        for ch in text:
+            u = views.utf16_len(ch)
+            if used + u > n:
+                return "".join(out) + "x" * (n - used)
+            out.append(ch)
+            used += u
+    return "".join(out)
+
+
+LEGACY_4096 = [
+    # (case, two stored texts of 4,096 UTF-16 units each — Telegram's limit, what a
+    # rendering stored before S7 could reach — display: True or the skip reason)
+    ("results:legacy-plain",
+     [_units("Accounting · Q3 2026 ACME\x01Corp owes 12.00\x7f and\x1bmore café 𝔘\n", 4096),
+      _units("Older · ACME\x1fLtd\x7f paid 3.50\n", 4096)], True),
+    ("results:legacy-hostile",
+     [_units("\n".join(v.replace("\n", "\x01") for v in HOSTILE) + "\n", 4096),
+      _units("*\x01_`[a](b) www.evil.example <b> 1. Ltd\n", 4096)],
+     "legacy text is not re-escaped for the dialect (spec 7.6)"),
+]
+ALERTS = 48               # hostile package notices: more than three full renderings hold
+
+
+def _render(st, kind, text) -> str:
+    import db
+    with db.tx(st.conn):
+        rid = f"r{db.next_seq(st.conn)}"
+        st.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
+                        " membership_json) VALUES (?,?,'{}',?,?,'[]')",
+                        (rid, kind, db.now(), text))
+    return rid
+
+
+def gen_post_results(sh, st, b):
+    """Item 5 (the package note is posted in gen_post_package, where its send makes it):
+    three BODY_LIMIT renderings of hostile lines in one post (package notices whose reasons
+    are hostile, composed by alerts.pending_in_tx as the job's cursor composes them, each
+    leaving out the ones before); two legacy 4,096-unit renderings in one post, plain and
+    hostile; the job-left line."""
+    import alerts, db, job, views
+    with db.tx(st.conn):
+        for i in range(ALERTS):
+            alerts.raise_package(st.conn, "package-stopped", f"gate:{i}", quarter=QUARTER,
+                                 reason=hostile(i, "_"), pass_id="")
+    rids, skip = [], set()
+    for _ in range(3):
+        with db.tx(st.conn):
+            r = alerts.pending_in_tx(st.conn, skip=skip)
+        units = views.utf16_len(r["text"])
+        if not views.BODY_LIMIT - 400 <= units <= views.BODY_LIMIT:
+            raise AssertionError(f"results: an alerts rendering of {units} units is not full")
+        rids.append(r["render_id"])
+        skip |= set(json.loads(st.conn.execute(
+            "SELECT scope_json FROM renders WHERE render_id=?",
+            (r["render_id"],)).fetchone()[0])["alerts"])
+    sh.call(st, b, "results:three-full", "post_results", {"render_ids": rids})
+    for case, texts, display in LEGACY_4096:
+        if any(views.utf16_len(t) != 4096 for t in texts):
+            raise AssertionError(f"{case}: a legacy rendering is not 4,096 units")
+        body = sh.call(st, b, case, "post_results",
+                       {"render_ids": [_render(st, "status", t) for t in texts]},
+                       display=display)
+        if display is True and body["value"] != views.deposit_safe("\n\n".join(texts)):
+            raise AssertionError(f"{case}: a legacy text is posted as itself, cleaned")
+    with db.tx(st.conn):
+        left = job._left_render(st.conn, "aaaaaaaa-1")
+    body = sh.call(st, b, "results:job-left", "post_results", {"render_ids": [left]})
+    if body["value"] != job.LEFT_WAITING:
+        raise AssertionError("results: the job-left line is not posted as itself")
+
+
+JOB = "aaaaaaaa-1"
+# the stored caption's lines, as the package build composed them, made hostile: a first
+# line (the file's own caption: escaped plain, clipped) carrying every marker, a link, a
+# control character and 2,000+ characters; then a 2,000-character count line, which with
+# the build's own further lines becomes the package note (§6.1)
+CAPTION_FIRST = ("Accounting Q3 2026 · *Acme* _x_ `y` a<b>c www.evil.example ACME\x01Corp "
+                 + "Z" * 2000)
+COUNT_LINE = _units("12 still missing, 3 not yet classified — listed in notes.md. ", 2000)
+
+
+def gen_post_package(sh, st, b):
+    """Item 6: the package posted as a first send (the job's deliver unit, request-bound),
+    a resend ("send it again" after an uncertain first send) and a send-last ("send me the
+    last package you built"), with a hostile caption line; the resend's delivery makes
+    the package note, posted (item 5)."""
+    import db, delivery, views
+    import asks
+    st.bind(label=ACCOUNT_LABEL)                    # the zip's name: the label's slug
+    asks.request_package(st.conn, QUARTER)
+    did, tok = st.drive_to_staged(JOB)
+    pk = st.conn.execute("SELECT p.package_id, p.caption, p.filename FROM packages p JOIN"
+                         " deliveries d ON d.package_id=p.package_id WHERE"
+                         " d.delivery_id=?", (did,)).fetchone()
+    rest = pk["caption"].split("\n")[1:]
+    with db.tx(st.conn):
+        st.conn.execute("UPDATE packages SET caption=? WHERE package_id=?",
+                        ("\n".join([CAPTION_FIRST, COUNT_LINE] + rest), pk["package_id"]))
+
+    def post(case, args):
+        body = sh.call(st, b, case, "post_package", args)
+        if body.get("filename") != pk["filename"] or body.get("kind") != "zip":
+            raise AssertionError(f"{case}: posted as {body.get('filename')!r}, not the "
+                                 f"package's name {pk['filename']!r}")
+        if "\n" in body["caption"] or len(body["caption"]) > 900:
+            raise AssertionError(f"{case}: the caption is not one clipped line")
+        return body
+
+    post("package:first", {"delivery_id": did, "package_token": tok})
+    out = delivery.record_delivery(st.conn, delivery_id=did, outcome="uncertain",
+                                   package_token=tok)
+    views.mark_rendering_delivered(st.conn, out["speak"]["render_id"])   # the offer is seen
+    s = delivery.stage_for_delivery(st.conn, resend=True,
+                                    package_id=delivery.resend_target(st.conn))
+    post("package:resend", {"delivery_id": s["delivery_id"]})
+    out = delivery.record_delivery(st.conn, delivery_id=s["delivery_id"], outcome="delivered")
+    note = out.get("note_render_id")
+    if note is None:
+        raise AssertionError("package: the delivered send made no package note")
+    body = sh.call(st, b, "results:package-note", "post_results", {"render_ids": [note]})
+    if COUNT_LINE not in views.unesc(body["value"]):
+        raise AssertionError("package: the note does not carry the count line")
+    s = delivery.stage_for_delivery(st.conn, last_built=True)
+    post("package:last", {"delivery_id": s["delivery_id"]})
+
+
 SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_single,
-          gen_show_view_setup_stop, gen_legacy_rendering]
-# 14b appends: gen_propose_reading, gen_propose_account, gen_post_results, gen_post_package
+          gen_show_view_setup_stop, gen_legacy_rendering, gen_propose_reading,
+          gen_propose_account, gen_post_results, gen_post_package]
 
 
 def generate() -> Shapes:

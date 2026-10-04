@@ -37,9 +37,9 @@ our_arguments_ok = _fb.arguments_ok
 NAME = "quarterly-accounting"
 DISPLAY = "F" * 40                                           # a long display name
 casa_tools._display_name_for_role = lambda role: DISPLAY
-# the kinds that must be judged at least once (part 14b: all three, when post_results and
-# post_package join the generator)
-REQUIRED_KINDS = ("operator_proposal",)
+# the kinds that must be judged at least once; and every capability tool the manifest
+# declares must have a deposit judged (read from the manifest: a new one is covered or fails)
+REQUIRED_KINDS = ("operator_proposal", "operator_message", "operator_file")
 
 
 def _display(rec):
@@ -61,6 +61,7 @@ def main(path) -> int:
     cmap = result_contract_map(res)
     by_wire = {e.wire_name: (rt, e) for rt, e in cmap.tools.items()}
     bad, n, kinds, judged, checked, skipped = [], 0, {}, [], 0, 0
+    tools_judged = set()
     lines = pathlib.Path(path).read_text().splitlines()
     head = json.loads(lines[0]) if lines else None
     if not isinstance(head, dict) or head.get("case") != "header":
@@ -91,6 +92,7 @@ def main(path) -> int:
         dkind = entry.delivers[b["slot"]]
         kinds[dkind] = kinds.get(dkind, 0) + 1
         judged.append(rec["case"])
+        tools_judged.add(rec["tool"])
         mode, expect = _display(rec)
         if mode is None:
             bad.append((n, "neither a display expectation nor an explicit skip", rec["case"]))
@@ -126,6 +128,9 @@ def main(path) -> int:
     for k in REQUIRED_KINDS:
         if not kinds.get(k):
             bad.append((0, f"no {k} deposit was judged", ""))
+    for tool in sorted(by_wire):
+        if by_wire[tool][1].delivers and tool not in tools_judged:
+            bad.append((0, f"no {tool} deposit was judged", ""))
     floor = head.get("display_checked")
     if not isinstance(floor, int) or floor < 1 or checked < floor:
         bad.append((0, f"{checked} display checks, the header declares {floor}", ""))
