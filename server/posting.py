@@ -67,17 +67,13 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
         revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
         value = _proposal(r["text"], buttons, revision)
         # r3 #3: stamped posted before the deposit (which stays last) — a view posted by a
-        # tap's stored call is never marked delivered, and a quote of it binds it
+        # tap's stored call is never marked delivered, and a quote of it binds it. The stamp
+        # means "a deposit was attempted at seq n": monotone, never restored on a refusal,
+        # so a late refusal cannot erase a later post's stamp (binding §3, r4 Terra S1). It
+        # only makes the row a quote candidate, and recency never picks among those (R1)
         conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
                      (db.next_seq(conn), r["render_id"]))
-    try:
-        ref = casa_broker.deposit("view", value)
-    except casa_broker.DepositFailed:
-        with db.tx(conn):
-            # back to what it was: a re-post Casa refused leaves an earlier post's stamp
-            conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
-                         (r["posted_seq"], r["render_id"]))
-        raise
+    ref = casa_broker.deposit("view", value)
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
 
 

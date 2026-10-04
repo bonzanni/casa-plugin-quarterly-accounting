@@ -395,7 +395,9 @@ class R3QuoteBindsAPostedPage(_Q3):
         self.assertEqual(views.bound_rendering(self.conn, None)["render_id"],
                          first["render_id"])                   # the unquoted fallback
 
-    def test_a_refused_deposit_clears_the_stamp(self):
+    def test_a_refused_deposit_keeps_the_stamp(self):
+        # binding §3 (r4 Terra S1): posted_seq is monotone — "a deposit was attempted"; a
+        # refusal never restores it, so a late refusal cannot erase a later post's stamp
         import posting
         self.sheet_fixture()
         with FakeBroker() as b:
@@ -403,4 +405,4 @@ class R3QuoteBindsAPostedPage(_Q3):
             with self.assertRaises(Exception):
                 posting.show_view(self.conn, view="check")
         self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE posted_seq IS"
-                                           " NOT NULL").fetchone()[0], 0)
+                                           " NOT NULL").fetchone()[0], 1)

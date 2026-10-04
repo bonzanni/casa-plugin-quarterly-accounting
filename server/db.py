@@ -323,7 +323,7 @@ CREATE TABLE IF NOT EXISTS renders (
   membership_json TEXT NOT NULL,
   delivered_seq INTEGER,         -- store sequence at delivery: what "most recent delivered" orders by
   binding INTEGER,               -- job_report's latest hand-out: 1 notification, 0 operator turn (R5)
-  posted_seq INTEGER);           -- S7 r3 #3: show_view deposited it (attempted; cleared on refusal)
+  posted_seq INTEGER);           -- S7 r3 #3: show_view deposited it (attempted; monotone, never cleared)
 CREATE TABLE IF NOT EXISTS render_items (
   render_id TEXT NOT NULL, pid INTEGER NOT NULL, projection_revision INTEGER NOT NULL,
   match_revisions_json TEXT NOT NULL, PRIMARY KEY (render_id, pid));

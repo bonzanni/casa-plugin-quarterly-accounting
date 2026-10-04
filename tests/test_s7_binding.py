@@ -34,6 +34,113 @@ def tap(prop, label):
     return call(c["tool"], **c["arguments"])
 
 
+class _Q3(StoreCase):
+    def setUp(self):
+        super().setUp()
+        cm = self.patch_clock(NOW)
+        cm.__enter__()
+        self.addCleanup(cm.__exit__, None, None, None)
+
+    def propose(self, text, quoted=None):
+        import posting
+        with FakeBroker() as b:
+            out = posting.propose_reading(self.conn, text, quoted)
+        return out, (b.proposal() if b.deposits else None)
+
+    def readings(self):
+        return self.conn.execute("SELECT count(*) FROM readings").fetchone()[0]
+
+    def operator_rows(self, match_id=None):
+        if match_id is None:
+            return self.conn.execute("SELECT count(*) FROM log WHERE author='operator'"
+                                     ).fetchone()[0]
+        return self.conn.execute("SELECT count(*) FROM log WHERE author='operator' AND"
+                                 " match_id=?", (match_id,)).fetchone()[0]
+
+    def text_of(self, render_id):
+        import views
+        return views.unesc(self.render_text(render_id))
+
+    def repair(self, pid, number, issuer=None, token=None):
+        """The job re-judges `pid`: a new document (same amount and date, `number`) replaces
+        its pairing (review_r4.test_quoted_old_pair). The new match row."""
+        d = call("list_quarter_state", pid=pid)["item"]
+        desc = self.conn.execute("SELECT * FROM projections WHERE pid=?", (pid,)).fetchone()
+        import work
+        w = work.describe(self.conn, pid)
+        doc = self.doc(counterparty=w["counterparty"], issuer=issuer or w["counterparty"],
+                       document_number=number, amount_minor=w["amount_minor"],
+                       document_date=w["date"])
+        tok = token or self._fixture_token
+        args = dict(pid=pid, doc_id=doc, author="auto", expected_revision=d["revision"],
+                    row_digest=d["row_digest"], document_date=w["date"], labels=["guessed"],
+                    resolves=d["candidate_ids"], pass_token=tok)
+        out = call("record_match", **args)
+        d = call("list_quarter_state", pid=pid)["item"]
+        if d["candidate_ids"]:
+            args.update(expected_revision=d["revision"], row_digest=d["row_digest"],
+                        resolves=d["candidate_ids"])
+            out = call("record_match", **args)
+        assert desc is not None
+        return out
+
+    def refused_show(self, **kw):
+        """show_view whose deposit Casa refuses (posted_seq stays: §3)."""
+        import casa_broker
+        import posting
+        with mock.patch.object(casa_broker, "deposit",
+                               side_effect=casa_broker.DepositFailed("proposal_limit")):
+            with self.assertRaises(casa_broker.DepositFailed):
+                posting.show_view(self.conn, **kw)
+        return dict(self.conn.execute("SELECT * FROM renders ORDER BY rowid DESC LIMIT 1"
+                                      ).fetchone())
+
+    def make_legacy(self, *render_ids):
+        """What a pre-S7 rendering stored: the same text without the first-line tag."""
+        import db
+        with db.tx(self.conn):
+            for rid in render_ids:
+                text = self.render_text(rid)
+                first, _, rest = text.partition("\n")
+                tag = f" · {rid[1:]}"
+                assert first.endswith(tag), (rid, first)
+                self.conn.execute("UPDATE renders SET text=? WHERE render_id=?",
+                                  (first[:-len(tag)] + ("\n" + rest if _ else ""), rid))
+
+
+# ---------------------------------------------------------------------------------------
+# Red case 1 — r4 Astra S1: no step reads `shown` (the _bind_match fallback is gone)
+# ---------------------------------------------------------------------------------------
+class MonotoneStamp(_Q3):
+    def test_a_late_refusal_keeps_the_newer_posts_stamp(self):
+        import casa_broker
+        import posting
+        import views
+        f = self.sheet_fixture()
+        rid = f["render_id"]
+        real = casa_broker.deposit
+        state = {"n": 0}
+
+        def interleaved(slot, value, **kw):
+            state["n"] += 1
+            if state["n"] == 1:
+                # the second re-post runs (and lands) while the first one's deposit is out
+                posting.show_view(self.conn, render_id=rid)
+                raise casa_broker.DepositFailed("timeout")
+            return real(slot, value, **kw)
+        with FakeBroker() as b, mock.patch.object(casa_broker, "deposit", interleaved):
+            with self.assertRaises(casa_broker.DepositFailed):
+                posting.show_view(self.conn, render_id=rid)
+            landed = b.proposal()["text"]
+        row = self.conn.execute("SELECT posted_seq FROM renders WHERE render_id=?",
+                                (rid,)).fetchone()
+        self.assertIsNotNone(row["posted_seq"])
+        self.assertEqual(views.bound_rendering(self.conn, landed)["render_id"], rid)
+
+
+# ---------------------------------------------------------------------------------------
+# Red case 4 — not on R: unquoted words naming what only an older sheet printed refuse
+# ---------------------------------------------------------------------------------------
 class LegacyReceipt(StoreCase):
     """review_r4.py::test_legacy_receipt, inverted, and review_migration.py (d3)."""
 
