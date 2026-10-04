@@ -21,19 +21,18 @@ def _proposal(text, buttons, revision) -> str:
                       ensure_ascii=False)
 
 
-def _keyed(conn, render_id, specs) -> tuple:
+def _keyed(conn, render_id, specs) -> list:
     """The buttons of `specs` (views.buttons_for), each writing one with a fresh key stored
-    under the rendering, and the keys minted. Inside the caller's transaction."""
-    out, minted = [], []
+    under the rendering. Inside the caller's transaction."""
+    out = []
     for label, tool, args, key_spec in specs:
         args = dict(args)
         if key_spec is not None:
             key = keys.mint()
             keys.store_render(conn, render_id, key_spec[0], key_spec[1], key)
             args["key"] = key
-            minted.append(key)
         out.append((label, tool, args))
-    return out, minted
+    return out
 
 
 def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None, walk=None,
@@ -59,17 +58,10 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
             r = conn.execute("SELECT * FROM renders WHERE render_id=?",
                              (out["render_id"],)).fetchone()
         scope = json.loads(r["scope_json"])
-        buttons, minted = _keyed(conn, r["render_id"], views.buttons_for(conn, r, walk))
+        buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r, walk))
         revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
         value = _proposal(r["text"], buttons, revision)
-    try:
-        ref = casa_broker.deposit("view", value)
-    except casa_broker.DepositFailed:
-        # no tap can carry a key Casa never took: an unspent key names a deposited page
-        if minted:
-            with db.tx(conn):
-                keys.revoke_render(conn, minted)
-        raise
+    ref = casa_broker.deposit("view", value)
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
 
 

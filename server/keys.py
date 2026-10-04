@@ -24,15 +24,6 @@ def store_render(conn, render_id, action, pid, key) -> None:
                  " VALUES (?,?,?,?,?)", (key, render_id, action, pid, db.now()))
 
 
-def revoke_render(conn, keys_) -> None:
-    """The keys of a proposal Casa did not take (the deposit failed): no tap can carry
-    them, so none may ever be spent — an unspent render key always names a deposited
-    proposal (§7.5)."""
-    assert conn.in_transaction
-    conn.executemany("UPDATE render_keys SET spent_at=? WHERE key=? AND spent_at IS NULL",
-                     [(db.now(), k) for k in keys_])
-
-
 def spend_render(conn, key, render_id, action, pid) -> None:
     assert conn.in_transaction
     if not isinstance(key, str) or not KEY_RE.fullmatch(key):

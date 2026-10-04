@@ -96,6 +96,58 @@ class ShowView(_Q3):
         self.assertEqual(prop["text"], "ACME  owes")
 
 
+class PagedSheet(_Q3):
+    """Review r1, finding 1 (§7.6): a paged sheet's More button stores its cursor; the
+    cursor is ints only, never a bank-feed date, and the next page starts where the
+    previous one stopped."""
+    def big_sheet(self, n=40):
+        import db, matches
+        self.bind()
+        token = self.pass_()
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
+                              " bank_through) VALUES ('p', 'x', 0, 0, '2026-09-20')")
+        pids = []
+        for i in range(n):
+            who, day = f"Supplier {i:02d} Consulting Services", "2026-08-%02d" % (1 + i % 28)
+            self.row(i + 1, counterparty=who, amount_minor=1000 + 37 * i, booking_date=day,
+                     value_date=day)
+            pid = self.lineage_for(i + 1)
+            self.classify(pid, {"software"})
+            self.settle(pid)
+            doc = self.doc(counterparty=who, issuer=who, amount_minor=1000 + 37 * i,
+                           document_date=day)
+            matches.record_match(self.conn, pid=pid, doc_id=doc, author="auto",
+                                 expected_revision=self.rev(pid),
+                                 row_snapshot=self.snapshot(pid), token=token,
+                                 labels=("guessed",))
+            pids.append(pid)
+        return pids
+
+    def test_the_more_cursor_is_ints_and_page_two_continues_page_one(self):
+        import posting, views
+        pids = self.big_sheet()
+        args, seen, cursors = {"view": "check"}, [], []
+        for _ in range(20):
+            with FakeBroker() as b:
+                out = posting.show_view(self.conn, **args)
+            more = [x for x in b.proposal()["buttons"] if x["label"] == "More"]
+            if args.get("page"):
+                seen.append(views.render_items(self.conn, out["render_id"]))
+            if not more:
+                break
+            args = more[0]["call"]["arguments"]
+            self.assertIsNone(arguments_ok(args))
+            if "after" in args:
+                self.assertTrue(all(type(x) is int for x in args["after"]), args)
+                cursors.append(args["after"])
+        self.assertGreaterEqual(len(seen), 2)         # the sheet really paged
+        self.assertTrue(cursors)
+        flat = [p for page in seen for p in page]
+        self.assertEqual(len(flat), len(set(flat)))   # no payment on two pages
+        self.assertEqual(set(flat), set(pids))        # and none skipped between them
+
+
 class Verdict(_Q3):
     def tap(self, prop, label):
         import tools, qa_server  # noqa: F401
@@ -161,18 +213,3 @@ class Verdict(_Q3):
         import tools, qa_server  # noqa: F401
         out = qa_server.TOOLS["verdict"]["fn"](dict(args, action="right", pid=fx["pid"] + 999))
         self.assertEqual(out["receipt"], keys.NO_LONGER)
-
-    def test_a_proposal_casa_refused_leaves_no_spendable_key(self):
-        """§7.5: an unspent key always names a deposited page — a deposit Casa refused
-        revokes the keys minted for it, so its stored call can never commit."""
-        import keys
-        import tools, qa_server  # noqa: F401
-        self.sheet_fixture()
-        with FakeBroker() as b:
-            b.refuse = "proposal_invalid"
-            out = qa_server.TOOLS["show_view"]["fn"]({"view": "check"})
-        self.assertIsNone(out["view"])
-        args = b.proposal()["buttons"][0]["call"]["arguments"]
-        self.assertEqual(qa_server.TOOLS["verdict"]["fn"](args)["receipt"], keys.NO_LONGER)
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE author='operator'"
-                                           ).fetchone()[0], 0)

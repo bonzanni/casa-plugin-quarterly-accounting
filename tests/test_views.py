@@ -335,7 +335,7 @@ class TestSheet(Base):
             self.assertEqual(len(seen), 200, view)
         self.assertIn("That is everything.",
                       views.build_review(self.conn, view="all", quarter="2026-Q3",
-                                         page=99, after=[99, "", 0])["text"])
+                                         page=99, after=[99, 0, 0])["text"])
 
     def test_an_oversized_item_never_breaks_the_limit(self):
         kb.upsert_counterparty(self.conn, "Adobe", source="portal",
