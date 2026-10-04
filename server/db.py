@@ -528,6 +528,11 @@ MIGRATIONS: dict[int, list[str]] = {
          " ('queued', 'snapshot', 'snapshot-done', 'built')",
          "DELETE FROM meta WHERE key='drain' OR key LIKE 'cancelled:%'",
          "ALTER TABLE deliveries ADD COLUMN posted_at TEXT",
+         # R5 + the d3 amendment: a v0.9.0 telegram package send, staged or recovered
+         # uncertain, may already have gone out (send_media) — its late receipt is accepted
+         # (an email send is settled uncertain at the upgrade instead)
+         "UPDATE deliveries SET posted_at = created_at WHERE status IN ('staged', 'uncertain')"
+         " AND channel = 'telegram' AND package_id IS NOT NULL AND posted_at IS NULL",
          "ALTER TABLE renders ADD COLUMN posted_seq INTEGER",
          READINGS_DDL, RENDER_KEYS_DDL, ACCOUNT_CHOICES_DDL, POST_OFFERS_DDL],
 }
