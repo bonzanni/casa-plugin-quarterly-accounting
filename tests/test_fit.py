@@ -18,7 +18,7 @@ import reply  # noqa: E402
 import views  # noqa: E402
 import work  # noqa: E402
 
-LIMIT = views.TELEGRAM_LIMIT
+LIMIT = views.BODY_LIMIT
 ALPHABET = "abcdefghij klmnop éü \U0001d518\U0001f6a8中"
 
 

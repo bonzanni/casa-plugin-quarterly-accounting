@@ -408,7 +408,7 @@ class TestPackageNotices(Requests):
         self.assertTrue(speak["text"].endswith(alerts.MORE_CLOSING))       # the rest waits
         self.assertLess(len(scope["alerts"]), 17)
         import views
-        self.assertLessEqual(views.utf16_len(speak["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(speak["text"]), views.BODY_LIMIT)
         self.call("mark_rendering_delivered", render_id=speak["render_id"])
         rest = self.claim()["speak"]                                      # the older ones follow
         self.assertNotIn("may not have arrived", rest["text"])

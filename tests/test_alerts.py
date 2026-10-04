@@ -114,7 +114,7 @@ class TestAlertBatching(StoreCase):
             if speak is None:
                 break
             renders += 1
-            self.assertLessEqual(views.utf16_len(speak["text"]), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(speak["text"]), views.BODY_LIMIT)
             self.assertIn("books-2026-Q3-2026-10-14.zip", speak["text"])
             self.assertIn('Say "rebuild Q3"', speak["text"])
             again = self.finish()                         # not delivered yet: the same offer
@@ -145,7 +145,7 @@ class TestAlertBatching(StoreCase):
         joined = passes.end_pass(self.conn, t, "complete", {})["speak"]
         self.assertNotEqual(joined["render_id"], rest["render_id"])
         self.assertIn("Gmail", joined["text"])
-        self.assertLessEqual(views.utf16_len(joined["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(joined["text"]), views.BODY_LIMIT)
 
 
 class TestUnboundedDetail(StoreCase):
@@ -160,7 +160,7 @@ class TestUnboundedDetail(StoreCase):
         t = self.pass_()
         passes.record_probe(self.conn, t, "gmail", False, detail)
         speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
-        self.assertLessEqual(views.utf16_len(speak["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(speak["text"]), views.BODY_LIMIT)
         flat = speak["text"].replace("\n", " ")
         self.assertTrue(flat.startswith("Gmail stopped letting me in ("), flat[:80])
         self.assertTrue(flat.endswith("Re-authorise Gmail when you can."), flat[-80:])
@@ -197,7 +197,7 @@ class TestOversizedParkedRendering(StoreCase):
         passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
         again = passes.end_pass(self.conn, t, "complete", {})["speak"]
         self.assertNotEqual(again["render_id"], first["render_id"])
-        self.assertLessEqual(views.utf16_len(again["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(again["text"]), views.BODY_LIMIT)
         self.assertIn("Gmail", again["text"])
         views.mark_rendering_delivered(self.conn, again["render_id"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM alerts WHERE sent_at IS NULL")

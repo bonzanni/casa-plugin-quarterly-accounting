@@ -265,7 +265,7 @@ class Handover(StoreCase):
                 self.assertFalse(out["more"])
                 break
             for x in out["texts"]:
-                self.assertLessEqual(views.utf16_len(x["text"]), views.TELEGRAM_LIMIT)
+                self.assertLessEqual(views.utf16_len(x["text"]), views.BODY_LIMIT)
                 lines += x["text"].split("\n")
                 offered.append(x["render_id"])
             state = self.conn.execute("SELECT state FROM work_requests WHERE"

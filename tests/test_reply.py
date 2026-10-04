@@ -741,14 +741,14 @@ class TestReceiptPages(Base):
     @unittest.skip("S7: re-enabled in Task 6")
     def test_a_hundred_rejections_give_pages_within_the_limit(self):
         text = " ".join("Vendor %03d Holding is wrong." % i for i in range(1, 101))
-        self.assertLess(views.utf16_len(text), views.TELEGRAM_LIMIT)
+        self.assertLess(views.utf16_len(text), views.BODY_LIMIT)
         out = reply.apply_reply(self.conn, text)
         self.assertEqual(len(out["applied"]), 100)
         self.assertEqual(self.operator_entries(), 100)
         pages = out["receipt_pages"]
         self.assertGreater(len(pages), 1)
         for page in pages:
-            self.assertLessEqual(views.utf16_len(page), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(page), views.BODY_LIMIT)
             self.assert_operator_words(page)
         self.assertEqual(out["receipt"], pages[0])
         lines = "\n".join(pages).splitlines()
@@ -762,7 +762,7 @@ class TestReceiptPages(Base):
                                            for i in range(1, 200)) + " — say it with the amount or the date."
         pages = reply._pages([long, "Confirmed Adobe."])
         for page in pages:
-            self.assertLessEqual(views.utf16_len(page), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(page), views.BODY_LIMIT)
         self.assertEqual("".join(p.replace("\n", "") for p in pages).replace(" ", ""),
                          (long + "Confirmed Adobe.").replace(" ", ""))
 
@@ -786,7 +786,7 @@ class TestReceiptSplit(Base):
         self.show(*adobe, figma)
         out = reply.apply_reply(self.conn, "Adobe is wrong; Figma is wrong")
         for page in out["receipt_pages"]:
-            self.assertLessEqual(views.utf16_len(page), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(page), views.BODY_LIMIT)
         self.assertIsNone(self.author(figma))
         ask = out["asks"][0]
         self.assertGreater(views.utf16_len(ask), views.TELEGRAM_LIMIT)
@@ -1007,7 +1007,7 @@ class TestIdentity(Base):
                                shas=["7692" + "1" * 60, "1234" + "2" * 60, "3" * 64,
                                      "4" * 64, "5" * 64])
         r = self.deliver(view="check")
-        self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
         it = views.build_review(self.conn, view="item", pid=pid)
         flat = " ".join(it["text"].split())
         # a literal never prints the reserved mark: generated text is unforgeable
@@ -1140,7 +1140,7 @@ class TestIdentity(Base):
         del mid
         for view, kw in (("status", {}), ("check", {}), ("all", {}), ("item", {"pid": pid})):
             r = views.build_review(self.conn, view=view, quarter="2026-Q3", **kw)
-            self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
             self.assertIn("and 97 others", r["text"], view)
             self.assertEqual(views.render_items(self.conn, r["render_id"]), [pid], view)
             self.assertEqual(len(self.bound(r["render_id"], pid)), 1, view)
@@ -1163,7 +1163,7 @@ class TestIdentity(Base):
         for _ in range(20):
             kw = {"page": page, "after": after} if page else {}
             it = views.build_review(self.conn, view="item", pid=pid, **kw)
-            self.assertLessEqual(views.utf16_len(it["text"]), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(it["text"]), views.BODY_LIMIT)
             seen |= self.bound(it["render_id"], pid)
             views.mark_rendering_delivered(self.conn, it["render_id"])
             if it["next"] is None:

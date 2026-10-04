@@ -446,7 +446,7 @@ class TestBusyAndReclaim(Flow):
         self.assertEqual(busy["status"], "busy")
         self.assertEqual(busy["text"], "A check is running — started 7 minutes ago.\n"
                                        "Ask again in a few minutes.")
-        self.assertLessEqual(views.utf16_len(busy["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(busy["text"]), views.BODY_LIMIT)
         for word in views.FORBIDDEN:
             self.assertNotIn(word, busy["text"].lower())
 

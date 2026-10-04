@@ -2,6 +2,7 @@
 """S7 §12/§7.6: every dynamic field passes ONE escape; control characters and in-field
 newlines become spaces; whole bodies are made deposit-safe; every rendering fits a
 proposal page (BODY_LIMIT) after escaping."""
+import re
 import unicodedata
 from tests._base import StoreCase
 
@@ -51,6 +52,9 @@ class Escape(StoreCase):
         for t in (asks.STOPPED, asks.NOT_FOUND, asks.NOT_AN_INVOICE, asks.NEXT_CHECK,
                   views.MORE_LINE, views.FIT_CLOSING, *alerts.PACKAGE.values()):
             self.assertEqual(views.unesc(t), t, t)
+            # every dialect marker is escaped, or absent (unesc alone passes "*bold*")
+            self.assertIsNone(re.search(r"(?<!\\)[*_`\[|~]", t), t)
+            self.assertIsNone(re.match(r"\s*(#|\d+\.)", t), t)
 
     def test_composers_that_bypassed_field_now_escape(self):
         import delivery, views

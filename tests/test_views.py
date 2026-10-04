@@ -132,7 +132,7 @@ class TestSheet(Base):
         self.assertIn('+12 more — say "all of them"', text)
         self.assertIn("Vendor19", text)
         self.assertNotIn("Vendor00 ", text)
-        self.assertLessEqual(views.utf16_len(text), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(text), views.BODY_LIMIT)
         all_text = self.render("all")["text"]
         self.assertIn("Vendor00", all_text)
 
@@ -284,7 +284,7 @@ class TestSheet(Base):
                 ledger.end_lineage(self.conn, pid, "erased")
                 lineage.settle(self.conn, pid)
         r = self.render()
-        self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
         self.assertIn('+142 more — say "all of them"', r["text"])
         self.assertEqual(r["next"]["view"], "all")
         views.mark_rendering_delivered(self.conn, r["render_id"])
@@ -295,7 +295,7 @@ class TestSheet(Base):
         while True:
             r = views.build_review(self.conn, view="all", quarter="2026-Q3", page=page,
                                    after=after)
-            self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
             self.assertNotIn("all of them", r["text"])
             seen |= set(re.findall(r"Gone\d{3}", r["text"]))
             views.mark_rendering_delivered(self.conn, r["render_id"])
@@ -319,7 +319,7 @@ class TestSheet(Base):
                 r = views.build_review(self.conn, view=view, quarter="2026-Q3", page=page,
                                        after=after)
                 n += 1
-                self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+                self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
                 self.assertNotIn("all of them", r["text"])
                 self.assertIn("classification through", flat(r["text"]))
                 got = re.findall(r"Vend\d{3}", r["text"])
@@ -347,7 +347,7 @@ class TestSheet(Base):
         # fix wave D round 2: the unbounded link is clipped with its mark, so the
         # item prints whole and is bound (before, the whole text was cut and bound nothing)
         for r in (self.render(), self.render("item", pid=pid), self.render("all")):
-            self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
             self.assertIn("Adobe · EUR 100.00", r["text"])
             self.assertIn("https://adobe.example/xxx", r["text"])
             self.assertIn(views.CLIP_MARK, r["text"])
@@ -364,7 +364,7 @@ class TestSheet(Base):
         pid = self.add()
         with mock.patch.object(views, "LINK_MAX", 10 ** 6):
             for r in (self.render(), self.render("item", pid=pid), self.render("all")):
-                self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+                self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
                 self.assertEqual(r["printed"], 0)
 
     def test_unprintable_residue_is_marked_with_the_rendering(self):
@@ -489,7 +489,7 @@ class TestSheet(Base):
         for i in range(10, 200):
             self.add(counterparty=f"Small{i}", amount_minor=200 + i)
         r = views.build_review(self.conn, view="missing", quarter="2026-Q3", page=1)
-        self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
         self.assertIsNotNone(r["next"])
         self.assertTrue(r["text"].endswith('say "more".'), r["text"][-80:])
         r2 = views.build_review(self.conn, view="missing", quarter="2026-Q3", **{

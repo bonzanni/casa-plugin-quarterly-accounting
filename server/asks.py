@@ -462,10 +462,10 @@ def _case_lines(conn, r) -> list:
 
 
 def _amount(minor, currency):
-    import amounts
+    import amounts, views
     if minor is None or not currency:
         return None
-    return amounts.fmt(abs(int(minor)), currency)
+    return views.esc(amounts.fmt(abs(int(minor)), currency))
 
 
 def _case(pairing, verdict, doc) -> str:
