@@ -72,6 +72,16 @@ class StoreCase(TempEnv):
         with db.tx(self.conn):
             return fn(self.conn, *args, grant=self.grant(), **kw)
 
+    def run_job_to_complete(self, job_id) -> list:
+        """Job run `job_id`, driven by the S2 simulator (tests/sim_job.py) from its claim
+        until `complete`. Binds the account and builds the driver on first use."""
+        if getattr(self, "_job_driver", None) is None:
+            from tests.sim_job import JobDriver
+            if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
+                self.bind()
+            self._job_driver = JobDriver(self)
+        return self._job_driver.run_job(job_id)
+
     def operator_pair(self, *, pid, doc_id, expected_revision, render_id):
         """The operator pairs a document with a payment they were shown (what
         record_match(author="operator") did before S7 §8.1: in the server only a tap's

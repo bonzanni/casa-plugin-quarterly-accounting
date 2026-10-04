@@ -251,6 +251,10 @@ def _choose(conn, token) -> dict:
         if p is None:
             if done(conn, job_id):
                 conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('drain','none')")
+                conn.execute("INSERT OR IGNORE INTO runs(job_id, passes) VALUES (?, 0)",
+                             (job_id,))
+                conn.execute("UPDATE runs SET completed_at=coalesce(completed_at, ?) WHERE"
+                             " job_id=?", (db.now(), job_id))
                 return {"unit": "complete", "text": run_end(conn, job_id)[0]}
             p = _begin_next(conn, token, job_id)
         req = steps.round_request(conn, p["pass_id"])
@@ -692,14 +696,21 @@ def record_filing(conn, token) -> dict:
 
 
 def status(conn, job_id) -> dict:
-    """Read-only, never a claim (ha-casa-app#1180; design delta §3): may this job end now?
-    `done` by THE predicate job_next answers `complete` on (`done`). An operator-message
-    turn in the job's topic calls it last, so a completion Casa refused (unread inbound)
-    is re-issued from the store."""
+    """Never a claim; it stamps the run complete, as job_next's complete does
+    (ha-casa-app#1180; design delta §3; S7 §10): may this job end now? `done` by THE
+    predicate job_next answers `complete` on (`done`). An operator-message turn in the
+    job's topic calls it last, so a completion Casa refused (unread inbound) is re-issued
+    from the store."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
-    ok = done(conn, job_id)
-    return {"done": ok, "text": run_end(conn, job_id)[0] if ok else None}
+    with db.tx(conn):
+        ok = done(conn, job_id)
+        if ok:
+            conn.execute("INSERT OR IGNORE INTO runs(job_id, passes) VALUES (?, 0)",
+                         (job_id,))
+            conn.execute("UPDATE runs SET completed_at=coalesce(completed_at, ?) WHERE"
+                         " job_id=?", (db.now(), job_id))
+        return {"done": ok, "text": run_end(conn, job_id)[0] if ok else None}
 
 
 RUN_FINISHED = "Accounting work finished."

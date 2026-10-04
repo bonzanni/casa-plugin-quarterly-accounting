@@ -96,7 +96,7 @@ class Base(StoreCase):
     def ingest(self, **kw):
         path = self.publish("inv-%d.pdf" % len(kw), PDF + repr(kw).encode())
         args = dict(source_path=path, kind="invoice", source="gmail",
-                    extraction_author="resident", counterparty="Zapier", issuer="Zapier",
+                    extraction_author="desk", counterparty="Zapier", issuer="Zapier",
                     amount_minor=1000, currency="EUR", document_date="2026-07-05")
         args.update(kw)
         return documents.ingest_document(self.conn, **args)["doc_id"]

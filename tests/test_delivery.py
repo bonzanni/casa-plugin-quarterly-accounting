@@ -252,7 +252,7 @@ class TestEmail(Base):
         import documents
         path = self.publish("inv.pdf", b"%PDF-1.4\n%%EOF\n")
         doc_id = documents.ingest_document(self.conn, source_path=path, kind="invoice",
-                                           source="gmail", extraction_author="resident",
+                                           source="gmail", extraction_author="desk",
                                            counterparty="Adobe", amount_minor=100,
                                            document_date="2026-07-02")["doc_id"]
         out = delivery.stage_for_delivery(self.conn, channel="telegram", doc_id=doc_id)
@@ -337,7 +337,7 @@ class TestOutboxNames(Base):
         import documents
         path = self.publish("inv.pdf", body)
         return documents.ingest_document(self.conn, source_path=path, kind="invoice",
-                                         source="gmail", extraction_author="resident",
+                                         source="gmail", extraction_author="desk",
                                          counterparty="Adobe", amount_minor=100,
                                          document_date="2026-07-02")["doc_id"]
 

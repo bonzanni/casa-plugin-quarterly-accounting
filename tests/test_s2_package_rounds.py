@@ -13,7 +13,7 @@ class PackageRounds(StoreCase):
 
     def test_a_package_ask_runs_its_rounds_and_waits_buildable(self):
         import asks
-        asks.request_package(self.conn, "2026-Q3", "telegram")
+        asks.request_package(self.conn, "2026-Q3")
         units = self.drv.run_job(A)
         self.assertEqual(units[-1]["unit"], "complete")
         r = self.conn.execute("SELECT state, token, lease_at FROM package_requests").fetchone()
@@ -23,7 +23,7 @@ class PackageRounds(StoreCase):
     def test_a_check_and_a_package_are_drained_by_one_job(self):
         import asks
         asks.request_work(self.conn, "check", "operator")
-        asks.request_package(self.conn, "2026-Q3", "telegram")
+        asks.request_package(self.conn, "2026-Q3")
         self.drv.run_job(A)
         self.assertEqual(self.conn.execute("SELECT state FROM work_requests").fetchone()[0],
                          "done")
@@ -32,7 +32,7 @@ class PackageRounds(StoreCase):
 
     def test_the_package_sweep_is_quarter_scoped(self):
         import asks
-        asks.request_package(self.conn, "2026-Q3", "telegram")
+        asks.request_package(self.conn, "2026-Q3")
         units = self.drv.run_job(A)
         self.assertTrue(all(u.get("quarter") == "2026-Q3" for u in units
                             if u["unit"] in ("sweep", "judge")))
@@ -49,7 +49,7 @@ class PackageRounds(StoreCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM projections WHERE"
                                            " ended IS NULL").fetchone()[0], 2)
         self.drv.bankfeed.purge_before("2026-09-01")            # the Q3 row is erased
-        asks.request_package(self.conn, "2026-Q4", "telegram")
+        asks.request_package(self.conn, "2026-Q4")
         self.drv.cut_after_import = True                        # the snapshot's turn ends
         units = self.drv.run_job(A)                             # re-claimed, to the end
         self.assertIn("sweep", [u["unit"] for u in units])

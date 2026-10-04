@@ -10,9 +10,10 @@ import passes
 
 JOB = "quarterly-accounting:work"
 START = {"job": JOB, "task": "Run the accounting work that is waiting.", "context": ""}
-LINES = {"check": "Checking the bank and your email — I'll send the result here.",
-         "handover": "Filed. Checking it against the payments — I'll tell you shortly.",
-         "cron": ""}
+LINES = {"check": "Checking the bank and your email — I'll post the result here.",
+         "handover": "Filed. Checking it against the payments — I'll post what I find."}
+BUSY_NO_RESULT = "The accounting job was busy just now. If no result comes, ask again."
+DONE_ALREADY = "That's done already — ask me for the status to see it."
 
 
 def request_work(conn, kind, trigger, doc_ids=None) -> dict:
@@ -39,30 +40,67 @@ def request_work(conn, kind, trigger, doc_ids=None) -> dict:
                            " created_at, state) VALUES (?,?,?,?,?, 'queued')",
                            (kind, trigger, json.dumps(ids), db.next_seq(conn),
                             db.now())).lastrowid
-    line = LINES["cron"] if trigger == "cron" and kind == "check" else LINES[kind]
-    return {"request_id": rid, "line": line, "start_job": dict(START)}
+    return {"request_id": rid, "kind": "work", "line": LINES[kind], "start_job": dict(START)}
 
 
-def request_package(conn, quarter, channel) -> dict:
-    """The request half of begin_pass(trigger="package"): kept whatever happens next."""
+def request_package(conn, quarter) -> dict:
+    """The request half of begin_pass(trigger="package"): kept whatever happens next. A
+    package goes to Telegram only (S7 §4: never email)."""
     import dates
-    if channel not in ("telegram", "email"):
-        raise db.Refusal("a package is asked for with its channel: 'telegram' or 'email'")
     dates.parse_quarter(quarter)
     label = dates.quarter_label(quarter)
     with db.tx(conn):
         open_ = conn.execute("SELECT request_id FROM package_requests WHERE quarter=? AND"
                              " state IN ('queued', 'snapshot')", (quarter,)).fetchone()
         if open_ is not None:
-            conn.execute("UPDATE package_requests SET channel=?, updated_at=? WHERE"
-                         " request_id=?", (channel, db.now(), open_[0]))
-            return {"status": "already", "start_job": dict(START),
+            # §10: a repeat renews the ask, so a closure of a failed run's asks spares it
+            conn.execute("UPDATE package_requests SET asked_seq=?, updated_at=? WHERE"
+                         " request_id=?", (db.next_seq(conn), db.now(), open_[0]))
+            return {"status": "already", "request_id": open_[0], "kind": "package",
+                    "start_job": dict(START),
                     "line": f"The {label} package is already on its way — it follows when the "
                             "check is done."}
-        passes._open_request(conn, quarter, channel)
-    return {"status": "asked", "start_job": dict(START),
+        rid = passes._open_request(conn, quarter)["id"]
+    return {"status": "asked", "request_id": rid, "kind": "package", "start_job": dict(START),
             "line": f"Checking the bank and your email for {label} — the package follows "
                     "when that's done."}
+
+
+def _live_run(conn) -> bool:
+    """The latest claim's run is live: its job id has no runs.completed_at (S7 §4)."""
+    top = conn.execute("SELECT job_id FROM claims ORDER BY gen DESC LIMIT 1").fetchone()
+    if top is None:
+        return False
+    done_ = conn.execute("SELECT completed_at FROM runs WHERE job_id=?", (top[0],)).fetchone()
+    return done_ is None or done_[0] is None
+
+
+def ask_state(conn, kind, request_id) -> dict:
+    """Read-only (S7 §4): will the running job take this ask? `taken`, or `queued` with a
+    live run, says the ask's own line; `queued` with none, BUSY_NO_RESULT; anything else
+    is `done` (DONE_ALREADY)."""
+    if kind not in ("work", "package"):
+        raise db.Refusal("kind is 'work' or 'package', as the ask returned it")
+    table = "work_requests" if kind == "work" else "package_requests"
+    r = conn.execute(f"SELECT * FROM {table} WHERE request_id=?", (request_id,)).fetchone()
+    if r is None:
+        raise db.Refusal("there is no such ask: pass the request_id the ask returned")
+    live = _live_run(conn)
+    if kind == "work":
+        state = {"taken": "taken", "queued": "queued"}.get(r["state"], "done")
+        own = LINES[r["kind"]]
+    else:
+        state = {"snapshot": "taken", "queued": "queued"}.get(r["state"], "done")
+        import dates
+        own = (f"Checking the bank and your email for {dates.quarter_label(r['quarter'])} — "
+               "the package follows when that's done.")
+    if state == "taken" or (state == "queued" and live):
+        line = own
+    elif state == "queued":
+        line = BUSY_NO_RESULT
+    else:
+        line = DONE_ALREADY
+    return {"state": state, "live_run": live, "line": line}
 
 
 def take_queued(conn, pass_id, late=False) -> list:

@@ -403,7 +403,7 @@ class ManyPasses(StoreCase):
         self.bind()
         drv = JobDriver(self, payments=0)
         for n in range(16):
-            asks.request_package(self.conn, f"{2023 + n // 4}-Q{n % 4 + 1}", "telegram")
+            asks.request_package(self.conn, f"{2023 + n // 4}-Q{n % 4 + 1}")
         runs, spanning = [], 0
         for k in range(8):
             job_id = f"{k + 1:08x}-{k + 1}"
@@ -443,7 +443,7 @@ class SweepLiveness(Tools):
         as fast as the sweep's fell: [F, F, F] while 50 → 120 → 190 rows settled."""
         self.rows = [{"row_id": i, "amount_minor": 10000 + i} for i in range(1, 401)]
         self.bank = {i: {"tags": [], "notes": [], "rev": 0} for i in range(1, 401)}
-        self.call("request_package", quarter="2026-Q3", channel="telegram")
+        self.call("request_package", quarter="2026-Q3")
         u = self.do(self.do(self.call("job_next", job_id=A)))      # probes, snapshot
         for b in self.bank.values():
             b["tags"], b["rev"] = ["software"], 1                   # classified meanwhile
@@ -570,7 +570,7 @@ class Credits(Tools):
     def test_an_import_alone_earns_nothing_whatever_it_requeues(self):
         """Diff r3 (R8): an import that revokes a staged first send puts its package ask
         back in the queue; it earns nothing and loses nothing — there is no baseline."""
-        self.call("request_package", quarter="2026-Q3", channel="telegram")
+        self.call("request_package", quarter="2026-Q3")
         self.until(self.call("job_next", job_id=A), "complete")
         tok = self.call("job_report", job_id=A, status="ok")["continue"]["package_token"]
         pkg = self.call("build_quarterly_package", quarter="2026-Q3", package_token=tok)
@@ -594,7 +594,7 @@ class Credits(Tools):
         before = credits(self)
         import work
         self.granted(work.stop_chasing_in_tx, "2026-Q3")    # the operator's tap (S7 §8.1)
-        self.call("request_package", quarter="2026-Q2", channel="telegram")
+        self.call("request_package", quarter="2026-Q2")
         upsert(name="Adobe", source="portal")
         self.assertEqual(credits(self), before)
 
@@ -607,7 +607,7 @@ class Credits(Tools):
         self.assertEqual(bad, 0)
 
     def test_a_package_request_earns_at_its_job_side_end(self):
-        self.call("request_package", quarter="2026-Q3", channel="telegram")
+        self.call("request_package", quarter="2026-Q3")
         self.until(self.call("job_next", job_id=A), "complete")
         rid = self.conn.execute("SELECT request_id, state FROM package_requests").fetchone()
         self.assertEqual(rid["state"], "snapshot-done")

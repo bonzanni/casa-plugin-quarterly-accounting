@@ -142,7 +142,7 @@ class ToolLayer(StoreCase):
     def test_request_work_then_job_status_then_job_next(self):
         out = self.call("request_work", kind="check", trigger="operator")
         self.assertEqual(out["start_job"]["job"], "quarterly-accounting:work")
-        self.assertEqual(out["line"], "Checking the bank and your email — I'll send the "
+        self.assertEqual(out["line"], "Checking the bank and your email — I'll post the "
                                       "result here.")
         self.assertEqual(self.call("job_status", job_id="0123abcd-0000"),
                          {"done": False, "text": None})
@@ -152,7 +152,7 @@ class ToolLayer(StoreCase):
         self.assertTrue(self.call("job_next").startswith("refused: "))
 
     def test_request_package_and_job_report(self):
-        out = self.call("request_package", quarter="Q3 2026", channel="telegram")
+        out = self.call("request_package", quarter="Q3 2026")
         self.assertEqual(out["status"], "asked")
         rep = self.call("job_report")
         self.assertEqual(rep["start_job"]["job"], "quarterly-accounting:work")

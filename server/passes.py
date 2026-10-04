@@ -112,7 +112,7 @@ def begin_pass(conn, trigger: str, reply=None, quarter=None, channel=None) -> di
                 return {"status": "already",
                         "text": f"The {label} package is already on its way — it follows "
                                 "when the check is done."}
-            req = _open_request(conn, quarter, channel)
+            req = _open_request_channel(conn, quarter, channel)
         m = _marker(conn)
         reclaimed, recovered, owed = False, None, []
         if m is not None and m["live"]:
@@ -172,17 +172,25 @@ def protocol_of(conn, pass_id) -> str:
     return row[0] if row is not None and row[0] is not None else "delegation"
 
 
-def _open_request(conn, quarter, channel) -> dict:
+def _open_request(conn, quarter) -> dict:
     """A package request, `queued` until a round of its check runs. A newer request for
     the quarter supersedes an open one that has not staged a send (a staged one is
     settled by its holder, or taken back by a claim): the operator asked again, and the
-    new one is checked afresh and is the one that arrives."""
+    new one is checked afresh and is the one that arrives. S7 §4: always Telegram, and
+    asked when created (asked_seq = created_seq)."""
+    return _open_request_channel(conn, quarter, "telegram")
+
+
+def _open_request_channel(conn, quarter, channel) -> dict:
+    """_open_request with a channel: begin_pass's (the delegation protocol, unreachable
+    from the surface since S2) keeps its own."""
     now = db.now()
     conn.execute("UPDATE package_requests SET state='superseded', updated_at=? WHERE quarter=?"
                  " AND state IN ('snapshot-done', 'built')", (now, quarter))
+    seq = db.next_seq(conn)
     rid = conn.execute("INSERT INTO package_requests(quarter, channel, state, created_at,"
-                       " updated_at, created_seq) VALUES (?,?, 'queued', ?, ?, ?)",
-                       (quarter, channel, now, now, db.next_seq(conn))).lastrowid
+                       " updated_at, created_seq, asked_seq) VALUES (?,?, 'queued', ?, ?, ?, ?)",
+                       (quarter, channel, now, now, seq, seq)).lastrowid
     return {"id": rid, "quarter": quarter, "channel": channel}
 
 

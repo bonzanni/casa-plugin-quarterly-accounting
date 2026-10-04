@@ -25,8 +25,7 @@ class MidBatchAsks(Tools):
 
     def test_package_asks_mid_batch_keep_progress(self):
         flags, settled = self.run_with_asks(
-            lambda b: self.call("request_package", quarter=f"2026-Q{b + 1}",
-                                channel="telegram"))
+            lambda b: self.call("request_package", quarter=f"2026-Q{b + 1}"))
         self.assertEqual(settled, sorted(set(settled)))       # rows settled every batch
         self.assertGreater(settled[0], 0)
         self.assertEqual(flags, [True, True, True], settled)

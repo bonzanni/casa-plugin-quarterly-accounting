@@ -395,7 +395,7 @@ class Cancelled(StoreCase):
         import asks, json
         _, pid = self.live_pass_of(A)                             # one check, taken
         asks.request_work(self.conn, "check", "cron")             # one queued
-        asks.request_package(self.conn, "2026-Q3", "telegram")    # one package, queued
+        asks.request_package(self.conn, "2026-Q3")    # one package, queued
         self.assertEqual(self.work(), [("taken", None), ("queued", None)])
         out = asks.job_report(self.conn, job_id=A[:8], status="cancelled")
         row = self.conn.execute("SELECT ended_at, outcome, orphaned_by, report_json FROM"
@@ -415,7 +415,7 @@ class Cancelled(StoreCase):
         job.claim(self.conn, A)                                   # the drain, no pass yet
         asks.request_work(self.conn, "check", "operator")
         asks.request_work(self.conn, "handover", "operator", doc_ids=[self.doc()])
-        asks.request_package(self.conn, "2026-Q3", "email")
+        asks.request_package(self.conn, "2026-Q3")
         out = asks.job_report(self.conn, job_id=A[:8], status="cancelled")
         self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
                          "stopped")
@@ -424,7 +424,7 @@ class Cancelled(StoreCase):
 
     def test_a_cancelled_package_round_closes_its_request(self):
         import asks, db, job, passes
-        asks.request_package(self.conn, "2026-Q3", "telegram")
+        asks.request_package(self.conn, "2026-Q3")
         t = job.claim(self.conn, A)
         with db.tx(self.conn):
             _, pid = passes.start_pass(self.conn, "package", "silent", protocol="job",
@@ -751,7 +751,7 @@ class CancelActsOnTheStore(StoreCase):
 
     def test_cancelling_the_unclaimed_recovery_job_closes_a_package_round(self):
         import asks, db, job, passes
-        asks.request_package(self.conn, "2026-Q3", "telegram")
+        asks.request_package(self.conn, "2026-Q3")
         t = job.claim(self.conn, A)
         with db.tx(self.conn):
             _, pid = passes.start_pass(self.conn, "package", "silent", protocol="job",

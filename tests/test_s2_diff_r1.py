@@ -181,7 +181,7 @@ class InformationalPages(Tools):
                          before)
 
     def uncertain_package(self, quarter="2026-Q3", job_id=A):
-        self.call("request_package", quarter=quarter, channel="telegram")
+        self.call("request_package", quarter=quarter)
         self.until(self.call("job_next", job_id=job_id), "complete", job_id=job_id)
         tok = self.call("job_report", job_id=job_id, status="ok")["continue"]["package_token"]
         pkg = self.call("build_quarterly_package", quarter=quarter, package_token=tok)
@@ -196,7 +196,7 @@ class InformationalPages(Tools):
         `speak` (the resend offer) and the handover page, relayed on the job's
         notification, delivered in that order. "Send it again" still resends the
         offered package."""
-        self.call("request_package", quarter="2026-Q3", channel="telegram")
+        self.call("request_package", quarter="2026-Q3")
         self.until(self.call("job_next", job_id=A), "complete")
         tok = self.call("job_report")["continue"]["package_token"]
         pkg = self.call("build_quarterly_package", quarter="2026-Q3", package_token=tok)

@@ -40,7 +40,7 @@ class Base(StoreCase):
         import documents
         self.docs = getattr(self, "docs", 0) + 1       # distinct numbers: no identity collision
         path = self.publish("d%d.pdf" % self.docs, PDF + body + str(meta).encode())
-        args = dict(source_path=path, kind=kind, source="gmail", extraction_author="resident",
+        args = dict(source_path=path, kind=kind, source="gmail", extraction_author="desk",
                     counterparty="Adobe", issuer="Adobe", amount_minor=10000, currency="EUR",
                     document_date="2026-07-02", document_number="N%d" % self.docs)
         args.update(meta)

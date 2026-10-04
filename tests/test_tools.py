@@ -28,6 +28,8 @@ EXPECTED = {
     # record_step and more_work
     "job_next", "job_status", "job_report", "request_work", "request_package",
     "record_filing",
+    # S7 Task 8 (§4): will the running job take this ask?
+    "ask_state",
     # S7 §8.1: confirm_match, reject_match, set_exemption, bind_account, set_watermark,
     # set_package_name, stop_chasing and apply_reply left the surface (a tap's grant only)
 }
@@ -87,14 +89,14 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 30)             # S2: 38; S7 Task 4: - 8 (§8.1)
+        self.assertEqual(len(EXPECTED), 31)     # S2: 38; S7 Task 4: - 8 (§8.1); T8: + ask_state
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 30)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 31)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
@@ -464,7 +466,7 @@ class TestInstallSmoke(TempEnv):
             path = self.publish("smoke.pdf", b"%PDF-1.4\nsmoke\n%%EOF\n")
             filed = json.loads(_call(resident, "ingest_document", 1, source_path=path,
                                      kind="invoice", source="manual-telegram",
-                                     extraction_author="resident", counterparty="Smoke",
+                                     extraction_author="desk", counterparty="Smoke",
                                      amount_minor=100, currency="EUR",
                                      document_date="2026-09-01"))
             seen = json.loads(_call(specialist, "list_unmatched_documents", 2))
