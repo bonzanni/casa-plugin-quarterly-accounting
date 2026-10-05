@@ -167,6 +167,10 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
                 now = db.now()
                 conn.execute("UPDATE deliveries SET status='failed', settled_at=?,"
                              " withdrawn_at=? WHERE delivery_id=?", (now, now, delivery_id))
+                # Terra r1 S2: the operator never saw this caption — its rendering goes,
+                # so no quote can bind a file that did not arrive
+                conn.execute("DELETE FROM renders WHERE render_id=? AND kind='package-file'",
+                             (rid,))
                 if req is not None:
                     conn.execute("UPDATE package_requests SET state='stopped', reason=?,"
                                  " updated_at=? WHERE request_id=?",

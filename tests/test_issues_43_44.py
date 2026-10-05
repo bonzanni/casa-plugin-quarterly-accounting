@@ -400,3 +400,34 @@ class DeskRouting(StoreCase):
         self.assertIn('"Send it again" goes to `propose_reading` first, never straight here. '
                       "Its `resend` instruction: `stage_for_delivery(resend=true)`", send)
         self.assertLessEqual(len(desk), 10_000)
+
+
+class RefusedFileBindsNothing(StoreCase):
+    """Terra r1 S2 (9b317ef): a post_package deposit Casa refuses leaves no bindable
+    `package-file` rendering — the operator never saw that caption."""
+
+    def test_a_refused_deposit_leaves_no_caption_to_bind_and_a_good_post_still_binds(self):
+        import db, delivery, posting, views
+        self.delivered_package()
+        st = delivery.stage_for_delivery(self.conn, last_built=True)
+        with FakeBroker() as b:
+            b.refuse = "bad_filename"
+            with self.assertRaises(db.Refusal):
+                posting.post_package(self.conn, st["delivery_id"])
+        refused_caption = b.deposits[0]["caption"]
+        self.assertEqual(self.conn.execute("SELECT status FROM deliveries WHERE delivery_id=?",
+                                           (st["delivery_id"],)).fetchone()[0], "failed")
+        with self.assertRaises(views.QuoteRefusal) as cm:
+            views.bound_rendering(self.conn, LABEL + "\n" + refused_caption)
+        self.assertEqual(cm.exception.line, views.UNMATCHED)
+        files = self.conn.execute("SELECT count(*) FROM renders WHERE kind='package-file'"
+                                  ).fetchone()[0]
+        self.assertEqual(files, 1)                      # the first, delivered send's only
+        # a successful post of the same package still binds its own caption
+        st = delivery.stage_for_delivery(self.conn, last_built=True)
+        with FakeBroker() as b:
+            posting.post_package(self.conn, st["delivery_id"])
+        rid = self.conn.execute("SELECT render_id FROM renders WHERE kind='package-file'"
+                                " ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+        self.assertEqual(views.bound_rendering(self.conn, LABEL + "\n" + b.deposits[0]["caption"])
+                         ["render_id"], rid)
