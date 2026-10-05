@@ -139,7 +139,18 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
         line = pk["caption"].split("\n", 1)[0]
         if d["as_built"]:
             line += f" · built {dates.short_day(pk['built_at'])}, as it was then"
-        caption = views.clip(views.caption_safe(views.esc(line, plain=True)), CAPTION_MAX)
+        # #44: the caption is a rendering of its own (`package-file`), tagged (binding V2)
+        # and offering its package, so a swipe-reply on the file binds it; its text is the
+        # caption in the dialect (a plain caption's backslashes doubled: unesc gives back
+        # exactly what Telegram shows), seen once deposited (posted_seq)
+        rid = f"r{db.next_seq(conn)}"
+        tag = views.tag_for(rid)
+        caption = views.clip(views.caption_safe(views.esc(line, plain=True)),
+                             CAPTION_MAX - views.utf16_len(tag)) + tag
+        conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
+                     " membership_json, posted_seq) VALUES (?, 'package-file', ?, ?, ?, '[]', ?)",
+                     (rid, db.canonical({"delivery": delivery_id, "offers": [d["package_id"]]}),
+                      db.now(), caption.replace("\\", "\\\\"), db.next_seq(conn)))
         # the post mark commits before the deposit: a turn that dies after it leaves the
         # send staged, recovered `uncertain` at a later claim (delivery.stalled_sends);
         # only record_delivery, on Casa's receipt, settles it delivered

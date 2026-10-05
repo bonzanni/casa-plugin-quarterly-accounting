@@ -30,7 +30,8 @@ the operator's buttons; you never press them and never call a button's tool.
 
 A swipe-reply on a Finance post, or a delegation about an accounting decision ("the Zapier
 one is wrong", "all good", "no invoices ever for Adobe", "stop chasing Q2", "start from
-Q1", "call the zips acme", "the bank ledger was reset"): call
+Q1", "call the zips acme", "the bank ledger was reset", "show me the Zapier payment", "send
+it again" in any words, quoted or not): call
 `propose_reading(text=<their words, verbatim; for a delegation, the brief>, quoted=<the
 quoted post's text from your context, when there is one>)`. Nothing is applied by you:
 - `reading` set: the reading was posted with Apply and Cancel. End with `<silent/>`.
@@ -80,7 +81,8 @@ is filed by you, without being asked:
 
 ## Sending again
 
-- "Send it again": `stage_for_delivery(resend=true)`, then
+- "Send it again" goes to `propose_reading` first, never straight here. Its `resend`
+  instruction: `stage_for_delivery(resend=true)`, then
   `post_package(delivery_id)`, then `record_delivery(delivery_id, outcome="delivered")`
   after its receipt, or `outcome="uncertain"` when it was withheld. If staging refuses, say
   the refusal (after a send that arrived it says so; that is right).

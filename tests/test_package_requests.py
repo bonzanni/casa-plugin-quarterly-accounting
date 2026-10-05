@@ -1293,10 +1293,15 @@ class TestReviewC7(Requests):
         # structural pin (tightened in C8): every function that composes offer wording
         # (the phrases), an offer scope ("offers" in any form) or an offer-carrying block
         # CALLS delivery.offerable() or delivery.resend_refusal() — none decides alone
+        # #44 (Ruling #44): the package note and the file's caption carry the package they
+        # are about in `offers`, whatever its state — they compose no offer wording, and
+        # resend_target answers that package with resend_refusal's own sentence
         self.assertEqual(offer_builders(), {("alerts", "_units"): True,
                                             ("alerts", "pending_in_tx"): True,
                                             ("views", "_compose"): True,
-                                            ("delivery", "resend_target"): True})
+                                            ("delivery", "resend_target"): True,
+                                            ("delivery", "_package_note"): False,
+                                            ("posting", "post_package"): False})
 
 
 PHRASES = ("send it again", "may not have arrived", "didn't go out")

@@ -1394,7 +1394,7 @@ def _common_view(rows) -> dict:
 def bound_rendering(conn, quoted):
     """S7 §8, binding R1/R3: THE one rendering a reading binds. Words with no quote bind
     db.last_delivered. A quote's candidates are every SEEN rendering (db.seen_render:
-    delivered, or posted by show_view), informational kinds excluded, with no row limit and
+    delivered, or posted), db.UNQUOTABLE_KINDS excluded, with no row limit and
     no ordering. A candidate matches when its normalised text and the normalised quote agree
     over their whole overlap, capped at QUOTE_CAP (the shorter is a prefix of the other: a
     post joins up to job.POST_MAX renderings, §5, and its quote binds the first). One match
@@ -1408,8 +1408,8 @@ def bound_rendering(conn, quoted):
     found = []
     for r in conn.execute("SELECT * FROM renders WHERE (delivered_at IS NOT NULL OR posted_seq"
                           " IS NOT NULL) AND kind NOT IN (%s)"
-                          % ",".join("?" * len(db.INFORMATIONAL_KINDS)),
-                          db.INFORMATIONAL_KINDS):
+                          % ",".join("?" * len(db.UNQUOTABLE_KINDS)),
+                          db.UNQUOTABLE_KINDS):
         # the body as posted: deposit_safe is the last step of every deposit (§7.6), so a
         # pre-S7 body's control characters are spaces in what the operator saw
         t = _bnorm(unesc(deposit_safe(r["text"] or "")))[:QUOTE_CAP]

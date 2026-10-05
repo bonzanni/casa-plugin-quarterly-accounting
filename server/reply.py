@@ -93,13 +93,26 @@ PATTERNS = [
     ("ledger_reset", re.compile(r"the bank ledger was (?:reset|wiped)")),
     ("revive", re.compile(r"have another look at\s+(?:the\s+)?(?P<t>.+?)(?:\s+one)?")),
     ("rebuild", re.compile(r"rebuild(?:\s+it|\s+(?P<q>q[1-4](?:\s+\d{4})?))?")),
-    ("resend", re.compile(r"send it again")),
+    ("resend", re.compile(r"send (?:it|that|the (?:package|zip|file)) again")),
     # issue #15: the previous build, asked for by name (a fresh one is the default)
     ("send_last", re.compile(r"(?:send|give)(?: me)? (?:the |my )?(?:last|previous|old)"
                              r" (?:package|zip)(?: (?:you|that you|i) (?:built|made|sent))?"
                              r"(?: (?:for|of) (?P<q>q[1-4](?:\s+\d{4})?))?")),
     ("show", re.compile(r"(?P<s>show the rest|show older|all of them|check emailed invoices|more)")),
 ]
+# Ruling A3 (#44): a polite request form of a directive ("can you send it again?", "send it
+# again please") is that directive, never a question; a "?" counts as polite only after
+# "can/could/would/will you". Any other clause is left as it is
+DIRECTIVES = ("resend", "send_last", "show", "candidates")
+_POLITE = re.compile(r"(?:please\s+)?(?P<ask>(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+                     r"(?P<d>.+?)(?:\s*,?\s+please)?(?P<q>\?)?")
+
+
+def _polite(clause: str) -> str:
+    m = _POLITE.fullmatch(clause)
+    if m is None or m.group("d") == clause or (m.group("q") and not m.group("ask")):
+        return clause
+    return m.group("d") if _parse(m.group("d"))[0] in DIRECTIVES else clause
 CLASS_SCOPES = {"payslips": ("salary", "payroll"), "statements": ("fees", "interest", "tax"),
                 "receipts": ("reimbursement",)}
 
@@ -133,7 +146,7 @@ def _clauses(text: str) -> list:
         c = re.sub(r"\s+", " ", p).strip(" ,:").lower()
         c = _ESCAPE_TAIL.sub("", _ESCAPE_LEAD.sub("", c)).strip(" ,:")
         if c and c != "accounting":
-            out.append(c)
+            out.append(_polite(c))
     return out
 
 

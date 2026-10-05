@@ -64,6 +64,7 @@ def main(path) -> int:
     bad, n, kinds, judged, checked, skipped = [], 0, {}, [], 0, 0
     tools_judged = set()
     quotes = []                                              # (n, case, store, quote, rid, raw)
+    quoted_kinds = set()
     lines = pathlib.Path(path).read_text().splitlines()
     head = json.loads(lines[0]) if lines else None
     if not isinstance(head, dict) or head.get("case") != "header":
@@ -115,14 +116,24 @@ def main(path) -> int:
             shown, entities = render(text)
             if shown != expect or entities:
                 bad.append((n, "display differs or an entity was produced", rec["case"]))
-            if "bind" in rec and dkind == rb.OPERATOR_PROPOSAL:
-                # binding r7: Casa's real quote of the post — the label line composed onto
-                # the text (_post_proposal), rendered, clipped as the desk context quotes it
-                # (specialist_desk.clip at DESK_QUOTE_CHARS)
+        if "bind" in rec and (mode == "check" or dkind == rb.OPERATOR_FILE):
+            # binding r7 (#44: the package note and the file too): Casa's real quote of the
+            # post, clipped as the desk context quotes it (specialist_desk.clip at
+            # DESK_QUOTE_CHARS) — a proposal's or a message's text with the label line
+            # composed onto it (_post_proposal, compose_operator_message), rendered; a file's
+            # caption composed under the label (compose_file_caption), shown as plain text.
+            # A post whose display is not promised (a legacy rendering) is not quoted
+            if dkind == rb.OPERATOR_FILE:
+                raw = rb.compose_file_caption(label, b.get("caption"))
+            elif text is not None:
                 raw = render(rb.compose_operator_message(text, label))[0]
-                quotes.append((n, rec["case"], str(pathlib.Path(path).parent / (
-                    pathlib.Path(path).name + ".stores") / f"{rec['bind']['store']}.sqlite"),
-                               clip(raw, DESK_QUOTE_CHARS), rec["bind"]["render_id"], raw))
+            else:
+                bad.append((n, f"a bind on a {dkind}", rec["case"]))
+                continue
+            quotes.append((n, rec["case"], str(pathlib.Path(path).parent / (
+                pathlib.Path(path).name + ".stores") / f"{rec['bind']['store']}.sqlite"),
+                           clip(raw, DESK_QUOTE_CHARS), rec["bind"]["render_id"], raw))
+            quoted_kinds.add(dkind)
     # binding r7: every displayed view post's quote binds back to its own rendering, by the
     # plugin's own views.bound_rendering in a process of its own (scripts/bind_quotes.py)
     bound = 0
@@ -140,8 +151,11 @@ def main(path) -> int:
             else:
                 bound += 1
     if head.get("binds") != len(quotes) or not head.get("binds"):
-        bad.append((0, f"{len(quotes)} view quotes built, the header declares "
+        bad.append((0, f"{len(quotes)} quotes built, the header declares "
                        f"{head.get('binds')}", ""))
+    for k in REQUIRED_KINDS:                                 # #44: a note and a file too
+        if k not in quoted_kinds:
+            bad.append((0, f"no {k} post was quoted and bound", ""))
     if not any(len(q[5]) > DESK_QUOTE_CHARS for q in quotes):
         bad.append((0, "no view post longer than Casa's quote cap was quoted", ""))
     # the header's promises: every case judged once, the kinds' counts, the display floor

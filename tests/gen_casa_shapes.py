@@ -21,6 +21,12 @@ Each shape is one generator function over a fresh store (`SHAPES`), one per brie
 show_view (items 1–2), propose_reading (3), propose_account (4), post_results (5; its package
 note comes from post_package's delivered send) and post_package (6). The checker requires a
 deposit of every capability tool the manifest declares, and of every deposit kind.
+
+A deposit whose post the operator can swipe-reply carries {"bind": {"render_id", "store"}}:
+every show_view, the package note (post_results) and each package file (post_package, #44).
+The checker builds Casa's real quote of that post and the plugin must bind it back to that
+rendering on the store copy; the header's "binds" counts them (a legacy rendering, whose
+display is not promised, is not quoted).
 """
 from __future__ import annotations
 
@@ -74,12 +80,14 @@ class Shapes:
         self.shape = None               # the running shape: its store copy is named after it
 
     # -- recording -----------------------------------------------------------------
-    def call(self, st, broker, case, tool, args, display=True):
+    def call(self, st, broker, case, tool, args, display=True, bind=False):
         """Run posting tool `tool` through qa_server.TOOLS and record its one deposit. A
         proposal's buttons are recorded too, every writing button is tapped (the store is
         restored after each), and the buttons are returned; otherwise the body is.
         `display`: True when the display check applies (the text is composed through
-        views.esc), else the reason it does not (recorded as `display_skip`)."""
+        views.esc), else the reason it does not (recorded as `display_skip`). `bind`: a
+        post_results post of one quotable rendering, bound back by the checker (#44);
+        show_view and post_package always are."""
         import qa_server
         import tools                                    # noqa: F401 — registers the tools
         import views
@@ -96,6 +104,15 @@ class Shapes:
         if any(r["case"] == case for r in self.records):
             raise AssertionError(f"{case}: a case name is used twice")
         rec = {"case": case, "tool": tool, "body": body}
+        if tool == "post_package":
+            # #44: the file's caption is a rendering of its own, quoted as Casa composes it
+            rid = st.conn.execute("SELECT render_id FROM renders WHERE kind='package-file'"
+                                  " ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+            rec["bind"] = {"render_id": rid, "store": self.shape}
+        elif bind:
+            if tool != "post_results" or len(args["render_ids"]) != 1:
+                raise AssertionError(f"{case}: bind is one post_results rendering")
+            rec["bind"] = {"render_id": args["render_ids"][0], "store": self.shape}
         if tool not in PROPOSALS:
             if display is True:          # an operator_message's text is its value
                 rec["display_expect"] = views.unesc(body["value"])
@@ -495,9 +512,11 @@ def gen_post_package(sh, st, b):
     note = out.get("note_render_id")
     if note is None:
         raise AssertionError("package: the delivered send made no package note")
-    body = sh.call(st, b, "results:package-note", "post_results", {"render_ids": [note]})
+    body = sh.call(st, b, "results:package-note", "post_results", {"render_ids": [note]},
+                   bind=True)
     if COUNT_LINE not in views.unesc(body["value"]):
         raise AssertionError("package: the note does not carry the count line")
+    views.mark_rendering_delivered(st.conn, note)       # Casa's receipt: the note is seen
     s = delivery.stage_for_delivery(st.conn, last_built=True)
     post("package:last", {"delivery_id": s["delivery_id"]})
 
@@ -539,7 +558,9 @@ def header(records) -> dict:
         kinds[KINDS[r["tool"]]] = kinds.get(KINDS[r["tool"]], 0) + 1
     return {"case": "header", "kinds": kinds, "cases": [r["case"] for r in deposits],
             "display_checked": sum(1 for r in deposits if "display_expect" in r),
-            "binds": sum(1 for r in deposits if "bind" in r and "display_expect" in r)}
+            # a quote is built for a bound post whose display is promised, and every file
+            "binds": sum(1 for r in deposits if "bind" in r
+                         and ("display_expect" in r or r["tool"] == "post_package"))}
 
 
 def main(argv) -> int:

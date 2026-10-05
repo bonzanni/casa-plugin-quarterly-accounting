@@ -161,3 +161,166 @@ class DeliverWithPassToken(StoreCase):
             d = qa_server.TOOLS[n]["description"]
             self.assertIn("deliver unit", d, n)
             self.assertIn("package_token", d, n)
+
+
+LABEL = "\U0001f4ca Alex"        # Casa's label line: compose_operator_message / compose_file_caption
+
+
+class SendItAgainOnThePackage(StoreCase):
+    """#44: a swipe-reply "send it again" on the package note or on the file itself reaches
+    the resend rule (delivery.resend_target): after a send that arrived it says so, after an
+    uncertain one it stages the file again. Quotes are composed as Casa composes them: the
+    label line, then the body (the note, as displayed) or the caption (plain)."""
+
+    def _send_last(self, outcome):
+        """A send-last of the delivered package, posted, settled `outcome`; its note (on
+        `delivered`) posted and marked. Returns (the file's caption, the note's render id)."""
+        import delivery, posting, views
+        st = delivery.stage_for_delivery(self.conn, last_built=True)
+        with FakeBroker() as b:
+            posting.post_package(self.conn, st["delivery_id"])
+        out = delivery.record_delivery(self.conn, delivery_id=st["delivery_id"], outcome=outcome)
+        if out.get("note_render_id"):
+            views.mark_rendering_delivered(self.conn, out["note_render_id"])
+        return b.deposits[0]["caption"], out.get("note_render_id")
+
+    def deliveries(self):
+        return self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]
+
+    def resend(self, text, quoted):
+        """propose_reading, then each instruction run as the desk skill says."""
+        import posting, qa_server, tools  # noqa: F401
+        ins = posting.propose_reading(self.conn, text, quoted)["instructions"]
+        self.assertEqual(len(ins), 1, ins)
+        self.assertIsInstance(ins[0], dict, ins)
+        return qa_server.TOOLS["stage_for_delivery"]["fn"](dict(ins[0]["stage_for_delivery"]))
+
+    def test_a_quote_of_the_package_note_after_delivered_says_it_did_arrive(self):
+        import db, views
+        self.delivered_package()
+        _, note = self._send_last("delivered")
+        n = self.deliveries()
+        q = LABEL + "\n" + views.unesc(self.render_text(note))
+        with self.assertRaises(db.Refusal) as cm:
+            self.resend("send it again", q)
+        self.assertIn("did arrive", str(cm.exception))
+        self.assertEqual(self.deliveries(), n)
+
+    def test_a_quote_of_the_file_after_delivered_says_it_did_arrive(self):
+        import db
+        self.delivered_package()
+        cap, _ = self._send_last("delivered")
+        n = self.deliveries()
+        with self.assertRaises(db.Refusal) as cm:
+            self.resend("send it again", LABEL + "\n" + cap)
+        self.assertIn("did arrive", str(cm.exception))
+        self.assertEqual(self.deliveries(), n)
+
+    def test_a_quote_of_the_file_after_uncertain_sends_it_again(self):
+        pkg = self.delivered_package(first_outcome="uncertain")
+        import views
+        cap = views.unesc(self.conn.execute("SELECT text FROM renders WHERE"
+                                            " kind='package-file'").fetchone()[0])
+        n = self.deliveries()
+        st = self.resend("Can you send it again?", LABEL + "\n" + cap)
+        self.assertEqual(self.deliveries(), n + 1)
+        self.assertEqual(self.conn.execute("SELECT package_id FROM deliveries WHERE"
+                                           " delivery_id=?", (st["delivery_id"],)).fetchone()[0],
+                         pkg)
+
+    def test_the_file_is_a_tagged_rendering_offering_its_package(self):
+        import json, views
+        pkg = self.delivered_package()
+        r = self.conn.execute("SELECT * FROM renders WHERE kind='package-file'").fetchone()
+        sc = json.loads(r["scope_json"])
+        self.assertEqual(sc["offers"], [pkg])
+        self.assertTrue(r["text"].endswith(views.tag_for(r["render_id"])), r["text"])
+        self.assertIsNotNone(r["posted_seq"])
+        note = self.conn.execute("SELECT * FROM renders WHERE kind='package-note'").fetchone()
+        self.assertEqual(json.loads(note["scope_json"])["offers"], [pkg])
+        self.assertIn(views.tag_for(note["render_id"]), note["text"].split("\n")[0])
+
+    def test_two_packages_identical_notes_each_bind_their_own(self):
+        """V2: the tag tells apart two notes whose text is otherwise the same (two packages
+        of one quarter): each quote binds its own note, never AMBIGUOUS."""
+        import asks, views
+        self.delivered_package()
+        import db
+        asks.request_package(self.conn, "2026-Q3")
+        self.drive(A, deliver=True, stop_before="deliver")
+        with db.tx(self.conn):          # the second build's lines, word for word the first's
+            self.conn.execute("UPDATE packages SET caption=(SELECT caption FROM packages"
+                              " WHERE package_id=1) WHERE package_id=2")
+        with FakeBroker():
+            self.drive(A, deliver=True)
+        notes = self.conn.execute("SELECT render_id, text FROM renders WHERE"
+                                  " kind='package-note' ORDER BY rowid").fetchall()
+        self.assertEqual(len(notes), 2)
+        for rid, text in notes:
+            views.mark_rendering_delivered(self.conn, rid)
+        strip = [t.split("\n")[0][:-len(views.tag_for(r))] + "\n" + t.split("\n", 1)[1]
+                 for r, t in notes]
+        self.assertEqual(strip[0], strip[1])                 # the same words, but the tag
+        for rid, text in notes:
+            self.assertEqual(views.bound_rendering(self.conn, LABEL + "\n" + views.unesc(text))
+                             ["render_id"], rid)
+
+    def test_unquoted_words_still_skip_the_note_and_the_file(self):
+        """The note and the file stay informational for words with no quote: they never
+        take the reply from the view before them."""
+        import db, views
+        self.delivered_package()
+        r = views.build_review(self.conn, view="status")
+        views.mark_rendering_delivered(self.conn, r["render_id"])
+        self._send_last("delivered")
+        # both packages' notes delivered (the job posted the first) after the view
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE kind IN"
+                                           " ('package-note', 'package-file')"
+                                           " AND delivered_at IS NOT NULL").fetchone()[0], 2)
+        self.assertEqual(db.last_delivered(self.conn)["render_id"], r["render_id"])
+        self.assertEqual(views.bound_rendering(self.conn, None)["render_id"], r["render_id"])
+
+
+class PoliteDirectives(StoreCase):
+    """Ruling A3: a polite request form of a directive is the directive, not a question."""
+
+    def instructions(self, text):
+        import posting
+        out = posting.propose_reading(self.conn, text)
+        return out["instructions"], out["not_a_reply"]
+
+    def test_polite_resend_forms_reach_the_rule(self):
+        self.delivered_package()
+        for t in ("can you send it again?", "Could you send it again please?",
+                  "send it again please", "please send it again", "would you send it again?",
+                  "can you send the package again?", "send that again"):
+            self.assertEqual(self.instructions(t), (["resend"], False), t)
+
+    def test_polite_send_last_and_show_forms(self):
+        self.delivered_package()
+        self.assertEqual(self.instructions("could you send me the last package you built?"),
+                         (["send last"], False))
+        self.assertEqual(self.instructions("can you show the rest?"), (["show the rest"], False))
+
+    def test_real_questions_stay_questions(self):
+        self.delivered_package()
+        for t in ("did you send it again?", "why did you send it again?",
+                  "can you tell me if it arrived?", "more?", "send it again?"):
+            self.assertEqual(self.instructions(t), ([], True), t)
+
+
+class DeskRouting(StoreCase):
+    def test_the_desk_routes_send_it_again_and_one_payment_to_propose_reading(self):
+        """Ruling A3 / UX: the desk sends "send it again" and "show me the X payment" to
+        propose_reading — never straight to stage_for_delivery or from memory."""
+        import pathlib
+        desk = (pathlib.Path(__file__).resolve().parents[1]
+                / "skills/quarterly-accounting/SKILL.md").read_text()
+        words = " ".join(desk[desk.index("## The operator's words"):desk.index("## Asks")]
+                         .split())
+        self.assertIn('"show me the Zapier payment", "send it again" in any words, quoted or '
+                      "not): call `propose_reading(", words)
+        send = " ".join(desk[desk.index("## Sending again"):desk.index("## Setup")].split())
+        self.assertIn('"Send it again" goes to `propose_reading` first, never straight here. '
+                      "Its `resend` instruction: `stage_for_delivery(resend=true)`", send)
+        self.assertLessEqual(len(desk), 10_000)

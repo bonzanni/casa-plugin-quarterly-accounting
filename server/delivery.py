@@ -537,7 +537,9 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
 
 def _package_note(conn, d):
     """§6.1: the caption's lines after the first, as a rendering the next post carries
-    (the file's own caption is one line). None when there are none."""
+    (the file's own caption is one line). None when there are none. Tagged (binding V2)
+    and offering its package (#44): a quote of it binds, and "send it again" on it reaches
+    resend_target, which answers a package that arrived with its own reason."""
     pk = conn.execute("SELECT caption FROM packages WHERE package_id=?",
                       (d["package_id"],)).fetchone()
     rest = [x for x in pk["caption"].split("\n")[1:] if x.strip()]
@@ -546,8 +548,8 @@ def _package_note(conn, d):
     rid = f"r{db.next_seq(conn)}"
     conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                  " membership_json) VALUES (?, 'package-note', ?, ?, ?, '[]')",
-                 (rid, db.canonical({"delivery": d["delivery_id"]}), db.now(),
-                  views.fit_message(rest)))
+                 (rid, db.canonical({"delivery": d["delivery_id"], "offers": [d["package_id"]]}),
+                  db.now(), "\n".join(views.fit_lines(rest, tag=views.tag_for(rid))[0])))
     return rid
 
 
@@ -572,7 +574,9 @@ def resend_refusal(conn, package_id):
     operator's sentence saying why not. Staging a resend refuses with exactly this
     sentence, and a package is OFFERED exactly when this is None (offerable, every
     composer of an offer, resend_target) — so nothing can be offered that staging
-    would refuse, by construction.
+    would refuse, by construction. (The package note and the file's own caption carry
+    their package in `offers` whatever its state (#44): resend_target answers it with
+    this predicate's sentence, as any offer no longer eligible.)
 
     Refused when: the package has arrived (any send delivered); it was never sent;
     its latest send is still being sent (staged); its latest send was revoked (an

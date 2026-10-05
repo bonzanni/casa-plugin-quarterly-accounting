@@ -686,11 +686,15 @@ def next_seq(conn: sqlite3.Connection) -> int:
 
 
 # Renderings that offer nothing to answer (S2 §6.4): a handover's case lines, a stop
-# line, a package's details note and the run's asks-waiting line (S7 §4.2, §6.1).
-# Delivered after a view or an offer, they never take the operator's reply from it
-# (diff round 1, R3; Astra S2: a handover page delivered after `speak`'s resend offer
-# made "send it again" refuse).
-INFORMATIONAL_KINDS = ("handover", "job-stop", "package-note", "job-left")
+# line, a package's details note, the package file's caption and the run's asks-waiting
+# line (S7 §4.2, §6.1). Delivered after a view or an offer, they never take the operator's
+# reply from it (diff round 1, R3; Astra S2: a handover page delivered after `speak`'s
+# resend offer made "send it again" refuse).
+INFORMATIONAL_KINDS = ("handover", "job-stop", "package-note", "job-left", "package-file")
+# Of those, the ones a QUOTE can never bind (views.bound_rendering). The package's note
+# and file are quotable (#44): a swipe-reply "send it again" on either names its package
+# (their scope's `offers`), answered by delivery.resend_target.
+UNQUOTABLE_KINDS = ("handover", "job-stop", "job-left")
 
 
 def seen_render(row) -> bool:

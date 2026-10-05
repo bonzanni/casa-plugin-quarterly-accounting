@@ -204,13 +204,18 @@ class Review(StoreCase):
         asks.request_package(self.conn, "2026-Q3")
         with FakeBroker() as b:
             self.drive(A, deliver=True)
+        import views
         cap = self.conn.execute("SELECT caption FROM packages").fetchone()[0]
         dep = next(d for d in b.deposits if d["slot"] == "package")
-        self.assertEqual(dep["caption"], cap.split("\n")[0])
-        note = self.conn.execute("SELECT text, scope_json FROM renders WHERE"
+        # #44: the file's caption is a tagged `package-file` rendering of its own
+        rid = self.conn.execute("SELECT render_id FROM renders WHERE"
+                                " kind='package-file'").fetchone()[0]
+        self.assertEqual(dep["caption"], cap.split("\n")[0] + views.tag_for(rid))
+        note = self.conn.execute("SELECT render_id, text, scope_json FROM renders WHERE"
                                  " kind='package-note'").fetchone()
         self.assertIn("Files are named", note["text"])
         self.assertNotIn(cap.split("\n")[0], note["text"])
+        self.assertIn(views.tag_for(note["render_id"]), note["text"].split("\n")[0])
         self.assertIn("delivery", json.loads(note["scope_json"]))
 
     def test_a_send_last_caption_says_when_it_was_built(self):
