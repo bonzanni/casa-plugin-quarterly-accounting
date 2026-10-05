@@ -99,6 +99,19 @@ def request_of_package(conn, package_id):
                         " request_id DESC LIMIT 1", (package_id,)).fetchone()
 
 
+def _check_pass(conn, pass_token, package_token) -> None:
+    """#43: the pass fence of a package send. A request-bound send (pass `package_token`
+    only then) whose pass_token is its package_token skips passes.check_token: the job's
+    deliver unit runs after its package pass ended (S7 §6.1), and the claim gen it carries
+    as both tokens is fenced by passes.check_package_token (the newest claim's, the
+    request's own), which every caller runs in the same transaction. Any other send keeps
+    the pass fence, unchanged."""
+    if package_token is not None and pass_token is not None \
+            and int(pass_token) == int(package_token):
+        return
+    passes.check_token(conn, pass_token)
+
+
 def stage_for_delivery(conn, *, channel="telegram", package_id=None, doc_id=None,
                        pass_token=None, package_token=None, resend=False, last_built=False,
                        quarter=None) -> dict:
@@ -126,12 +139,12 @@ def stage_for_delivery(conn, *, channel="telegram", package_id=None, doc_id=None
         raise db.Refusal("stage one package or one document")
     if conn.in_transaction:
         raise RuntimeError("stage_for_delivery takes the custody lock before its own transaction")
-    passes.check_token(conn, pass_token)                     # early refusals only
+    req = None if resend or package_id is None else request_of_package(conn, package_id)
+    _check_pass(conn, pass_token, package_token if req is not None else None)   # early only
     if resend and package_id is not None:
         why = resend_refusal(conn, package_id)               # THE predicate, as offered
         if why is not None:
             raise db.Refusal(why)
-    req = None if resend or package_id is None else request_of_package(conn, package_id)
     if req is not None:
         passes.check_package_token(conn, req["request_id"], package_token)
     built_for = None if package_id is None else conn.execute(
@@ -205,7 +218,7 @@ def _stage(conn, package_id, doc_id, pass_token, request_id, package_token,
         # until the commit below, so any failure removes it before it can be sent
         try:
             with db.tx(conn):
-                passes.check_token(conn, pass_token)
+                _check_pass(conn, pass_token, package_token if request_id is not None else None)
                 if request_id is not None:
                     passes.check_package_token(conn, request_id, package_token)
                 if package_id is not None and as_built:
@@ -247,7 +260,7 @@ def _staged_again(conn, request_id, package_token, pass_token):
     """Staging a request that already staged its send returns that send (same
     delivery, path and request id): at most one staged send per request."""
     with db.tx(conn):
-        passes.check_token(conn, pass_token)
+        _check_pass(conn, pass_token, package_token)
         req = passes.check_package_token(conn, request_id, package_token)
         if req["state"] != "staged":
             return None
@@ -448,8 +461,10 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
         raise db.Refusal("outcome is 'delivered', 'uncertain' or 'failed'")
     with db.tx(conn):
         note = None
-        passes.check_token(conn, pass_token)
         d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?", (delivery_id,)).fetchone()
+        bound = conn.execute("SELECT 1 FROM package_requests WHERE delivery_id=?",
+                             (delivery_id,)).fetchone() is not None
+        _check_pass(conn, pass_token, package_token if bound else None)
         if d is None:
             raise db.Refusal(f"there is no delivery #{delivery_id}")
         if d["revoked_at"] is not None:

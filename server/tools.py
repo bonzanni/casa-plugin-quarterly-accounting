@@ -736,7 +736,8 @@ def t_delivered(args):
           "Post a staged package to the operator as a file (Casa posts it, labelled, under "
           "the package's name). After Casa's receipt (casa_delivery.status delivered): "
           "record_delivery(delivery_id, outcome=\"delivered\"); withheld or no receipt: "
-          "record_delivery(outcome=\"uncertain\") — never post it again yourself.",
+          "record_delivery(outcome=\"uncertain\") — never post it again yourself. A send staged "
+          "for a package request (the job's deliver unit) needs that unit's package_token.",
           obj({"delivery_id": I, "package_token": PKG_TOKEN}, ("delivery_id",)))
 @capability("package")
 def t_post_package(args):
@@ -769,8 +770,10 @@ def t_build(args):
           "say; its `stage_for_delivery` instruction (a reply to one message) gives the "
           "arguments, render_id included. For its `send last` instruction pass last_built=true (and the quarter it "
           "names, if any) and neither id: the last package built, unchanged. A package built "
-          "for a package request needs its package_token; staging it again returns the same "
-          "send. channel is telegram (the default). During a pass, pass the pass_token.",
+          "for a package request needs its package_token (the job's deliver unit gives it: "
+          "that unit's check has ended, and the package_token admits the send); staging it "
+          "again returns the same send. channel is telegram (the default). During a pass, "
+          "pass the pass_token.",
           obj({"channel": S, "package_id": I, "resend": B, "render_id": S, "last_built": B,
                "quarter": Q, "pass_token": TOKEN, "package_token": PKG_TOKEN}))
 def t_stage(args):
@@ -800,7 +803,8 @@ def t_stage(args):
 @register("record_delivery",
           "Record a send's outcome: delivered (on Casa's receipt), uncertain (withheld or no "
           "receipt — never post it again yourself), failed. A send staged for a package "
-          "request needs its package_token. Returns `speak` (uncertain/failed) or "
+          "request needs its package_token (the job's deliver unit's: it admits the record "
+          "after that unit's check has ended). Returns `speak` (uncertain/failed) or "
           "`note_render_id` (delivered): post it with post_results(render_ids=[…]), then mark "
           "it delivered on the receipt — in a job turn the next `post` does it for you. "
           "During a pass, pass the pass_token.",

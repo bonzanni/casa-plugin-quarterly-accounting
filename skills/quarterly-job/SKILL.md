@@ -270,7 +270,8 @@ that the bank was re-read changed nothing. Then `job_next`.
 
 ### `deliver`
 
-The unit carries `package_id` and `package_token`.
+The unit carries `package_id` and `package_token`. Each of the three calls below takes the
+unit's `package_token`: the check's pass has ended, so that token is what admits them.
 1. `stage_for_delivery(package_id=…, package_token=…)`.
 2. `post_package(delivery_id=<the staged delivery_id>, package_token=…)`.
 3. On its receipt, `record_delivery(delivery_id, outcome="delivered", package_token=…)`.

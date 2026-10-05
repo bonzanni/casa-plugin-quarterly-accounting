@@ -344,9 +344,8 @@ def check_token(conn, token) -> None:
         return
     m = _marker(conn)
     if m is None or not m["live"] or int(token) != m["generation"]:
-        raise db.Refusal("this pass is no longer the current one (another turn continued it, "
-                         "a newer pass reclaimed its marker, or the store was reset); stop — "
-                         "nothing was written")
+        raise db.Refusal("this pass is no longer the current one (it has ended, or a newer "
+                         "one took its place); stop — nothing was written")
     if conn.in_transaction:
         conn.execute("UPDATE pass_marker SET lease_at=? WHERE id=1", (db.now(),))
 

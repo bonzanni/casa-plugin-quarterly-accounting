@@ -23,6 +23,10 @@ everything; the driver never chooses a unit, an outcome or a token of its own.
               broker, else a tests.fakebroker of its own), then record_delivery — `delivered` on the
               receipt (`package_receipt`), else `uncertain`. `stop_after="stage"`: the
               turn ends right after staging (nothing posted, nothing recorded)
+
+build and deliver go through the real tools (qa_server.TOOLS), each call carrying the
+unit's pass_token as the skill says every write does (#43: the suite then runs the call
+shape the model makes, not a direct call the model never makes).
 """
 from __future__ import annotations
 
@@ -220,28 +224,45 @@ class JobDriver:
             views.mark_rendering_delivered(self.conn, u["render_id"])
         return None
 
+    def _tool(self, name, args):
+        """#43: the plugin tool `name` called the way the model calls it — through
+        qa_server.TOOLS, with the arguments the skill names. A posting tool's no-post shape
+        (`refused`) is raised as the refusal it carries, as a direct call would raise it."""
+        import db
+        import qa_server
+        import tools  # noqa: F401  -- registers every tool
+        out = qa_server.TOOLS[name]["fn"](args)
+        if isinstance(out, dict) and out.get("refused") is not None:
+            raise db.Refusal(out["refused"])
+        return out
+
     def _build(self, u, token):
-        import package
-        package.build_quarterly_package(self.conn, u["quarter"], u["package_token"],
-                                        request_id=u["request_id"])
+        """The skill's build unit, with the pass_token every write carries ("Pass the
+        pass_token to every plugin write you make")."""
+        self._tool("build_quarterly_package", {"quarter": u["quarter"],
+                                               "package_token": u["package_token"],
+                                               "request_id": u["request_id"],
+                                               "pass_token": u["pass_token"]})
         return None
 
     def _deliver(self, u, token):
-        import delivery, posting
-        st = delivery.stage_for_delivery(self.conn, package_id=u["package_id"],
-                                         package_token=u["package_token"])
-        self.staged = (st["delivery_id"], u["package_token"])
+        """The skill's deliver unit, through the real tools, each call carrying the unit's
+        package_token and its pass_token (#43: the live model passed both)."""
+        pkg, tok = u["package_token"], u["pass_token"]
+        st = self._tool("stage_for_delivery", {"package_id": u["package_id"],
+                                               "package_token": pkg, "pass_token": tok})
+        self.staged = (st["delivery_id"], pkg)
         if self.stop_after == "stage":
             return STOP
+        args = {"delivery_id": st["delivery_id"], "package_token": pkg, "pass_token": tok}
         if os.environ.get("CASA_BROKER_SOCKET"):        # the test's own broker listens
-            posting.post_package(self.conn, st["delivery_id"], u["package_token"])
+            self._tool("post_package", dict(args))
         else:
             from tests.fakebroker import FakeBroker
             with FakeBroker():
-                posting.post_package(self.conn, st["delivery_id"], u["package_token"])
-        delivery.record_delivery(self.conn, delivery_id=st["delivery_id"],
-                                 outcome="delivered" if self.package_receipt else "uncertain",
-                                 package_token=u["package_token"])
+                self._tool("post_package", dict(args))
+        self._tool("record_delivery",
+                   {**args, "outcome": "delivered" if self.package_receipt else "uncertain"})
         return None
 
     def _probes(self, u, token):
