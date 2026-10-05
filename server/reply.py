@@ -99,6 +99,11 @@ PATTERNS = [
                              r" (?:package|zip)(?: (?:you|that you|i) (?:built|made|sent))?"
                              r"(?: (?:for|of) (?P<q>q[1-4](?:\s+\d{4})?))?")),
     ("show", re.compile(r"(?P<s>show the rest|show older|all of them|check emailed invoices|more)")),
+    # Ruling UX: a view of one payment ("show me the Zapier payment"), resolved on R as
+    # "candidates for" is; after the fixed show phrases
+    ("candidates", re.compile(r"(?:now\s+)?(?:show|open)(?:\s+me)?\s+(?:the\s+)?(?P<t>.+?)"
+                              r"\s+(?:payment|one|item)"
+                              r"(?:\s+and\s+(?:the\s+)?(?:invoice|document|receipt)\b.*)?")),
 ]
 # Ruling A3 (#44): a polite request form of a directive ("can you send it again?", "send it
 # again please") is that directive, never a question; a "?" counts as polite only after
@@ -113,6 +118,8 @@ def _polite(clause: str) -> str:
     if m is None or m.group("d") == clause or (m.group("q") and not m.group("ask")):
         return clause
     return m.group("d") if _parse(m.group("d"))[0] in DIRECTIVES else clause
+
+
 CLASS_SCOPES = {"payslips": ("salary", "payroll"), "statements": ("fees", "interest", "tax"),
                 "receipts": ("reimbursement",)}
 
@@ -229,8 +236,16 @@ def _names(d, seen=None) -> set:
     return out
 
 
-def _matches(d, t, seen=None) -> bool:
-    if t["vendor"] and t["vendor"] not in _names(d, seen):
+def _begins(vendor, names) -> bool:
+    """Ruling UX: the words of `vendor` begin one of `names`, word for word ("snelstart"
+    begins "snelstart software"; "snel" and "software" begin nothing)."""
+    w = vendor.split()
+    return any(n.split()[:len(w)] == w for n in names if n)
+
+
+def _matches(d, t, seen=None, prefix=False) -> bool:
+    if t["vendor"] and t["vendor"] not in _names(d, seen) and not (
+            prefix and _begins(t["vendor"], _names(d, seen))):
         return False
     if t["amount"] is not None and d["amount_minor"] != t["amount"]:
         return False
@@ -248,11 +263,16 @@ def _resolve(run, phrase, items):
     are those). The literal reading (the whole phrase as payee, amount, date) and a ref
     reading are both tried; a "ref <hex>" counts only as a generated ref R printed,
     exactly (round 6: a payee literally named "Adobe ref e40c" is not a ref). Several
-    readings, or several payments: ask. None on R while an open item elsewhere answers
-    to it: R3's refusal (run.not_on)."""
+    readings, or several payments: ask. No payment of R by the whole name: those of R whose
+    name it begins, word for word (Ruling UX; the exact name wins). None on R while an open
+    item elsewhere answers to it by the whole name: R3's refusal (run.not_on)."""
     t = _parse_target(phrase)
     seen_names = run.scope.names
     hits = [d for d in items if _matches(d, t, seen_names)]
+    if not hits and t["vendor"]:
+        # Ruling UX: no payment of R answers to the whole name — those of R whose name it
+        # begins, word for word (the exact name always wins; several: "Which one?" below)
+        hits = [d for d in items if _matches(d, t, seen_names, prefix=True)]
     refs = run.scope.refs
     m = _REF.search(phrase)
     if m and m.group(1) in refs:

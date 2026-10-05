@@ -309,6 +309,82 @@ class PoliteDirectives(StoreCase):
             self.assertEqual(self.instructions(t), ([], True), t)
 
 
+class DeskNames(StoreCase):
+    """Ruling UX: "show (me) the X payment" shows that item of the bound rendering; a name's
+    first words find a payment of the bound rendering when no whole name does — the exact
+    name wins, several are asked about ("Which one?") with nothing applied; `never` stays
+    exact."""
+
+    def setUp(self):
+        """Ruling F3: the sheet fixture's data sits in 2026-Q3 (as tests/test_s7_readings)."""
+        super().setUp()
+        import datetime as dt
+        cm = self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc))
+        cm.__enter__()
+        self.addCleanup(cm.__exit__, None, None, None)
+
+    def propose(self, text, quoted=None):
+        import posting
+        with FakeBroker() as b:
+            out = posting.propose_reading(self.conn, text, quoted)
+        return out, (b.proposal() if b.deposits else None)
+
+    def tap(self, prop, label):
+        import qa_server, tools  # noqa: F401
+        call = next(x for x in prop["buttons"] if x["label"] == label)["call"]
+        return qa_server.TOOLS[call["tool"]]["fn"](call["arguments"])
+
+    def operator_rows(self):
+        return self.conn.execute("SELECT count(*) FROM log WHERE author='operator'").fetchone()[0]
+
+    def test_show_me_the_x_payment_shows_its_item(self):
+        fx = self.sheet_fixture(payee="Snelstart Software", guesses=3)
+        for t in ("show me the Snelstart Software payment and the invoice you paired it with",
+                  "show the snelstart software one", "now show me the snelstart payment",
+                  "open the Snelstart item"):
+            out, prop = self.propose(t)
+            self.assertEqual((out["instructions"], prop), ([f"show item {fx['pid']}"], None), t)
+
+    def test_a_partial_name_binds_the_one_payment_it_begins(self):
+        fx = self.sheet_fixture(payee="Snelstart Software", guesses=3)
+        out, prop = self.propose("the SnelStart one is wrong")
+        self.assertIsNotNone(prop, out)
+        self.assertIn("Unpair", prop["text"])
+        self.tap(prop, "Apply")
+        self.assertEqual(self.conn.execute("SELECT state FROM match_state WHERE match_id=?",
+                                           (fx["match_id"],)).fetchone()[0], "rejected")
+
+    def test_several_payments_a_partial_name_begins_are_asked_about(self):
+        self.EXTRA_PAYEES = ("Snelstart Hosting", "Figma")
+        self.sheet_fixture(payee="Snelstart Software", guesses=2)
+        for t in ("the snelstart one is wrong", "show me the snelstart payment"):
+            out, prop = self.propose(t)
+            self.assertIsNone(prop, t)
+            self.assertEqual(out["instructions"], [], t)
+            self.assertTrue(out["say"].startswith("Which one?"), out["say"])
+        self.assertEqual(self.operator_rows(), 0)
+
+    def test_the_exact_name_wins_over_a_longer_one_it_begins(self):
+        self.EXTRA_PAYEES = ("Snelstart Software", "Figma")
+        fx = self.sheet_fixture(payee="Snelstart", guesses=2)
+        out, prop = self.propose("show me the snelstart payment")
+        self.assertEqual(out["instructions"], [f"show item {fx['pid']}"])
+
+    def test_a_word_fragment_matches_nothing(self):
+        self.sheet_fixture(payee="Snelstart Software", guesses=3)
+        for t in ("the soft one is wrong", "the snel one is wrong"):
+            out, prop = self.propose(t)
+            self.assertIsNone(prop, t)
+            self.assertIn("Nothing open matches", out["say"], t)
+
+    def test_never_stays_on_the_exact_name(self):
+        self.sheet_fixture(payee="Snelstart Software", guesses=3)
+        out, prop = self.propose("no invoices ever for snelstart")
+        self.assertIsNone(prop, out)
+        out, prop = self.propose("no invoices ever for snelstart software")
+        self.assertIsNotNone(prop, out)
+
+
 class DeskRouting(StoreCase):
     def test_the_desk_routes_send_it_again_and_one_payment_to_propose_reading(self):
         """Ruling A3 / UX: the desk sends "send it again" and "show me the X payment" to
