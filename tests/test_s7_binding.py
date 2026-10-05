@@ -1169,6 +1169,67 @@ class LabelOnlyOnTheQuote(_Q3):
 
 
 # ---------------------------------------------------------------------------------------
+# r7 (Astra S2) — Casa's clip marker on a long quote is undone, like its label
+# ---------------------------------------------------------------------------------------
+CASA_QUOTE_CHARS = 2000      # casa specialist_desk.py:48 DESK_QUOTE_CHARS (bcebd66b)
+CASA_CLIP = "[\u2026]"       # casa specialist_desk.py:52 CLIP
+
+
+def casa_clip(text, limit=CASA_QUOTE_CHARS):
+    """A copy of casa specialist_desk.py:78-84 clip(): what Casa puts in the desk context
+    as the quoted post (specialist_desk.py:692)."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:max(limit - len(CASA_CLIP), 0)] + CASA_CLIP
+
+
+class ClippedQuote(_Long):
+    """review_casa_quote.py: "all good" quoting a page over 2,000 characters — Casa sends
+    its first 1,997 characters and "[…]". It binds that page; 15 confirmations."""
+
+    def test_a_clipped_quote_binds_its_page(self):
+        import views
+        with FakeBroker() as b:
+            r = call("show_view", view="all", quarter="2026-Q3", page=1)
+            call("mark_rendering_delivered", render_id=r["render_id"])
+            raw = LABEL + views.unesc(b.proposal()["text"])
+            quote = casa_clip(raw)
+            self.assertGreater(len(raw), CASA_QUOTE_CHARS)
+            self.assertTrue(quote.endswith(CASA_CLIP))
+            self.assertEqual(views.bound_rendering(self.conn, quote)["render_id"],
+                             r["render_id"])
+            out = call("propose_reading", text="all good", quoted=quote)
+            self.assertIsNotNone(out["reading"], out)
+            self.assertEqual(self.conn.execute("SELECT render_id FROM readings").fetchone()[0],
+                             r["render_id"])
+            tap(b.proposal(), "Apply")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE author='operator'"
+                                           ).fetchone()[0], 15)
+
+    def test_a_legacy_body_binds_as_it_was_deposited(self):
+        """Found by the r7 gate check (legacy:ctrl): a pre-S7 body's control characters are
+        spaces in what was posted (views.deposit_safe, §7.6), so in Casa's quote too."""
+        import db
+        import views
+        text = "Accounting \u00b7 Q3 2026\nACME\x01Corp owes 12.00\x7f and\x1bmore"
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
+                              " delivered_at, text, membership_json, delivered_seq) VALUES"
+                              " ('r9000', 'status', '{}', 'x', 'x', ?, '[]', ?)",
+                              (text, db.next_seq(self.conn)))
+        quote = casa_clip(LABEL + views.unesc(views.deposit_safe(text)))
+        self.assertEqual(views.bound_rendering(self.conn, quote)["render_id"], "r9000")
+
+    def test_only_casa_s_own_clip_is_undone(self):
+        import views
+        body = "x" * 3000
+        self.assertEqual(views._qnorm(casa_clip(body)), "x" * (CASA_QUOTE_CHARS - 3))
+        short = "a sheet that ends with [\u2026]"          # under the cap: text, kept
+        self.assertEqual(views._qnorm(short), short)
+
+
+# ---------------------------------------------------------------------------------------
 # Red case 17 — grep pins; §1's one "seen" predicate
 # ---------------------------------------------------------------------------------------
 class GrepPins(unittest.TestCase):

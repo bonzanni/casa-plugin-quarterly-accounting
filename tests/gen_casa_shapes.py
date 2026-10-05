@@ -71,6 +71,7 @@ class Shapes:
     def __init__(self):
         self.records: list = []
         self.taps = 0
+        self.shape = None               # the running shape: its store copy is named after it
 
     # -- recording -----------------------------------------------------------------
     def call(self, st, broker, case, tool, args, display=True):
@@ -103,6 +104,10 @@ class Shapes:
             self.records.append(rec)
             return body
         prop = json.loads(body["value"])
+        if tool == "show_view":
+            # binding r7: the checker builds Casa's real quote of this post (label, render,
+            # clip) and the plugin must bind it back to this rendering, on the store copy
+            rec["bind"] = {"render_id": out["render_id"], "store": self.shape}
         if display is True:
             rec["display_expect"] = views.unesc(prop["text"])
         else:
@@ -502,14 +507,24 @@ SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_si
           gen_propose_account, gen_post_results, gen_post_package]
 
 
-def generate() -> Shapes:
+def generate(stores=None) -> Shapes:
+    """Every shape over a fresh store; with `stores` (a directory), each store is copied
+    there as <shape>.sqlite once its shape ran — the quote check binds against it."""
     sh = Shapes()
     for fn in SHAPES:
         st = _Store()
         st.setUp()
+        sh.shape = fn.__name__
         try:
             with st.patch_clock(CLOCK), FakeBroker() as b:
                 fn(sh, st, b)
+            if stores is not None:
+                stores.mkdir(parents=True, exist_ok=True)
+                dest = stores / f"{fn.__name__}.sqlite"
+                dest.unlink(missing_ok=True)
+                copy = sqlite3.connect(dest)
+                st.conn.backup(copy)
+                copy.close()
         finally:
             st.doCleanups()
     return sh
@@ -523,13 +538,14 @@ def header(records) -> dict:
     for r in deposits:
         kinds[KINDS[r["tool"]]] = kinds.get(KINDS[r["tool"]], 0) + 1
     return {"case": "header", "kinds": kinds, "cases": [r["case"] for r in deposits],
-            "display_checked": sum(1 for r in deposits if "display_expect" in r)}
+            "display_checked": sum(1 for r in deposits if "display_expect" in r),
+            "binds": sum(1 for r in deposits if "bind" in r and "display_expect" in r)}
 
 
 def main(argv) -> int:
     out = pathlib.Path(argv[1]) if len(argv) > 1 else ROOT / "tests" / "casa_shapes.jsonl"
-    sh = generate()
     out.parent.mkdir(parents=True, exist_ok=True)
+    sh = generate(out.parent / (out.name + ".stores"))
     out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
                            for r in [header(sh.records)] + sh.records))
     deposits = sum(1 for r in sh.records if r["case"] != "stored_call")

@@ -1334,9 +1334,23 @@ def _bnorm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+# What Casa does to a post before it reaches the desk as `quoted` — undone, exactly, by
+# _qnorm (r7, after r6's label; read at the Casa tree, bcebd66b):
+# - result_broker.py:147 POST_LABEL_GLYPH "📊", :363 post_label() -> "📊 <display name>",
+#   :372 compose_operator_message() -> f"{label}\n{body}": the label line heads the post;
+# - specialist_desk.py:48 DESK_QUOTE_CHARS = 2000, :52 CLIP = "[…]", :78-84 clip(): a text
+#   over the cap becomes text[:cap - len(CLIP)] + CLIP; :692 quotes the post through it.
+CASA_QUOTE_CHARS = 2000
+CASA_CLIP = "[\u2026]"
+
+
 def _qnorm(s: str) -> str:
-    """The incoming QUOTE as compared for binding: Casa's label line (which Casa adds to
-    the post, never to the stored body) dropped, then _bnorm."""
+    """The incoming QUOTE as compared for binding: Casa's clip marker dropped when the quote
+    is exactly the clipped length (only then did Casa cut it), Casa's label line (which Casa
+    adds to the post, never to the stored body) dropped, then _bnorm. A shorter prefix
+    still binds by the whole-overlap rule."""
+    if len(s) == CASA_QUOTE_CHARS and s.endswith(CASA_CLIP):
+        s = s[:-len(CASA_CLIP)]
     lines = s.split("\n")
     if lines and lines[0].startswith(_LABEL_LINE):
         lines = lines[1:]
@@ -1396,7 +1410,9 @@ def bound_rendering(conn, quoted):
                           " IS NOT NULL) AND kind NOT IN (%s)"
                           % ",".join("?" * len(db.INFORMATIONAL_KINDS)),
                           db.INFORMATIONAL_KINDS):
-        t = _bnorm(unesc(r["text"] or ""))[:QUOTE_CAP]
+        # the body as posted: deposit_safe is the last step of every deposit (§7.6), so a
+        # pre-S7 body's control characters are spaces in what the operator saw
+        t = _bnorm(unesc(deposit_safe(r["text"] or "")))[:QUOTE_CAP]
         n = min(len(t), len(q))
         if db.seen_render(r) and n and t[:n] == q[:n]:
             found.append(r)

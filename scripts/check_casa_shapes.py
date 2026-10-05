@@ -12,7 +12,7 @@ truncated or thinned file fails.
 
     python3 tests/gen_casa_shapes.py OUT.jsonl && CASA_TREE=… CASA_TESTS=… \\
         <Casa's python> scripts/check_casa_shapes.py OUT.jsonl"""
-import importlib.util, json, os, pathlib, sys
+import importlib.util, json, os, pathlib, subprocess, sys
 
 CASA, CTESTS = os.environ["CASA_TREE"], os.environ["CASA_TESTS"]
 sys.path[:0] = [CASA, CTESTS]
@@ -25,6 +25,7 @@ from channels.tg_richtext import render, render_paged        # noqa: E402
 from plugin_grants import result_contract_map                # noqa: E402
 from plugin_registry import ResolutionResult, ResolvedPlugin # noqa: E402
 from plugin_store import validate_manifest                   # noqa: E402
+from specialist_desk import clip, DESK_QUOTE_CHARS          # noqa: E402
 from test_proposal_slot import _identity                     # noqa: E402
 
 # the plugin's stdlib copy of the argument grammar, loaded by path: putting the plugin's
@@ -62,6 +63,7 @@ def main(path) -> int:
     by_wire = {e.wire_name: (rt, e) for rt, e in cmap.tools.items()}
     bad, n, kinds, judged, checked, skipped = [], 0, {}, [], 0, 0
     tools_judged = set()
+    quotes = []                                              # (n, case, store, quote, rid, raw)
     lines = pathlib.Path(path).read_text().splitlines()
     head = json.loads(lines[0]) if lines else None
     if not isinstance(head, dict) or head.get("case") != "header":
@@ -113,6 +115,35 @@ def main(path) -> int:
             shown, entities = render(text)
             if shown != expect or entities:
                 bad.append((n, "display differs or an entity was produced", rec["case"]))
+            if "bind" in rec and dkind == rb.OPERATOR_PROPOSAL:
+                # binding r7: Casa's real quote of the post — the label line composed onto
+                # the text (_post_proposal), rendered, clipped as the desk context quotes it
+                # (specialist_desk.clip at DESK_QUOTE_CHARS)
+                raw = render(rb.compose_operator_message(text, label))[0]
+                quotes.append((n, rec["case"], str(pathlib.Path(path).parent / (
+                    pathlib.Path(path).name + ".stores") / f"{rec['bind']['store']}.sqlite"),
+                               clip(raw, DESK_QUOTE_CHARS), rec["bind"]["render_id"], raw))
+    # binding r7: every displayed view post's quote binds back to its own rendering, by the
+    # plugin's own views.bound_rendering in a process of its own (scripts/bind_quotes.py)
+    bound = 0
+    if quotes:
+        res = subprocess.run([sys.executable, str(ROOT / "scripts" / "bind_quotes.py")],
+                             input=json.dumps([{"store": q[2], "quote": q[3]} for q in quotes]),
+                             capture_output=True, text=True,
+                             env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
+        got = json.loads(res.stdout) if res.returncode == 0 else []
+        if len(got) != len(quotes):
+            bad.append((0, "the quote matcher failed", res.stderr[-300:]))
+        for (n_, case, _, _, rid, _), g in zip(quotes, got):
+            if g.get("render_id") != rid:
+                bad.append((n_, f"Casa's quote binds {g} not {rid}", case))
+            else:
+                bound += 1
+    if head.get("binds") != len(quotes) or not head.get("binds"):
+        bad.append((0, f"{len(quotes)} view quotes built, the header declares "
+                       f"{head.get('binds')}", ""))
+    if not any(len(q[5]) > DESK_QUOTE_CHARS for q in quotes):
+        bad.append((0, "no view post longer than Casa's quote cap was quoted", ""))
     # the header's promises: every case judged once, the kinds' counts, the display floor
     want = head.get("cases") or []
     if not want:
@@ -138,7 +169,8 @@ def main(path) -> int:
         print("FAIL", *b_)
     print(f"{'FAIL' if bad else 'OK'}: {n} records "
           f"({', '.join(f'{v} {k}' for k, v in sorted(kinds.items())) or 'no deposit accepted'}"
-          f"; display checked {checked}, skipped {skipped})")
+          f"; display checked {checked}, skipped {skipped}; quotes bound {bound}, clipped "
+          f"{sum(1 for q in quotes if len(q[5]) > DESK_QUOTE_CHARS)})")
     return 1 if bad else 0
 
 
