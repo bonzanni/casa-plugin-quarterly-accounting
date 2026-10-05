@@ -24,6 +24,10 @@ read-only, whether the job may end; `record_filing` closes the job's filing step
   loaded there. Live use also needs ha-casa-app#1220 fixed (buttons on a specialist whose
   plugin tools are deferred) and ha-casa-app#1228 fixed (the main assistant delegates a
   specialist's job instead of starting it).
+- The job's starter line (`Started by: operator` — a job the operator started with nothing
+  asked yet runs as the operator's check, not as a silent scheduled one) takes effect from
+  Casa 0.344.31. On an older Casa the job's brief has no such line, and such a job runs as a
+  scheduled check, as before.
 - bank-feed **0.20.0** or newer (casa-specialist-finance component 0.21.0) — unchanged —
   installed on the finance specialist with the business account linked, labelled `company`,
   and synced.

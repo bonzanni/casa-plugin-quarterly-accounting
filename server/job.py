@@ -57,6 +57,21 @@ def check_claim(conn, token) -> None:
 
 LEFT_BEHIND = "the check stopped before it finished — ask again when you want it"
 
+# #45: the line Casa (0.344.31 on) writes right after the first `Job id:` of the job's launch
+# prompt and brief, as the job model copies it. Only §4.1's implicit check reads it: the
+# trigger it records. `scheduled` and `agent` keep today's cron; anything else, and no line
+# (an older Casa), is "Casa did not say" — today's cron too.
+STARTED_BY = {"Started by: operator": "operator", "Started by: scheduled": "cron",
+              "Started by: agent": "cron"}
+
+
+def starter_trigger(started_by) -> str:
+    """The implicit check's trigger for the copied starter line: surrounding whitespace
+    (CR and LF included) stripped, then an exact match; otherwise cron."""
+    if not isinstance(started_by, str):
+        return "cron"
+    return STARTED_BY.get(started_by.strip(), "cron")
+
 
 def _queued_any(conn) -> bool:
     return conn.execute("SELECT 1 FROM work_requests WHERE state='queued' UNION ALL SELECT 1"
@@ -69,14 +84,17 @@ def _completed(conn, job_id) -> bool:
     return r is not None and r[0] is not None
 
 
-def claim(conn, job_id) -> int:
+def claim(conn, job_id, started_by=None) -> int:
     """A job turn's token-less job_next (S7 §4.1, §10). Under the custody lock, taken
     before the transaction (the store's lock order: the stalled-send recovery removes
     staged bytes), in one transaction: the claim is recorded with its store sequence
     (`claims.seq`); a live pass held by another job is adopted (§6.3); the left-behind
     run's package asks are closed (§10); then a job id's first claim that leaves no live
-    pass and nothing queued records a cron check (§4.1); a stalled staged send is
-    recovered (§6.1). Nothing restarts a job: no drain, no orphan mark (§9)."""
+    pass and nothing queued records a check (§4.1) — trigger operator when `started_by`
+    is Casa's `Started by: operator`, cron otherwise (#45); a stalled staged send is
+    recovered (§6.1). Nothing restarts a job: no drain, no orphan mark (§9). `started_by`
+    is read by that check only, so a later claim of the job, or a claim that finds an ask
+    queued, ignores it."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
     import delivery, steps
@@ -130,8 +148,9 @@ def claim(conn, job_id) -> int:
             if first and not exhausted and live_job_pass(conn) is None \
                     and not _queued_any(conn):
                 conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json,"
-                             " created_seq, created_at, state) VALUES ('check', 'cron', '[]',"
-                             " ?, ?, 'queued')", (db.next_seq(conn), db.now()))
+                             " created_seq, created_at, state) VALUES ('check', ?, '[]',"
+                             " ?, ?, 'queued')", (starter_trigger(started_by),
+                                                  db.next_seq(conn), db.now()))
             for d in delivery.stalled_sends(conn, steps.LEASE_S):             # §6.1
                 _settle_recovered(conn, d)
             return token

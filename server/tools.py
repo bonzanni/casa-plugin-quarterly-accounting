@@ -416,7 +416,9 @@ def t_observe(args):
 # --- the job (S2 §3, §5, §6.4, §13) -------------------------------------------------
 @register("job_next",
           "The job's next step. First call of every job turn: job_next(job_id=<your brief's "
-          "`Job id:` line>) — it gives you a pass_token; then job_next(pass_token=…) after "
+          "`Job id:` line>, started_by=<the line right after your brief's first `Job id:` "
+          "line, verbatim, when it is a `Started by:` line; else omit it>) — it gives you a "
+          "pass_token; then job_next(pass_token=…) after "
           "each step, with judged={judgment, after, page_next, triage_remaining, documents} "
           "after a judge step: echo the judge unit's `judgment` and `after` exactly as handed "
           "out (an answer that does not is refused). Do exactly the unit it returns. When it "
@@ -430,7 +432,10 @@ def t_observe(args):
           "build_quarterly_package(quarter, package_token, request_id). `deliver` → "
           "stage_for_delivery(package_id, package_token), post_package(delivery_id, "
           "package_token), then record_delivery on its receipt.",
-          obj({"job_id": S, "pass_token": TOKEN, "judged": O}))
+          obj({"job_id": S, "pass_token": TOKEN, "judged": O,
+               "started_by": {"type": "string", "description": "first job_id call only: "
+                              "Casa's `Started by:` line, the one right after the first "
+                              "`Job id:` line of your brief, copied verbatim"}}))
 def t_job_next(args):
     import job
     tok = _int(args, "pass_token")
@@ -441,7 +446,7 @@ def t_job_next(args):
             raise db.Refusal("judged goes with the pass_token of the turn that judged: "
                              "call job_next(job_id=…) without it")
         _need(args, "job_id")
-        tok = job.claim(conn(), args["job_id"])
+        tok = job.claim(conn(), args["job_id"], started_by=args.get("started_by"))
     return _deliverable("job_next", job.next_unit(conn(), tok, judged=args.get("judged")))
 
 
