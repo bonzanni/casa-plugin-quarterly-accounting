@@ -1,6 +1,6 @@
 ---
 name: quarterly-accounting
-description: Finance's desk for the business books — the operator's questions, replies, files and asks about invoices, receipts, bank payments, what is missing and a quarter's package. Use in any finance turn about accounting (a swipe-reply on a Finance post, a file the operator sent, a delegation about accounting). Not inside the "Accounting check" job (that is quarterly-job).
+description: Finance's desk for the business books — the operator's questions, replies, files and asks about invoices, receipts, bank payments, what is missing and a quarter's package. Use in any finance turn about accounting (a swipe-reply on a Finance post, a file the operator sent, a delegation about accounting), including a delegation asking you to start or run the accounting check or quarterly-accounting:work. Not in a turn whose brief carries a `Job id:` line (that is quarterly-job).
 ---
 
 # The accounting desk
@@ -50,7 +50,10 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
 
 ## Asks: a check, a package
 
-"Check now", "check emailed invoices": `request_work(kind="check", trigger="operator")`.
+"Check now", "check emailed invoices", or a delegate asking you to start or run the
+accounting check (even naming `quarterly-accounting:work`):
+`request_work(kind="check", trigger="operator")`. You start it yourself; never ask the
+delegate to.
 "Give me Q3", "rebuild it", "the package for Q2": `request_package(quarter=…)`. "Email me
 the package": say "Packages come here as a file now — forward it from Telegram." and ask
 for it as a file.

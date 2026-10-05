@@ -458,6 +458,8 @@ def t_job_status(args):
 
 
 @register("request_work",
+          "Your desk's way to start the accounting check, also when a delegate asks you to "
+          "start or run it (even naming quarterly-accounting:work). "
           "Record a check (kind=check, trigger=operator) or a filed document handed over "
           "(kind=handover, trigger=operator, doc_ids) BEFORE start_job; then start_job with "
           "the returned start_job; then say the result's reading: "

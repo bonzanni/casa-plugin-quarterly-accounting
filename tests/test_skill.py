@@ -62,13 +62,29 @@ class TestBothSkills(TempEnv):
         self.assertTrue(SKILL.startswith(
             "---\nname: quarterly-accounting\ndescription: Finance's desk for the business "
             "books"))
-        self.assertTrue(JOB.startswith(
-            "---\nname: quarterly-job\ndescription: The quarterly-accounting job's procedure, "
-            "for the finance specialist inside the \"Accounting check\" job only. Use when the "
-            "turn's brief names the job quarterly-accounting:work.\n---\n"))
+        # T16: the job skill is keyed on what Casa's job brief carries (the background job
+        # "Accounting check" and a `Job id:` line), never on the job's qualified name — a
+        # delegation asking the desk to start the check names quarterly-accounting:work.
+        self.assertTrue(JOB.startswith("---\nname: quarterly-job\ndescription: "))
+        jdesc = JOB.split("---")[1]
+        self.assertNotIn("names the job quarterly-accounting:work", jdesc)
+        self.assertIn('the background job "Accounting check"', jdesc)
+        self.assertIn("`Job id:` line", jdesc)
+        self.assertIn("A request to start or run the accounting check, even one naming "
+                      "quarterly-accounting:work, is not the job", jdesc)
+        self.assertIn("(skill quarterly-accounting)", jdesc)
         desc = SKILL.split("---")[1]
         self.assertIn("Use in any finance turn about accounting", desc)
-        self.assertIn("Not inside the \"Accounting check\" job (that is quarterly-job).", desc)
+        self.assertIn("a delegation asking you to start or run the accounting check or "
+                      "quarterly-accounting:work", desc)
+        self.assertIn("Not in a turn whose brief carries a `Job id:` line (that is "
+                      "quarterly-job).", desc)
+        self.assertNotIn("Not inside the", desc)
+        # both stay plain YAML scalars: a bare ": " or " #" would break the frontmatter
+        for text in (SKILL, JOB):
+            d = text.split("---")[1].split("description: ", 1)[1].strip()
+            self.assertNotIn(": ", d)
+            self.assertNotIn(" #", d)
         # §3: the notification relay is gone with job_report
         self.assertNotIn("notification", desc)
 
@@ -491,8 +507,11 @@ class TestJob(TempEnv):
         # S7 §3/§6.1: binding is the operator's tap; the job packages; the asks are the desk's
         self.assertIn("are the operator's, by their tap: never call `set_expectation` except "
                       "in the judge unit", never)
-        self.assertIn("Never call `request_work`, `request_package` or `start_job`: the asks "
-                      "are the desk's.", never)
+        # T16: a misrouted desk turn must not conclude the desk is someone else
+        self.assertIn("Never call `request_work`, `request_package` or `start_job`: those "
+                      "asks are made at your desk (skill quarterly-accounting), not by the "
+                      "job.", never)
+        self.assertNotIn("the asks are the desk's", never)
         self.assertIn("never speak to the operator", never)
         self.assertNotIn("packaging", never)
         self.assertIn("anything the operator says is theirs, by their tap", self.judge())

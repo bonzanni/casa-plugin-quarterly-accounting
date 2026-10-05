@@ -47,3 +47,29 @@ class Skills(unittest.TestCase):
             self.assertIn(s, JOB, s)
         self.assertNotIn("job_report", JOB)
         self.assertNotIn("asking for work and relaying it", JOB.lower())
+
+
+class T16DelegatedStart(unittest.TestCase):
+    """T16: a delegation asking finance to start the accounting check (naming
+    quarterly-accounting:work) is the desk's check ask, never the job."""
+
+    def test_the_job_skill_turns_a_turn_without_a_job_id_back_to_the_desk(self):
+        body = JOB.split("---", 2)[2]
+        head = " ".join(body[:600].split())
+        self.assertIn("Only with a `Job id:` line in your brief.", head)
+        self.assertIn("load skill quarterly-accounting", head)
+        self.assertIn('`request_work(kind="check", trigger="operator")`, then `start_job`', head)
+
+    def test_the_desk_asks_name_the_delegated_start(self):
+        asks = DESK[DESK.index("## Asks"):DESK.index("## A file the operator sent")]
+        flat = " ".join(asks.split())
+        self.assertIn("a delegate asking you to start or run the accounting check (even "
+                      "naming `quarterly-accounting:work`)", flat)
+        self.assertIn("never ask the delegate to", flat)
+
+    def test_request_work_names_the_delegated_start(self):
+        import qa_server, tools  # noqa: F401
+        d = " ".join(qa_server.TOOLS["request_work"]["description"].split())
+        self.assertIn("also when a delegate asks you to start or run it (even naming "
+                      "quarterly-accounting:work)", d)
+        self.assertIn("kind=check, trigger=operator", d)

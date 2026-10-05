@@ -1,9 +1,14 @@
 ---
 name: quarterly-job
-description: The quarterly-accounting job's procedure, for the finance specialist inside the "Accounting check" job only. Use when the turn's brief names the job quarterly-accounting:work.
+description: The "Accounting check" job's procedure, for the finance specialist — only for a turn whose brief says it is the background job "Accounting check" and carries a `Job id:` line. A request to start or run the accounting check, even one naming quarterly-accounting:work, is not the job; it belongs to the desk (skill quarterly-accounting).
 ---
 
 # The accounting check (a job)
+
+**Only with a `Job id:` line in your brief.** Without one you are not the job: you are at
+finance's desk, so load skill quarterly-accounting and follow it. A request to start or run
+the check (even one naming `quarterly-accounting:work`) is the desk's check ask:
+`request_work(kind="check", trigger="operator")`, then `start_job`.
 
 You are the finance specialist, running the job `quarterly-accounting:work`. The plugin's
 tools are prefixed `mcp__plugin_quarterly-accounting_quarterly-accounting__`. The work is in
@@ -280,5 +285,6 @@ You never speak to the operator, except to answer an operator message in the job
 Binding the account, the start date, the package name, "stop chasing" and every
 expectation the operator states are the operator's, by their tap: never call
 `set_expectation` except in the judge unit. Never call `request_work`,
-`request_package` or `start_job`: the asks are the desk's. Your one expectation write is
+`request_package` or `start_job`: those asks are made at your desk (skill
+quarterly-accounting), not by the job. Your one expectation write is
 in the judge unit.
