@@ -44,6 +44,18 @@ read-only, whether the job may end; `record_filing` closes the job's filing step
 Nothing is asked at install. The account binds itself when exactly one company account exists.
 The package name and the start quarter are defaulted and changeable by asking.
 
+## Upgrade notes
+- **0.9 → 0.10: remove the old prompt cron.** The weekly prompt trigger
+  `quarterly_accounting_pass` on the main assistant (the 0.9 install's
+  `name: quarterly_accounting_pass, type: cron, schedule: 0 9 * * 1, prompt: Run the
+  quarterly-accounting background pass…`) survives the plugin upgrade: Casa keeps a
+  role's triggers whatever plugin is updated. Left in place it keeps firing every Monday
+  at 09:00 and asks the main assistant to run the accounting, beside the new job trigger.
+  Ask Casa's configurator to remove it ("remove the trigger quarterly_accounting_pass from
+  the assistant"): it runs `config_trigger_delete(role="assistant",
+  name="quarterly_accounting_pass")` and reloads that role's triggers. Then check that only
+  `quarterly-check` (Install, step 3) remains.
+
 ## Uninstall
 The plugin declares `reset_store` as its Casa `eraseTool`. On Casa 0.329.0+, uninstalling asks
 Keep data / Erase everything / Cancel; "Erase everything" runs `reset_store()` and removes the
