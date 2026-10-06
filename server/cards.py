@@ -363,6 +363,15 @@ def _handover(conn, job_id, docs, quarter, tail, ready, sent=None) -> str:
             continue
         head.append("Filed. No payment fits it yet — it's matched when one does.")
     props.sort(key=_line_key)
+    # every handed document is accounted for (review round 1): the "Filed." lines that fit
+    # whole — leaving room for the proposals' closing line and the tail — then one count
+
+    def more(left):
+        return f"… and {left} more filed."
+    room = (["To confirm:", f"… and {len(props)} more to confirm — Review shows them."]
+            if props else [])
+    k = _fit_count([], head, more, room + list(tail))
+    head = head[:k] + ([more(len(head) - k)] if k < len(head) else [])
     return _summary(conn, "end", quarter, head, props, [], tail,
                     {d["pid"]: item_state(d) for d in props}, scheduled=False,
                     extra_scope={"job_id": job_id, **(sent or {}),
@@ -370,7 +379,7 @@ def _handover(conn, job_id, docs, quarter, tail, ready, sent=None) -> str:
 
 
 def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), ready=(),
-                alerts=()):
+                alerts=(), stopped=None):
     """The run's one end message (kind 'end', §1), or None when a scheduled run has nothing
     new and no extra line (rev 17: "only if it holds an item in a state no delivered
     message showed"). `extra`: failure lines, mirror failures, the partial line — on a
@@ -378,13 +387,18 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     run's one message", the alerts post). `ready`: the quarters whose completion notice is
     owed (D19) — lines of the message when it has items to list, else the message IS the
     completion (compose_ready). `alerts`: the ids of the alerts `extra` prints, marked sent
-    when the message is delivered (scope["alerts"], D10)."""
+    when the message is delivered (scope["alerts"], D10). `stopped`: an operator run whose
+    pass stopped — its stop line heads the message in place of "checked" (the bank was not
+    worked), whatever its alert's state (review round 1)."""
     st = state(conn)
     q = main_quarter(conn, job_id)
     open_missing = [d for ds in st["missing"].values() for d in ds if not _answered(d)]
     ready = sorted(set(ready))
     tail = [_ready_line(r, q) for r in ready] + list(extra)
     sent = {"alerts": sorted(alerts)} if alerts else {}
+    if stopped and not scheduled:
+        tail = [stopped] + tail if handover_docs else tail
+        extra = [stopped] + list(extra)
     if handover_docs:
         return _handover(conn, job_id, handover_docs, q, tail, ready, sent)
     reported = {d["pid"]: item_state(d) for d in st["proposals"]}
@@ -410,10 +424,11 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         if ready:
             return compose_ready(conn, ready, extra, alerts=alerts)
         if not c["pending"]:
-            return _summary(conn, "end", q,
-                            [f"{_qn(q)} checked · {_s(n, 'payment')} · all accounted for."],
-                            [], [], list(extra), reported, scheduled=False,
-                            extra_scope=extra_scope)
+            first = ([stopped] if stopped else
+                     [f"{_qn(q)} checked · {_s(n, 'payment')} · all accounted for."])
+            return _summary(conn, "end", q, first, [], [],
+                            list(extra[1:] if stopped else extra), reported,
+                            scheduled=False, extra_scope=extra_scope)
     earlier = []
     for eq in sorted(st["counts"]):
         if eq == q:
@@ -422,7 +437,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         b = sum(1 for d in open_missing if d["quarter"] == eq)
         if a or b:
             earlier.append(f"{_qn(eq, q)} · still open: {a} to confirm · {b} missing")
-    head = [f"{_qn(q)} checked · {_s(n, 'payment')}", _counts_line(c)]
+    head = [stopped or f"{_qn(q)} checked · {_s(n, 'payment')}", _counts_line(c)]
     return _summary(conn, "end", q, head, st["proposals"], _vendor_items(open_missing),
                     earlier + tail, reported, scheduled=False, extra_scope=extra_scope)
 

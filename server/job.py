@@ -55,7 +55,11 @@ def check_claim(conn, token) -> None:
     if top is None or int(token) != top:
         raise db.Refusal("this job turn is no longer the current one (a newer turn claimed "
                          "the work); stop — nothing was written")
-    if live_job_pass(conn) is not None:
+    p = live_job_pass(conn)
+    if p is not None and p["holder_job"] == conn.execute(
+            "SELECT job_id FROM claims WHERE gen=?", (int(token),)).fetchone()[0]:
+        # the pass fence is the holder's: a finished run's late claim, which leaves another
+        # job's live pass alone (claim), answers only its own `complete`
         passes.check_token(conn, token)
 
 
@@ -119,6 +123,8 @@ def claim(conn, job_id, started_by=None) -> int:
             first = conn.execute("SELECT 1 FROM claims WHERE job_id=?",
                                  (job_id,)).fetchone() is None
             p = live_job_pass(conn)
+            if p is not None and p["holder_job"] != job_id and _completed(conn, job_id):
+                p = None            # a finished run never ends another job's live pass
             token = passes.rotate(conn)
             changed = p is not None and p["holder_job"] != job_id
             conn.execute("INSERT INTO claims(gen, job_id, at, batch, seq) VALUES (?,?,?,?,?)",

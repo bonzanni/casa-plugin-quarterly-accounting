@@ -14,8 +14,8 @@ driver makes in a turn is counted into `calls_made` (a new turn — a claim — 
   vendor    one search of the vendor's mail; each invoice found filed with
             ingest_document(vendor=…); then, per payment: its exact_fit → match; else a
             same-currency, same-amount unheld candidate → match; else any candidate →
-            propose; else (after one record_search(pids=[the rest], search=hinted|plain))
-            missing. All in ONE decide
+            propose; else missing. All in ONE decide, then one record_search(pids=[the
+            missing ones], search=hinted|plain)
   mirror    each call through bank-feed (a reply starting `refused`, or bank-feed's
             "Nothing was changed.", counts as failed), then one record_mirror
   view      show_view(render_id) under a broker; on the receipt (`deliver`),
@@ -280,14 +280,17 @@ class JobDriver:
             day = next(c["date"] for c in cands if c["doc_id"] == pick) or pay["date"]
             entries.append({"pid": pay["pid"], "outcome": outcome, "doc_id": pick,
                             "expected_revision": pay["revision"], "document_date": day})
+        entries += [{"pid": p["pid"], "outcome": "missing", "reason": "no invoice found",
+                     "expected_revision": p["revision"]} for p in rest]
+        # decided first, then the search recorded: the record that ages a payment out
+        # (D7) settles it and moves its revision, which a later `missing` at the handed
+        # revision would find changed (review round 1)
+        out = self._tool("decide", {"pass_token": token, "entries": entries})
+        assert out["refused"] == 0, out          # the sim decides only what the floor takes
         if rest:
             self._tool("record_search", {"pass_token": token, "pids": [p["pid"] for p in rest],
                                          "search": "hinted" if hinted else "plain",
                                          "queries": [query]})
-            entries += [{"pid": p["pid"], "outcome": "missing", "reason": "no invoice found",
-                         "expected_revision": p["revision"]} for p in rest]
-        out = self._tool("decide", {"pass_token": token, "entries": entries})
-        assert out["refused"] == 0, out          # the sim decides only what the floor takes
         return None
 
     def _mirror(self, u, token):

@@ -315,3 +315,118 @@ class Surface(StoreCase):
                                          " attention"])
                 alerts.evaluate(self.conn)
             self.assertEqual(self.conn.execute("SELECT count(*) FROM alerts").fetchone()[0], 1)
+
+
+class ReviewRound1(StoreCase):
+    """Task 10 review, fix round 1."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+
+    def msg(self, units):
+        (m,) = [u for u in units if u["unit"] in ("view", "post")]
+        return " ".join(self.render_text(m.get("render_id") or m["render_ids"][0]).split())
+
+    def test_a_stop_is_said_again_after_a_run_that_read_the_bank(self):
+        """1a: the stop alert's streak ends when a pass imports."""
+        drv = JobDriver(self, payments=1)
+        drv.no_bank_tools()
+        drv.run_job("ffffffff-1", started_by="scheduled")             # said
+        drv.run_job("ffffffff-2", started_by="scheduled")             # same streak: silent
+        drv._no_tools = False
+        drv.run_job("ffffffff-3", started_by="scheduled")             # the bank is read
+        drv.no_bank_tools()
+        units = drv.run_job("ffffffff-4", started_by="scheduled")     # a new streak
+        self.assertIn("Accounting check stopped: bank\\-feed's tools", self.msg(units))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM alerts WHERE kind="
+                                           "'run-stopped' AND sent_at IS NOT NULL"
+                                           ).fetchone()[0], 2)
+
+    def test_an_operator_run_that_stopped_always_says_so_never_checked(self):
+        """1b: the reviewer's sequence — no tools, tools, no tools again (same streak's
+        alert already sent or not): the operator's message heads with its stop line."""
+        drv = JobDriver(self, payments=1)
+        drv.no_bank_tools()
+        first = self.msg(drv.run_job("ffffffff-5"))
+        drv._no_tools = False
+        drv.run_job("ffffffff-6")
+        drv.no_bank_tools()
+        again = self.msg(drv.run_job("ffffffff-7"))
+        drv.run_job("ffffffff-8", started_by="scheduled")             # same streak: silent
+        last = self.msg(drv.run_job("ffffffff-9"))                    # the alert was sent
+        for text in (first, again, last):
+            self.assertTrue(text.startswith("Accounting check stopped: bank\\-feed's tools"),
+                            text)
+            self.assertNotIn("checked", text)
+            self.assertEqual(text.count("Accounting check stopped"), 1, text)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM alerts WHERE kind="
+                                           "'run-stopped' AND sent_at IS NULL").fetchone()[0], 0)
+
+    def test_the_import_and_the_filing_wait_for_a_fresh_batch_past_the_soft_bound(self):
+        """2: snapshot and filing are handed out only while calls_made < CALLS_SOFT."""
+        import job, loop
+        drv = JobDriver(self, payments=1)
+        tok = drv.claim("ffffffff-a")
+        u = job.next_unit(self.conn, tok, 0)
+        self.assertEqual(u["unit"], "probes")
+        drv.do(u, tok)
+        self.assertEqual(job.next_unit(self.conn, tok, loop.CALLS_SOFT)["unit"], "end-batch")
+        tok = drv.claim("ffffffff-a")
+        u = job.next_unit(self.conn, tok, 0)
+        self.assertEqual(u["unit"], "probes")                 # a new turn reads again
+        drv.do(u, tok)
+        u = job.next_unit(self.conn, tok, 0)
+        self.assertEqual(u["unit"], "snapshot")
+        drv.do(u, tok)
+        self.assertEqual(job.next_unit(self.conn, tok, loop.CALLS_SOFT)["unit"], "end-batch")
+        tok = drv.claim("ffffffff-a")
+        self.assertEqual(job.next_unit(self.conn, tok, 0)["unit"], "filing")
+
+    def test_weekly_runs_age_a_missing_payment_out_and_rearm_it(self):
+        """3, D7: a missing payment is searched on three weekly runs, then aged out and left
+        off the list until AGE_OUT_REARM_S after its last counted search."""
+        import datetime as dt
+        drv = JobDriver(self, payments=1)
+        start = _dt("2026-10-06")
+        searched, states = [], []
+        for n, day in enumerate((0, 7, 14, 21, 28, 42)):
+            with self.patch_clock(start + dt.timedelta(days=day)):
+                units = drv.run_job(f"ffffff{n:02x}-b", started_by="scheduled")
+            searched.append(sum(1 for u in units if u["unit"] == "vendor"))
+            states.append(self.conn.execute("SELECT search_state FROM projections"
+                                            ).fetchone()[0])
+        self.assertEqual(searched, [1, 1, 1, 0, 0, 1])
+        self.assertEqual(states[:5], ["active", "active", "aged-out", "aged-out", "aged-out"])
+
+    def test_a_handover_of_200_documents_accounts_for_every_one(self):
+        """4 (was test_a_handover_of_200_documents_is_paged_whole): every document is shown
+        or counted, within one message."""
+        import cards, views
+        self.run_claim()
+        docs = [self.doc(amount_minor=50000 + i) for i in range(200)]
+        with db.tx(self.conn):
+            rid = cards.compose_end(self.conn, self.job_id, scheduled=False,
+                                    handover_docs=docs)
+        text = self.render_text(rid)
+        self.assertLessEqual(views.utf16_len(text), views.BODY_LIMIT)
+        shown = text.count("Filed. No payment fits it yet")
+        import re
+        (more,) = re.findall(r"… and (\d+) more filed\.", text)
+        self.assertGreater(shown, 0)
+        self.assertEqual(shown + int(more), 200)
+
+    def test_a_completed_runs_claim_never_ends_another_jobs_pass(self):
+        """5: a late claim of a finished run leaves the live run alone."""
+        import job
+        drv = JobDriver(self, payments=1)
+        drv.run_job("ffffffff-c")                                  # finished
+        a = drv.claim("ffffffff-d")                                 # a live run
+        pass_d = self.conn.execute("SELECT pass_id FROM runs WHERE job_id='ffffffff-d'"
+                                   ).fetchone()[0]
+        b = job.claim(self.conn, "ffffffff-c")                      # the finished run again
+        self.assertEqual(job.next_unit(self.conn, b, 0)["unit"], "complete")
+        self.assertIsNone(self.conn.execute("SELECT ended_at FROM passes WHERE pass_id=?",
+                                            (pass_d,)).fetchone()[0])
+        a = job.claim(self.conn, "ffffffff-d")                      # it carries on
+        self.assertEqual(job.next_unit(self.conn, a, 0)["unit"], "probes")

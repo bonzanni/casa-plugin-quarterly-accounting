@@ -72,8 +72,13 @@ def evaluate(conn) -> None:
 
 def raise_stop(conn, reason: str) -> int:
     """A run's pass stopped (simple loop §2 step 1: no bank-feed tools, setup or the bank
-    gate refuses): said once per occurrence of its reason (D10). Inside the caller's tx."""
-    key = f"stop:{' '.join(str(reason).split())}"[:500]
+    gate refuses): said once per streak of its reason (D10) — the streak is keyed by the
+    latest pass that imported, so a pass that reads the bank again ends it and the next
+    stop is said again. Inside the caller's tx."""
+    last = conn.execute("SELECT pass_id FROM snapshots ORDER BY snapshot_id DESC LIMIT 1"
+                        ).fetchone()
+    since = (last[0] if last is not None else None) or "none"
+    key = f"stop:{' '.join(str(reason).split())[:400]}:{since}"
     conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
                  " VALUES ('run-stopped', ?, ?, ?)",
                  (key, db.canonical({"reason": views.clip(str(reason), DETAIL_MAX)}), db.now()))
@@ -83,18 +88,21 @@ def raise_stop(conn, reason: str) -> int:
 LINES_BUDGET = 1500         # UTF-16 units of alert lines one run message carries
 
 
-def pending_lines(conn, budget=LINES_BUDGET) -> tuple:
+def pending_lines(conn, budget=LINES_BUDGET, said=()) -> tuple:
     """(lines, alert ids): the undelivered alerts as the lines the run's one message
     carries (simple loop §1: "the line joins the end message when there is one") — whole
     occurrences in print order while they fit `budget` (the first always), so the message
     stays within its limit; the rest wait for the next run's message. The ids go into that
     message's scope["alerts"], so its delivery marks exactly them sent (D10). Inside the
-    caller's transaction; evaluate() first."""
+    caller's transaction; evaluate() first. `said`: alert ids the message already says in
+    its own words (an operator run's stop line): bound, with no line of their own."""
     assert conn.in_transaction
     evaluate(conn)
-    rows = conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL ORDER BY alert_id").fetchall()
+    said = [a for a in said]
+    rows = [r for r in conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL ORDER BY"
+                                    " alert_id").fetchall() if r["alert_id"] not in said]
     if not rows:
-        return [], []
+        return [], sorted(said)
     units = _units(conn, rows)
     chosen = []
     for u in units:
@@ -102,7 +110,7 @@ def pending_lines(conn, budget=LINES_BUDGET) -> tuple:
         if chosen and views.utf16_len("\n".join(_lines(trial)[0])) > budget:
             break
         chosen = trial
-    return _lines(chosen)[0], [u[0] for u in chosen]
+    return _lines(chosen)[0], sorted([u[0] for u in chosen] + said)
 
 
 # The package notices (issue #2): what a continuation owes the operator about a

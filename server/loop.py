@@ -548,11 +548,15 @@ def _choose(conn, token, job_id, calls_made, logs) -> dict:
         take(conn, job_id, p["pass_id"])
         u = _acquire(conn, token, job_id, p)
         if u is not None:
+            if u["unit"] == "snapshot" and calls_made >= CALLS_SOFT:
+                return {"unit": "end-batch"}            # the import goes to a fresh batch
             return u
     run = _run(conn, job_id)
     p = run_pass(conn, run)
     if p is not None:
         if run["filed_at"] is None:
+            if calls_made >= CALLS_SOFT:
+                return {"unit": "end-batch"}            # as vendor work does (§2.2)
             return {"unit": "filing", "filed_refs": work.filed_refs(conn),
                     "handover_docs": run_handover_docs(conn, job_id)}
         if run["listed_at"] is None:
@@ -759,9 +763,29 @@ def run_message(conn, job_id, run):
     import cards
     import mirror
     owed = owed_notices(conn)
-    alert_lines, alert_ids = alerts.pending_lines(conn)
+    scheduled = run["started_by"] != "operator"
+    stopped, said = _stop_line(conn, run) if not scheduled else (None, [])
+    alert_lines, alert_ids = alerts.pending_lines(conn, said=said)
     extra = (alert_lines + mirror.failed_lines(conn, job_id) + _gate_lines(conn, run)
              + partial_lines(conn, job_id))
-    return cards.compose_end(conn, job_id, scheduled=run["started_by"] != "operator",
+    return cards.compose_end(conn, job_id, scheduled=scheduled,
                              handover_docs=run_handover_docs(conn, job_id), extra=extra,
-                             ready=owed, alerts=alert_ids)
+                             ready=owed, alerts=alert_ids, stopped=stopped)
+
+
+def _stop_line(conn, run) -> tuple:
+    """An operator run whose pass stopped ALWAYS says so in its one message, whatever the
+    stop alert's state (review round 1): (the line, the unsent stop alerts it says)."""
+    import job
+    p = conn.execute("SELECT outcome, report_json FROM passes WHERE pass_id=? AND"
+                     " ended_at IS NOT NULL", (run["pass_id"],)).fetchone() \
+        if run["pass_id"] else None
+    if p is None or p["outcome"] != "stopped":
+        return None, []
+    import views
+    reason = json.loads(p["report_json"] or "{}").get("stopped_reason") or ""
+    reason = views.field(" ".join(str(reason).split()).rstrip(". "), 300)
+    line = f"Accounting check stopped: {reason}." if reason else job._end_line("stopped", {})
+    said = [r[0] for r in conn.execute("SELECT alert_id FROM alerts WHERE kind='run-stopped'"
+                                       " AND sent_at IS NULL")]
+    return line, said
