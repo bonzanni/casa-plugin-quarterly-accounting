@@ -89,12 +89,14 @@ MIRROR_FAILED = ("{n} bank-ledger update{s} did not go through — tried again a
                  "check.")
 
 
-def raise_incomplete(conn, job_id, lines) -> None:
-    """Rule 5 on a scheduled run with nothing new to ask (e2, Astra S2): its "search
-    incomplete" lines, said once — keyed by the run. Inside the caller's tx."""
+def raise_incomplete(conn, streak_start, lines) -> None:
+    """Rule 5 on scheduled runs that keep leaving work incomplete (e2, Astra S2; BRAIN's
+    R2 ruling): the current "search incomplete" lines, said ONCE per streak — keyed by the
+    streak's first run. Inside the caller's tx."""
     conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
                  " VALUES ('run-incomplete', ?, ?, ?)",
-                 (f"incomplete:{job_id}", db.canonical({"lines": list(lines)[:4]}), db.now()))
+                 (f"incomplete:{streak_start}", db.canonical({"lines": list(lines)[:4]}),
+                  db.now()))
 
 
 def _ids(unit) -> list:

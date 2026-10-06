@@ -2,9 +2,9 @@
 store sequence `since` when, after it, a payment was decided or (re)listed, a search was
 recorded, an owed item (an erase check, the own-mail search, a found attachment) was closed
 or enqueued, a document was filed, or a mirror call was reported. Casa's batch report
-(loop._close) and the hand-out settle (queues.settle) both read it; the import and the
-probes are progress through claims.progressed (decide.note_progress), which _close reads
-alongside."""
+(loop._close, since the run's last report) and the hand-out settle (queues.settle) both read
+it; the import and the probes are progress through decide.note_progress's stamp
+(claims.progressed_seq)."""
 from __future__ import annotations
 
 
@@ -37,4 +37,7 @@ def made(conn, job_id, since, unit=None) -> bool:
     if unit is None and conn.execute("SELECT 1 FROM documents WHERE filed_seq > ?",
                                      (since,)).fetchone():
         return True
+    if unit is None and conn.execute("SELECT 1 FROM claims WHERE job_id=? AND progressed_seq"
+                                     " > ?", (job_id, since)).fetchone():
+        return True                 # the import and the probes: note_progress's own stamp
     return False

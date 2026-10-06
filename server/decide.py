@@ -23,7 +23,8 @@ DATE_READ = ("pass document_date: the date printed on the document you opened (i
 def note_progress(conn, token) -> None:
     """§2.2 `progressed`: the batch persisted work (a decision, a filing, a search) — Casa's
     batch progress report. (A hand-out's own progress is the queues' stamps: queues.settle.)"""
-    conn.execute("UPDATE claims SET progressed=1 WHERE gen=?", (int(token),))
+    conn.execute("UPDATE claims SET progressed=1, progressed_seq=? WHERE gen=?",
+                 (db.next_seq(conn), int(token)))
 
 
 def record_outcome(conn, token, pid, outcome, reason=None) -> None:
@@ -168,6 +169,19 @@ def _check_handed(conn, token, entries) -> None:
     if pid is None or isinstance(want, bool) or not isinstance(want, int) or \
             lineage.resolve_pid(conn, want) != lineage.resolve_pid(conn, pid):
         raise db.Refusal("decide the payment handed out now, in one entry: call job_next")
+
+
+def guard_single(conn, token, pid, doc_id) -> None:
+    """e3 (Astra S2): the single-decision tools (record_match, propose_match) pass the same
+    job checks as decide — the payment handed out now, its found attachments filed, and a
+    handed document never committed onto a paired payment (rev 18.4 §R18.3). Inside the
+    caller's transaction, its token checked."""
+    entry = {"pid": pid, "doc_id": doc_id}
+    _check_handed(conn, token, [entry])
+    _check_order(conn, token, [entry])
+    if _handover_onto_pairing(conn, token, lineage.resolve_pid(conn, pid), entry):
+        raise db.Refusal("this payment already has a document: answer it with decide — "
+                         "replace (the operator is asked) or keep")
 
 
 def _check_order(conn, token, entries) -> None:

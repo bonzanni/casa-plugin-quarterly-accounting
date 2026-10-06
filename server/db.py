@@ -63,7 +63,8 @@ CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   closed INTEGER NOT NULL DEFAULT 0,    -- this claim was answered end-batch or complete
   seq INTEGER,                   -- the store sequence taken at the claim (S7 §10)
   progressed INTEGER NOT NULL DEFAULT 0,    -- the batch moved the work list on (simple loop §2.2)
-  said INTEGER NOT NULL DEFAULT 0);         -- d3: the batch's progress was handed for reporting"""
+  said INTEGER NOT NULL DEFAULT 0,          -- d3: this claim's progress was handed for reporting
+  progressed_seq INTEGER);       -- e3: when note_progress last stamped it (progress.made)"""
 
 # Schema 10's credits (INV-J8), frozen for MIGRATIONS[9]; MIGRATIONS[11] drops it.
 CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (
@@ -80,7 +81,8 @@ RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
   end_render_id TEXT,                       -- the end message's rendering (§1); '' = none
   partial INTEGER NOT NULL DEFAULT 0,       -- the run ended partial (§3 "Run")
   quarter TEXT,                             -- the run's main quarter, when a check named it
-  hand_unit TEXT, hand_seq INTEGER);        -- queues: the last unit handed (queues.settle), at this seq"""
+  hand_unit TEXT, hand_seq INTEGER,         -- queues: the last unit handed (queues.settle), at this seq
+  reported_seq INTEGER);                    -- e3: progress up to here was reported to Casa"""
 
 WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -585,6 +587,7 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE probes ADD COLUMN fail_runs INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE claims ADD COLUMN progressed INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE claims ADD COLUMN said INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE claims ADD COLUMN progressed_seq INTEGER",
          "ALTER TABLE counterparties ADD COLUMN hint_sender TEXT",
          "ALTER TABLE counterparties ADD COLUMN hint_subject TEXT",
          "ALTER TABLE runs ADD COLUMN started_by TEXT",
@@ -597,6 +600,7 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE runs ADD COLUMN quarter TEXT",
          "ALTER TABLE runs ADD COLUMN hand_unit TEXT",
          "ALTER TABLE runs ADD COLUMN hand_seq INTEGER",
+         "ALTER TABLE runs ADD COLUMN reported_seq INTEGER",
          "ALTER TABLE work_requests ADD COLUMN quarter TEXT",
          RUN_WORK_DDL, RUN_MIRROR_DDL, RUN_ITEMS_DDL, REPLACE_QUESTIONS_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL,
          # ... then the machinery §4 deletes: the sweep, the chunk carry, the judge,

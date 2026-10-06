@@ -729,18 +729,17 @@ def _close(conn, token, out, calls_made) -> dict:
     c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
     ending = out["unit"] in ("end-batch", "complete")
     conn.execute("UPDATE claims SET closed=? WHERE gen=?", (int(ending or c["closed"]), token))
-    # rev 18.4 §R18.5 (d7 Astra S1b): progress is progress.made — what the queues and the
-    # work list stamped since the batch's first claim — or the import/probes' own flag
-    first = conn.execute("SELECT seq FROM claims WHERE gen=?", (c["batch"],)).fetchone()
-    progressed = conn.execute("SELECT EXISTS(SELECT 1 FROM claims WHERE batch=? AND"
-                              " progressed=1)", (c["batch"],)).fetchone()[0] == 1 or (
-        first is not None and first[0] is not None
-        and progress.made(conn, c["job_id"], first[0]))
-    said = conn.execute("SELECT EXISTS(SELECT 1 FROM claims WHERE batch=? AND said=1)",
-                        (c["batch"],)).fetchone()[0] == 1
-    report = ending or (progressed and not said)
+    # rev 18.4 §R18.5 (d7 Astra S1b): progress is progress.made, the ONE definition. e3
+    # (Astra S1): what was persisted since the run last REPORTED (runs.reported_seq) — a
+    # batch Casa cut before its next job_next never answered, so its work is reported by
+    # the next answer that can carry it, a re-claim's included; at most once per claim
+    run = _run(conn, c["job_id"])
+    progressed = progress.made(conn, c["job_id"], run["reported_seq"] or 0)
+    report = ending or (progressed and not c["said"])
     if report and progressed:
         conn.execute("UPDATE claims SET said=1 WHERE gen=?", (token,))
+        conn.execute("UPDATE runs SET reported_seq=? WHERE job_id=?",
+                     (db.next_seq(conn), c["job_id"]))
     summary = (job.run_end(conn, c["job_id"])[1] if out["unit"] == "complete"
                else WORDS[out["unit"]])
     if not ending:
@@ -925,11 +924,31 @@ def run_message(conn, job_id, run):
                             ready=owed, alerts=alert_ids, stopped=stopped,
                             standalone=_handover_only(conn, job_id))
     if rid is None and incomplete:
-        # e2 (Astra S2, rule 5): a scheduled run with nothing new to ask that left work
-        # incomplete says so — through the alerts, the scheduled run's failure channel
-        # (§1), once per run; its post is the pending alerts alone
-        alerts.raise_incomplete(conn, job_id, incomplete)
+        # e2 (Astra S2, rule 5) under R2 (BRAIN ruling 2026-10-07): a scheduled run with
+        # nothing new to ask that left work incomplete stays silent — the next run retries —
+        # unless incompleteness PERSISTS: INCOMPLETE_RUNS scheduled runs in a row, said ONCE
+        # per streak through the alerts (§1's scheduled failure channel, D10)
+        first = _incomplete_streak(conn, job_id)
+        if first is not None:
+            alerts.raise_incomplete(conn, first, incomplete)
     return rid
+
+
+INCOMPLETE_RUNS = 3          # R2: a failure said once per streak, like Gmail's 3 runs
+
+
+def _incomplete_streak(conn, job_id):
+    """The job_id that started this run's streak of scheduled runs that left work
+    incomplete (runs.partial) when it is at least INCOMPLETE_RUNS long, else None. Only
+    scheduled runs count; a scheduled run that completed cleanly ends the streak."""
+    streak = []
+    for r in conn.execute("SELECT job_id, partial FROM runs WHERE started_by IS NOT"
+                          " 'operator' AND rowid <= (SELECT rowid FROM runs WHERE job_id=?)"
+                          " ORDER BY rowid DESC", (job_id,)):
+        if not r["partial"]:
+            break
+        streak.append(r["job_id"])
+    return streak[-1] if len(streak) >= INCOMPLETE_RUNS else None
 
 
 def _handover_only(conn, job_id) -> bool:

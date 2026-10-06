@@ -150,6 +150,17 @@ def settle(conn, job_id) -> None:
     conn.execute("UPDATE runs SET hand_unit=NULL WHERE job_id=?", (job_id,))
     import progress
     if progress.made(conn, job_id, h, unit):      # rev 18.4 §R18.5: the ONE definition
+        # e3 (Astra S2): attempts count CONSECUTIVE unproductive hand-outs — a hand-out that
+        # progressed clears its unit's count
+        conn.execute("UPDATE run_items SET attempts=0 WHERE job_id=? AND unit=? AND"
+                     " state='queued'", (job_id, unit))
+        pid = pid_of_unit(unit)
+        if pid is not None:
+            conn.execute("UPDATE run_work SET attempts=0 WHERE job_id=? AND pid=? AND"
+                         " outcome IS NULL", (job_id, pid))
+        elif unit == "mirror":
+            conn.execute("UPDATE run_mirror SET attempts=0 WHERE job_id=? AND"
+                         " state='handed'", (job_id,))
         return
     conn.execute("UPDATE run_items SET attempts=attempts+1 WHERE job_id=? AND unit=? AND"
                  " hand_seq=? AND state='queued'", (job_id, unit, h))

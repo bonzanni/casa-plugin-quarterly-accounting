@@ -360,6 +360,8 @@ def record_match(conn, *, pid, doc_id, author, expected_revision, token, render_
         raise db.Refusal("a machine pairing is written during a run: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
+        import decide
+        decide.guard_single(conn, token, pid, doc_id)
         return _single(conn, token, "match", machine_in_tx(
             conn, "pair", pid, doc_id, expected_revision=expected_revision, **kw))
 
@@ -371,6 +373,8 @@ def propose_match(conn, *, pid, doc_id, expected_revision, token, **kw) -> dict:
         raise db.Refusal("a machine pairing is written during a run: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
+        import decide
+        decide.guard_single(conn, token, pid, doc_id)
         return _single(conn, token, "propose", machine_in_tx(
             conn, "propose", pid, doc_id, expected_revision=expected_revision, **kw))
 

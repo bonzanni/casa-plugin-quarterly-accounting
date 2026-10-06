@@ -3,8 +3,8 @@ real surface:
 - Astra S1a: a payment settled just before the walk moves on still has its found invoice
   filed before the mirror and the post;
 - Astra S1b: the vendor name a payment unit hands out is accepted by ingest_document;
-- Astra S2a: a scheduled run with nothing new to ask that left work incomplete says so
-  (a once-per-run alert, the scheduled run's failure channel);
+- Astra S2a (BRAIN's R2 ruling): scheduled runs that keep leaving work incomplete say so
+  once per streak of three (an alert, the scheduled run's failure channel);
 - Astra S2b: a retired replace question never suppresses the handover's receipt;
 - Astra S2c: a handover onto a paired payment listed for changed facts still goes through
   the replace card;
@@ -52,18 +52,36 @@ class Owed(StoreCase):
         self.assertEqual(self.conn.execute("SELECT status FROM projections").fetchone()[0],
                          "matched")
 
-    def test_a_scheduled_run_that_left_work_incomplete_says_so(self):
+    def test_incomplete_scheduled_runs_speak_once_per_streak_of_three(self):
+        """e2 Astra S2 under BRAIN's R2 ruling: one incomplete scheduled run stays silent;
+        three in a row raise ONE `run-incomplete` alert (posted alone); a fourth says
+        nothing new; a clean run ends the streak, and a new streak speaks again."""
         drv = JobDriver(self, payments=1)
         drv.run_job("e2e2e2e2-a3")                              # missing, shown
+        real = drv._payment
         drv._payment = lambda u, token: None                   # never progresses
-        units = drv.run_job("e2e2e2e2-a4", started_by="scheduled")
-        posts = [u for u in units if u["unit"] in ("post", "view")]
-        self.assertTrue(posts)
+
+        def alerts():
+            return [r[0] for r in self.conn.execute(
+                "SELECT occurrence_key FROM alerts WHERE kind='run-incomplete'")]
+        for k in range(2):
+            drv.run_job(f"e2e2e2e2-5{k}", started_by="scheduled")
+            self.assertEqual(alerts(), [], k)                  # silent: the next one retries
+        units = drv.run_job("e2e2e2e2-52", started_by="scheduled")
+        self.assertEqual(alerts(), ["incomplete:e2e2e2e2-50"])
+        self.assertTrue([u for u in units if u["unit"] == "post"])
         text = self.conn.execute("SELECT r.text FROM renders r JOIN alerts a ON"
                                  " a.render_id=r.render_id WHERE a.kind='run-incomplete'"
-                                 ).fetchone()
-        self.assertIsNotNone(text)
-        self.assertIn("search incomplete", text[0])
+                                 ).fetchone()[0]
+        self.assertIn("search incomplete", text)
+        drv.run_job("e2e2e2e2-53", started_by="scheduled")
+        self.assertEqual(len(alerts()), 1)                      # once per streak
+        drv._payment = real
+        drv.run_job("e2e2e2e2-54", started_by="scheduled")     # clean: the streak ends
+        drv._payment = lambda u, token: None
+        for k in range(5, 8):
+            drv.run_job(f"e2e2e2e2-5{k}", started_by="scheduled")
+        self.assertEqual(alerts(), ["incomplete:e2e2e2e2-50", "incomplete:e2e2e2e2-55"])
 
 
 class ReplaceFlow(StoreCase):
