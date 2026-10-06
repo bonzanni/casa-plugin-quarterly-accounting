@@ -40,7 +40,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tests._base import StoreCase                      # noqa: E402  (puts server/ on the path)
+from tests._base import LoopCase, StoreCase            # noqa: E402  (puts server/ on the path)
 from tests.fakebroker import FakeBroker                # noqa: E402
 from tests.test_s7_escape import HOSTILE               # noqa: E402  (Task 3's hostile set)
 
@@ -58,19 +58,35 @@ def hostile(i: int, filler: str = "*") -> str:
     return HOSTILE[i % len(HOSTILE)] + filler * 2100
 
 
-class _Store(StoreCase):
-    """StoreCase's fixtures, outside a test run: a fresh data dir and store per shape."""
+class _Store(LoopCase):
+    """StoreCase's fixtures, outside a test run: a fresh data dir and store per shape. The
+    simple-loop shapes use LoopCase's pay/propose after loop_store(); setUp stays
+    StoreCase's (an unbound store: each shape binds its own)."""
+    setUp = StoreCase.setUp
+
     def runTest(self):                                 # pragma: no cover — never run
         pass
 
 
 # each posting tool's delivered slot and its kind (§3)
 SLOTS = {"show_view": "view", "propose_reading": "reading", "propose_account": "accounts",
-         "post_results": "results", "post_package": "package"}
+         "post_results": "results", "post_package": "package", "get_package": "package"}
 KINDS = {"show_view": "operator_proposal", "propose_reading": "operator_proposal",
          "propose_account": "operator_proposal", "post_results": "operator_message",
-         "post_package": "operator_file"}
+         "post_package": "operator_file", "get_package": "operator_file"}
 PROPOSALS = {t for t, k in KINDS.items() if k == "operator_proposal"}
+
+
+def kind_of(rec) -> str:
+    """The kind a non-stored_call record is counted under — the header's and the checker's
+    one rule: a tap's next card (#1302: its tool is the tapped `verdict`, which delivers
+    nothing), a capability's no-post refusal (#1303: `result`, no deposit), else the
+    deposit kind of its tool."""
+    if "next" in rec:
+        return "next_card"
+    if "result" in rec:
+        return "no_post"
+    return KINDS[rec["tool"]]
 
 
 class Shapes:
@@ -101,10 +117,8 @@ class Shapes:
         body = {k: v for k, v in new[0].items() if k != "client"}
         if KINDS[tool] == "operator_file" and display is True:
             display = "a file caption is sent as plain text"
-        if any(r["case"] == case for r in self.records):
-            raise AssertionError(f"{case}: a case name is used twice")
-        rec = {"case": case, "tool": tool, "body": body}
-        if tool == "post_package":
+        rec = {"case": self._unique(case), "tool": tool, "body": body}
+        if KINDS[tool] == "operator_file":
             # #44: the file's caption is a rendering of its own, quoted as Casa composes it
             rid = st.conn.execute("SELECT render_id FROM renders WHERE kind='package-file'"
                                   " ORDER BY rowid DESC LIMIT 1").fetchone()[0]
@@ -130,13 +144,47 @@ class Shapes:
         else:
             rec["display_skip"] = display
         self.records.append(rec)
-        for b in prop["buttons"]:
-            self.records.append({"case": "stored_call", "tool": b["call"]["tool"],
-                                 "arguments": b["call"]["arguments"]})
+        self._stored_calls(prop["buttons"])
         for b in prop["buttons"]:
             if "key" in b["call"]["arguments"]:
                 self.tap(st, case, b)
         return prop["buttons"]
+
+    def _stored_calls(self, buttons):
+        for b in buttons:
+            self.records.append({"case": "stored_call", "tool": b["call"]["tool"],
+                                 "arguments": b["call"]["arguments"]})
+
+    def _unique(self, case) -> str:
+        if any(r["case"] == case for r in self.records):
+            raise AssertionError(f"{case}: a case name is used twice")
+        return case
+
+    def refusal(self, broker, case, tool, args) -> dict:
+        """#1303: a capability button's refusal — no deposit, every slot null, and the
+        words as `receipt` (Casa posts them as the tap's answer). Recorded as {"case",
+        "tool", "result"}; the checker judges it with Casa's own no-link and receipt
+        readers."""
+        import qa_server
+        import tools                                    # noqa: F401 — registers the tools
+        n0 = len(broker.deposits)
+        out = qa_server.TOOLS[tool]["fn"](dict(args))
+        if len(broker.deposits) != n0 or not isinstance(out, dict) \
+                or out.get(SLOTS[tool], "") is not None:
+            raise AssertionError(f"{case}: {tool}({args}) did not refuse: {out}")
+        self.records.append({"case": self._unique(case), "tool": tool, "result": out})
+        return out
+
+    def next_card(self, case, label, tool, out):
+        """#1302: a tap's answer is a receipt and the next card; recorded as
+        "<case>:next:<label>" for the checker to judge as specialist_desk._post_next_card
+        does (proposal_ok against the tapped tool's entry), with its stored calls."""
+        name = f"{case}:next:{label}"
+        n = sum(1 for r in self.records if r["case"].startswith(name))
+        self.records.append({"case": self._unique(name + (f":{n + 1}" if n else "")),
+                             "tool": tool, "receipt": out.get("receipt"),
+                             "next": out["next"]})
+        self._stored_calls(out["next"].get("buttons") or [])
 
     def tap(self, st, case, button, keep=False) -> dict:
         """Execute a writing button's stored call; its receipt must not be NO_LONGER.
@@ -153,6 +201,11 @@ class Shapes:
         if not isinstance(receipt, str) or receipt.startswith(NO_LONGER_PREFIX):
             raise AssertionError(f"{case}: the {button['label']!r} tap failed: {out}")
         self.taps += 1
+        if "next" in out:
+            if not isinstance(out["next"], dict):
+                raise AssertionError(f"{case}: the {button['label']!r} tap's next is "
+                                     f"{out['next']!r}")
+            self.next_card(case, button["label"], call["tool"], out)
         if snap is not None:
             snap.backup(st.conn)
             snap.close()
@@ -508,9 +561,282 @@ def gen_post_package(sh, st, b):
     post("package:last", s["delivery_id"])
 
 
+# -- the simple loop's shapes (Task 17: §1, #1301–#1303) ----------------------------------
+# Every card is posted as the loop posts it: a show_view re-post of its stored rendering
+# (Task 7's path), so Casa's real deposit judges its text and every button — [Get package]
+# (#1303) included; every writing button is tapped, and each tap's next card (#1302) is
+# recorded and judged as specialist_desk._post_next_card judges it.
+Q3_DAY = "2026-09-14"
+Q2_DAY = "2026-05-14"
+
+
+def loop_store(st):
+    """A simple-loop store: bound under the hostile account label from 2026-Q2 on (an
+    earlier quarter in scope), a run claimed."""
+    st.bind(label=ACCOUNT_LABEL, watermark="2026-04-01")
+    st.token = st.run_claim()
+    st.n = 0
+
+
+def _c(st, fn, *a, **k):
+    """A cards composer, inside its own transaction (each asserts it runs in one)."""
+    import db
+    with db.tx(st.conn):
+        return fn(st.conn, *a, **k)
+
+
+def _post(sh, st, b, case, rid, must=None):
+    """Post stored rendering `rid` as the loop does (show_view's re-post); `must` is a
+    phrase its text has to hold — the shape is the one asked for."""
+    import views
+    text = st.conn.execute("SELECT text FROM renders WHERE render_id=?", (rid,)).fetchone()[0]
+    if must is not None and must not in views.unesc(text):
+        raise AssertionError(f"{case}: {must!r} is not in {text[:200]!r}")
+    return sh.call(st, b, case, "show_view", {"render_id": rid})
+
+
+def _proposals(st, k, start=0, alternatives=0, day=Q3_DAY):
+    """`k` proposals, each to a hostile oversized payee, its document number, issuer and
+    alternatives' numbers hostile too. Returns the pids."""
+    pids = []
+    for i in range(start, start + k):
+        cents = 5000 + i
+        pid = st.pay(hostile(i), cents, day)
+        alts = [st.doc(counterparty=hostile(i), issuer=hostile(i + j + 1), amount_minor=cents,
+                       document_date=day, document_number=docnum(100 * i + j))
+                for j in range(alternatives)]
+        st.propose(pid, alternatives=alts, counterparty=hostile(i), issuer=hostile(i),
+                   amount_minor=cents, document_date=day, document_number=docnum(i))
+        pids.append(pid)
+    return pids
+
+
+def _missing(st, vendors, per=1, day=Q3_DAY, links=True):
+    """`per` searched, documentless payments for each vendor; each vendor's counterparty
+    carries a hostile document link (printed on its vendor page)."""
+    import kb
+    pids = []
+    for v, vendor in enumerate(vendors):
+        for i in range(per):
+            pids.append(st.pay(vendor, 100 + i, day if per == 1 else
+                               "2026-%02d-%02d" % (7 + i % 3, i % 28 + 1)))
+        if links and kb.counterparty_for(st.conn, vendor) is None:
+            kb.upsert_counterparty(st.conn, vendor, patterns=[vendor],
+                                   document_link=hostile(v + 7, "`")[:kb.LINK_MAX],
+                                   token=st.token)
+    return pids
+
+
+def gen_end_message_operator(sh, st, b):
+    """The operator run's end message: hostile proposals (one with alternatives), hostile
+    vendors with missing invoices, an earlier quarter's open item — then the same with 30
+    proposals (lines dropped, no Confirm all)."""
+    import cards
+    loop_store(st)
+    _proposals(st, 3, alternatives=1)
+    _missing(st, [hostile(20), hostile(21)])
+    _missing(st, [hostile(22)], day=Q2_DAY)
+    end = _c(st, cards.compose_end, st.job_id, scheduled=False)
+    labels = [x["label"] for x in _post(sh, st, b, "end:operator", end, "Q3 checked")]
+    if labels != ["Review 6", "Confirm all 3", "Get package"]:
+        raise AssertionError(f"end:operator: the buttons are {labels}")
+    _proposals(st, 27, start=3)
+    end = _c(st, cards.compose_end, st.job_id, scheduled=False)
+    labels = [x["label"] for x in _post(sh, st, b, "end:operator-full", end, "more to confirm")]
+    if labels != ["Review 33", "Get package"]:
+        raise AssertionError(f"end:operator-full: the buttons are {labels}")
+
+
+def gen_end_message_scheduled(sh, st, b):
+    """A scheduled run's end message: only the items no delivered message showed, plus
+    "earlier items still open"."""
+    import cards, views
+    loop_store(st)
+    _proposals(st, 1)
+    _missing(st, [hostile(20)])
+    views.mark_rendering_delivered(st.conn, _c(st, cards.compose_end, st.job_id,
+                                               scheduled=False))
+    _proposals(st, 2, start=1)
+    _missing(st, [hostile(20), hostile(23)])
+    end = _c(st, cards.compose_end, st.job_id, scheduled=True)
+    _post(sh, st, b, "end:scheduled", end, "earlier items still open")
+
+
+def gen_end_message_nothing_to_ask(sh, st, b):
+    """Every payment accounted for: "all accounted for", [Get package] alone."""
+    import cards
+    loop_store(st)
+    for i in range(3):
+        pid = st.pay(hostile(i), 700 + i)
+        st.machine_match(pid, st.doc(counterparty=hostile(i), issuer=hostile(i),
+                                     amount_minor=700 + i, document_date=Q3_DAY,
+                                     document_number=docnum(i)), st.token)
+    end = _c(st, cards.compose_end, st.job_id, scheduled=False)
+    labels = [x["label"] for x in _post(sh, st, b, "end:nothing", end, "all accounted for")]
+    if labels != ["Get package"]:
+        raise AssertionError(f"end:nothing: the buttons are {labels}")
+
+
+def gen_end_message_handover(sh, st, b):
+    """A handover's end message (§2.5): one "Filed." line per handed document, and the
+    proposals among them."""
+    import cards
+    loop_store(st)
+    paired = st.pay(hostile(0), 10000)
+    filed = st.doc(counterparty=hostile(0), issuer=hostile(0), amount_minor=10000,
+                   document_date=Q3_DAY, document_number=docnum(0))
+    st.machine_match(paired, filed, st.token)
+    prop = st.pay(hostile(1), 4120)
+    held = st.propose(prop, counterparty=hostile(1), issuer=hostile(1), amount_minor=4120,
+                      document_date=Q3_DAY, document_number=docnum(1))
+    lone = st.doc(counterparty=hostile(2), amount_minor=1, document_number=docnum(2))
+    _missing(st, [hostile(3)])                                  # not shown: not handed
+    end = _c(st, cards.compose_end, st.job_id, scheduled=False,
+             handover_docs=[filed, held, lone])
+    _post(sh, st, b, "end:handover", end, "Filed. Paired with")
+
+
+def gen_end_message_with_completion(sh, st, b):
+    """D19: an owed completion notice as a line of an end message with items, and as the
+    message itself when nothing is left to ask."""
+    import cards, work
+    loop_store(st)
+    q2 = st.pay(hostile(0), 900, Q2_DAY)
+    st.machine_match(q2, st.doc(counterparty=hostile(0), issuer=hostile(0), amount_minor=900,
+                                document_date=Q2_DAY, document_number=docnum(0)), st.token)
+    left = _missing(st, [hostile(1)])
+    end = _c(st, cards.compose_end, st.job_id, scheduled=False, ready=["2026-Q2"])
+    _post(sh, st, b, "end:completion", end, "Q2 complete · package ready")
+    st.granted(lambda c, grant: work.leave_missing_in_tx(c, left, grant=grant))
+    end = _c(st, cards.compose_end, st.job_id, scheduled=False, ready=["2026-Q2", "2026-Q3"])
+    _post(sh, st, b, "end:completion-ready", end, "Q3 complete · 1 of 1 accounted for")
+
+
+def gen_open_items(sh, st, b):
+    """The open-items card (show_view(view="open")): proposals and missing invoices."""
+    loop_store(st)
+    _proposals(st, 2, alternatives=2)
+    _missing(st, [hostile(20), hostile(21)])
+    out = sh.call(st, b, "open-items", "show_view", {"view": "open", "quarter": QUARTER})
+    if [x["label"] for x in out] != ["Review 4", "Confirm all 2", "Get package"]:
+        raise AssertionError(f"open-items: the buttons are {[x['label'] for x in out]}")
+
+
+def gen_all_answered(sh, st, b):
+    """The open-items card once everything is answered (left missing counts)."""
+    import work
+    loop_store(st)
+    left = _missing(st, [hostile(20)])
+    st.granted(lambda c, grant: work.leave_missing_in_tx(c, left, grant=grant))
+    sh.call(st, b, "all-answered", "show_view", {"view": "open", "quarter": QUARTER})
+    if "all answered" not in next(r for r in sh.records
+                                  if r["case"] == "all-answered")["display_expect"]:
+        raise AssertionError("all-answered: the card does not say so")
+
+
+def gen_ready_notice(sh, st, b):
+    """The "package ready" notice (D19), first and updated, with an earlier quarter's line."""
+    import cards, views
+    loop_store(st)
+    for day in (Q2_DAY, Q3_DAY):
+        pid = st.pay(hostile(1), 900, day)
+        st.machine_match(pid, st.doc(counterparty=hostile(1), issuer=hostile(1),
+                                     amount_minor=900, document_date=day,
+                                     document_number=docnum(1)), st.token)
+    rid = _c(st, cards.compose_ready, ["2026-Q2", "2026-Q3"])
+    _post(sh, st, b, "ready", rid, "Q3 complete · 1 of 1 accounted for · package ready")
+    views.mark_rendering_delivered(st.conn, rid)
+    _post(sh, st, b, "ready:updated", _c(st, cards.compose_ready, ["2026-Q3"]),
+          "Q3 complete · updated · package ready")
+
+
+def gen_review_cards(sh, st, b):
+    """Review cards: a proposal of four candidates (the chosen one and three alternatives),
+    a legacy joint set (no chosen one: named picks), and a single proposal."""
+    import cards
+    loop_store(st)
+    (four,) = _proposals(st, 1, alternatives=3)
+    joint = st.pay(hostile(5), 3300)
+    for j in range(3):
+        st.machine_entry(joint, st.doc(counterparty=hostile(5), issuer=hostile(5 + j),
+                                       amount_minor=3300, document_date=Q3_DAY,
+                                       document_number=docnum(50 + j)))
+    (single,) = _proposals(st, 1, start=9)
+    end = _c(st, cards.compose_end, st.job_id, scheduled=False)
+    order = [o.get("p") for o in json.loads(st.conn.execute(
+        "SELECT scope_json FROM renders WHERE render_id=?", (end,)).fetchone()[0])["order"]]
+    for case, pid, want in (("review:candidates", four, 4), ("review:set", joint, 3),
+                            ("review:single", single, 0)):
+        buttons = _post(sh, st, b, case, _c(st, cards.card, end, order.index(pid)),
+                        "· to confirm")
+        picks = [x for x in buttons if x["call"]["arguments"].get("action") == "pick"]
+        if len(picks) != want:
+            raise AssertionError(f"{case}: {len(picks)} named candidates, not {want}")
+
+
+VENDOR_PAYMENTS = 240                     # one vendor's missing invoices, many pages
+
+
+def _vendor_walk(sh, st, b, tag, end, *, scheduled):
+    import cards
+    first = _c(st, cards.card, end, 0)
+    pages = json.loads(st.conn.execute("SELECT scope_json FROM renders WHERE render_id=?",
+                                       (first,)).fetchone()[0])["pages"]
+    if len(pages) < 3:
+        raise AssertionError(f"{tag}: {len(pages)} pages, not a walk of many")
+    for case, page in ((f"{tag}page1", 1), (f"{tag}page2", 2), (f"{tag}last", len(pages))):
+        rid = first if page == 1 else _c(st, cards.card, end, 0, page=page)
+        labels = [x["label"] for x in _post(sh, st, b, case, rid, f"page {page} of")]
+        never = any(x.startswith("Never for") for x in labels)
+        if never != (page == len(pages) and not scheduled):
+            raise AssertionError(f"{case}: the buttons are {labels}")
+
+
+def gen_vendor_pages(sh, st, b):
+    """One hostile vendor with 240 missing invoices (some left missing): pages 1, 2 and
+    the last, each with every button tapped ([Never for X] on the last)."""
+    import cards, work
+    loop_store(st)
+    pids = _missing(st, [hostile(0)], per=VENDOR_PAYMENTS)
+    st.granted(lambda c, grant: work.leave_missing_in_tx(c, pids[1:25], grant=grant))
+    end = _c(st, cards.compose_end, st.job_id, scheduled=False)
+    _vendor_walk(sh, st, b, "vendor:", end, scheduled=False)
+
+
+def gen_vendor_pages_scheduled(sh, st, b):
+    """A scheduled walk of the same vendor's new payments: no [Never for X]."""
+    import cards, views
+    loop_store(st)
+    _missing(st, [hostile(0)])
+    views.mark_rendering_delivered(st.conn, _c(st, cards.compose_end, st.job_id,
+                                               scheduled=False))
+    _missing(st, [hostile(0)], per=VENDOR_PAYMENTS // 2)
+    end = _c(st, cards.compose_end, st.job_id, scheduled=True)
+    _vendor_walk(sh, st, b, "vendor:scheduled:", end, scheduled=True)
+
+
+def gen_get_package(sh, st, b):
+    """#1303: [Get package]'s stored call — first before any bank check (the no-post shape
+    with its `receipt`, nothing deposited), then the file itself, built now."""
+    import posting
+    loop_store(st)
+    out = sh.refusal(b, "get_package:no-check", "get_package", {"quarter": QUARTER})
+    if out.get("receipt") != posting.NO_CHECK:
+        raise AssertionError(f"get_package:no-check: {out}")
+    st.import_again()
+    _missing(st, [hostile(0), hostile(1)])
+    body = sh.call(st, b, "get_package:file", "get_package", {"quarter": QUARTER})
+    if body.get("kind") != "zip" or "\n" in (body.get("caption") or "\n"):
+        raise AssertionError(f"get_package:file: posted {body}")
+
+
 SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_single,
           gen_show_view_setup_stop, gen_legacy_rendering, gen_propose_reading,
-          gen_propose_account, gen_post_results, gen_post_package]
+          gen_propose_account, gen_post_results, gen_post_package,
+          gen_end_message_operator, gen_end_message_scheduled, gen_end_message_nothing_to_ask,
+          gen_end_message_handover, gen_end_message_with_completion, gen_open_items,
+          gen_all_answered, gen_ready_notice, gen_review_cards, gen_vendor_pages,
+          gen_vendor_pages_scheduled, gen_get_package]
 
 
 def generate(stores=None) -> Shapes:
@@ -542,12 +868,12 @@ def header(records) -> dict:
     deposits = [r for r in records if r["case"] != "stored_call"]
     kinds: dict = {}
     for r in deposits:
-        kinds[KINDS[r["tool"]]] = kinds.get(KINDS[r["tool"]], 0) + 1
+        kinds[kind_of(r)] = kinds.get(kind_of(r), 0) + 1
     return {"case": "header", "kinds": kinds, "cases": [r["case"] for r in deposits],
             "display_checked": sum(1 for r in deposits if "display_expect" in r),
             # a quote is built for a bound post whose display is promised, and every file
             "binds": sum(1 for r in deposits if "bind" in r
-                         and ("display_expect" in r or r["tool"] == "post_package"))}
+                         and ("display_expect" in r or KINDS[r["tool"]] == "operator_file"))}
 
 
 def main(argv) -> int:
@@ -556,8 +882,11 @@ def main(argv) -> int:
     sh = generate(out.parent / (out.name + ".stores"))
     out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
                            for r in [header(sh.records)] + sh.records))
-    deposits = sum(1 for r in sh.records if r["case"] != "stored_call")
-    print(f"{len(sh.records)} records ({deposits} deposits, {sh.taps} keyed taps) -> {out}")
+    deposits = sum(1 for r in sh.records if r["case"] != "stored_call"
+                   and kind_of(r) not in ("next_card", "no_post"))
+    nexts = sum(1 for r in sh.records if "next" in r)
+    print(f"{len(sh.records)} records ({deposits} deposits, {nexts} next cards, "
+          f"{sh.taps} keyed taps) -> {out}")
     return 0
 
 
