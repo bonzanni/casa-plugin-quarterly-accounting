@@ -62,9 +62,10 @@ delegate to. When the operator names a quarter, pass it: "Check Q2":
 `request_work(kind="check", trigger="operator", quarter="2026-Q2")` — its end message and
 its [Get package] are that quarter's.
 "Send the package", "Give me Q3", "rebuild it", "the package for Q2":
-`get_package(quarter=…)`, also for the reading's "rebuild Qn". It sends the file itself,
-built now from what the last check knew; say nothing more after it. If it refuses, say
-its words. "Email me the package": say "Packages come here as a file now —
+`get_package(quarter=…)`, also for the reading's "rebuild Qn"; a bare "send the package"
+names no quarter: `get_package()` sends the quarter the operator last checked. It sends
+the file itself, built now from what the last check knew; say nothing more after it. If it
+refuses, say its words. "Email me the package": say "Packages come here as a file now —
 forward it from Telegram.", then `get_package`. The job never sends a package.
 
 After `request_work`, always `start_job` with the ask's `start_job` exactly. Read its result:

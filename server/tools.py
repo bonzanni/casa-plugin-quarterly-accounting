@@ -756,13 +756,14 @@ def t_post_package(args):
 @register("get_package",
           "The quarter's package as a file, built now from the store's latest state, with "
           "one caption line. A [Get package] button calls it; at the desk, call it for "
-          "\"send the package\", \"give me Q3\" or \"rebuild it\". Never in the job.",
-          obj({"quarter": Q}, ("quarter",)))
+          "\"send the package\", \"give me Q3\" or \"rebuild it\". With no quarter: "
+          "the quarter the operator last checked. Never in the job.",
+          obj({"quarter": Q}))
 @capability("package", receipt=True)
 def t_get_package(args):
-    import posting
-    _need(args, "quarter")
-    return posting.get_package(conn(), _quarter(args))
+    import cards, posting
+    c = conn()
+    return posting.get_package(c, _quarter(args) or cards.main_quarter(c))
 
 
 # --- packaging ---------------------------------------------------------------------

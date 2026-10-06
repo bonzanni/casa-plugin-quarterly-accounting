@@ -1088,7 +1088,9 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
         raise db.Refusal("after is the cursor a previous page's `next` returned")
     if prev is not None and (not isinstance(prev, str) or not _RENDER_ID.fullmatch(prev)):
         raise db.Refusal("prev is the render id the More button carried")
-    q = quarter or dates.quarter_of(db.now()[:10])
+    import cards
+    # ruling Q2b: after an operator's "check Q2" a view with no quarter is Q2's
+    q = quarter or cards.named_quarter(conn) or dates.quarter_of(db.now()[:10])
     dates.parse_quarter(q)
     # binding V2: the render id is minted before composing — its tag ends line 1, counted
     # inside every page budget (_limit), and this page's `next` names it as `prev` (V1)

@@ -44,13 +44,24 @@ class Undisplayed(RuntimeError):
 
 # ---- the state the surface is composed from -----------------------------------------------
 
+def named_quarter(conn):
+    """Ruling Q2b: the quarter the newest run's operator check named (runs.quarter), or
+    None when the newest run named none. Runs are only ever inserted (job.claim's INSERT OR
+    IGNORE), so the highest rowid is the newest."""
+    r = conn.execute("SELECT quarter FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
+    return r[0] if r is not None and r[0] else None
+
+
 def main_quarter(conn, job_id=None) -> str:
-    """The run's quarter when an operator check named one (ruling Q2: runs.quarter), else
-    D11: the quarter of the latest in-scope payment (today's quarter when none)."""
+    """The run's quarter when an operator check named one (ruling Q2: runs.quarter); with
+    no run given (a desk view, a desk get_package), the newest run's named quarter (ruling
+    Q2b); else D11: the quarter of the latest in-scope payment (today's when none)."""
     if job_id is not None:
         r = conn.execute("SELECT quarter FROM runs WHERE job_id=?", (job_id,)).fetchone()
         if r is not None and r[0]:
             return r[0]
+    elif named_quarter(conn):
+        return named_quarter(conn)
     days = [dates.effective_date(row) for _, _, row in loop.in_scope(conn)]
     return dates.quarter_of(max(days) if days else dates.today())
 

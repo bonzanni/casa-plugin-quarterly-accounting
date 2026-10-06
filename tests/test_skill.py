@@ -236,7 +236,9 @@ class TestDesk(TempEnv):
                        '"Check Q2": `request_work(kind="check", trigger="operator", '
                        'quarter="2026-Q2")`',
                        '"Send the package", "Give me Q3", "rebuild it", "the package for Q2": '
-                       "`get_package(quarter=…)`, also for the reading's \"rebuild Qn\".",
+                       "`get_package(quarter=…)`, also for the reading's \"rebuild Qn\"; a "
+                       "bare \"send the package\" names no quarter: `get_package()` sends "
+                       "the quarter the operator last checked.",
                        "built now from what the last check knew; say nothing more after it.",
                        "The job never sends a package.",
                        "After `request_work`, always `start_job` with the ask's `start_job` "

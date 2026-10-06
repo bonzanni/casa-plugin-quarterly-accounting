@@ -184,3 +184,101 @@ class DeskMore(StoreCase):
         self.assertIn('A button that answers "expired" (a card whose send timed out, Casa '
                       '#1305) is recovered the same way: say "review" or "what\'s open" and the '
                       'card comes again.', ans)
+
+
+def _dt(day):
+    import datetime as dt
+    return dt.datetime.fromisoformat(day + "T12:00:00+00:00")
+
+
+class NamedQuarter(StoreCase):
+    """Ruling Q2b (review round 1): after an operator's "check Q2", a desk view or a bare
+    "send the package" with no quarter is Q2's (runs.quarter of the newest run), not D11's
+    latest in-scope quarter; a later run that named none gives D11 back."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.sim_job import JobDriver
+        self.bind(watermark="2026-04-01")
+        self.drv = JobDriver(self, payments=0)
+        self.drv.add_payments(["2026-05-10"])
+        self.drv.add_payments(["2026-08-10"])
+
+    def check(self, job_id, quarter=None):
+        import qa_server, tools  # noqa: F401
+        args = {"kind": "check", "trigger": "operator"}
+        if quarter:
+            args["quarter"] = quarter
+        qa_server.TOOLS["request_work"]["fn"](args)
+        self.drv.run_job(job_id)
+
+    def open_card(self):
+        import qa_server, tools  # noqa: F401
+        with FakeBroker() as broker:
+            out = qa_server.TOOLS["show_view"]["fn"]({"view": "open"})
+        return out, json.loads(broker.deposits[0]["value"])
+
+    def test_whats_open_and_a_bare_send_the_package_follow_the_checked_quarter(self):
+        import qa_server, tools  # noqa: F401
+        with self.patch_clock(_dt("2026-10-06")):
+            self.check("eeeeeeee-1", quarter="Q2")
+            out, card = self.open_card()
+            self.assertTrue(card["text"].startswith("Q2 · "), card["text"])
+            get = card["buttons"][-1]
+            self.assertEqual((get["label"], get["call"]["tool"],
+                              get["call"]["arguments"]["quarter"]),
+                             ("Get package", "get_package", "2026-Q2"))
+            with FakeBroker():
+                pkg = qa_server.TOOLS["get_package"]["fn"](get["call"]["arguments"])
+            self.assertIn("-2026-Q2-", pkg["filename"])
+            with FakeBroker():
+                bare = qa_server.TOOLS["get_package"]["fn"]({})
+            self.assertIn("-2026-Q2-", bare["filename"])
+            with FakeBroker() as broker:
+                st = qa_server.TOOLS["show_view"]["fn"]({"view": "status"})
+            self.assertEqual(json.loads(self.conn.execute(
+                "SELECT scope_json FROM renders WHERE render_id=?",
+                (st["render_id"],)).fetchone()[0])["quarter"], "2026-Q2")
+            # a later check that names no quarter gives D11's latest in-scope quarter back
+            self.check("eeeeeeee-2")
+            _, card = self.open_card()
+            self.assertTrue(card["text"].startswith("Q3 · "), card["text"])
+            with FakeBroker():
+                bare = qa_server.TOOLS["get_package"]["fn"]({})
+            self.assertIn("-2026-Q3-", bare["filename"])
+
+
+class DeskHandover(StoreCase):
+    """§2.5 at the desk: a file filed at the desk and handed over (request_work
+    kind=handover) starts a continuation whose work list is the payments it could fit."""
+
+    def test_a_desk_handover_lists_the_payments_the_document_could_fit(self):
+        import qa_server, tools  # noqa: F401
+        from tests.sim_job import JobDriver
+        self.bind()
+        drv = JobDriver(self, payments=2)            # Zapier 1000 on 5 Jul, 2000 on 5 Aug
+        with self.patch_clock(_dt("2026-10-06")):
+            drv.run_job("ffffffff-1")                # both searched, both missing
+            listed = [r[0] for r in self.conn.execute("SELECT pid FROM run_work WHERE"
+                                                      " job_id='ffffffff-1' ORDER BY pid")]
+            self.assertEqual(len(listed), 2)
+            # the operator left both missing: neither is open work for a later run
+            self.granted(lambda c, grant: __import__("work").leave_missing_in_tx(
+                c, listed, grant=grant))
+            path = self.publish("handed.pdf", b"%PDF-1.4 handed\n", producer="telegram")
+            doc = qa_server.TOOLS["ingest_document"]["fn"]({
+                "source_path": path, "kind": "invoice", "source": "manual-telegram",
+                "extraction_author": "desk", "issuer": "Zapier", "amount_minor": 2000,
+                "currency": "EUR", "document_date": "2026-08-04", "document_number": "Z-2"})
+            ask = qa_server.TOOLS["request_work"]["fn"]({"kind": "handover",
+                                                         "trigger": "operator",
+                                                         "doc_ids": [doc["doc_id"]]})
+            self.assertEqual(ask["start_job"]["job"], "quarterly-accounting:work")
+            drv.run_job("ffffffff-2")
+        rows = [tuple(r) for r in self.conn.execute(
+            "SELECT pid, why, outcome FROM run_work WHERE job_id='ffffffff-2'")]
+        # the continuation's work list is the one payment the document fits (the 2000 one)
+        self.assertEqual(rows, [(listed[1], "handover", "match")])
+        self.assertEqual(tuple(self.conn.execute(
+            "SELECT kind, state FROM work_requests WHERE request_id=?",
+            (ask["request_id"],)).fetchone()), ("handover", "reported"))
