@@ -185,8 +185,8 @@ D12. **Money and dates.** Amounts print in the house format `amounts.fmt` (`EUR 
      design's `€100.00` is illustrative. The note's date uses a new `dates.long_day` ("2 Sep
      2026").
 
-D13. **Version 0.11.0.** 0.10.0 was never tagged, but casa-test may hold a schema-11 store.
-     BRAIN may rule to reuse 0.10.0; only `plugin.json` and the CHANGELOG change.
+D13. **Version 0.11.0** (BRAIN ruling after plan round 1: approved). 0.10.0 was never
+     released; the CHANGELOG says so (Task 14).
 
 D14. **The `mirror_note` start value.** After the upgrade `mirror_note` is NULL. The first
      run writes one plain note per in-scope row (≈ 60 calls grouped by identical text
@@ -206,6 +206,12 @@ D16. **Tap actions are all `verdict` stored calls** with keys, including the non
 D17. **The handover continuation's work list** is every payment for which the handed
      document would be a candidate (same function as the vendor unit's candidates), except
      operator-confirmed, exempt and no-document payments (§2.5).
+
+D18. **Pending rows** (plan round 1, Terra S2). The reducer is unchanged: it still gives a
+     PDNG row `acct::open`. The mirror treats a non-BOOK row as pending: no owned accounting
+     tag (any it carries is removed) and no note. The package marks it `PENDING`, never
+     `MISSING`, and counts it as not documented ("open") in the caption, whose ruled format
+     stays. The end message counts it as "pending".
 
 ## Unimplementable or underspecified in the design (flagged; no task invents beyond D1–D17)
 
@@ -605,9 +611,10 @@ class StoreGates(StoreCase):
         import db, matches
         self.classify(self.pid, set())
         mid, _ = self._auto("pair", self.doc())
+        rid = self.show(self.pid)     # outside granted's tx: show opens its own
         self.granted(lambda c, grant: matches.reject_in_tx(
             c, grant=grant, match_id=mid, expected_revision=self.rev(match_id=mid),
-            render_id=self.show(self.pid), bind="rendered"))
+            render_id=rid, bind="rendered"))
         self.assertEqual(self.conn.execute("SELECT state FROM match_state WHERE match_id=?",
                                            (mid,)).fetchone()[0], "rejected")
 ```
@@ -830,13 +837,26 @@ class Floor(StoreCase):
         self.assertEqual((out["wrote"], self.rev(self.p1)), (False, rev))
         self.assertEqual(self.conn.execute("SELECT max(seq) FROM log").fetchone()[0], seq)
 
+    def test_a_redecision_after_the_payment_changed_is_written(self):
+        d = self.doc()
+        self.write("pair", self.p1, d)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE bank_rows SET remittance='INV 42' WHERE row_id=1")
+        self.settle(self.p1)
+        self.assertEqual(self.conn.execute("SELECT status FROM projections WHERE pid=?",
+                                           (self.p1,)).fetchone()[0], "proposed")
+        out = self.write("pair", self.p1, d)
+        self.assertTrue(out["wrote"])
+        self.assertEqual(out["status"], "matched")
+
     def test_an_operator_rejection_refuses_both_writes(self):
         import matches
         d = self.doc()
         mid = self.write("propose", self.p1, d)["match_id"]
+        rid = self.show(self.p1)     # outside granted's tx: show opens its own
         self.granted(lambda c, grant: matches.reject_in_tx(
             c, grant=grant, match_id=mid, expected_revision=self.rev(match_id=mid),
-            render_id=self.show(self.p1), bind="rendered"))
+            render_id=rid, bind="rendered"))
         for kind in ("pair", "propose"):
             with self.assertRaisesRegex(db.Refusal, "operator rejected"):
                 self.write(kind, self.p1, d)
@@ -845,9 +865,10 @@ class Floor(StoreCase):
         import matches
         d = self.doc()
         mid = self.write("propose", self.p1, d)["match_id"]
+        rid = self.show(self.p1)     # outside granted's tx: show opens its own
         self.granted(lambda c, grant: matches.confirm_in_tx(
             c, grant=grant, match_id=mid, expected_revision=self.rev(match_id=mid),
-            render_id=self.show(self.p1), bind="rendered"))
+            render_id=rid, bind="rendered"))
         with self.assertRaisesRegex(db.Refusal, "never reopened"):
             self.write("propose", self.p1, self.doc())
 
@@ -989,10 +1010,16 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
         _floor_doc(conn, kind, pid, row, exp, d, document_date if d == doc_id else None)
     own = _own_machine(st)
     want = "matched" if kind == "pair" else "proposed"
-    if (len(own) == 1 and own[0].state == want and own[0].doc_id == doc_id
+    current = (len(own) == 1 and own[0].fp is not None
+               and json.loads(own[0].fp)["facts"] == R.facts_of(row))
+    if (current and own[0].state == want and own[0].doc_id == doc_id
+            and proj["status"] == want
             and (kind == "pair" or _alternatives(conn, own[0].match_id) == alts)):
-        # §2.2: the same outcome and the same document writes nothing — no revision moves,
-        # so a delivered card's buttons stay valid
+        # §2.2: the same EFFECTIVE outcome and the same document, made against the payment
+        # as it is now, writes nothing — no revision moves, so a delivered card's buttons
+        # stay valid. A pairing whose payment changed since (its fingerprint's facts differ:
+        # the reducer shows it proposed, `facts-changed`) is written again, which
+        # re-fingerprints it (plan round 1, Astra S2)
         return {"applied": True, "wrote": False, "pid": pid, "status": proj["status"],
                 "revision": proj["revision"], "match_id": own[0].match_id, "state": want,
                 "effects": []}
@@ -1038,6 +1065,30 @@ def record_match(conn, *, pid, doc_id, author, expected_revision, token, render_
 ```
 
   and the same for `propose_match` with `"propose"`. Add `import amounts` at the top.
+
+  **Alternatives are part of what a card binds** (plan round 1, Astra S1: an alternative's
+  amount changed after display and a candidate tap committed it). In `server/lineage.py`:
+  - `settle`'s match digest (L294–311) reads `alternatives_json` with `label, rationale,
+    runners_up_json` and adds, for a live candidate, `"alts": [_doc_digest(conn, a) for a in
+    json.loads(m["alternatives_json"])]`. A change to an alternative's facts moves that
+    match's revision, and the payment's revision through `cands` in its digest.
+  - `settle_doc_holders(conn, doc_id)` (L372–375) also settles every payment whose live
+    machine pairing lists `doc_id` as an alternative:
+
+```python
+def settle_doc_holders(conn, doc_id: int) -> None:
+    pids = {r[0] for r in conn.execute("SELECT pid FROM match_state WHERE doc_id=?",
+                                       (doc_id,))}
+    pids |= {r[0] for r in conn.execute(
+        "SELECT s.pid FROM match_state s JOIN matches m ON m.match_id=s.match_id,"
+        " json_each(m.alternatives_json) j WHERE s.state IN ('matched', 'proposed',"
+        " 'conflicted') AND j.value=?", (doc_id,))}
+    settle_all(conn, sorted(pids))
+```
+
+  `update_document_metadata` and `mark_irrelevant` already call it (documents.py:263, 277),
+  so an edited alternative re-settles its proposal; a card recorded before the edit then
+  fails `taps._changed` (Task 8 pins it).
 
 - [ ] **Step 4: Tool surface.** In `tools.py`:
   - `record_match` / `propose_match` drop `resolves`; `row_digest` is optional;
@@ -1563,6 +1614,20 @@ class Mirror(StoreCase):
         self.assertEqual(order, sorted(order, key=["untag_transaction", "tag_transaction",
                                                     "add_note"].index))
 
+    def test_a_pending_row_carries_no_accounting_tag_and_no_note(self):
+        import mirror
+        self.row(9, counterparty="Figma", amount_minor=1200, status="PDNG",
+                 booking_date=None, value_date="2026-09-29")
+        pid = self.lineage_for(9)
+        self.classify(pid, {"software"})
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET observed_tags_json=? WHERE pid=?",
+                              (json.dumps(["acct::open"]), pid))
+        self.settle(pid)
+        self.assertIsNone(mirror.note_text(self.conn, pid))
+        calls = [(c["tool"], c["pids"]) for c in mirror.plan(self.conn)]
+        self.assertEqual(calls, [("untag_transaction", [pid])])
+
     def test_a_group_larger_than_a_call_is_split_at_100_rows(self):
         import mirror
         for n in range(1, 251):
@@ -1652,11 +1717,18 @@ def _doc_words(conn, match_id) -> str:
     return " · ".join([head] + [t for t in tail if t])
 
 
+def pending(conn, p) -> bool:
+    """§2.1: a pending (PDNG) row is shown as pending, never as missing — until a later
+    import books it (plan round 1, Terra S2: the reducer gives it acct::open)."""
+    row = lineage.live_row(conn, p)
+    return row is not None and row["status"] != "BOOK"
+
+
 def note_text(conn, pid):
     p = lineage.projection(conn, pid)
     status = p["status"]
-    if status in (None, "ended", "ineligible"):
-        return None
+    if status in (None, "ended", "ineligible") or pending(conn, p):
+        return None                           # no note; a pending row carries none
     if status == "matched" and p["current_match"]:
         text = f"Accounting: matched — {_doc_words(conn, p['current_match'])}{SUFFIX}"
     elif status == "proposed" and p["current_match"]:
@@ -1703,7 +1775,8 @@ def plan(conn) -> list:
     for pid, p, row in _rows(conn):
         pid_of[row["row_id"]] = pid
         observed = set(json.loads(p["observed_tags_json"] or "[]"))
-        desired = set(json.loads(p["desired_json"] or "[]"))
+        desired = (set() if row["status"] != "BOOK"       # pending: no accounting tag
+                   else set(json.loads(p["desired_json"] or "[]")))
         adds = desired - observed
         removes = (observed & set(R.OWNED)) - desired
         if removes:
@@ -1929,9 +2002,10 @@ class Work(StoreCase):
         mid = matches.propose_match(self.conn, pid=confirmed, doc_id=d,
                                     expected_revision=self.rev(confirmed), token=self.token,
                                     document_date="2026-09-01")["match_id"]
+        rid = self.show(confirmed)     # outside granted's tx: show opens its own
         self.granted(lambda c, grant: matches.confirm_in_tx(
             c, grant=grant, match_id=mid, expected_revision=self.rev(match_id=mid),
-            render_id=self.show(confirmed), bind="rendered"))
+            render_id=rid, bind="rendered"))
         left = self.pay(who="Zapier")
         with db.tx(self.conn):
             self.conn.execute("UPDATE projections SET search_state='accepted-missing' WHERE"
@@ -1987,13 +2061,33 @@ class Work(StoreCase):
         d = self.doc(vendor="Adobe")
         mid = matches.propose_match(self.conn, pid=pid, doc_id=d, expected_revision=self.rev(pid),
                                     token=self.token, document_date="2026-09-01")["match_id"]
+        rid = self.show(pid)     # outside granted's tx: show opens its own
         self.granted(lambda c, grant: matches.reject_in_tx(
             c, grant=grant, match_id=mid, expected_revision=self.rev(match_id=mid),
-            render_id=self.show(pid), bind="rendered"))
+            render_id=rid, bind="rendered"))
         row = lineage.live_row(self.conn, lineage.projection(self.conn, pid))
         cands = loop.candidates(self.conn, pid, row, "Adobe")
         self.assertNotIn(d, [c["doc_id"] for c in cands])
         self.assertIsNone(loop.exact_fit(self.conn, pid, row, "Adobe", cands))
+
+    def test_a_handover_entry_is_handed_out_though_ordinary_work_would_skip_it(self):
+        import loop
+        pid = self.pay()
+        self.machine_match(pid, self.doc(), self.token)               # EUR, matched
+        usd = self.doc(currency="USD", amount_minor=11000, vendor=None)  # handed over
+        with db.tx(self.conn):
+            req = self.conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json,"
+                                    " created_seq, created_at, state, pass_id) VALUES"
+                                    " ('handover', 'operator', ?, 0, 'x', 'taken', 'pp')",
+                                    (json.dumps([usd]),)).lastrowid
+            self.conn.execute("UPDATE runs SET pass_id='pp' WHERE job_id=?", (JOB,))
+        loop.build_work(self.conn, JOB, 10**9, handover_docs=[usd])
+        self.assertEqual(self.conn.execute("SELECT why FROM run_work WHERE pid=?",
+                                           (pid,)).fetchone()[0], "handover")
+        unit = loop.vendor_unit(self.conn, JOB)
+        self.assertEqual([p["pid"] for p in unit["payments"]], [pid])
+        self.assertIn(usd, [c["doc_id"] for c in unit["payments"][0]["candidates"]])
+        self.assertTrue(req)
 
     def test_a_large_vendor_is_split_and_each_part_handed_at_most_twice(self):
         import loop
@@ -2100,6 +2194,26 @@ def build_work(conn, job_id, since_seq, handover_docs=()) -> int:
                             (job_id,)).fetchone()[0]
 
 
+def run_handover_docs(conn, job_id) -> list:
+    """The documents of the handovers this run's pass took (§2.5)."""
+    out = []
+    for r in conn.execute("SELECT w.doc_ids_json FROM work_requests w JOIN runs u ON"
+                          " u.pass_id=w.pass_id WHERE u.job_id=? AND w.kind='handover'",
+                          (job_id,)):
+        out += [d for d in json.loads(r[0]) if d not in out]
+    return out
+
+
+def still_work(conn, r, p, row, handed_docs) -> bool:
+    """Is the work-list entry `r` still the job's to decide at hand-out? A handover entry
+    keeps its own eligibility — the handed document still fits and the operator has not
+    settled the payment (plan round 1, Astra S2: a machine-matched payment with a handed
+    USD candidate is no ordinary why_work case); every other entry, why_work's."""
+    if r["why"] == "handover":
+        return _handover_fits(conn, r["pid"], p, row, handed_docs)
+    return why_work(conn, r["pid"], p, row, 0) is not None
+
+
 def _handover_fits(conn, pid, p, row, doc_ids) -> bool:
     """D17: the handed-over document would be a candidate for this payment, which the
     operator has not settled (§2.5)."""
@@ -2180,15 +2294,16 @@ def vendor_unit(conn, job_id):
     import work
     with db.tx(conn):
         rows = conn.execute(
-            "SELECT w.vendor, w.pid, w.searched, w.handed FROM run_work w WHERE w.job_id=?"
-            " AND w.outcome IS NULL AND w.handed < ?", (job_id, HAND_MAX)).fetchall()
+            "SELECT w.vendor, w.pid, w.why, w.searched, w.handed FROM run_work w WHERE"
+            " w.job_id=? AND w.outcome IS NULL AND w.handed < ?", (job_id, HAND_MAX)).fetchall()
+        handed_docs = run_handover_docs(conn, job_id)
         if not rows:
             return None
         live = []
         for r in rows:
             p = lineage.projection(conn, r["pid"])
             row = lineage.live_row(conn, p)
-            if row is None or why_work(conn, r["pid"], p, row, 0) is None:
+            if row is None or not still_work(conn, r, p, row, handed_docs):
                 # settled meanwhile (an operator tap): nothing to decide; counted handed out
                 conn.execute("UPDATE run_work SET handed=? WHERE job_id=? AND pid=?",
                              (HAND_MAX, job_id, r["pid"]))
@@ -2298,7 +2413,8 @@ composes its `next` in the tap's own transaction.
   - "need no invoice" = `exempt`, `no-document`, `optional`;
   - "to confirm" = `proposed`;
   - "missing" = `open` with a BOOK row;
-  - "pending" = a PDNG row (whatever its status).
+  - "pending" = a PDNG row (whatever its status). The counts line prints it as
+    `"{k} pending"` when k > 0 (§6.1).
 
   Each in-scope payment lands in exactly one bucket. The bucket test is pending first, then
   status.
@@ -2795,6 +2911,21 @@ class Taps(StoreCase):
                                       (p,)).fetchall())
         self.assertEqual((rows[alt], rows[chosen]), ("matched", "rejected"))
 
+    def test_a_candidate_whose_amount_changed_after_display_is_not_committed(self):
+        import documents
+        p = self.pay()
+        alt = self.doc(document_number="INV-91", amount_minor=10000)
+        chosen = self.propose(p, alternatives=[alt], document_number="INV-88")
+        card = self.tap(self.end(), "Review 1")["next"]
+        documents.update_document_metadata(self.conn, alt, amount_minor=90000)
+        out = self.tap(card, next(b["label"] for b in card["buttons"]
+                                  if b["label"].startswith("INV-91")))
+        self.assertIn("changed", out["receipt"])
+        rows = dict(self.conn.execute("SELECT doc_id, state FROM match_state WHERE pid=?",
+                                      (p,)).fetchall())
+        self.assertEqual(rows.get(chosen), "proposed")
+        self.assertNotEqual(rows.get(alt), "matched")
+
     def test_a_pick_key_is_bound_to_its_document(self):
         import keys, qa_server, tools  # noqa: F401
         p = self.pay()
@@ -3118,6 +3249,22 @@ class GetPackage(StoreCase):
         self.assertIn("bank", out["refused"])
         self.assertEqual(broker.deposits, [])
 
+    def test_a_pending_row_is_pending_in_the_zip_never_missing(self):
+        import package
+        self.row(9, counterparty="Figma", amount_minor=1200, status="PDNG",
+                 booking_date=None, value_date="2026-09-29")
+        p = self.lineage_for(9)
+        self.classify(p, {"software"})
+        self.settle(p)
+        built = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        import zipfile
+        with zipfile.ZipFile(built["path"]) as z:
+            ledger = z.read("ledger.csv").decode()
+            notes = z.read("notes.md").decode()
+        figma = [ln for ln in ledger.splitlines() if "Figma" in ln][0]
+        self.assertIn(",PENDING,", figma)
+        self.assertIn("## Pending at the bank", notes)
+
     def test_send_the_last_one_still_sends_the_last_build_as_is(self):
         import delivery
         with FakeBroker():
@@ -3137,8 +3284,12 @@ Expected: FAIL (no `get_package`).
 
 - [ ] **Step 3: Implement.**
   - `package._freeze` adds `"as_of": <imported_at of the latest snapshot or None>`.
-  - `_render` counts `in_scope` (lines whose status is not `UNTRACKED`) and `open` (status in
-    `UNCONFIRMED`, `MISSING`, `UNCLASSIFIED`).
+  - `_render` marks a line whose bank row is not BOOK as `PENDING` (a new `STATUS` value,
+    set before the MISSING test, so a pending row is never MISSING: §2.1, plan round 1
+    Terra S2), lists those rows under a new notes.md section "## Pending at the bank", and
+    counts `in_scope` (lines whose status is not `UNTRACKED`), `pending`, and `open`
+    (status in `UNCONFIRMED`, `MISSING`, `UNCLASSIFIED`, `PENDING`: a pending row is not
+    documented, D18).
   - `_build` stores the one line as `packages.caption`. The old multi-line `_caption` is
     deleted.
 
@@ -3745,6 +3896,39 @@ None of these columns is indexed or under a constraint, and none is read by any 
 (SQLite's DROP COLUMN conditions). `renders.binding` (retired by S7) is left as is. It is
 outside this design.
 
+**Retained code that names a dropped column or table** (plan round 1, Astra S1: the drops
+broke `import_ledger_export` and `end_lineage`). Each is edited in this same step, verified
+by grep at 26b68ee over the files this plan keeps:
+
+| retained code (26b68ee) | names | edit |
+|---|---|---|
+| `ledger.py:371–378` (`_import`'s snapshot INSERT) | `snapshots.read_seq` | drop the column from the INSERT list and `cur_pass["read_seq"] if job_pass else None` from its arguments |
+| `ledger.py:99–104` (`end_lineage`) | `projections.readback_owed` | the UPDATE sets `ended, ended_at, ended_snapshot` only |
+| `ledger.py:116–130` (`merge`) | `note_issued_at`, `note_other_issued_at`, `note_issued_gen`, `note_other_issued_gen` | delete the two blocks (already in the table above) |
+| `ledger.py:483–491` (`_import` step 6) | `observed_revision` | delete (already above) |
+| `lineage.py:228–246, 330–341` | `note_seq`, `note_body` | delete (already above); the `settle` UPDATE loses both columns |
+| `passes.py:160–163` (`start_pass`'s marker INSERT) | `pass_marker.claimed_step` | drop the column and its `NULL` value |
+| `asks.py:113–128` (`take_queued`) | `passes.late_takes`, `passes.judge_after` | `take_queued(conn, pass_id)` takes every queued request; the two passes reads/writes go (Task 10 already drops `late`) |
+| `package.py:498–503` (`_build`'s packages INSERT) | `packages.request_id` | drop the column and its value |
+| `delivery.py:236–240` (`_stage`'s deliveries INSERT) | `deliveries.request_id` | drop the column and its `None` |
+| `delivery.py:322–330` (`revoke_superseded_first_sends`) | `package_requests` | delete the request update; the delivery's own revocation stays |
+| `binding.py:145–150, 174–181` | `pass_steps`, `package_requests`, `credits`, `cursor` | already above |
+| `job.py` (Task 10's `status`, `claim`) | `runs.passes` | `INSERT OR IGNORE INTO runs(job_id)` without `passes` |
+
+Step 3 ends with this gate. It must print nothing outside `server/db.py`'s `MIGRATIONS`
+(history) and its comments:
+
+```bash
+for c in orphaned_by adoptions adopters_json read_seq w_refreshes judge_after w_pending \
+         judge_epoch late_takes swept_at observed_revision note_seen_seq note_seen_rev \
+         note_seen_at note_issued_at note_issued_seq note_other_issued_at readback_owed \
+         note_issued_gen note_other_issued_gen note_seen_gen read_snapshot note_seq \
+         note_body claimed_step verdicts_json store_epoch_at pass_steps package_requests \
+         credits; do grep -nw "$c" server/*.py | grep -v '^server/db.py'; done
+grep -nE "runs\(job_id, passes|SET passes=|SELECT passes|\bspent\b *[=+]|reported=1" server/*.py
+grep -nE "(packages|deliveries)\(.*request_id" server/*.py
+```
+
 - [ ] **Step 1: Write the failing test** (append to `tests/test_schema12.py`):
 
 ```python
@@ -4147,6 +4331,7 @@ git commit -am "docs(loop): the job skill for the simple loop — vendor units, 
             text = (ROOT / f).read_text()
             self.assertIn("#1301, #1302 and #1303", text, f)
             self.assertIn("quietWhenScheduled", text, f)
+        self.assertIn("0.10.0 was never released", (ROOT / "CHANGELOG.md").read_text())
 ```
 
 - [ ] **Step 2: Run it and see it fail.**
@@ -4163,7 +4348,8 @@ git commit -am "docs(loop): the job skill for the simple loop — vendor units, 
   no fallback.
 ```
 
-  The `CHANGELOG.md` 0.11.0 entry:
+  The `CHANGELOG.md` 0.11.0 entry (BRAIN: 0.11.0 approved) opens with: "0.10.0 was never
+  released: its S7 work ships in this release." Then:
   - one paragraph per design area: the loop, the floor, decide, the mirror, the end message
     and its cards, `get_package`, the deletions;
   - the upgrade notes: schema 12; the first run writes one plain note per row (D14); the
@@ -4341,6 +4527,27 @@ class Quarter(StoreCase):
         self.assertEqual(sum(len(u["calls"]) for u in units if u["unit"] == "mirror"), 0)
         self.assertEqual(self.conn.execute("SELECT max(seq) FROM log").fetchone()[0], seq)
 
+    def test_the_pending_row_is_pending_until_booked_then_missing(self):
+        import cards, mirror
+        figma = self.rows[7]
+        row_id = self.conn.execute("SELECT dest_row_id FROM projections WHERE pid=?",
+                                   (figma,)).fetchone()[0]
+        self.assertEqual([t for t in self.drv.bf.tags(row_id) if t.startswith("acct::")], [])
+        self.assertFalse([n for n in self.drv.bf.notes(row_id) if n.startswith("Accounting")])
+        end = self.conn.execute("SELECT end_render_id FROM runs WHERE job_id='eeeeeeee-1'"
+                                ).fetchone()[0]
+        text = self.conn.execute("SELECT text FROM renders WHERE render_id=?",
+                                 (end,)).fetchone()[0]
+        self.assertIn("1 pending", text)
+        self.drv.book(row_no=7)                         # a later fetch books the row
+        self.drv.run_job("eeeeeeee-6", started_by="operator")
+        self.assertEqual(self.buckets()[self.drv.pid_of(7)], "missing")
+        row_id = self.conn.execute("SELECT dest_row_id FROM projections WHERE pid=?",
+                                   (self.drv.pid_of(7),)).fetchone()[0]
+        self.assertIn("acct::open", self.drv.bf.tags(row_id))
+        self.assertEqual(self.drv.bf.notes(row_id)[-1],
+                         "Accounting: invoice missing (quarterly check)")
+
     def test_notes_group_and_read_as_plain_words(self):
         calls = [c for u in self.units if u["unit"] == "mirror" for c in u["calls"]]
         missing = [c for c in calls if c["tool"] == "add_note"
@@ -4399,6 +4606,9 @@ class Quarter(StoreCase):
   - `posted_end(job_id)` → the end message's deposit (`show_view` under a `FakeBroker`);
   - `tap(deposit, label)` → a button's stored call through `qa_server.TOOLS`;
   - `cards.state(conn)["by_bucket"]` is Task 7's partition.
+  - `book(row_no)` re-fetches the fixture's rows with that row `BOOK` and a booking date
+    (bank-feed may give it a new row id, superseding the pending one); `pid_of(row_no)`
+    resolves the fixture row's lineage after that (`lineage.resolve_pid`).
   - `Gmail.invoice(vendor, amount_minor, currency, day, number, sender)` holds a message
     whose PDF the vendor unit files; the sim saves `hint_sender=<sender>` after a vendor
     search found one (§2.2 step 5).
@@ -4599,3 +4809,19 @@ Expected: suite PASS; gate `OK` with its `PRE-FLOOR:` line.
 | the delegation protocol (`begin_pass`, `end_pass`, `continue_pass`, legacy tools) | brief decision 2 (one pass per run) | 11 | legacy_tools.py, sim.py; test_passes_binding (1); harness edits |
 | `set_epoch` / `epoch`, `cursor` table | §4 (sweep) | 11 | — |
 | `job-left` line (asks waiting past the pass budget) | §4 (nested passes) | 10, 11 | test_s7_posts (1) |
+
+## Plan round 1 dispositions
+
+Astra `gpt-6-astra` medium: DO NOT SHIP (3 S1, 2 S2). Terra `gpt-5.6-terra` medium: SHIP WITH
+FIXES (1 S2). All were accepted and folded. BRAIN ruled 0.11.0 approved; the CHANGELOG says
+0.10.0 was never released (D13, Task 14).
+
+| finding | disposition |
+|---|---|
+| Astra S1: a candidate tap commits an alternative whose amount changed after display | Task 3: the match digest covers the alternatives' document facts, and `settle_doc_holders` settles a proposal holding the document as an alternative, so the card's recorded revision goes stale. Task 8 pins it: `test_a_candidate_whose_amount_changed_after_display_is_not_committed`. |
+| Astra S1: the schema drops break `import_ledger_export` (`snapshots.read_seq`) and `end_lineage` (`readback_owed`) | Task 11: a table of every retained reference to a dropped column or table (ledger, passes, asks, package, delivery, job), each edited in the same step, plus a grep gate over all dropped names. |
+| Astra S1: two Task 3 floor tests nest `tx()` (`self.show` inside `self.granted`) | Every occurrence (Task 2: 1, Task 3: 2, Task 6: 2) computes `rid = self.show(…)` before `self.granted(…)`. Checked in a disposable worktree at 26b68ee: the nested form raises "does not nest", the hoisted form commits. |
+| Astra S2: `vendor_unit` drops a handover entry that ordinary `why_work` would skip | Task 6: `still_work` keeps a `handover` entry's own eligibility (`_handover_fits` against the run's handed documents, operator-settled payments excluded). Pinned: `test_a_handover_entry_is_handed_out_though_ordinary_work_would_skip_it`. |
+| Astra S2: the no-op shortcut blocks re-deciding a pairing after the payment's facts changed | Task 3: the no-op applies only when the effective status equals the outcome and the pairing's fingerprint facts equal the payment's now. Otherwise the decision is written, which re-fingerprints it. Pinned: `test_a_redecision_after_the_payment_changed_is_written`. |
+| Terra S2: a PDNG payment is mirrored as missing with `acct::open` | D18. Task 5: no accounting tag and no note for a non-BOOK row. Task 9: `PENDING` in the zip. Task 7: "k pending" on the counts line. Task 16: `test_the_pending_row_is_pending_until_booked_then_missing` against the real bank-feed. |
+
