@@ -207,12 +207,33 @@ class NoteTexts(Mirror):
         notes = [c for c in mirror.plan(self.conn) if c["tool"] == "add_note"]
         self.assertEqual([sorted(c["pids"]) for c in notes], [sorted([transfer, exempt])])
 
-    def test_an_ineligible_row_has_no_note_and_is_left_alone(self):
+    def test_an_ineligible_row_has_no_note_and_loses_its_accounting_tags(self):
+        """Fix round 1: a row the export still carries that left scope owes the removal of
+        every acct:: tag it carries (as 26b68ee's sweep untagged it), and no note."""
         import mirror
-        pid = self.payment(1, observed=["acct::open"])
+        pid = self.payment(1, observed=["acct::open", "acct::matched", "software"])
         self.row(1, counterparty="Adobe", booking_date="2026-06-02", value_date="2026-06-02")
         self.settle(pid)                                # before the watermark: ineligible
         self.assertIsNone(mirror.note_text(self.conn, pid))
+        self.assertEqual([(c["tool"], c["args"]["tags"], c["pids"])
+                          for c in mirror.plan(self.conn)],
+                         [("untag_transaction", ["acct::matched", "acct::open"], [pid])])
+
+    def test_an_ended_row_the_export_carries_loses_its_accounting_tags(self):
+        import mirror
+        pid = self.payment(1, observed=["acct::open"])
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET ended='vanished' WHERE pid=?", (pid,))
+        self.assertEqual([(c["tool"], c["args"]["tags"]) for c in mirror.plan(self.conn)],
+                         [("untag_transaction", ["acct::open"])])
+
+    def test_a_row_the_export_did_not_carry_owes_nothing(self):
+        import mirror
+        self.payment(1, observed=["acct::open"])
+        self.row(1, counterparty="Adobe", booking_date="2026-06-02", value_date="2026-06-02")
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
+                              " VALUES ('p', 'x', 0, 0)")      # a later import, without it
         self.assertEqual(mirror.plan(self.conn), [])
 
     def test_a_long_note_is_cut_to_bank_feeds_limit(self):
@@ -292,6 +313,37 @@ class HandOut(Mirror):
         mirror.record(self.conn, self.token, done=[c["n"] for c in last], failed=[])
         self.assertEqual(mirror.owed(self.conn, self.job_id), 0)
 
+    def test_an_older_note_reported_in_a_later_record_does_not_win(self):
+        """Fix round 1: two notes for one row in flight, acknowledged in reverse order by
+        two separate record_mirror calls: the newer note stays the row's mirror_note."""
+        import mirror
+        pid = self.payment(1)
+        mirror.start(self.conn, self.job_id)
+        first = mirror.hand_calls(self.conn, self.job_id, budget=50)
+        self.machine_match(pid, self.doc(document_number="INV-7"), self.token)
+        both = mirror.hand_calls(self.conn, self.job_id, budget=50)
+        later = [c["n"] for c in both if c not in first]
+        mirror.record(self.conn, self.token, done=later, failed=[])
+        mirror.record(self.conn, self.token, done=[c["n"] for c in first], failed=[])
+        note, tags = self.conn.execute("SELECT mirror_note, observed_tags_json FROM"
+                                       " projections WHERE pid=?", (pid,)).fetchone()
+        self.assertEqual(note, mirror.note_text(self.conn, pid))
+        self.assertTrue(note.startswith("Accounting: matched"))
+        self.assertEqual(json.loads(tags), ["acct::matched"])   # the older tag ack skipped
+
+    def test_a_later_note_does_not_hide_an_earlier_tag_acknowledgement(self):
+        import mirror
+        pid = self.payment(1)
+        mirror.start(self.conn, self.job_id)
+        tag, note = mirror.hand_calls(self.conn, self.job_id, budget=50)
+        self.assertEqual((tag["tool"], note["tool"]), ("tag_transaction", "add_note"))
+        mirror.record(self.conn, self.token, done=[note["n"]], failed=[])
+        mirror.record(self.conn, self.token, done=[tag["n"]], failed=[])
+        self.assertEqual(json.loads(self.conn.execute(
+            "SELECT observed_tags_json FROM projections WHERE pid=?", (pid,)).fetchone()[0]),
+            ["acct::open"])
+        self.assertEqual(mirror.owed(self.conn, self.job_id), 0)
+
     def test_start_logs_once_and_stamps_the_run(self):
         import mirror
         self.payment(1)
@@ -364,8 +416,8 @@ class RealBankFeed(StoreCase):
         import lineage
         import mirror
         import version
-        self.bf.fetch([self.bf.row("2026-09-02", amount=10000 + n, ref=f"R{n}",
-                                   counterparty=who)
+        self.bf.fetch([self.bf.row("2026-08-03" if n == 0 else "2026-09-02",
+                                   amount=10000 + n, ref=f"R{n}", counterparty=who)
                        for n, who in enumerate(("Adobe", "Figma", "Zapier", "Notion"))])
         ids = [r["row_id"] for r in self.bf.rows()]
         self.bf.call("tag_transaction", row_ids=ids, tags=["software"])     # the classifier
@@ -401,3 +453,19 @@ class RealBankFeed(StoreCase):
         mirror.start(self.conn, self.job_id)
         self.assertEqual(mirror.hand_calls(self.conn, self.job_id, budget=50), [])
         self.assertEqual(mirror.owed(self.conn, self.job_id), 0)
+        # fix round 1: the watermark moves past the matched row (still in the export): it
+        # is untagged and gets no new note; the others are untouched
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE binding SET watermark='2026-08-15'")
+        token = self.run_and_import()
+        mirror.start(self.conn, self.job_id)
+        calls = mirror.hand_calls(self.conn, self.job_id, budget=50)
+        self.assertEqual([(c["tool"], c["args"]["row_ids"], c["args"]["tags"]) for c in calls],
+                         [("untag_transaction", [ids[0]], ["acct::matched"])])
+        for c in calls:
+            self.assertNotIn("changed nothing", self.bf.call(c["tool"], **c["args"]))
+        mirror.record(self.conn, token, done=[c["n"] for c in calls], failed=[])
+        self.assertEqual(self.bf.tags(ids[0]), ["software"])
+        self.assertEqual(len(self.bf.notes(ids[0])), 1)          # no new note
+        self.run_and_import()
+        self.assertEqual(mirror.plan(self.conn), [])

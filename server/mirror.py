@@ -77,18 +77,21 @@ def note_text(conn, pid):
 
 
 def _rows(conn) -> list:
-    """Every in-scope row the latest import carried (its export tags are known): §2.4
-    "a diff over every in-scope row"; a row the import did not carry is left alone."""
+    """Every row the latest import carried (its export tags are known), as (pid, p, row,
+    in_scope): §2.4 "a diff over every in-scope row". A row the export still carries that
+    left scope (ended, or ineligible: before a moved watermark) is included out of scope:
+    it owes the removal of its acct:: tags, as 26b68ee's sweep untagged it (fix round 1).
+    A row the import did not carry (or an erased one) is left alone."""
     latest = lineage.latest_import(conn)
     out = []
     for pid in lineage.live_pids(conn):
         p = lineage.projection(conn, pid)
         row = lineage.live_row(conn, p)
-        if p["ended"] or row is None or not lineage.eligible(conn, row):
+        if row is None:
             continue
         if p["class_observed_snapshot"] is None or p["class_observed_snapshot"] < latest:
             continue
-        out.append((pid, p, row))
+        out.append((pid, p, row, not p["ended"] and lineage.eligible(conn, row)))
     return out
 
 
@@ -96,16 +99,17 @@ def _writes(conn) -> list:
     """Every row-level write the store owes the bank now: (tool, payload, row_id, pid),
     payload the sorted tag tuple or the note text."""
     out = []
-    for pid, p, row in _rows(conn):
+    for pid, p, row, in_scope in _rows(conn):
         observed = set(json.loads(p["observed_tags_json"] or "[]"))
-        desired = set() if _pending(row) else set(json.loads(p["desired_json"] or "[]"))
+        desired = (set(json.loads(p["desired_json"] or "[]"))
+                   if in_scope and not _pending(row) else set())
         removes = (observed & set(R.OWNED)) - desired
         adds = desired - observed
         if removes:
             out.append(("untag_transaction", tuple(sorted(removes)), row["row_id"], pid))
         if adds:
             out.append(("tag_transaction", tuple(sorted(adds)), row["row_id"], pid))
-        text = note_text(conn, pid)
+        text = note_text(conn, pid) if in_scope else None
         if text is not None and text != p["mirror_note"]:
             out.append(("add_note", text, row["row_id"], pid))
     return out
@@ -203,6 +207,17 @@ def _numbers(items) -> list:
         raise db.Refusal("done is a list of call numbers (n)") from None
 
 
+def _superseded(conn, job_id, n, pid, tool) -> bool:
+    """A later call of the same kind (the note; or the tags, tag and untag alike) for `pid`
+    was already recorded done in this run: this older one's acknowledgement must not
+    overwrite it, across record_mirror calls too (fix round 1)."""
+    kinds = ("add_note",) if tool == "add_note" else ("tag_transaction", "untag_transaction")
+    return conn.execute(
+        "SELECT 1 FROM run_mirror m, json_each(m.pids_json) j WHERE m.job_id=? AND m.n>?"
+        " AND m.state='done' AND m.tool IN (%s) AND j.value=? LIMIT 1"
+        % ",".join("?" * len(kinds)), (job_id, n, *kinds, pid)).fetchone() is not None
+
+
 def record(conn, token, done, failed) -> dict:
     """The model's report of a mirror unit (D9): the calls bank-feed accepted are taken as
     written (the export tags and mirror_note move, no read-back); a refused call is kept
@@ -228,6 +243,8 @@ def record(conn, token, done, failed) -> dict:
                 continue
             tool, args = json.loads(r["args_json"])
             for pid in json.loads(r["pids_json"]):
+                if _superseded(conn, job_id, n, pid, tool):
+                    continue                  # a later call's acknowledgement already landed
                 if tool == "add_note":
                     conn.execute("UPDATE projections SET mirror_note=?, last_error=NULL"
                                  " WHERE pid=?", (args["note"], pid))
