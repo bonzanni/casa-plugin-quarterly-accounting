@@ -402,8 +402,8 @@ class TestJob(TempEnv):
         v = self.vendor()
         order = ["**Filed documents first.**", "`exact_fit` you accept",
                  "**Search the vendor's mail once per run**", "`searches.hinted` false",
-                 "When it leaves ANY of the vendor's payments uncovered and `searches.plain` "
-                 "is false: the plain vendor-and-dates search once",
+                 "With no hint, or when the hinted search leaves ANY payment uncovered, and "
+                 "`searches.plain` is false: the plain vendor-and-dates search once",
                  "Then per-payment searches only for what is still uncovered",
                  '`record_search(pids=[the payments it was for], search="hinted"',
                  'search="plain"', 'search="payment"', "**File** every plausible invoice",
@@ -426,7 +426,7 @@ class TestJob(TempEnv):
                        'Never "no invoice needed": that is the operator\'s',
                        "`document_date` is the date printed on the document you opened: its "
                        "issue date, not a due, delivery or email date",
-                       "Decide again only the entries the reply refused",
+                       "Re-decide only the refused entries.",
                        "no date window"):
             self.assertIn(phrase, v, phrase)
         self.assertNotIn("not-needed", v)

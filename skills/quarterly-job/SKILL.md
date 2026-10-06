@@ -93,8 +93,8 @@ One vendor's payments, each with its `revision`, the filed documents that could 
 2. **Search the vendor's mail once per run** for the payments nothing filed fits, over the
    `search_window` dates; `searches` and `vendor_queries` say what this run already did.
    With a learned hint and `searches.hinted` false: the hinted search
-   (`from:<hint_sender>` and the `hint_subject` words). When it leaves ANY of the
-   vendor's payments uncovered and `searches.plain` is false:
+   (`from:<hint_sender>` and the `hint_subject` words). With no hint, or when the hinted
+   search leaves ANY payment uncovered, and `searches.plain` is false:
    the plain vendor-and-dates search once. Then per-payment searches only for what is
    still uncovered, until found or out of ideas. Record each:
    `record_search(pids=[the payments it was for], search="hinted", queries=[…], found_candidate=…, pass_token)`
@@ -112,7 +112,7 @@ One vendor's payments, each with its `revision`, the filed documents that could 
      operator's.
    `document_date` is the date printed on the document you opened: its issue date, not a
    due, delivery or email date. The server enforces the floor; no date window.
-   Decide again only the entries the reply refused. A payment that
+   Re-decide only the refused entries. A payment that
    `holds` a document and now has another fit: `match` the same document, or `propose` the
    right one with the other as an alternative.
 5. **Save what worked:** when a vendor search found an invoice,
