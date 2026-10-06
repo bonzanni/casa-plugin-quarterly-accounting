@@ -274,14 +274,15 @@ def record(conn, token, done, failed) -> dict:
                          (job_id, n))
             recorded += 1
         for n, err in fails:
-            r = conn.execute("SELECT pids_json FROM run_mirror WHERE job_id=? AND n=? AND"
-                             " state='handed'", (job_id, n)).fetchone()
+            r = conn.execute("SELECT args_json, pids_json FROM run_mirror WHERE job_id=? AND"
+                             " n=? AND state='handed'", (job_id, n)).fetchone()
             if r is None:
                 continue
             conn.execute("UPDATE run_mirror SET state='failed', error=? WHERE job_id=? AND"
                          " n=?", (err, job_id, n))
             conn.executemany("UPDATE projections SET last_error=? WHERE pid=?",
                              [(err, pid) for pid in json.loads(r["pids_json"])])
+            _raise_failed(conn, json.loads(r["args_json"]), json.loads(r["pids_json"]), err)
             recorded += 1
         if recorded:
             decide.note_progress(conn, token)
@@ -298,9 +299,19 @@ def owed(conn, job_id) -> int:
     return inflight + len(_fresh(conn, job_id))
 
 
-def failed_lines(conn, job_id) -> list:
-    """§2.4 last bullet: a failed write never blocks the work; the end message lists it."""
-    n = conn.execute("SELECT count(*) FROM run_mirror WHERE job_id=? AND state='failed'",
-                     (job_id,)).fetchone()[0]
-    return ([f"{n} bank-ledger update{'s' if n != 1 else ''} did not go through — tried "
-             "again at the next check."] if n else [])
+def _raise_failed(conn, call, pids, err) -> None:
+    """§2.4 last bullet and d1 (Astra S2, ruled): a failed write is said in the run's one
+    message — as an alert, once per occurrence, keyed by the payment and the write's
+    payload (the note text, or the tool and its tags), so the same refused write in a later
+    run is never said again, and a scheduled run with no new item still posts it (the
+    alerts are its one message then). Inside the caller's transaction."""
+    import hashlib
+    tool, args = call
+    payload = db.canonical([tool, args["note"] if tool == "add_note" else sorted(args["tags"])])
+    digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
+    conn.executemany(
+        "INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
+        " VALUES ('mirror-failed', ?, ?, ?)",
+        [(f"mirror:{pid}:{digest}", db.canonical({"pid": pid, "tool": tool,
+                                                  "error": views.clip(err, 300)}), db.now())
+         for pid in pids])

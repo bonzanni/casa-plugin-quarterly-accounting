@@ -131,18 +131,51 @@ def seen_state(conn, pid, st) -> bool:
         (pid, st, *TAP_CARDS)).fetchone() is not None
 
 
-def never_set(conn, vendor) -> list:
-    """§1 (r10): every payment [Never for X] changes now — the vendor's in-scope open
-    payments that expect a document, booked, all quarters (accepted-missing included: the
-    rule moves them to no-document too)."""
+def _missing_of(conn, vendor) -> list:
+    """The vendor's missing invoices (§1): its in-scope open payments that expect a
+    document, booked, all quarters (left-missing included). What a vendor card's
+    [No invoice needed for these] and [Leave missing] act on — never Never's set."""
     return sorted(pid for pid, p, row in loop.in_scope(conn)
                   if kb.norm(loop.vendor_of(conn, row)) == kb.norm(vendor)
                   and p["status"] == "open" and p["exp_kind"] != "none"
                   and row["status"] == "BOOK")
 
 
+REHEARSAL_RID = "rehearsal"     # a seen rendering that exists only inside the rehearsal
+
+
+def _outcomes(conn) -> dict:
+    return {pid: (p["status"], p["exp_kind"], p["exp_tier"])
+            for pid, p, _ in loop.in_scope(conn)}
+
+
+def never_set(conn, vendor) -> list:
+    """§1 (r10) and d1 (Terra S1, ruled: generalize): every in-scope payment [Never for X]
+    changes now, learned by REHEARSAL, never by a filter — the counterparty rule
+    (kb.set_expectation_in_tx, kind none) applied under a rehearsal grant inside a savepoint
+    that is always rolled back; the set is every payment whose status or expectation it
+    moved (a pending payment, a proposal, a matched or exempted one included). That exact
+    set is what the vendor card lists and what Never binds. The store is settled first, so
+    only the rule's own effect is measured. Runs in the caller's transaction (or its own)."""
+    import authority
+    if not conn.in_transaction:
+        with db.tx(conn):
+            return never_set(conn, vendor)
+    with authority.rehearsal(conn) as grant:
+        lineage.settle_all(conn)
+        before = _outcomes(conn)
+        # the rule's provenance check wants a seen rendering: one that lives and dies here
+        conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
+                     " membership_json, posted_seq) VALUES (?, 'vendor-page', '{}', ?, '',"
+                     " '[]', 0)", (REHEARSAL_RID, db.now()))
+        kb.set_expectation_in_tx(conn, scope_type="counterparty", scope=vendor, kind="none",
+                                 author="operator", render_id=REHEARSAL_RID, grant=grant)
+        after = _outcomes(conn)
+    return sorted(pid for pid in set(before) | set(after) if before.get(pid) != after.get(pid))
+
+
 def _unanswered(conn, vendor, only=None) -> list:
-    out = [p for p in never_set(conn, vendor)
+    out = [p for p in _missing_of(conn, vendor)
            if lineage.projection(conn, p)["search_state"] != "accepted-missing"]
     return [p for p in out if only is None or p in only]
 
@@ -538,14 +571,23 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
                       docs={pid: docs})
 
 
+def _mark(d) -> str:
+    """A vendor page line's state (d1 ruling: the card lists every payment Never changes,
+    and says which of them are not missing invoices)."""
+    b = _bucket(d)
+    if b == "missing":
+        return " · left missing" if _answered(d) else ""
+    return {"pending": " · pending", "proposed": " · to confirm", "matched": " · matched",
+            "not_needed": " · no invoice needed"}.get(b, "")
+
+
 def _page_lines(vendor, ds, i, n, p, pages, link, quarter) -> list:
     """A vendor page's FINAL lines — what _store fits and what _pages measures (one
     function, so the measure is the text)."""
     head = f"Card {i} of {n} · missing invoices · {views.field(vendor)}"
     if pages > 1:
         head += f" · page {p} of {pages}"
-    body = [views.headline(d, quarter) + (" · left missing" if _answered(d) else "")
-            for d in ds]
+    body = [views.headline(d, quarter) + _mark(d) for d in ds]
     return [head] + body + ([views.field(link, views.LINK_MAX)] if link else [])
 
 
@@ -596,26 +638,30 @@ def _vendor_pages_of(conn, review_of, pos, page):
 
 def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page):
     """§1 (r11): one vendor's missing invoices, paged. An operator walk lists the vendor's
-    whole never_set (left-missing ones marked), so the pages' union is what [Never for X]
-    changes; a scheduled walk lists the item's new payments only, with no Never (rev 17).
-    Page 1 freezes the pages; later pages copy them. None when nothing is left to list."""
+    whole never_set — the rehearsed set Never changes (d1 ruling): its missing payments,
+    left-missing ones, and the pending, proposed, matched or exempted ones the rule also
+    moves, each marked — so the pages' union is what [Never for X] changes; [No invoice
+    needed for these] and [Leave missing] act only on its missing lines (scope "missing").
+    A scheduled walk lists the item's new missing payments only, with no Never (rev 17).
+    Page 1 freezes the pages; later pages copy them. None when the vendor has no missing
+    invoice left to list."""
     vendor = item["v"]
     first, prior = (None, [])
     if page > 1:
         first, prior = _vendor_pages_of(conn, review_of, pos, page)
+    missing = set(_missing_of(conn, vendor))
     now = set(_unanswered(conn, vendor, item["pids"]) if scheduled
               else never_set(conn, vendor))
     if first is not None:
         # a later page copies page 1's frozen pages, but lists only the payments still in
-        # the walk's set now (review round 1: a page-2 payment matched meanwhile is no
-        # missing invoice — never printed under that header, never bound for an exemption);
-        # Never's union then differs from the vendor's set, so Never refuses with page 1
+        # the walk's set now; Never's union then differs from the vendor's set when the set
+        # changed, so Never refuses with page 1
         pages = json.loads(first["scope_json"])["pages"]
         pids = [p for pg in pages for p in pg if p in now]
     else:
         pids = sorted(now)
         pages = None
-    if not pids:
+    if not pids or not (now & missing):
         return None
     ds = {p: work.describe(conn, p) for p in pids}
     order = sorted(ds.values(), key=lambda d: (d["date"] or "", d["pid"]))
@@ -635,12 +681,13 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page):
             k -= 1
         lines = lines[:1 + k] + lines[1 + len(mine):]
         shown = mine[:k]
+        acts = [d["pid"] for d in shown if d["pid"] in missing]
         scope = {"quarter": quarter, "scheduled": scheduled, "review_of": review_of,
                  "pos": pos, "vendor": vendor, "page": page, "pages": pages,
-                 "prior": prior if page > 1 else [], **_grammar(shown)}
+                 "missing": acts, "prior": prior if page > 1 else [], **_grammar(shown)}
         return _store(conn, "vendor-page", lines, scope,
                       {d["pid"]: 1 + j for j, d in enumerate(shown)},
-                      {d["pid"]: "missing" for d in shown})
+                      {p: "missing" for p in acts})
 
 
 def card(conn, review_of, pos, page=1):
@@ -712,10 +759,12 @@ def buttons(conn, r) -> list:
         return (out + [v("Wrong", "wrong", pid), v("Leave for now", "leave", pid)])[:6]
     if kind == "vendor-page":
         last = scope["page"] == len(scope["pages"])
-        out = [v("No invoice needed for these", "exempt-these")]
+        acts = scope.get("missing", True)       # a page with no missing line: no exemption
+        out = [v("No invoice needed for these", "exempt-these")] if acts else []
         if last and not scope.get("scheduled"):
             out.append(v(_label(f"Never for {scope['vendor']}"), "never"))
-        out.append(v("Leave missing", "leave-missing"))
+        if acts:
+            out.append(v("Leave missing", "leave-missing"))
         if not last:
             out.append(v("Next page", "next-page"))
         return out

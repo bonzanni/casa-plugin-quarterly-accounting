@@ -270,11 +270,12 @@ class Cards(LoopCase):
         self.assertEqual(sorted(bound), sorted(pages[1][:len(bound)]))      # its first lines
         self.assertEqual(sorted(pids), cards.never_set(self.conn, self.WIDE))
 
-    def test_a_later_page_lists_only_payments_still_missing(self):
-        """Review round 1: page 1 froze 50 payments over two pages; a page-2 payment is
-        machine-matched meanwhile. Page 2 neither prints nor binds it (an exemption there
-        would hit a matched payment); what the walk displayed is then exactly what Never
-        changes now."""
+    def test_a_later_page_marks_a_payment_matched_meanwhile_and_never_exempts_it(self):
+        """Review round 1, ported for d1 (Never's set is the rehearsed rule): page 1 froze
+        50 payments over two pages; a page-2 payment is machine-matched meanwhile. The rule
+        still changes it (its expectation), so page 2 prints it marked "· matched" and binds
+        it for Never — but its exemption and Leave missing act only on the missing lines
+        (scope "missing"), so a matched payment is never exempted."""
         import cards
         pids = [self.pay("Adobe", 100 + i, "2026-%02d-%02d" % (7 + i % 3, i % 28 + 1))
                 for i in range(50)]
@@ -286,17 +287,18 @@ class Cards(LoopCase):
                                    " ON p.dest_row_id=b.row_id WHERE p.pid=?",
                                    (gone,)).fetchone()[0]
         self.machine_match(gone, self.doc(amount_minor=amount), self.token)
-        self.assertNotIn(gone, cards.never_set(self.conn, "Adobe"))
+        self.assertIn(gone, cards.never_set(self.conn, "Adobe"))
         second = self.c(cards.card, end, 0, page=2)
         r, scope = self.rendering(second)
         self.assert_binds_exactly_what_it_shows(second)
         bound = sorted(int(p) for p in scope["bound_lines"])
-        self.assertEqual(bound, sorted(p for p in pages[1] if p != gone))
-        self.assertEqual(json.loads(r["membership_json"]), bound)
+        self.assertEqual(bound, sorted(pages[1]))
+        self.assertTrue(scope["bound_lines"][str(gone)].endswith("· matched"))
+        self.assertEqual(sorted(scope["missing"]), sorted(p for p in pages[1] if p != gone))
         self.assertEqual(scope["pages"], pages)                  # still page 1's frozen pages
         union = set(pages[0]) | set(bound)                       # what the walk displayed
         self.assertEqual(sorted(union), cards.never_set(self.conn, "Adobe"))
-        self.assertEqual(sorted(union | {gone}), sorted(pids))
+        self.assertEqual(sorted(union), sorted(pids))
 
     def test_a_closing_open_items_card_counts_as_seen_once_posted(self):
         """Review round 1 ruling: Wrong during a walk turns a proposal into a missing item;

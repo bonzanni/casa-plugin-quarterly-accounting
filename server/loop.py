@@ -439,9 +439,15 @@ def take(conn, job_id, pass_id) -> list:
     list). A check naming a quarter sets the run's main quarter (ruling Q2). The NEWLY taken
     handovers' documents reopen their payments when the list is already built (Task 6:
     take_handovers resets what it reopens, so it is given only these); before the list is
-    built, build_work reads them through run_handover_docs. Inside the caller's tx."""
+    built, build_work reads them through run_handover_docs. Inside the caller's tx.
+    d1 (Astra S1, ruled): once the run's end message is composed (runs.end_render_id set,
+    '' included), the run takes nothing more — a handover asked for after that stays
+    queued for the next run, the continuation, whose own message shows what it changed
+    (§2.5); taken here, its proposal would sit behind the composed message unshown."""
     import asks
     assert conn.in_transaction
+    if _run(conn, job_id)["end_render_id"] is not None:
+        return []
     ids = asks.take_queued(conn, pass_id)
     docs = []
     for i in ids:
@@ -770,18 +776,17 @@ def views_clip(text) -> str:
 
 def run_message(conn, job_id, run):
     """The run's ONE message (§1; D19): owed completion notices selected first, the failure
-    lines (pending alerts, refused mirror calls, a refused bank gate, a cut run) in whichever
-    message is selected — its scope's `alerts` mark them sent on delivery. None when a
-    scheduled run has neither a new item nor an owed notice."""
+    lines (pending alerts — refused mirror writes among them, d1 — a refused bank gate, a
+    cut run) in whichever message is selected — its scope's `alerts` mark them sent on
+    delivery. None when a scheduled run has neither a new item nor an owed notice (its
+    pending alerts are then posted alone: _post_unit)."""
     import alerts
     import cards
-    import mirror
     owed = owed_notices(conn)
     scheduled = run["started_by"] != "operator"
     stopped, said = _stop_line(conn, run) if not scheduled else (None, [])
     alert_lines, alert_ids = alerts.pending_lines(conn, said=said)
-    extra = (alert_lines + mirror.failed_lines(conn, job_id) + _gate_lines(conn, run)
-             + partial_lines(conn, job_id))
+    extra = alert_lines + _gate_lines(conn, run) + partial_lines(conn, job_id)
     return cards.compose_end(conn, job_id, scheduled=scheduled,
                              handover_docs=run_handover_docs(conn, job_id), extra=extra,
                              ready=owed, alerts=alert_ids, stopped=stopped)

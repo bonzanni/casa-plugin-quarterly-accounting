@@ -228,14 +228,18 @@ def _vendor_answer(conn, rid, scope, action, grant):
     applies when every payment the rule changes now was on one of those pages, so the
     operator's own earlier-page answers ([Leave missing], [No invoice needed for these])
     never block it, and a payment that arrived since (r10) refuses it. Returns
-    (receipt, "onward" | "next"), or None when the binding changed (nothing written)."""
+    (receipt, "onward" | "next"), or None when the binding changed (nothing written).
+    Never's set is cards.never_set — the rule rehearsed (d1 ruling) — and the real write
+    that follows in the same transaction changes exactly that set."""
     import cards
     import kb
     listed = views.render_items(conn, rid)
     vendor = views.field(scope["vendor"])
-    if _changed(conn, rid, listed) or not listed:
+    if not listed:
         return None
     if action == "never":
+        if _changed(conn, rid, listed):          # Never binds every line it displayed
+            return None
         union = set(listed)
         for p in scope.get("prior") or []:
             union |= set(views.render_items(conn, p))
@@ -246,14 +250,19 @@ def _vendor_answer(conn, rid, scope, action, grant):
                                  kind="none", author="operator", render_id=rid, grant=grant)
         return (f"{vendor} never needs an invoice: {_plural(len(changes), 'payment')} "
                 "changed.", "next")
+    # the page's missing lines only: a pending, proposed, matched or exempted line is
+    # listed because Never would change it (d1 ruling), never to be exempted or left
+    acts = [p for p in listed if p in set(scope.get("missing", listed))]
+    if not acts or _changed(conn, rid, acts):   # bound to the missing lines it acts on
+        return None
     if action == "exempt-these":
-        for p in listed:
+        for p in acts:
             matches.set_exemption_in_tx(conn, grant=grant, pid=p, exempt=True,
                                         expected_revision=_item(conn, rid, p)["projection_revision"],
                                         render_id=rid, bind="rendered")
-        return f"No invoice needed for {_plural(len(listed), vendor + ' payment')}.", "onward"
-    work.leave_missing_in_tx(conn, listed, grant=grant)
-    return f"Left missing: {_plural(len(listed), vendor + ' payment')}.", "onward"
+        return f"No invoice needed for {_plural(len(acts), vendor + ' payment')}.", "onward"
+    work.leave_missing_in_tx(conn, acts, grant=grant)
+    return f"Left missing: {_plural(len(acts), vendor + ' payment')}.", "onward"
 
 
 def _confirm_all(conn, r, scope, grant) -> dict:

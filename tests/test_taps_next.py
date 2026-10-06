@@ -356,13 +356,15 @@ class TapsMore(_Tapping):
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM projections WHERE status='open'").fetchone()[0], 0)
 
-    def test_a_next_page_with_nothing_left_posts_the_next_item(self):
-        """Task 7 carry: cards.card is None when a later page has nothing left; the walk
-        goes on (next_after), never a None card."""
+    def test_a_later_page_whose_payments_were_matched_still_offers_never(self):
+        """Task 7 carry, ported for d1 (Never's set is the rehearsed rule): page 2's
+        payments matched meanwhile are still payments Never changes (their expectation),
+        so page 2 lists them marked, offers no exemption, and Never there binds all 30."""
         import matches
         pids = [self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1)) for i in range(30)]
         page1 = self.tap(self.end(), "Review 1")["next"]
-        for p in self.scope_of(page1)["pages"][1]:
+        later = self.scope_of(page1)["pages"][1]
+        for p in later:
             matches.record_match(self.conn, pid=p, author="auto",
                                  doc_id=self.doc(amount_minor=self.conn.execute(
                                      "SELECT amount_minor FROM bank_rows b JOIN projections"
@@ -370,10 +372,26 @@ class TapsMore(_Tapping):
                                      (p,)).fetchone()[0]),
                                  expected_revision=self.rev(p), token=self.token)
         out = self.tap(page1, "Next page")
-        self.assertTrue(out["receipt"].strip())
-        self.assertNotIn("Page 2", out["receipt"])
-        self.assertIn("still open", out["next"]["text"])
+        self.assertEqual(out["receipt"], "Page 2 of 2.")
+        lines = out["next"]["text"].splitlines()
+        self.assertEqual(sum(ln.endswith("· matched") for ln in lines), len(later))
+        self.assertEqual([b["label"] for b in out["next"]["buttons"]], ["Never for Adobe"])
+        self.assertEqual(self.scope_of(out["next"])["missing"], [])
+        done = self.tap(out["next"], "Never for Adobe")
+        self.assertEqual(done["receipt"], "Adobe never needs an invoice: 30 payments changed.")
         self.assertEqual(len(pids), 30)
+
+    def test_a_vendor_with_no_missing_payment_left_has_no_card(self):
+        """Task 7 carry: cards.card is None when nothing of the vendor is missing any more;
+        the walk goes on (next_after), never a None card."""
+        import matches
+        a = self.pay("Adobe", 100)
+        end = self.end()
+        matches.record_match(self.conn, pid=a, author="auto",
+                             doc_id=self.doc(amount_minor=100),
+                             expected_revision=self.rev(a), token=self.token)
+        out = self.tap(end, "Review 1")
+        self.assertIn("all answered", out["next"]["text"])
 
     def test_leave_missing_on_a_changed_page_commits_nothing(self):
         a = self.pay("Adobe", 100)

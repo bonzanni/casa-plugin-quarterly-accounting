@@ -143,9 +143,11 @@ class Authority(StoreCase):
         text = (ROOT / "server/taps.py").read_text()
         for handler in ("def verdict", "def apply_reading", "def bind_account"):
             self.assertIn(handler, text)
-        rehearsals = [p.name for p in (ROOT / "server").glob("*.py")
-                      if "authority.rehearsal(" in p.read_text()]
-        self.assertEqual(rehearsals, ["reply.py"])
+        rehearsals = sorted(p.name for p in (ROOT / "server").glob("*.py")
+                            if "authority.rehearsal(" in p.read_text())
+        # d1 ruling (Terra S1): cards.never_set rehearses [Never for X]'s rule to learn its
+        # set; a rehearsal always rolls back (test_d1_review pins that it leaves nothing)
+        self.assertEqual(rehearsals, ["cards.py", "reply.py"])
 
     def test_no_server_module_constructs_a_grant_yet(self):
         """Until taps.py exists (Tasks 5–7), nothing in server/ mints operator authority."""
