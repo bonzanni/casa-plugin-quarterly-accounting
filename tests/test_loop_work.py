@@ -145,7 +145,8 @@ class Work(StoreCase):
         p = lineage.projection(self.conn, pid)
         self.assertTrue(loop._handover_fits(self.conn, pid, p, row, [ninth]))
         self.assertEqual(len(loop.handed_candidates(cands, [])), loop.CANDIDATES_MAX)
-        self.assertTrue(first)
+        self.assertEqual({c["doc_id"] for c in cands if c["vendor"] == "Adobe"},
+                         {first, ninth})                                     # both exact
 
     def test_a_trigger_beyond_the_cap_is_handed_out_and_only_then_considered(self):
         import decide, loop
@@ -216,7 +217,10 @@ class Work(StoreCase):
         unit = loop.vendor_unit(self.conn, self.job_id)
         self.assertEqual([p["pid"] for p in unit["payments"]], [pid])
         self.assertIn(usd, [c["doc_id"] for c in unit["payments"][0]["candidates"]])
-        self.assertTrue(req)
+        self.assertEqual(tuple(self.conn.execute("SELECT state, pass_id FROM work_requests WHERE"
+                                           " request_id=?", (req,)).fetchone()),
+                         ("taken", self.pass_id))
+        self.assertEqual(loop.run_handover_docs(self.conn, self.job_id), [usd])
 
     def test_a_large_vendor_is_split_and_each_part_handed_at_most_twice(self):
         import loop
@@ -225,6 +229,19 @@ class Work(StoreCase):
         loop.build_work(self.conn, self.job_id)
         first = loop.vendor_unit(self.conn, self.job_id)
         self.assertEqual(len(first["payments"]), loop.GROUP_MAX)
+        again = loop.vendor_unit(self.conn, self.job_id)            # undecided: once more
+        self.assertEqual([p["pid"] for p in again["payments"]],
+                         [p["pid"] for p in first["payments"]])
+        rest = loop.vendor_unit(self.conn, self.job_id)
+        self.assertEqual(len(rest["payments"]), 3)
+        self.assertFalse({p["pid"] for p in rest["payments"]}
+                         & {p["pid"] for p in first["payments"]})
+        self.assertEqual(rest["vendor"], "Adobe")
+        self.assertEqual(len(loop.vendor_unit(self.conn, self.job_id)["payments"]), 3)
+        self.assertIsNone(loop.vendor_unit(self.conn, self.job_id))   # each part twice
+        self.assertEqual(tuple(self.conn.execute(
+            "SELECT count(*), min(handed), max(handed), count(outcome) FROM run_work WHERE"
+            " job_id=?", (self.job_id,)).fetchone()), (loop.GROUP_MAX + 3, 2, 2, 0))
 
     def test_a_vendors_second_split_group_reuses_the_runs_search(self):
         import decide, loop, work
@@ -395,8 +412,44 @@ class Work(StoreCase):
         rid = self.show(pid)                    # the operator pairs it between hand-outs
         self.operator_pair(pid=pid, doc_id=d, expected_revision=self.rev(pid), render_id=rid)
         self.assertIsNone(loop.vendor_unit(self.conn, self.job_id))
-        self.assertEqual(tuple(self.conn.execute("SELECT handed, outcome FROM run_work WHERE pid=?",
-                                           (pid,)).fetchone()), (loop.HAND_MAX, None))
+        self.assertEqual(tuple(self.conn.execute("SELECT handed, outcome FROM run_work WHERE"
+                                                 " pid=?", (pid,)).fetchone()), (0, "settled"))
+
+    def test_left_missing_between_hand_outs_is_settled(self):
+        import loop
+        pid = self.pay()
+        self.listed()
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET search_state='accepted-missing' WHERE"
+                              " pid=?", (pid,))
+        self.assertIsNone(loop.vendor_unit(self.conn, self.job_id))
+        self.assertEqual(self.conn.execute("SELECT outcome FROM run_work WHERE pid=?",
+                                           (pid,)).fetchone()[0], "settled")
+
+    def test_a_reopening_document_another_vendor_took_settles_the_entry(self):
+        """Review fix round 1: an own-mail document reopens P and fits Q too; Q's vendor
+        goes first and takes it; P is no longer work — settled, never a cut entry."""
+        import decide, loop
+        p = self.pay(who="Zapier", day="2026-09-02")
+        a = self.doc(vendor="Zapier", issuer="Zapier", document_date="2026-09-01")
+        self.machine_match(p, a, self.token)
+        q = self.pay(who="Adobe", day="2026-09-03")
+        d = self.doc(vendor=None, document_date="2026-09-03")
+        self.file_later(d)
+        self.assertEqual(self.listed(), [q, p])                   # Adobe, then Zapier
+        self.assertEqual(self.why_of(p), "reopen")
+        unit = loop.vendor_unit(self.conn, self.job_id)
+        self.assertEqual([x["pid"] for x in unit["payments"]], [q])
+        out = decide.decide(self.conn, self.token, [{
+            "pid": q, "outcome": "match", "doc_id": d, "document_date": "2026-09-03",
+            "expected_revision": self.rev(q)}])
+        self.assertTrue(out["results"][0]["applied"])
+        self.assertIsNone(loop.vendor_unit(self.conn, self.job_id))
+        self.assertEqual(tuple(self.conn.execute(
+            "SELECT why, outcome, handed FROM run_work WHERE pid=?", (p,)).fetchone()),
+            ("reopen", "settled", 0))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM run_work WHERE job_id=? AND"
+                                           " outcome IS NULL", (self.job_id,)).fetchone()[0], 0)
 
     def test_the_unit_is_bounded_and_carries_the_vendor_kb(self):
         import kb, loop

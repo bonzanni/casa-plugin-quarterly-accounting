@@ -291,8 +291,8 @@ def _vendor_searches(conn, job_id, vendor) -> dict:
 
 def vendor_unit(conn, job_id):
     """The next vendor group of the work list (§2.2), or None when nothing is left to hand
-    out: undecided entries handed fewer than HAND_MAX times, by vendor then date, at most
-    GROUP_MAX of one vendor. Each payment carries its must-show documents (its triggers
+    out: undecided entries (outcome NULL) handed fewer than HAND_MAX times, by vendor then
+    date, at most GROUP_MAX of one vendor; an entry no longer work takes outcome 'settled'. Each payment carries its must-show documents (its triggers
     and exact fit) first, then up to CANDIDATES_MAX others; handed_upto records the latest
     filed_seq among the documents actually handed out (what a decision then considered)."""
     import work
@@ -309,9 +309,12 @@ def vendor_unit(conn, job_id):
             row = lineage.live_row(conn, p)
             if p["merged_into"] is not None or row is None or p["ended"] or \
                     not still_work(conn, r, p, row, handed_docs):
-                # settled meanwhile (an operator tap): nothing to decide; counted handed out
-                conn.execute("UPDATE run_work SET handed=? WHERE job_id=? AND pid=?",
-                             (HAND_MAX, job_id, r["pid"]))
+                # settled meanwhile (an operator tap, [Leave missing], or the document that
+                # listed it taken by another payment's decision): nothing to decide. A
+                # terminal outcome of its own, never confused with a cut, undecided entry
+                # ("missing · search incomplete", which is outcome NULL)
+                conn.execute("UPDATE run_work SET outcome='settled' WHERE job_id=? AND pid=?",
+                             (job_id, r["pid"]))
                 continue
             live.append((kb.norm(r["vendor"]), dates.effective_date(row) or "", r["pid"], r,
                          row, p))

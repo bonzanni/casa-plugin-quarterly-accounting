@@ -140,7 +140,8 @@ RUN_WORK_DDL = """CREATE TABLE IF NOT EXISTS run_work (
   vendor TEXT NOT NULL,          -- loop.vendor_of: the group it is handed out in (D1)
   why TEXT NOT NULL CHECK (why IN ('open', 'new', 'reopen', 'competitor', 'changed',
                                    'handover')),
-  outcome TEXT CHECK (outcome IN ('match', 'propose', 'missing')),
+  outcome TEXT CHECK (outcome IN ('match', 'propose', 'missing',
+                                  'settled')),   -- settled: no longer work at hand-out
   reason TEXT,                   -- a `missing` outcome's reason, as the model gave it (§2.2)
   handed INTEGER NOT NULL DEFAULT 0,     -- vendor units that carried it (HAND_MAX, D8)
   handed_upto INTEGER,           -- the latest filed_seq among the documents handed out for it
