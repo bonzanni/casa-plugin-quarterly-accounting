@@ -45,7 +45,7 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              # the simple loop's vendor unit fields (§2.2)
              "exact_fit", "search_window", "vendor_queries",
              # d3: every unit's call budget
-             "max_calls"}
+             "max_calls", "unfiled", "unfiled_total"}
 # §15: tools that left the surface in S7 (their functions stay server-side).
 REMOVED_S7 = ("job_report", "apply_reply", "confirm_match", "reject_match", "set_exemption",
               "stop_chasing", "set_watermark", "set_package_name")
@@ -395,11 +395,12 @@ class TestJob(TempEnv):
 
     def test_the_filing_records_gmail_skips_what_is_filed_and_names_no_vendor(self):
         """The gmail probe is the filing's own search (simple loop §2); own mail is no
-        vendor's."""
-        f = self.units("filing", "### `vendor`")
+        vendor's. d4: the probe carries every ref found; the server answers the exact
+        unfiled ones."""
+        f = flat(self.units("filing", "### `vendor`"))
         for phrase in ('`record_probe(pass_token, kind="gmail", ok=false, absent=true)`',
-                       "Skip every file whose ref is in `filed_refs`",
-                       "File each other attachment once, newest first",
+                       'data={"refs": [each attachment\'s ref, newest first]})`',
+                       "File each ref its answer lists in `unfiled`, in order",
                        "source_ref=<message id>:<attachment id>",
                        'source="manual-email", extraction_author="specialist"',
                        "no `vendor`: your own mail is no vendor's",
@@ -414,10 +415,14 @@ class TestJob(TempEnv):
         checkpoints with job_next, the unit comes again; record_filing only when every
         attachment is filed; a vendor continuation skips what it filed."""
         turn = flat(section(JOB, "## Every turn", "**Refusals.**"))
-        self.assertIn("**Budget:** a unit carries `max_calls`; at that many calls for it, stop "
-                      "where you are and call `job_next`: an unfinished unit comes again.", turn)
+        self.assertIn("**Budget:** a unit carries `max_calls`, its closing write (`decide`, "
+                      "`record_filing`, `record_mirror`) included: keep a call for it. At "
+                      "`max_calls`, stop and call `job_next`: an unfinished unit comes again.",
+                      turn)
         f = flat(self.units("filing", "### `vendor`"))
-        self.assertIn("When all are filed: `record_filing(pass_token)`.", f)
+        self.assertIn("When `unfiled` was all of `unfiled_total` (or no search ran): "
+                      "`record_filing(pass_token)`.", f)
+        self.assertNotIn("filed_refs", f)
         self.assertNotIn("max_files", JOB)
         self.assertIn("**File** every plausible invoice found (none in `filed_refs`), reading "
                       "each once", flat(self.vendor()))
@@ -427,7 +432,7 @@ class TestJob(TempEnv):
         issuer and number — own mail with no vendor (a candidate, never an exact_fit), the
         vendor search's filing with the unit's vendor."""
         f = flat(self.units("filing", "### `vendor`"))
-        self.assertIn("read each and pass its fields: `ingest_document(source_path, kind, "
+        self.assertIn("read each, pass its fields: `ingest_document(source_path, kind, "
                       'source="manual-email", extraction_author="specialist", '
                       "source_ref=<message id>:<attachment id>, " + self.READING, f)
         self.assertNotIn("vendor=", f)

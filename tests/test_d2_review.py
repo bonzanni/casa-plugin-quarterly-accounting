@@ -66,7 +66,8 @@ class OwnMailFilingIsSliced(StoreCase):
             u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
             self.drv.calls += 1
             if u["unit"] == "filing":
-                seen.append(len(u["filed_refs"]))
+                seen.append(self.conn.execute("SELECT count(*) FROM operator_refs"
+                                              ).fetchone()[0])
                 filed_at = self.conn.execute("SELECT filed_at FROM runs WHERE"
                                              " job_id='d2d2d2d2-a2'").fetchone()[0]
                 self.assertIsNone(filed_at)                 # not drained yet
@@ -76,24 +77,21 @@ class OwnMailFilingIsSliced(StoreCase):
                 self.drv.claim("d2d2d2d2-a2")
                 continue
             self.drv.do(u, self.drv.token)
-        self.assertGreater(len(seen), 1)                     # handed again, refs growing
+        self.assertGreater(len(seen), 1)               # handed again, filed refs growing
         self.assertEqual(seen, sorted(seen))
         self.assertGreater(seen[-1], 0)
         self.assertIsNotNone(self.conn.execute(
             "SELECT filed_at FROM runs WHERE job_id='d2d2d2d2-a2'").fetchone()[0])
 
-    def test_filed_refs_hold_every_ref_of_the_filing_window(self):
-        """With more files than the old 60-ref cap, the filing still drains: filed_refs
-        lists each ref filed in the window, so no filed attachment is handed again."""
-        import work
+    def test_every_filed_ref_is_held_exactly(self):
+        """More files than d2's old 60-ref cap: every ref is filed once and held whole
+        (d4: membership is the server's, on the exact refs)."""
         g = self.drv.gmail
         for i in range(83):
             g.own(70000 + i)
         self.drv.run_job("d2d2d2d2-a3")
-        refs = work.filed_refs(self.conn)
-        self.assertEqual(len(refs), 83)
-        self.assertEqual(len(set(refs)), 83)
-
+        refs = [r[0] for r in self.conn.execute("SELECT ref FROM operator_refs")]
+        self.assertEqual(sorted(refs), sorted(m["ref"] for m in g.own_mail))
 
     def test_a_new_ref_for_bytes_already_held_is_progress(self):
         """A slice whose attachments are all copies of held files still persisted work —

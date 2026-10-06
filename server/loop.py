@@ -367,15 +367,19 @@ def vendor_unit_in_tx(conn, job_id, hand_seq=None):
 
 def _vendor_refs(conn, job_id, vendor) -> list:
     """d3: what this run already filed for the vendor (its documents' source refs, newest
-    first) — a continuation skips those messages."""
-    import work
+    first, EXACT — d4: never clipped), at most VENDOR_REFS_MAX — a continuation skips those
+    messages. Past the bound the oldest are left out: filed again they are the same bytes
+    (ingest answers created false), never a skipped unfiled one."""
     start = conn.execute("SELECT min(seq) FROM claims WHERE job_id=?", (job_id,)).fetchone()[0]
-    return work.refs_in_budget(
-        r["source_ref"] for r in conn.execute(
-            "SELECT source_ref, vendor FROM documents WHERE vendor IS NOT NULL AND"
-            " source_ref IS NOT NULL AND filed_seq > ? ORDER BY filed_seq DESC",
-            (start or 0,))
-        if kb.norm(r["vendor"]) == kb.norm(vendor))
+    out = []
+    for r in conn.execute("SELECT source_ref, vendor FROM documents WHERE vendor IS NOT NULL"
+                          " AND source_ref IS NOT NULL AND filed_seq > ? ORDER BY filed_seq"
+                          " DESC", (start or 0,)):
+        if kb.norm(r["vendor"]) == kb.norm(vendor) and r["source_ref"] not in out:
+            out.append(r["source_ref"])
+            if len(out) == VENDOR_REFS_MAX:
+                break
+    return out
 
 
 def completion_sig(conn, quarter) -> str:
@@ -399,11 +403,29 @@ def completion_sig(conn, quarter) -> str:
 CALLS_SOFT = 65          # §2.2: hand out payments while calls_made < about 65 (Casa: 80)
 CALLS_HARD = 75          # a mirror unit never carries the batch past this many calls
 OFFER_MAX = 2            # S7 §5: one rendering is handed out at most this often per run
-# d3 (Astra S1, generalized): every unit carries `max_calls`, the room before the batch's
-# bound; at it the model stops and checkpoints with job_next. A filing or vendor unit the
-# model left unfinished is handed again as a continuation; one that persisted work does not
-# count against HAND_MAX. A continuation is handed only with at least UNIT_MIN_CALLS of room
-UNIT_MIN_CALLS = 10
+# d3/d4 (Astra S1, generalized): every unit carries `max_calls` (unit_room), the calls it
+# may make before the batch's bound — its own closing write included (CLOSING), the
+# job_next checkpoint reserved. At it the model stops and checkpoints with job_next. A
+# filing or vendor unit left unfinished is handed again as a continuation; one that
+# persisted work does not count against HAND_MAX. A unit is handed only when its least
+# useful work and its closing calls fit (unit_fits); otherwise the batch ends
+CLOSING = {"vendor": 1, "filing": 1, "mirror": 1, "post": 1, "view": 1}  # decide,
+# record_filing, record_mirror, mark_rendering_delivered
+MIN_WORK = {"probes": 9, "snapshot": 2, "vendor": 8, "filing": 3, "mirror": 1, "post": 1,
+            "view": 1}
+VENDOR_REFS_MAX = 100    # a vendor continuation's filed refs, exact, newest first
+
+
+def unit_room(unit, calls_made) -> int:
+    """The unit's `max_calls`: the room before the batch's bound (CALLS_HARD for the mirror
+    and the posts, CALLS_SOFT for the rest) less the job_next checkpoint."""
+    bound = CALLS_HARD if unit in ("mirror", "post", "view") else CALLS_SOFT
+    return bound - calls_made - 1
+
+
+def unit_fits(unit, calls_made) -> bool:
+    """d4: the unit's least useful work and its closing calls fit in its room."""
+    return unit_room(unit, calls_made) >= MIN_WORK.get(unit, 1) + CLOSING.get(unit, 0)
 WORDS = {"probes": "Reading the bank", "snapshot": "Importing the bank read",
          "filing": "Filing your own emailed documents", "vendor": "Matching invoices",
          "mirror": "Updating the bank ledger", "post": "Posting the result",
@@ -610,7 +632,7 @@ def _choose(conn, token, job_id, calls_made, logs) -> dict:
         take(conn, job_id, p["pass_id"])
         u = _acquire(conn, token, job_id, p)
         if u is not None:
-            if u["unit"] == "snapshot" and calls_made >= CALLS_SOFT:
+            if not unit_fits(u["unit"], calls_made):
                 return {"unit": "end-batch"}            # the import goes to a fresh batch
             return u
     run = _run(conn, job_id)
@@ -619,16 +641,15 @@ def _choose(conn, token, job_id, calls_made, logs) -> dict:
         if run["filed_at"] is None:
             # d3: handed again (a continuation, within its call budget) until
             # record_filing says the attachments are drained
-            if CALLS_SOFT - calls_made < UNIT_MIN_CALLS:
+            if not unit_fits("filing", calls_made):
                 return {"unit": "end-batch"}
             _handing(conn, job_id, "filing", db.next_seq(conn))
-            return {"unit": "filing", "filed_refs": work.filed_refs(conn),
-                    "handover_docs": run_handover_docs(conn, job_id)}
+            return {"unit": "filing", "handover_docs": run_handover_docs(conn, job_id)}
         if run["listed_at"] is None:
             build_work_in_tx(conn, job_id, run_handover_docs(conn, job_id))
             conn.execute("UPDATE runs SET listed_at=? WHERE job_id=?", (db.now(), job_id))
         if _undecided(conn, job_id):
-            if CALLS_SOFT - calls_made < UNIT_MIN_CALLS:
+            if not unit_fits("vendor", calls_made):
                 return {"unit": "end-batch"}
             seq = db.next_seq(conn)
             u = vendor_unit_in_tx(conn, job_id, hand_seq=seq)
@@ -643,15 +664,16 @@ def _choose(conn, token, job_id, calls_made, logs) -> dict:
             if line:
                 logs.append(line)
             if mirror.owed(conn, job_id) > 0:
-                room = CALLS_HARD - calls_made
-                if room < 1:
+                # d4 (Astra S1): the unit's calls leave room for its record_mirror
+                if not unit_fits("mirror", calls_made):
                     return {"unit": "end-batch"}
-                return {"unit": "mirror", "calls": mirror.hand_calls_in_tx(conn, job_id, room)}
+                return {"unit": "mirror", "calls": mirror.hand_calls_in_tx(
+                    conn, job_id, unit_room("mirror", calls_made) - CLOSING["mirror"])}
             conn.execute("UPDATE runs SET mirrored_at=coalesce(mirrored_at, ?) WHERE job_id=?",
                          (db.now(), job_id))
     u = _post_unit(conn, job_id, _run(conn, job_id))
     if u is not None:
-        return u
+        return u if unit_fits(u["unit"], calls_made) else {"unit": "end-batch"}
     run = _run(conn, job_id)
     p = run_pass(conn, run)
     if p is not None:
@@ -667,8 +689,7 @@ def _close(conn, token, out, calls_made) -> dict:
     (`end-batch`, `complete`) and — d3 (Astra S1) — on the FIRST answer after the batch
     persisted work (claims.progressed: a decision, a filing, a search, an import, a mirror
     report), so a batch Casa cuts later has already reported it. Every unit carries
-    `max_calls`, the room before the batch's bound (CALLS_HARD for the mirror and the
-    posts, which are sized to it; CALLS_SOFT for the rest)."""
+    `max_calls` (unit_room: its closing write included, the checkpoint reserved)."""
     import job
     c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
     ending = out["unit"] in ("end-batch", "complete")
@@ -683,8 +704,7 @@ def _close(conn, token, out, calls_made) -> dict:
     summary = (job.run_end(conn, c["job_id"])[1] if out["unit"] == "complete"
                else WORDS[out["unit"]])
     if not ending:
-        bound = CALLS_HARD if out["unit"] in ("mirror", "post", "view") else CALLS_SOFT
-        out["max_calls"] = max(bound - calls_made, 1)
+        out["max_calls"] = max(unit_room(out["unit"], calls_made), 1)
     out.update(pass_token=token, report=report,
                progress={"summary": summary, "progressed": progressed, "done": None,
                          "remaining": None})

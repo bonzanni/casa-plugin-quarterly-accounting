@@ -114,6 +114,13 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None, 
         if isinstance(acq, bool) or not isinstance(acq, int):
             raise db.Refusal("acq is the number job_next handed out with the bank read")
         data = {**(data or {}), "acq": acq}
+    refs = None
+    if kind == "gmail" and data is not None and "refs" in data:
+        # d4: the filing's found attachments, exact; answered with the unfiled ones
+        refs = data["refs"]
+        if not isinstance(refs, list) or not all(isinstance(r, str) and r for r in refs):
+            raise db.Refusal("the gmail probe's refs is a list of <message id>:<attachment id>")
+        data = {**{k: v for k, v in data.items() if k != "refs"}, "refs_n": len(refs)}
     if kind == "ledger" and data is not None and "missing" in data:
         missing = data["missing"]
         if not isinstance(missing, list) or not all(isinstance(w, str) for w in missing):
@@ -166,7 +173,11 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None, 
                              " observed_at, pass_id, failing_since) VALUES"
                              " ('bound_account', ?, '', NULL, ?, ?, ?)",
                              (1 if present else 0, now, pass_id, since))
-        return {"recorded": kind, "ok": bool(ok), "observed_at": now}
+        out = {"recorded": kind, "ok": bool(ok), "observed_at": now}
+        if refs is not None:
+            import work
+            out.update(work.unfiled(conn, refs))
+        return out
 
 
 def store_populated(conn) -> bool:

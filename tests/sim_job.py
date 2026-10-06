@@ -9,10 +9,10 @@ driver makes in a turn is counted into `calls_made` (a new turn — a claim — 
             (bank_sync with the unit's acq), check_setup
   snapshot  export_history -> import_ledger_export(acq) -> each erase candidate:
             get_transaction; "no transaction #N" -> record_not_found
-  filing    one search of the operator's own mail, record_probe(gmail, ok) — failed when
-            Gmail.down — then each attachment not in `filed_refs` filed, newest first
-            (download, Read, ingest_document with the reading: amount, currency, date,
-            issuer, number; no vendor), and record_filing once none is left unfiled
+  filing    one search of the operator's own mail, record_probe(gmail, ok, data.refs) —
+            failed when Gmail.down — then each attachment the probe answers `unfiled`,
+            newest first (download, Read, ingest_document with the reading: amount,
+            currency, date, issuer, number; no vendor), and record_filing once none is left
   vendor    the skill's search rule (Task 16): only while a payment is uncovered (no exact
             fit, no unheld candidate), the hinted search (a learned hint, not yet run this
             run), then the plain one (still uncovered, not yet run); each message found
@@ -73,6 +73,8 @@ def ledger_state(listing: str) -> dict:
 
 MAX_UNITS = 600         # a cursor that never finishes is a failure, never a hang
 CASA_IDLE_BATCHES = 3   # Casa ends a run after this many batches without reported progress
+# d4: the writes that close a unit (loop.CLOSING), made from the unit's reserved calls
+CLOSING_TOOLS = ("decide", "record_filing", "record_mirror", "mark_rendering_delivered")
 
 
 class CasaCut(Exception):
@@ -117,13 +119,14 @@ class Gmail:
         self.down = False
 
     def own(self, amount_minor, currency="EUR", day="2026-07-05", number=None,
-            issuer="Zapier") -> str:
+            issuer="Zapier", ref=None) -> str:
         """One self-addressed mail with an invoice attachment (the operator forwarding a
-        document to themselves). Its ref, <message id>:<attachment id>."""
+        document to themselves). Its ref, <message id>:<attachment id> (`ref`: as given —
+        Gmail's attachment ids run to hundreds of characters)."""
         k = len(self.own_mail) + 1
         number = number or f"OWN-{k:03d}"
         path = self.test.publish(f"own-{number}.pdf", b"%PDF-1.4 own " + number.encode() + b"\n")
-        ref = f"own-msg-{k:03d}:att-1"
+        ref = ref or f"own-msg-{k:03d}:att-1"
         self.own_mail.append({"ref": ref, "path": path, "amount_minor": amount_minor,
                               "currency": currency, "date": day, "number": number,
                               "issuer": issuer, "seq": k})
@@ -219,6 +222,7 @@ class JobDriver:
         self.cuts = 0                   # batches Casa cut (casa_cut)
         self.batch_reported = []        # per batch: a progress report was handed (progressed)
         self._limit = None              # the unit in hand's call budget
+        self._reserve = 0               # the calls its closing write needs (loop.CLOSING)
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
 
     # --- the bank, as the operator's bank has it ------------------------------------
@@ -567,7 +571,9 @@ class JobDriver:
         """Carry out unit `u` under claim `token`, within its `max_calls` (d3): at the
         budget the unit stops where it is (the model then calls job_next)."""
         self.token = token
+        import loop
         self._limit = self.calls + u["max_calls"] if "max_calls" in u else None
+        self._reserve = loop.CLOSING.get(u["unit"], 0)     # d4: its closing write's calls
         try:
             with self._broker():
                 return getattr(self, "_" + u["unit"].replace("-", "_"))(u, token)
@@ -576,12 +582,14 @@ class JobDriver:
         finally:
             self._limit = None
 
-    def _spend(self, k=1) -> None:
+    def _spend(self, k=1, closing=False) -> None:
         """k tool calls: past Casa's bound the batch is cut; past the unit's budget the unit
-        stops (neither call is made)."""
+        stops (neither call is made). A work call keeps the unit's closing write's calls in
+        reserve (d4); the closing write itself may use them."""
         if self.casa_cut is not None and self.calls + k > self.casa_cut:
             raise CasaCut()
-        if self._limit is not None and self.calls + k > self._limit:
+        reserve = 0 if closing else self._reserve
+        if self._limit is not None and self.calls + k > self._limit - reserve:
             raise UnitBudget()
         self.calls += k
 
@@ -592,7 +600,7 @@ class JobDriver:
         import db
         import qa_server
         import tools  # noqa: F401  -- registers every tool
-        self._spend()
+        self._spend(closing=name in CLOSING_TOOLS)
         out = qa_server.TOOLS[name]["fn"](args)
         if isinstance(out, dict) and isinstance(out.get("refused"), str):
             raise db.Refusal(out["refused"])
@@ -642,19 +650,21 @@ class JobDriver:
         return None
 
     def _filing(self, u, token):
-        """The skill's filing: the search and its probe, then each attachment not in
-        `filed_refs` filed, newest first, downloaded and read once, with the reading (no
-        vendor: own mail is no vendor's); record_filing once none is left — a unit cut at
-        its `max_calls` comes again (d3)."""
+        """The skill's filing: the search, then its gmail probe with every attachment found
+        (data.refs, newest first) — answered with the exact unfiled ones (d4) — each of
+        those filed, downloaded and read once, with the reading (no vendor: own mail is no
+        vendor's); record_filing once the probe says none is left. A unit cut at its
+        `max_calls` comes again (d3)."""
         self._spend(1)
         found = self.gmail.search_emails("from:me to:me has:attachment newer_than:8d")
-        self._tool("record_probe", {"pass_token": token, "kind": "gmail",
-                                    "ok": found is not None,
-                                    **({"detail": "Gmail search failed"} if found is None
-                                       else {})})
-        for m in found or ():
-            if m["ref"] in u["filed_refs"]:
-                continue
+        out = self._tool("record_probe", {
+            "pass_token": token, "kind": "gmail", "ok": found is not None,
+            **({"detail": "Gmail search failed"} if found is None
+               else {"data": {"refs": [m["ref"] for m in found]}})})
+        todo = out.get("unfiled", []) if found else []
+        by_ref = {m["ref"]: m for m in found or ()}
+        for ref in todo:
+            m = by_ref[ref]
             self._spend(2)                                # download_attachment, Read
             self._tool("ingest_document", {
                 "source_path": m["path"], "kind": "invoice", "source": "manual-email",
@@ -662,7 +672,8 @@ class JobDriver:
                 "amount_minor": m["amount_minor"], "currency": m["currency"],
                 "document_date": m["date"], "issuer": m["issuer"],
                 "document_number": m["number"], "pass_token": token})
-        self._tool("record_filing", {"pass_token": token})
+        if not found or out["unfiled_total"] == len(todo):
+            self._tool("record_filing", {"pass_token": token})
         return None
 
     def _vendor(self, u, token):
