@@ -425,8 +425,8 @@ class TestJob(TempEnv):
         self.assertIn("Then `record_filing(pass_token)`.", f)
         self.assertNotIn("filed_refs", JOB)                  # d5: one membership, the probe's
         self.assertNotIn("max_files", JOB)
-        self.assertIn("**File** the plausible invoices found that **Which are new** (refs: "
-                      "message ids) answers `unfiled`, reading each once", flat(self.vendor()))
+        self.assertIn("**File** the plausible invoices found that **Which are new** answers "
+                      "`unfiled`, reading each once", flat(self.vendor()))
 
     def test_own_mail_and_vendor_filing_pass_the_reading(self):
         """d2 (Astra S2): the model reads each document and passes amount, currency, date,
@@ -438,10 +438,10 @@ class TestJob(TempEnv):
                       "source_ref=<message id>:<attachment id>, " + self.READING, f)
         self.assertNotIn("vendor=", f)
         v = flat(self.vendor())
-        self.assertIn("**File** the plausible invoices found that **Which are new** (refs: "
-                      "message ids) answers `unfiled`, reading each once: "
+        self.assertIn("**File** the plausible invoices found that **Which are new** answers "
+                      "`unfiled`, reading each once: "
                       '`ingest_document(source_path, kind, source="gmail", '
-                      'extraction_author="specialist", source_ref=<message id>, '
+                      'extraction_author="specialist", source_ref=<message id>:<attachment id>, '
                       "vendor=<the unit's vendor>, " + self.READING, v)
 
     def vendor(self):

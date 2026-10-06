@@ -349,13 +349,26 @@ UNFILED_SHOWN = 20
 UNFILED_BUDGET = 12_000
 
 
+def _filed(conn, ref) -> bool:
+    """`ref` (<message id>:<attachment id>) is filed: an ingest recorded it exactly, or — a
+    vendor document filed before refs named the attachment — a document holds its bare
+    message id. That legacy bare id counts for EVERY attachment of the message: the job's
+    vendor step then filed every plausible invoice of a message under the same bare id, so
+    the bare id says the message was worked whole, and which attachment(s) it covered is
+    unknowable (no attachment order is stored) — counting only a "first" one could offer
+    the filed invoice again and skip the other."""
+    bare = ref.split(":", 1)[0]
+    return conn.execute(
+        "SELECT 1 FROM operator_refs WHERE ref=? UNION ALL SELECT 1 FROM documents WHERE"
+        " source_ref=? UNION ALL SELECT 1 FROM documents WHERE source='gmail' AND"
+        " source_ref=? AND ? LIMIT 1", (ref, ref, bare, ":" in ref)).fetchone() is not None
+
+
 def unfiled(conn, refs) -> dict:
     """Of `refs` (what a search found, newest first), the ones no ingest filed — no
     operator_refs row and no document holds the ref: {"unfiled": the first of them, exact,
     "unfiled_total": all}."""
-    todo = [r for r in dict.fromkeys(refs)
-            if conn.execute("SELECT 1 FROM operator_refs WHERE ref=? UNION ALL SELECT 1 FROM"
-                            " documents WHERE source_ref=? LIMIT 1", (r, r)).fetchone() is None]
+    todo = [r for r in dict.fromkeys(refs) if not _filed(conn, r)]
     shown, used = [], 0
     for r in todo[:UNFILED_SHOWN]:
         used += budget.size([r]) + 1

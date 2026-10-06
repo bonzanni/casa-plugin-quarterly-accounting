@@ -101,9 +101,9 @@ One vendor's payments, each with its `revision`, the filed documents that could 
    still uncovered. Record each:
    `record_search(pids=[the payments it was for], search="hinted", queries=[…], found_candidate=…, pass_token)`
    (`search="plain"`, `search="payment"`).
-3. **File** the plausible invoices found that **Which are new** (refs: message ids)
-   answers `unfiled`, reading each once:
-   `ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<message id>, vendor=<the unit's vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`.
+3. **File** the plausible invoices found that **Which are new** answers `unfiled`,
+   reading each once:
+   `ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<message id>:<attachment id>, vendor=<the unit's vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`.
 4. **Decide the vendor's payments in ONE call:** `decide(pass_token, entries=[…])`, one
    entry per payment:
    - `{pid, expected_revision, outcome: "match", doc_id, document_date}` only when you are

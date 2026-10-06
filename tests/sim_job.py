@@ -133,15 +133,20 @@ class Gmail:
         return ref
 
     def invoice(self, vendor, amount_minor, currency, day, number, sender=None,
-                kind="invoice", sent=False) -> None:
+                kind="invoice", sent=False, message=None) -> str:
         """One message from `sender` (default billing@<vendor>.com) carrying a PDF of
-        `kind`. `sent`: a sales invoice in the operator's Sent folder."""
+        `kind`. `sent`: a sales invoice in the operator's Sent folder. `message`: the id of
+        an earlier message this PDF is one more attachment of. Its ref,
+        <message id>:<attachment id>."""
         sender = sender or "billing@%s.com" % re.sub(r"[^a-z0-9]", "", vendor.lower())
         path = self.test.publish(f"{number}.pdf", b"%PDF-1.4 " + number.encode() + b"\n")
+        mid = message or f"msg-{len(self.messages) + 1:04d}"
+        att = 1 + sum(1 for m in self.messages if m["id"] == mid)
         self.messages.append({"vendor": vendor, "amount_minor": amount_minor,
                               "currency": currency, "date": day, "number": number,
                               "path": path, "sender": sender, "kind": kind, "sent": sent,
-                              "id": f"msg-{len(self.messages) + 1:04d}"})
+                              "id": mid, "ref": f"{mid}:att-{att}"})
+        return f"{mid}:att-{att}"
 
     def search_emails(self, query):
         """The messages the query finds; None when Gmail is down."""
@@ -717,8 +722,8 @@ class JobDriver:
             found = self.gmail.search_emails(query) or []
             self.search_log.append((vendor, kind, query))
             searched.append((kind, query, want, found))
-            by_id = {m["id"]: m for m in found}
-            for ref in self._unfiled(token, [m["id"] for m in found]):
+            by_id = {m["ref"]: m for m in found}
+            for ref in self._unfiled(token, [m["ref"] for m in found]):
                 m = by_id[ref]                 # d5: only what no ingest filed, any run
                 if m["path"] in seen:
                     continue
@@ -727,7 +732,7 @@ class JobDriver:
                 out = self._tool("ingest_document", {
                     "source_path": m["path"], "kind": m["kind"], "source": "gmail",
                     "extraction_author": "specialist", "counterparty": m["vendor"],
-                    "source_ref": m["id"], "issuer": m["vendor"], "document_date": m["date"],
+                    "source_ref": m["ref"], "issuer": m["vendor"], "document_date": m["date"],
                     "document_number": m["number"], "amount_minor": m["amount_minor"],
                     "currency": m["currency"], "vendor": vendor, "pass_token": token})
                 if not out["created"]:

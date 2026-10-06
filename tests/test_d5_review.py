@@ -56,7 +56,7 @@ class OneMembershipAcrossRuns(StoreCase):
         own = drv.gmail.own(1000, day=drv.DATES[0], number="OWN-1")
         drv.gmail.invoice("Zapier", 2000, "EUR", drv.DATES[1], "INV-2")
         drv.run_job("d5d5d5d5-b1")
-        vendor_ref = drv.gmail.messages[0]["id"]
+        vendor_ref = drv.gmail.messages[0]["ref"]
         self.assertEqual(sorted(r[0] for r in self.conn.execute(
             "SELECT ref FROM operator_refs")), sorted([own, vendor_ref]))
         drv.claim("d5d5d5d5-b2")
@@ -64,9 +64,11 @@ class OneMembershipAcrossRuns(StoreCase):
                                              data={"refs": ["new-msg:att-1", own, vendor_ref]}))
         self.assertEqual((out["unfiled"], out["unfiled_total"]), (["new-msg:att-1"], 1))
 
-    def test_a_document_filed_before_the_ref_table_knew_vendor_refs_counts(self):
-        """A document whose source_ref no operator_refs row holds (filed before d5) is
-        still filed for the probe."""
+    def test_a_legacy_bare_message_id_counts_for_every_attachment_of_it(self):
+        """A vendor document filed before refs named the attachment holds the bare message
+        id: it counts as filed for every attachment of that message (the vendor step then
+        filed every plausible invoice of a message under that one id); a message it does
+        not name is offered."""
         import db
         drv = JobDriver(self, payments=1)
         drv.claim("d5d5d5d5-c1")
@@ -76,5 +78,21 @@ class OneMembershipAcrossRuns(StoreCase):
                               (doc,))
             self.conn.execute("DELETE FROM operator_refs")
         out = drv._tool("record_probe", dict(pass_token=drv.token, kind="gmail", ok=True,
-                                             data={"refs": ["legacy-msg", "fresh-msg"]}))
-        self.assertEqual(out["unfiled"], ["fresh-msg"])
+                                             data={"refs": ["legacy-msg:att-1",
+                                                            "legacy-msg:att-2",
+                                                            "fresh-msg:att-1"]}))
+        self.assertEqual(out["unfiled"], ["fresh-msg:att-1"])
+
+    def test_one_vendor_email_with_two_invoices_files_and_matches_both(self):
+        drv = JobDriver(self, payments=2)                   # Zapier EUR 10.00 and 20.00
+        first = drv.gmail.invoice("Zapier", 1000, "EUR", drv.DATES[0], "INV-A")
+        second = drv.gmail.invoice("Zapier", 2000, "EUR", drv.DATES[1], "INV-B",
+                                   message=drv.gmail.messages[0]["id"])
+        self.assertEqual(first.split(":")[0], second.split(":")[0])   # one email
+        drv.casa_cut = CASA_CALLS
+        drv.run_job("d5d5d5d5-d1")
+        self.assertEqual(sorted(r[0] for r in self.conn.execute(
+            "SELECT source_ref FROM documents")), sorted([first, second]))
+        self.assertEqual(dict(self.conn.execute(
+            "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
+            {"matched": 2})
