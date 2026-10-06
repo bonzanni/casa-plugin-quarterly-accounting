@@ -117,3 +117,31 @@ class ResetKeepKB(StoreCase):
                                text=True)
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertTrue(list(pathlib.Path(d).glob(db.DB_NAME + ".pre-reset-*")))
+
+    def test_main_success_path_backs_up_the_pre_reset_rows_privately(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            dbp = pathlib.Path(d) / db.DB_NAME
+            env = dict(os.environ, CLAUDE_PLUGIN_DATA=d)
+            conn = db.open_store(dbp)
+            conn.execute("INSERT INTO binding (id, account_id, account_label, watermark,"
+                         " bound_at, package_name) VALUES (1,'acc','L','2026-07-01','t','p')")
+            conn.execute("INSERT INTO documents (sha256, ext, size, kind, source,"
+                         " extraction_author, ingested_at, ingest_quarter)"
+                         " VALUES ('ab','pdf',1,'invoice','email','a','t','2026Q3')")
+            conn.close()
+            outs = []
+            for _ in range(2):
+                r = subprocess.run([sys.executable, str(SCRIPT)], env=env,
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                outs.append(json.loads(r.stdout))
+            self.assertNotEqual(outs[0]["backup"], outs[1]["backup"])
+            first = pathlib.Path(outs[0]["backup"])
+            self.assertEqual(first.stat().st_mode & 0o777, 0o600)
+            c = db.sqlite3.connect(str(first))
+            self.assertEqual(c.execute("SELECT count(*) FROM documents").fetchone()[0], 1)
+            c.close()
+            c = db.sqlite3.connect(str(dbp))
+            self.assertEqual(c.execute("SELECT count(*) FROM documents").fetchone()[0], 0)
+            c.close()

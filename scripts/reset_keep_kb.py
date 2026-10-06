@@ -26,6 +26,7 @@ copies the store beside itself (accounting.sqlite.pre-reset-<time>); the copy is
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sqlite3
 import sys
@@ -93,20 +94,35 @@ def main(argv) -> int:
             print(f"refused: the store is at schema {version}, this script needs "
                   f"{REQUIRED_SCHEMA}; nothing was changed", file=sys.stderr)
             return 2
-        backup = path.with_name(f"{path.name}.pre-reset-{db.now().replace(':', '')}")
+        stem = f"{path.name}.pre-reset-{db.now().replace(':', '')}"
+        backup, n = path.with_name(stem), 0
+        while True:     # never overwrite: a second run in the same second gets a counter
+            try:
+                fd = os.open(str(backup), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.close(fd)
+                break
+            except FileExistsError:
+                n += 1
+                backup = path.with_name(f"{stem}-{n}")
         dest = sqlite3.connect(str(backup))
         try:
             raw.backup(dest)
         finally:
             dest.close()
+        os.chmod(backup, 0o600)
     finally:
         raw.close()
     conn = db.open_store()
     try:
         out = reset_keep_kb(conn)
     except db.Refusal as exc:
-        print(f"refused: {exc}", file=sys.stderr)
-        return 2
+        kind = "busy" if isinstance(exc, db.Busy) else "refused"
+        print(f"{kind}: {exc}; the store was copied to {backup}", file=sys.stderr)
+        return 1 if kind == "busy" else 2
+    except sqlite3.IntegrityError as exc:
+        print(f"failed: {exc}; the store may be partly reset, the copy is at {backup}",
+              file=sys.stderr)
+        return 1
     finally:
         conn.close()
     out["backup"] = str(backup)
