@@ -512,3 +512,59 @@ class TestOfferIsExactlyStaging(StoreCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestKeptDeliveryGuards(StoreCase):
+    """Ported request-free from test_package_requests (Task 11 review): the delivery guards
+    the package requests' tests used to pin."""
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        self.pass_()
+        self.row(1)
+        self.pid = self.lineage_for(1)
+        self.classify(self.pid, {"software"})
+        self.settle(self.pid)
+        self.end_live_pass()
+
+    def test_a_recovered_send_takes_only_the_evidence_of_its_delivery(self):
+        import job
+        did = self.staged_package(lapsed=True)
+        job.claim(self.conn, "abcdef01-0000-4000-8000-0000000000aa")   # recovers it
+        r = self.conn.execute("SELECT status, withdrawn_at FROM deliveries WHERE"
+                              " delivery_id=?", (did,)).fetchone()
+        self.assertEqual(r["status"], "uncertain")
+        self.assertIsNotNone(r["withdrawn_at"])
+        for late in ("failed", "uncertain"):
+            with self.assertRaises(db.Refusal) as cm:
+                delivery.record_delivery(self.conn, delivery_id=did, outcome=late)
+            self.assertIn("taken back before it was recorded", str(cm.exception))
+            self.assertEqual(self.conn.execute("SELECT status FROM deliveries WHERE"
+                                               " delivery_id=?", (did,)).fetchone()[0],
+                             "uncertain")
+        posted_first(self.conn, did)                  # it had been posted: evidence wins
+        self.assertEqual(delivery.record_delivery(self.conn, delivery_id=did,
+                                                  outcome="delivered")["status"], "delivered")
+
+    def test_a_late_delivery_says_what_changed_since_the_build(self):
+        did = self.staged_package()
+        posted_first(self.conn, did)
+        self.row(1, amount_minor=12345)                       # the bank corrected it since
+        out = delivery.record_delivery(self.conn, delivery_id=did, outcome="delivered")
+        self.assertIn("speak", out)
+        self.assertIn("corrected by the bank", out["speak"]["text"])
+
+    def test_an_import_that_revokes_an_unsent_first_send_says_so(self):
+        did = self.staged_package()
+        pkg = self.conn.execute("SELECT package_id FROM deliveries WHERE delivery_id=?",
+                                (did,)).fetchone()[0]
+        with db.tx(self.conn):
+            sid = self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows,"
+                                    " max_row_id) VALUES (NULL, ?, 0, 0)",
+                                    (db.now(),)).lastrowid
+            revoked = delivery.revoke_superseded_first_sends(self.conn, sid)
+        self.assertEqual([r["delivery_id"] for r in revoked], [did])
+        import json
+        notes = [json.loads(r[0]) for r in self.conn.execute(
+            "SELECT detail FROM alerts WHERE kind='package-revoked' AND sent_at IS NULL")]
+        self.assertEqual([n["package_id"] for n in notes], [pkg])

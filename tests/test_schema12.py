@@ -141,3 +141,38 @@ class Schema12(StoreCase):
                                                  " render_id=?", (r["render_id"],))
                                     .fetchone()[0])["alerts"], [1, 2])
 
+    def test_an_open_package_request_is_told_once_when_its_table_goes(self):
+        """Task 11 review: 11 -> 12 drops the package asks; each one still open (queued,
+        being checked, buildable or built) is told once as not sent, a settled one not."""
+        import alerts, db, sqlite3
+        from tests.schema_history import build_v11_store
+        path = self.tmp / "v11r" / "accounting.sqlite"
+        path.parent.mkdir()
+        build_v11_store(path)
+        c = sqlite3.connect(path)
+        for i, state in enumerate(("queued", "snapshot", "snapshot-done", "built",
+                                   "delivered", "stopped"), 1):
+            c.execute("INSERT INTO package_requests(request_id, quarter, channel, state,"  # removed-name: asserted absent
+                      " created_at, updated_at) VALUES (?, '2026-Q2', 'telegram', ?, 'x', 'x')",
+                      (i, state))
+        c.commit()
+        c.close()
+        conn = db.open_store(path)
+        self.addCleanup(conn.close)
+        keys = [r[0] for r in conn.execute("SELECT occurrence_key FROM alerts WHERE"
+                                           " kind='package-not-sent' ORDER BY alert_id")]
+        self.assertEqual(keys, [f"request:{i}:dropped" for i in (1, 2, 3, 4)])
+        text = alerts.pending_rendering(conn)["text"]
+        self.assertIn("I couldn't send the Q2 2026 package (it was asked for before the "
+                      "update) — ask again when you want it.", " ".join(text.split()))
+
+    def test_a_legacy_note_or_left_line_never_becomes_the_last_delivered(self):
+        import db
+        with db.tx(self.conn):
+            for rid, kind, seq in (("r-s", "status", 1), ("r-n", "package-note", 2),
+                                   ("r-l", "job-left", 3)):
+                self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
+                                  " delivered_at, text, membership_json, delivered_seq) VALUES"
+                                  " (?, ?, '{}', 'x', 'x', 't', '[]', ?)", (rid, kind, seq))
+        self.assertEqual(db.last_delivered(self.conn)["render_id"], "r-s")
+

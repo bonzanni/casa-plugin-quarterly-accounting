@@ -115,8 +115,8 @@ def pending_lines(conn, budget=LINES_BUDGET, said=()) -> tuple:
 # The package notices (issue #2): what the operator is owed about a package send. `package-uncertain` and `package-send-failed` offer the
 # package, so "send it again" binds to the rendering that printed them (D3).
 PACKAGE = {
-    # a BUILT package that could not be posted (Casa refused the deposit, or it is over
-    # Telegram's limit): no Casa code reaches the operator (final fix wave T11-d)
+    # raised only by MIGRATIONS[11] since the simple loop (schema 12): a package an older
+    # version was asked for and had not sent, and an unsaid stopped / bank-unread notice
     "package-not-sent": "I couldn't send the {quarter} package{why} — ask again when you want it.",
     "package-revoked": "The bank was re-read before I could send the {quarter} package — ask "
                        "for it again and I'll rebuild it.",

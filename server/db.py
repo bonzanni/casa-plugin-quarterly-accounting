@@ -573,6 +573,14 @@ MIGRATIONS: dict[int, list[str]] = {
          RUN_WORK_DDL, RUN_MIRROR_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL,
          # ... then the machinery §4 deletes: the sweep, the chunk carry, the judge,
          # credits, nested passes, package requests and the delegation protocol
+         # a package asked for and not yet sent is told, once, before its request goes
+         "INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
+         " SELECT 'package-not-sent', 'request:' || request_id || ':dropped',"
+         " json_object('package_id', NULL, 'pass_id', '', 'quarter', quarter,"
+         " 'reason', 'it was asked for before the update'),"
+         " strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM package_requests"
+         " WHERE state IN ('queued', 'snapshot', 'snapshot-done', 'built')"
+         " ORDER BY request_id",
          "DROP TABLE IF EXISTS credits", "DROP TABLE IF EXISTS cursor",
          "DROP TABLE IF EXISTS pass_steps", "DROP TABLE IF EXISTS package_requests",
          *(f"ALTER TABLE passes DROP COLUMN {c}" for c in (
@@ -746,14 +754,16 @@ def next_seq(conn: sqlite3.Connection) -> int:
 
 
 # Renderings that offer nothing to answer (S2 §6.4): a handover's case lines, a stop line
-# and the package file's caption (S7 §6.1). Delivered after a view or an offer, they never take the operator's
+# and the package file's caption (S7 §6.1); an upgraded store's package notes and
+# asks-waiting lines (no longer made since schema 12) stay classed as they were. Delivered after a view or an offer, they never take the operator's
 # reply from it (diff round 1, R3; Astra S2: a handover page delivered after `speak`'s
 # resend offer made "send it again" refuse).
-INFORMATIONAL_KINDS = ("handover", "job-stop", "package-file")
-# Of those, the ones a QUOTE can never bind (views.bound_rendering). The package file is
-# quotable (#44): a swipe-reply "send it again" on it names its package (its scope's
-# `offers`), answered by delivery.resend_target.
-UNQUOTABLE_KINDS = ("handover", "job-stop")
+INFORMATIONAL_KINDS = ("handover", "job-stop", "package-file",
+                       "package-note", "job-left")     # the last two: legacy, before 12
+# Of those, the ones a QUOTE can never bind (views.bound_rendering). The package file and
+# a legacy package note are quotable (#44): a swipe-reply "send it again" on either names
+# its package (its scope's `offers`), answered by delivery.resend_target.
+UNQUOTABLE_KINDS = ("handover", "job-stop", "job-left")    # job-left: legacy, before 12
 
 
 def seen_render(row) -> bool:
