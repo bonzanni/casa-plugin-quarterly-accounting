@@ -383,6 +383,18 @@ def t_record_missing(args):
                                  _int(args, "expected_revision"), args.get("reason") or "")
 
 
+@register("record_mirror",
+          "After a mirror unit: the numbers (n) of the calls bank-feed accepted (done) and, "
+          "for each it refused, {n, error} with bank-feed's reply (failed). No read-backs.",
+          obj({"pass_token": TOKEN, "done": AI, "failed": {"type": "array", "items": O}},
+              ("pass_token",)))
+def t_record_mirror(args):
+    import mirror
+    _need(args, "pass_token")
+    return mirror.record(conn(), _int(args, "pass_token"), args.get("done") or [],
+                         args.get("failed") or [])
+
+
 @register("relabel_match",
           "Change a machine pairing's confidence labels (clean, guessed, no-ref, partial-search, "
           "recipient?) when later evidence arrives — e.g. a competing invoice. Specialist, "

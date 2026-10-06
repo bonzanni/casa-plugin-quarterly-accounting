@@ -84,6 +84,12 @@ def short_day(day: str) -> str:
     return f"{d.day} {_MONTHS[d.month - 1]}"
 
 
+def long_day(day: str) -> str:
+    """The note's date (simple loop §2.4): "2 Sep 2026"."""
+    d = parse_day(day)
+    return f"{d.day} {_MONTHS[d.month - 1]} {d.year}"
+
+
 def quarter_label(q: str) -> str:
     year, n = parse_quarter(q)
     return f"Q{n} {year}"

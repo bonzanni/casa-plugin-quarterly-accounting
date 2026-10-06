@@ -130,6 +130,9 @@
         "record_missing": {
           "result": "safe"
         },
+        "record_mirror": {
+          "result": "safe"
+        },
         "record_observation": {
           "result": "safe"
         },
@@ -206,6 +209,7 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_filing",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_match",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_missing",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__record_mirror",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_observation",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_probe",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_search",
