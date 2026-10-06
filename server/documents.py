@@ -34,6 +34,7 @@ MIME = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg",
         "tif": "image/tiff", "tiff": "image/tiff", "xml": "text/plain"}
 # How far into a held PDF read_document looks for the %PDF- header (issue #8).
 PDF_HEADER_WINDOW = 1024
+VENDOR_MAX = 80
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _CCY = re.compile(r"^[A-Z]{3}$")
 
@@ -100,7 +101,11 @@ def collisions(conn, doc_id: int) -> list:
 def ingest_document(conn, *, source_path, kind, source, extraction_author, counterparty=None,
                     issuer=None, document_date=None, document_number=None, amount_minor=None,
                     currency=None, recipient=None, source_ref=None, acquisition=None,
-                    token=None) -> dict:
+                    vendor=None, token=None) -> dict:
+    """`vendor` is the KB counterparty of the vendor group being worked when the job files
+    it (design rev 17 §2.2, D1); a document filed otherwise (own mail, a handover) carries
+    none. `filed_seq` is the store sequence at filing: "newly filed" (§2.1)."""
+    import decide
     import passes
     if source not in SOURCES:
         raise db.Refusal(f"source is one of {', '.join(SOURCES)}")
@@ -110,6 +115,10 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
     fields = {"kind": kind, "document_date": document_date, "currency": currency,
               "amount_minor": amount_minor}
     _validate(fields)
+    if vendor is not None and (not isinstance(vendor, str) or not vendor.strip()
+                               or len(vendor) > VENDOR_MAX):
+        raise db.Refusal(f"vendor is the vendor group's name, at most {VENDOR_MAX} characters")
+    vendor = vendor.strip() if vendor is not None else None
     try:
         name, data = casa_handoff.capture(source_path)
     except casa_handoff.HandoffError as exc:
@@ -136,6 +145,10 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 # row names (fix wave F)
                 _install(data, sha, "." + existing["ext"])
                 _operator_ref(conn, source, source_ref, existing[0])
+                if vendor is not None:
+                    # a vendor group that found it again names it, where none was recorded
+                    conn.execute("UPDATE documents SET vendor=? WHERE doc_id=? AND vendor IS"
+                                 " NULL", (vendor, existing[0]))
                 return {"doc_id": existing[0], "sha256": sha, "created": False,
                         "collisions": collisions(conn, existing[0])}
             _install(data, sha, ext)
@@ -143,14 +156,17 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 "INSERT INTO documents(sha256, ext, size, kind, counterparty, issuer,"
                 " document_date, document_number, amount_minor, currency, recipient, source,"
                 " source_ref, acquisition_json, extraction_author, original_name, ingested_at,"
-                " ingest_quarter)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " ingest_quarter, vendor, filed_seq)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sha, ext.lstrip("."), len(data), kind, counterparty, issuer, document_date,
                  document_number, amount_minor, currency, recipient, source, source_ref,
                  db.canonical(acquisition) if acquisition is not None else None,
-                 extraction_author, name, db.now(), dates.quarter_of(db.now()[:10])))
+                 extraction_author, name, db.now(), dates.quarter_of(db.now()[:10]), vendor,
+                 db.next_seq(conn)))
             doc_id = cur.lastrowid
             _operator_ref(conn, source, source_ref, doc_id)
+            if token is not None:
+                decide.note_progress(conn, token)      # §2.2 `progressed`: a document filed
             return {"doc_id": doc_id, "sha256": sha, "created": True,
                     "collisions": collisions(conn, doc_id)}
 

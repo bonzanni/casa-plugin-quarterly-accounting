@@ -129,45 +129,6 @@ class TestMoreWork(C):
                                                           calls_made=10))
 
 
-class TestARecordBelongsToTheChunk(C):
-    def test_an_effort_record_outside_the_chunk_is_refused_and_writes_nothing(self):
-        self.seed(10)
-        c = self.swept()
-        t = c["pass_token"]
-        handed = {i["pid"] for i in c["work"]["triage"]}
-        other = next(d["pid"] for d in work.triage(self.conn) if d["pid"] not in handed)
-        before = lineage.projection(self.conn, other)
-        for kw in ({"queries": ["q"]}, {"found_candidate": True}, {"exhausted": True}):
-            out = self.text("record_search", pid=other, pass_token=t, **kw)
-            self.assertIn(f"payment #{other} is not in the work you were handed", out)
-            # Task 12 fix round 1 (M1): said in the job's terms, no removed tool named
-            self.assertIn("search and record only the payments job_next hands out in its "
-                          "Gmail items — nothing was written", out)
-        after = lineage.projection(self.conn, other)
-        self.assertEqual((after["search_json"], after["passes_without_candidate"]),
-                         (before["search_json"], before["passes_without_candidate"]))
-
-    def test_a_call_without_effort_is_accepted_anywhere(self):
-        self.seed(10)
-        c = self.swept()
-        t = c["pass_token"]
-        handed = {i["pid"] for i in c["work"]["triage"]}
-        other = next(d["pid"] for d in work.triage(self.conn) if d["pid"] not in handed)
-        self.call("record_search", pid=other, pass_token=t, identity_unknown=True)
-        self.call("record_search", pid=other, pass_token=t, incomplete=True)
-        self.call("record_search", pid=other, revive=True)
-        self.assertNotIn(other, self.chunk_of()["recorded"])
-
-    def test_after_the_judgment_starts_nothing_is_recorded_with_effort(self):
-        self.seed(10)
-        c = self.swept()
-        t = self.chunk(c)
-        self.start(t, step="judge")
-        out = self.text("record_search", pid=c["work"]["triage"][0]["pid"], pass_token=t,
-                        queries=["late"])
-        self.assertIn("is not in the work you were handed", out)
-
-
 class TestHandOutOrder(StoreCase):
     def d(self, pid, tier, seq=None):
         return {"pid": pid, "expectation": {"tier": tier},
@@ -481,7 +442,8 @@ class TestAgeOutUnits(StoreCase):
 
     def test_a_record_from_before_0_7_counts_as_of_its_last_search(self):
         self.set("active", 2, {"last_counted_pass": "old", "last_searched_at": self.ago(DAY)})
-        out = work.record_search(self.conn, pid=self.pid, token=self.token, queries=["q"])
+        out = work.record_search(self.conn, pid=self.pid, token=self.token,
+                                 queries=["q"])["recorded"][0]
         self.assertEqual((out["search_state"], out["passes_without_candidate"]), ("active", 2))
 
     def test_an_aged_out_payment_is_searched_again_after_28_days_and_not_before(self):
@@ -490,7 +452,8 @@ class TestAgeOutUnits(StoreCase):
         self.set("aged-out", 3, {"last_counted_at": self.ago(work.AGE_OUT_REARM_S)})
         self.assertEqual([d["pid"] for d in work.triage(self.conn)], [self.pid])
         # a fruitless re-search keeps it aged-out and moves its 28 days
-        out = work.record_search(self.conn, pid=self.pid, token=self.token, queries=["q"])
+        out = work.record_search(self.conn, pid=self.pid, token=self.token,
+                                 queries=["q"])["recorded"][0]
         self.assertEqual(out["search_state"], "aged-out")
         self.assertEqual(work.triage(self.conn), [])
         # a candidate makes it active again
@@ -498,7 +461,7 @@ class TestAgeOutUnits(StoreCase):
         self.token = self.pass_()
         self.handed(self.pid)
         out = work.record_search(self.conn, pid=self.pid, token=self.token,
-                                 found_candidate=True)
+                                 found_candidate=True)["recorded"][0]
         self.assertEqual((out["search_state"], out["passes_without_candidate"]), ("active", 0))
 
     def test_accepted_missing_stays_out(self):

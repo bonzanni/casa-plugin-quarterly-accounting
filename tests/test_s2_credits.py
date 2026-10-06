@@ -602,7 +602,10 @@ class Credits(Tools):
     def test_every_key_is_under_the_claim_that_earned_it(self):
         self.until(self.start(2), "complete")
         keys = {r["key"].split(":")[0] for r in self.conn.execute("SELECT key FROM credits")}
-        self.assertTrue({"sweep", "search", "judge", "file", "req"} <= keys, keys)
+        # simple loop Task 4: a recorded search earns no credit (job.credit_search deleted;
+        # claims.progressed carries it, tests/test_decide.py)
+        self.assertTrue({"sweep", "judge", "file", "req"} <= keys, keys)
+        self.assertNotIn("search", keys)
         bad = self.conn.execute("SELECT count(*) FROM credits WHERE gen NOT IN (SELECT gen"
                                 " FROM claims)").fetchone()[0]
         self.assertEqual(bad, 0)

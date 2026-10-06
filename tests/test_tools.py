@@ -42,6 +42,8 @@ EXPECTED = {
     "post_results",
     # S7 §6.1 (Task 11): the job posts the package as a file, under its name
     "post_package",
+    # simple loop Task 4 (§2.2 step 4): a vendor group's decisions, and a single missing
+    "decide", "record_missing",
 }
 
 
@@ -99,16 +101,17 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 39)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
+        self.assertEqual(len(EXPECTED), 41)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
                                                 # Task 7: + 2; T8: + ask_state; T9: - job_report (§9);
-                                                # T10: + post_results (§5); T11: + post_package (§6.1)
+                                                # T10: + post_results (§5); T11: + post_package (§6.1);
+                                                # simple loop T4: + decide, record_missing (§2.2)
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 39)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 41)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])

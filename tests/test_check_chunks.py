@@ -298,7 +298,8 @@ class TestAChunkTurnFitsEllensTurn(Check):
         c, pid = self.paired_unsearched_at(work.AGE_OUT_PASSES - 1)
         t = c["pass_token"]
         self.call("record_probe", pass_token=t, kind="gmail", ok=True)
-        out = self.call("record_search", pid=pid, pass_token=t, queries=["q1", "q2"])
+        out = self.call("record_search", pid=pid, pass_token=t,
+                        queries=["q1", "q2"])["recorded"][0]
         self.assertEqual((out["search_state"], out["passes_without_candidate"]),
                          ("active", work.AGE_OUT_PASSES - 1))
         d = work.describe(self.conn, pid)
@@ -356,7 +357,8 @@ class TestAChunkTurnFitsEllensTurn(Check):
         self.assertIsNone(work.describe(self.conn, pid4)["current"])
         c = self.judged(t)
         self.assertEqual([i["pid"] for i in c["work"]["triage"]], [pid4])
-        out = self.call("record_search", pid=pid4, pass_token=c["pass_token"], queries=["q"])
+        out = self.call("record_search", pid=pid4, pass_token=c["pass_token"],
+                        queries=["q"])["recorded"][0]
         self.assertEqual((out["search_state"], out["passes_without_candidate"]),
                          ("active", work.AGE_OUT_PASSES - 1))
         c = self.judged(c["pass_token"])
@@ -366,7 +368,7 @@ class TestAChunkTurnFitsEllensTurn(Check):
         # C1 (Astra S2): unchanged either way — neither advanced nor reset
         c, pid = self.paired_unsearched_at(work.AGE_OUT_PASSES - 1)
         out = self.call("record_search", pid=pid, pass_token=c["pass_token"], queries=["q"],
-                        found_candidate=True)
+                        found_candidate=True)["recorded"][0]
         self.assertEqual((out["search_state"], out["passes_without_candidate"]),
                          ("active", work.AGE_OUT_PASSES - 1))
 
@@ -401,7 +403,8 @@ class TestAChunkTurnFitsEllensTurn(Check):
                               (work.AGE_OUT_PASSES - 1, pid))
         self.clock.advance(work.AGE_OUT_SPACING_S)       # issue #26: a week after the last
         c = self.swept()
-        out = self.call("record_search", pid=pid, pass_token=c["pass_token"], queries=["q"])
+        out = self.call("record_search", pid=pid, pass_token=c["pass_token"],
+                        queries=["q"])["recorded"][0]
         self.assertEqual((out["search_state"], out["passes_without_candidate"]),
                          ("aged-out", work.AGE_OUT_PASSES))
 

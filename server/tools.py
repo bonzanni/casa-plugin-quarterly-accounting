@@ -189,11 +189,13 @@ def obj(props, required=()):
           "sent); any other path is refused. Bytes are copied and hashed; filing the same bytes "
           "twice returns the same doc_id. The metadata is your provisional reading, for filing. "
           "extraction_author is desk (a desk turn's filing, no token) or specialist (the "
-          "job's filing). During a pass, pass the pass_token.",
+          "job's filing). During a pass, pass the pass_token. vendor: the vendor group you "
+          "are working when you file it (its KB name, as job_next hands it out); leave it "
+          "out for a document filed otherwise (own mail, a handover).",
           obj({"source_path": S, "kind": S, "source": S, "extraction_author": S,
                "counterparty": S, "issuer": S, "document_date": S, "document_number": S,
                "amount_minor": I, "currency": S, "recipient": S, "source_ref": S,
-               "acquisition": O, "pass_token": TOKEN},
+               "acquisition": O, "vendor": S, "pass_token": TOKEN},
               ("source_path", "kind", "source", "extraction_author")))
 def t_ingest(args):
     _need(args, "source_path", "kind", "source", "extraction_author")
@@ -202,7 +204,7 @@ def t_ingest(args):
     return documents.ingest_document(conn(), token=_int(args, "pass_token"), **_pick(args, (
         "source_path", "kind", "source", "extraction_author", "counterparty", "issuer",
         "document_date", "document_number", "amount_minor", "currency", "recipient",
-        "source_ref", "acquisition")))
+        "source_ref", "acquisition", "vendor")))
 
 
 @register("update_document_metadata",
@@ -267,15 +269,19 @@ def t_get_cp(args):
 @register("upsert_counterparty",
           "Create or update a KB entry: patterns are bank counterparty texts exactly as bank-feed "
           "shows them; source is 'email' or 'portal'; document_link is the researched deep link "
-          "to the vendor's invoice list. During a pass, pass the pass_token.",
+          "to the vendor's invoice list. hint_sender and hint_subject are the vendor's learned "
+          "search hint: the sender address and subject pattern of the search that found its "
+          "invoice. During a pass, pass the pass_token.",
           obj({"name": S, "patterns": A, "source": S, "document_link": S, "link_note": S,
-               "search_hint": S, "notes": S, "window_days": I, "pass_token": TOKEN}, ("name",)))
+               "search_hint": S, "notes": S, "window_days": I, "hint_sender": S,
+               "hint_subject": S, "pass_token": TOKEN}, ("name",)))
 def t_upsert_cp(args):
     _need(args, "name")
     return kb.upsert_counterparty(conn(), args["name"], token=_int(args, "pass_token"),
                                   **_pick(args, ("patterns", "source", "document_link",
                                                  "link_note", "search_hint", "notes",
-                                                 "window_days")))
+                                                 "window_days", "hint_sender",
+                                                 "hint_subject")))
 
 
 @register("set_expectation",
@@ -347,6 +353,34 @@ def _machine_args(args) -> dict:
                 runners_up=tuple(args.get("runners_up") or ()),
                 row_snapshot=args.get("row_snapshot"), row_digest=args.get("row_digest"),
                 document_date=args.get("document_date"))
+
+
+@register("decide",
+          "Decide a vendor group's payments in one call (one entry each): match (a pair you "
+          "judged certain: same currency, exact amount, a document no other payment holds), "
+          "propose (any doubt, another currency, or several fit: doc_id the one you chose, "
+          "alternatives up to 3), or missing (reason). Each entry is checked on its own, in "
+          "order; a refused entry says why and the others still apply — decide again only "
+          "the refused ones. Pass each payment's expected_revision as handed out, and for "
+          "match/propose the document_date read on the document. Never 'no invoice needed': "
+          "that is the operator's.",
+          obj({"pass_token": TOKEN, "entries": {"type": "array", "items": O}},
+              ("pass_token", "entries")))
+def t_decide(args):
+    import decide
+    _need(args, "pass_token", "entries")
+    return decide.decide(conn(), _int(args, "pass_token"), args["entries"])
+
+
+@register("record_missing",
+          "One payment's `missing` decision (a continuation or a handover), with its reason.",
+          obj({"pass_token": TOKEN, "pid": I, "expected_revision": I, "reason": S},
+              ("pass_token", "pid", "expected_revision")))
+def t_record_missing(args):
+    import decide
+    _need(args, "pass_token", "pid", "expected_revision")
+    return decide.record_missing(conn(), _int(args, "pass_token"), _int(args, "pid"),
+                                 _int(args, "expected_revision"), args.get("reason") or "")
 
 
 @register("relabel_match",
@@ -557,21 +591,28 @@ def t_reset(args):
 
 # --- work ------------------------------------------------------------------------
 @register("record_search",
-          "Record a search for one payment: the queries you ran, whether a candidate turned up, "
-          "whether the ideas are exhausted or the pass ran out of room (incomplete), whether the "
-          "payee is unknown (identity_unknown). revive=true to look again. The pass_token is "
-          "required, except for a bare revive (no queries, nothing found, not exhausted)."
-          " During a pass, pass the pass_token.",
-          obj({"pid": I, "pass_token": TOKEN, "queries": A, "found_candidate": B,
-               "exhausted": B, "incomplete": B, "identity_unknown": B, "revive": B}, ("pid",)))
+          "Record a search for the payments it covered: pids (a vendor search: every payment "
+          "of the vendor it was for) or pid (one payment). search is hinted (the vendor search "
+          "led by its learned hint), plain (the plain vendor-and-dates search) or payment (a "
+          "per-payment search, the default). Also: the queries you ran, whether a candidate "
+          "turned up, whether the ideas are exhausted or the run ran out of room (incomplete), "
+          "whether the payee is unknown (identity_unknown). revive=true to look again. The "
+          "pass_token is required, except for a bare revive (no queries, nothing found, not "
+          "exhausted). During a pass, pass the pass_token.",
+          obj({"pids": AI, "pid": I, "search": S, "pass_token": TOKEN, "queries": A,
+               "found_candidate": B, "exhausted": B, "incomplete": B, "identity_unknown": B,
+               "revive": B}))
 def t_search(args):
-    _need(args, "pid")
     flags = {n: _bool(args, n, False) for n in ("found_candidate", "exhausted", "incomplete",
                                                 "revive")}
     if args.get("identity_unknown") is not None:
         flags["identity_unknown"] = _bool(args, "identity_unknown")
-    return work.record_search(conn(), pid=_int(args, "pid"), token=_int(args, "pass_token"),
-                              **_pick(args, ("queries",)), **flags)
+    if args.get("pids") in (None, []) and args.get("pid") is None:
+        raise db.Refusal("missing argument(s): pids (or pid)")
+    return work.record_search(conn(), pids=args.get("pids") or None, pid=_int(args, "pid"),
+                              search=args.get("search") or "payment",
+                              token=_int(args, "pass_token"), **_pick(args, ("queries",)),
+                              **flags)
 
 
 # --- views and replies -------------------------------------------------------------

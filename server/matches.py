@@ -348,8 +348,8 @@ def record_match(conn, *, pid, doc_id, author, expected_revision, token, render_
         raise db.Refusal("a machine pairing is written during a run: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
-        return machine_in_tx(conn, "pair", pid, doc_id, expected_revision=expected_revision,
-                             **kw)
+        return _single(conn, token, "match", machine_in_tx(
+            conn, "pair", pid, doc_id, expected_revision=expected_revision, **kw))
 
 
 def propose_match(conn, *, pid, doc_id, expected_revision, token, **kw) -> dict:
@@ -359,8 +359,18 @@ def propose_match(conn, *, pid, doc_id, expected_revision, token, **kw) -> dict:
         raise db.Refusal("a machine pairing is written during a run: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
-        return machine_in_tx(conn, "propose", pid, doc_id,
-                             expected_revision=expected_revision, **kw)
+        return _single(conn, token, "propose", machine_in_tx(
+            conn, "propose", pid, doc_id, expected_revision=expected_revision, **kw))
+
+
+def _single(conn, token, outcome, out) -> dict:
+    """A single decision lands on the run's work list too (§2.2: record_match and
+    propose_match "stay for single decisions"). decide imports this module, so it is
+    imported here, lazily."""
+    import decide
+    if out["applied"]:
+        decide.record_outcome(conn, token, out["pid"], outcome)
+    return out
 
 
 def confirm_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="rendered") -> dict:

@@ -22,7 +22,6 @@ ADOPTIONS_MAX = 2          # holder changes per pass (§6.3), returns of an earl
 LATE_TAKES_MAX = 2         # requests a live pass takes after it began (each needs a read)
 MAX_PASSES_PER_JOB = 4     # passes one Casa job run begins; past it the run completes
 K_STATES = 32              # distinct settled states credited per (pass, acquisition, payment)
-K_SEARCH = 4               # recorded searches credited per (pass, acquisition, payment)
 TURNS_PER_BATCH, BATCH_RESERVE = 80, 10     # turnsPerBatch: the manifest's casa.jobs
 UNIT_COST = {"probes": 12, "snapshot": 6, "sweep": 10, "gmail-probe": 3, "filing": 28,
              "item": 11, "judge": 24, "post": 3, "view": 3, "build": 3, "deliver": 5}
@@ -269,19 +268,6 @@ def credit_sweep(conn, token, pid, what) -> None:
     digest = conn.execute("SELECT digest FROM projections WHERE pid=?", (pid,)).fetchone()[0]
     d = hashlib.sha256((digest or "").encode()).hexdigest()[:24]
     credit(conn, token, p["pass_id"], prefix + d, cap_prefix=prefix, cap=K_STATES)
-
-
-def credit_search(conn, token, pid) -> None:
-    """A search item recorded for `pid`: `search:<acq>:<pid>:<k>`, the k-th recorded in that
-    acquisition, k ≤ K_SEARCH."""
-    p = live_job_pass(conn)
-    if p is None or token is None:
-        return
-    prefix = f"search:{_acq(conn, p)}:{pid}:"
-    k = conn.execute("SELECT count(*) FROM credits WHERE pass_id=? AND substr(key, 1, ?)=?",
-                     (p["pass_id"], len(prefix), prefix)).fetchone()[0] + 1
-    if k <= K_SEARCH:
-        credit(conn, token, p["pass_id"], f"{prefix}{k}")
 
 
 def hand_acquisition(conn, token, pass_id) -> int:

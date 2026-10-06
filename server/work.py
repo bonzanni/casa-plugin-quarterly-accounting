@@ -27,13 +27,57 @@ AGE_OUT_REARM_S = 28 * 24 * 3600
 QUERY_CLIP = 200           # one recorded search query (issue #3: the record is bounded)
 
 
-def record_search(conn, *, pid, token, queries=(), found_candidate=False, exhausted=False,
-                  incomplete=False, identity_unknown=None, revive=False) -> dict:
+SEARCH_KINDS = ("hinted", "plain", "payment")
+
+
+def record_search(conn, *, token, pids=None, pid=None, search="payment", queries=(),
+                  found_candidate=False, exhausted=False, incomplete=False,
+                  identity_unknown=None, revive=False) -> dict:
+    """One search, recorded for every payment it covered (design rev 17 §2.2 step 2: a
+    vendor's search runs once per vendor per run); a lone pid (every per-payment caller) is
+    [pid]. `search` is the kind: hinted (the learned-hint vendor search), plain (the plain
+    vendor-and-dates search) or payment (a per-payment search). Returns {"recorded": [one
+    record_search_in_tx result per payment]}."""
+    import decide
+    if pids is None and pid is not None:
+        pids = [pid]
+    if not isinstance(pids, (list, tuple)) or not pids or any(
+            isinstance(p, bool) or not isinstance(p, int) for p in pids):
+        raise db.Refusal("pids is the list of payments this search was for")
+    if search not in SEARCH_KINDS:
+        raise db.Refusal("search is hinted (the learned-hint vendor search), plain (the plain "
+                         "vendor-and-dates search) or payment")
     with db.tx(conn):
-        return record_search_in_tx(conn, pid=pid, token=token, queries=queries,
+        out = [record_search_in_tx(conn, pid=p, token=token, queries=queries,
                                    found_candidate=found_candidate, exhausted=exhausted,
                                    incomplete=incomplete, identity_unknown=identity_unknown,
                                    revive=revive)
+               for p in dict.fromkeys(pids)]
+        if token is not None and (queries or found_candidate or exhausted):
+            # a search ran (the effort test of record_search_in_tx): an identity question or
+            # a bare `incomplete` is no search, marks no vendor and is no progress
+            if search != "payment":
+                _mark_vendor_search(conn, token, [r["pid"] for r in out], search)
+            decide.note_progress(conn, token)       # §2.2 `progressed`: a search recorded
+    return {"recorded": out}
+
+
+def _mark_vendor_search(conn, token, pids, search) -> None:
+    """A vendor search covers the vendor for the whole run (§2.2, rev 17): every entry of
+    the searched payments' vendors in the claim's run is marked, its later split groups
+    included (plan round 4); the hinted and the plain one apart (plan round 5: a later
+    uncovered group still gets the plain fallback)."""
+    job = conn.execute("SELECT job_id FROM claims WHERE gen=?", (int(token),)).fetchone()
+    if job is None:
+        return
+    vendors = {kb.norm(r[0]) for r in conn.execute(
+        "SELECT vendor FROM run_work WHERE job_id=? AND pid IN (%s)" % ",".join("?" * len(pids)),
+        (job[0], *pids))}
+    for r in conn.execute("SELECT pid, vendor FROM run_work WHERE job_id=?",
+                          (job[0],)).fetchall():
+        if kb.norm(r["vendor"]) in vendors:          # `search` is hinted or plain: a column
+            conn.execute(f"UPDATE run_work SET {search}=1 WHERE job_id=? AND pid=?",
+                         (job[0], r["pid"]))
 
 
 def record_search_in_tx(conn, *, pid, token, queries=(), found_candidate=False,
@@ -64,19 +108,12 @@ def record_search_in_tx(conn, *, pid, token, queries=(), found_candidate=False,
     cur = passes.current_pass(conn)
     pass_id = cur["pass_id"] if cur else None
     if token is not None and pass_id is not None:
-        # issue #26/#28 (A4): a search is recorded only for the work handed out — the
-        # open chunk's payments. A call without effort (an identity question, a bare
-        # incomplete, a quiet revive) is accepted anywhere, as before
+        # the chunk gate is deleted (design rev 17 §4: a vendor search is recorded for every
+        # payment it covered, handed out or not). Until the cursor's chunk machinery goes
+        # (plan Tasks 10-11), a chunk payment's record still counts as its chunk's search
         import steps
-        in_chunk = steps.chunk_has(conn, pass_id, pid)
-        if effort and not in_chunk:
-            raise db.Refusal(f"payment #{pid} is not in the work you were handed: search "
-                             "and record only the payments job_next hands out in its "
-                             "Gmail items — nothing was written")
-        if in_chunk:
+        if steps.chunk_has(conn, pass_id, pid):
             steps.chunk_recorded(conn, pass_id, pid)
-            import job
-            job.credit_search(conn, token, pid)     # INV-J8: a search item recorded
     state, streak = p["search_state"], p["passes_without_candidate"]
     if revive:
         state, streak = "active", 0

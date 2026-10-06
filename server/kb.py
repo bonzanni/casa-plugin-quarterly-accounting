@@ -74,23 +74,27 @@ def get_counterparty(conn, text):
 
 
 LINK_MAX = 500              # issue #3: every stored field a listing carries is bounded
+HINT_MAX = 200             # the learned search hint, each of its two values (§2.2 step 5)
 
 
 def upsert_counterparty(conn, name, *, patterns=(), source=None, document_link=None,
                         link_note=None, search_hint=None, notes=None, window_days=None,
-                        token=None) -> dict:
+                        hint_sender=None, hint_subject=None, token=None) -> dict:
     import passes
     with db.tx(conn):
         passes.check_token(conn, token)
         return upsert_in_tx(conn, name, patterns=patterns, source=source,
                             document_link=document_link, link_note=link_note,
-                            search_hint=search_hint, notes=notes, window_days=window_days)
+                            search_hint=search_hint, notes=notes, window_days=window_days,
+                            hint_sender=hint_sender, hint_subject=hint_subject)
 
 
 def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, link_note=None,
-                 search_hint=None, notes=None, window_days=None) -> dict:
+                 search_hint=None, notes=None, window_days=None, hint_sender=None,
+                 hint_subject=None) -> dict:
     """The upsert inside the caller's transaction (a reading's identity clause
-    checks the shown revision in the same transaction as this write)."""
+    checks the shown revision in the same transaction as this write). hint_sender and
+    hint_subject are the vendor's learned search hint (design rev 17 §2.2 step 5, §3)."""
     import lineage
     if not (name or "").strip():
         raise db.Refusal("a counterparty needs a name")
@@ -98,6 +102,10 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
         raise db.Refusal("source is 'email' or 'portal'")
     if document_link is not None and len(document_link) > LINK_MAX:
         raise db.Refusal(f"a document link is at most {LINK_MAX} characters")
+    for hint in (hint_sender, hint_subject):
+        if hint is not None and (not isinstance(hint, str) or len(hint) > HINT_MAX):
+            raise db.Refusal("a learned hint is a sender address and a subject pattern, each "
+                             f"at most {HINT_MAX} characters")
     if window_days is not None and not (1 <= int(window_days) <= 60):
         raise db.Refusal("window_days is between 1 and 60")
     existing = _entry(conn, name)
@@ -116,7 +124,8 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
         existing = _entry(conn, name)
     fields = {"patterns_json": json.dumps(merged), "source": source,
               "document_link": document_link, "link_note": link_note,
-              "search_hint": search_hint, "notes": notes, "window_days": window_days}
+              "search_hint": search_hint, "notes": notes, "window_days": window_days,
+              "hint_sender": hint_sender, "hint_subject": hint_subject}
     sets = {k: v for k, v in fields.items() if v is not None}
     sets["updated_at"] = db.now()
     conn.execute("UPDATE counterparties SET %s WHERE cp_id=?"

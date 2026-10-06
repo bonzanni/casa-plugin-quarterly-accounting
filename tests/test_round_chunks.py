@@ -75,11 +75,12 @@ class TestTheRoundInChunks(Chunks):
         self.assertEqual((c["next"], c["work"]["total"]), ("gmail-round", 2))
         t = c["pass_token"]
         self.call("record_probe", pass_token=t, kind="gmail", ok=True)
-        # the first chunk's, again: not the work handed out now (issue #26, A4) — refused,
-        # and nothing recorded is progress
+        # the first chunk's, again: not the work handed out now. Simple loop §4: the chunk
+        # gate is deleted, so the record is accepted, and it is still no progress of this
+        # chunk (the round below ends as before)
         for it in first[:3]:
-            out = self.text("record_search", pid=it["pid"], pass_token=t, queries=["q"])
-            self.assertIn("is not in the work you were handed", out)
+            out = self.call("record_search", pid=it["pid"], pass_token=t, queries=["q"])
+            self.assertEqual([r["pid"] for r in out["recorded"]], [it["pid"]])
         for it in c["work"]["triage"]:
             self.call("record_search", pid=it["pid"], pass_token=t, incomplete=True)
         c = self.judged(t)

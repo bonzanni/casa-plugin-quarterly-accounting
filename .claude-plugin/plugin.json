@@ -42,6 +42,9 @@
         "check_setup": {
           "result": "safe"
         },
+        "decide": {
+          "result": "safe"
+        },
         "get_counterparty": {
           "result": "safe"
         },
@@ -124,6 +127,9 @@
         "record_match": {
           "result": "safe"
         },
+        "record_missing": {
+          "result": "safe"
+        },
         "record_observation": {
           "result": "safe"
         },
@@ -179,6 +185,7 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_review",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__cancel_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__check_setup",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__decide",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__get_counterparty",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__import_ledger_export",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__ingest_document",
@@ -198,6 +205,7 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_delivery",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_filing",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_match",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__record_missing",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_observation",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_probe",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_search",
