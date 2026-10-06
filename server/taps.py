@@ -135,7 +135,8 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
 def _answer(conn, receipt, next_rid) -> dict:
     """#1302: the receipt (a non-blank sentence), then the card Casa posts after it."""
     import cards
-    assert receipt.strip() and next_rid is not None
+    if not receipt.strip() or next_rid is None:
+        raise RuntimeError("#1302: every card answer is a receipt and a next card")
     return {"receipt": views.fit_message(receipt), "next": cards.deposit_of(conn, next_rid)}
 
 
@@ -223,7 +224,10 @@ def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:
 def _vendor_answer(conn, rid, scope, action, grant):
     """A vendor page's writing buttons. [No invoice needed for these] and [Leave missing]
     bind only this page's own payments (plan round 2, Astra S2); [Never for X] binds the
-    union of the pages, which must still be the vendor's whole set now (r10/r11). Returns
+    union of the pages the walk displayed, by membership (review round 1 ruling): it
+    applies when every payment the rule changes now was on one of those pages, so the
+    operator's own earlier-page answers ([Leave missing], [No invoice needed for these])
+    never block it, and a payment that arrived since (r10) refuses it. Returns
     (receipt, "onward" | "next"), or None when the binding changed (nothing written)."""
     import cards
     import kb
@@ -232,18 +236,15 @@ def _vendor_answer(conn, rid, scope, action, grant):
     if _changed(conn, rid, listed) or not listed:
         return None
     if action == "never":
-        prior = scope.get("prior") or []
         union = set(listed)
-        for p in prior:
-            theirs = views.render_items(conn, p)
-            if _changed(conn, p, theirs):
-                return None
-            union |= set(theirs)
-        if sorted(union) != cards.never_set(conn, scope["vendor"]):
+        for p in scope.get("prior") or []:
+            union |= set(views.render_items(conn, p))
+        changes = cards.never_set(conn, scope["vendor"])
+        if not set(changes) <= union:
             return None
         kb.set_expectation_in_tx(conn, scope_type="counterparty", scope=scope["vendor"],
                                  kind="none", author="operator", render_id=rid, grant=grant)
-        return (f"{vendor} never needs an invoice: {_plural(len(union), 'payment')} "
+        return (f"{vendor} never needs an invoice: {_plural(len(changes), 'payment')} "
                 "changed.", "next")
     if action == "exempt-these":
         for p in listed:

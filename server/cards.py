@@ -160,13 +160,19 @@ def _doc_summary(conn, doc_id) -> dict:
 
 def _offered(conn, d) -> list:
     """The candidates a proposal offers (D3): the chosen document and its alternatives, or
-    a legacy joint set's members — each {"doc", "match_id"} (None for an alternative)."""
+    a legacy joint set's members — each {"doc", "match_id"} (None for an alternative).
+    An alternative or set member another payment holds (matches.holders, R5) is not
+    offered: a pick of it would only be refused (Task 8 review round 1)."""
     cur = d["current"]
+
+    def free(doc_id):
+        return not matches.taken_elsewhere(conn, doc_id, d["pid"])
     if cur is not None:
         return [{"doc": cur["document"], "match_id": cur["match_id"]}] + [
             {"doc": _doc_summary(conn, a), "match_id": None}
-            for a in matches.alternatives(conn, cur["match_id"])]
-    return [{"doc": c["document"], "match_id": c["match_id"]} for c in d["candidates"]]
+            for a in matches.alternatives(conn, cur["match_id"]) if free(a)]
+    return [{"doc": c["document"], "match_id": c["match_id"]} for c in d["candidates"]
+            if free(c["document"]["doc_id"])]
 
 
 def _doc_word(doc) -> str:

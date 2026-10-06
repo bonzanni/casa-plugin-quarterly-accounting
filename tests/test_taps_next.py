@@ -27,7 +27,6 @@ class _Tapping(LoopCase):
                                                                   scheduled=False))
 
 
-
 class Taps(_Tapping):
     def test_review_walks_card_by_card_and_ends_on_all_answered(self):
         p = self.pay()
@@ -253,6 +252,8 @@ class TapsMore(_Tapping):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE author='operator'"
                                            ).fetchone()[0], 0)
         self.assertIn("Card 1 of 1", out["next"]["text"])      # the same item, as it is now
+        self.assertNotIn("INV-91", " ".join(b["label"] for b in out["next"]["buttons"]))
+        self.assertNotIn("INV-91", out["next"]["text"])         # held elsewhere: not offered
 
     def test_a_pick_rejects_only_the_displayed_candidates(self):
         """Plan round 8: a legacy set of five, four displayed; picking one rejects the other
@@ -312,12 +313,17 @@ class TapsMore(_Tapping):
                                                (p,)).fetchone()[0], 1)
         self.assertIn("all answered", out["next"]["text"])
 
-    def test_never_refuses_when_an_earlier_page_changed_though_the_set_did_not(self):
-        for i in range(30):
-            self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1))
+    def _two_pages(self):
+        pids = [self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1)) for i in range(30)]
         page1 = self.tap(self.end(), "Review 1")["next"]
         page2 = self.tap(page1, "Next page")["next"]
         self.assertIn("Never for Adobe", [b["label"] for b in page2["buttons"]])
+        return pids, page1, page2
+
+    def test_never_applies_when_an_earlier_page_changed_though_the_set_did_not(self):
+        """Review round 1 ruling: Never binds by membership — a page-1 payment whose amount
+        the bank corrected is still one of the payments the walk displayed."""
+        pids, page1, page2 = self._two_pages()
         first = self.scope_of(page1)["pages"][0][0]
         row = self.conn.execute("SELECT dest_row_id FROM projections WHERE pid=?",
                                 (first,)).fetchone()[0]
@@ -325,10 +331,30 @@ class TapsMore(_Tapping):
                  value_date="2026-08-01")                     # the bank corrected its amount
         self.settle(first)
         out = self.tap(page2, "Never for Adobe")
-        self.assertIn("nothing applied", out["receipt"])
-        self.assertIsNone(self.conn.execute("SELECT exp_kind FROM counterparties WHERE"
-                                            " name='Adobe'").fetchone())
-        self.assertIn("page 1 of 2", out["next"]["text"])
+        self.assertEqual(out["receipt"], "Adobe never needs an invoice: 30 payments changed.")
+        self.assertEqual(self.conn.execute("SELECT exp_kind FROM counterparties WHERE"
+                                           " name='Adobe'").fetchone()[0], "none")
+
+    def test_page_one_leave_missing_then_never_applies(self):
+        """§1 "one tap per vendor": the operator's own [Leave missing] on page 1 never
+        blocks [Never for X] on the last page (review round 1, reproduced)."""
+        pids, page1, page2 = self._two_pages()
+        self.assertIn("Left missing", self.tap(page1, "Leave missing")["receipt"])
+        out = self.tap(page2, "Never for Adobe")
+        self.assertEqual(out["receipt"], "Adobe never needs an invoice: 30 payments changed.")
+        self.assertEqual({r[0] for r in self.conn.execute(
+            "SELECT status FROM projections WHERE pid IN (%s)" % ",".join(map(str, pids)))},
+            {"no-document"})
+
+    def test_page_one_exempt_then_never_applies(self):
+        pids, page1, page2 = self._two_pages()
+        n1 = len(self.scope_of(page1)["pages"][0])
+        self.tap(page1, "No invoice needed for these")
+        out = self.tap(page2, "Never for Adobe")
+        self.assertEqual(out["receipt"], "Adobe never needs an invoice: "
+                                         f"{30 - n1} payments changed.")
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM projections WHERE status='open'").fetchone()[0], 0)
 
     def test_a_next_page_with_nothing_left_posts_the_next_item(self):
         """Task 7 carry: cards.card is None when a later page has nothing left; the walk
