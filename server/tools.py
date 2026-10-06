@@ -115,22 +115,28 @@ NOT_POSTED = ("this could not be posted ({code}) — nothing was sent. Ask again
               "happening, say what you asked for")
 
 
-def capability(slot):
+def capability(slot, receipt=False):
     """A posting tool (S7 §3): Casa's result contract for a delivering tool. The result is
     `{slot: <reference>, ...}` after a deposit, or the explicit no-post shape — every slot
     present as null and nothing deposited (INV-PLUG-028) — for a refusal or a deposit Casa
     refused, so the words reach the model instead of a withheld result. The function
-    deposits LAST (the store is committed first): nothing can raise after the deposit."""
+    deposits LAST (the store is committed first): nothing can raise after the deposit.
+    `receipt=True` (get_package, a button's stored call: Casa v0.344.37 treats its no-post
+    shape like the More no-post and posts the result's own `receipt` sentence as the tap's
+    answer) also carries the refusal's words as `receipt`."""
     import casa_broker
+
+    def no_post(words):
+        return {slot: None, "refused": words, **({"receipt": words} if receipt else {})}
 
     def wrap(fn):
         def inner(args):
             try:
                 return fn(args)
             except db.Refusal as exc:
-                return {slot: None, "refused": str(exc)}
+                return no_post(str(exc))
             except casa_broker.DepositFailed as exc:
-                return {slot: None, "refused": NOT_POSTED.format(code=exc.code)}
+                return no_post(NOT_POSTED.format(code=exc.code))
         return inner
     return wrap
 
@@ -809,6 +815,18 @@ def t_post_package(args):
     import posting
     _need(args, "delivery_id")
     return posting.post_package(conn(), _int(args, "delivery_id"), _int(args, "package_token"))
+
+
+@register("get_package",
+          "The quarter's package as a file, built now from the store's latest state, with "
+          "one caption line. A [Get package] button calls it; at the desk, call it for "
+          "\"send the package\", \"give me Q3\" or \"rebuild it\". Never in the job.",
+          obj({"quarter": Q}, ("quarter",)))
+@capability("package", receipt=True)
+def t_get_package(args):
+    import posting
+    _need(args, "quarter")
+    return posting.get_package(conn(), _quarter(args))
 
 
 # --- packaging ---------------------------------------------------------------------

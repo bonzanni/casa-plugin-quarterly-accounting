@@ -195,17 +195,6 @@ class SendItAgainOnThePackage(StoreCase):
         self.assertIsInstance(ins[0], dict, ins)
         return qa_server.TOOLS["stage_for_delivery"]["fn"](dict(ins[0]["stage_for_delivery"]))
 
-    def test_a_quote_of_the_package_note_after_delivered_says_it_did_arrive(self):
-        import db, views
-        self.delivered_package()
-        _, note = self._send_last("delivered")
-        n = self.deliveries()
-        q = LABEL + "\n" + views.unesc(self.render_text(note))
-        with self.assertRaises(db.Refusal) as cm:
-            self.resend("send it again", q)
-        self.assertIn("did arrive", str(cm.exception))
-        self.assertEqual(self.deliveries(), n)
-
     def test_a_quote_of_the_file_after_delivered_says_it_did_arrive(self):
         import db
         self.delivered_package()
@@ -236,49 +225,9 @@ class SendItAgainOnThePackage(StoreCase):
         self.assertEqual(sc["offers"], [pkg])
         self.assertTrue(r["text"].endswith(views.tag_for(r["render_id"])), r["text"])
         self.assertIsNotNone(r["posted_seq"])
-        note = self.conn.execute("SELECT * FROM renders WHERE kind='package-note'").fetchone()
-        self.assertEqual(json.loads(note["scope_json"])["offers"], [pkg])
-        self.assertIn(views.tag_for(note["render_id"]), note["text"].split("\n")[0])
-
-    def test_two_packages_identical_notes_each_bind_their_own(self):
-        """V2: the tag tells apart two notes whose text is otherwise the same (two packages
-        of one quarter): each quote binds its own note, never AMBIGUOUS."""
-        import asks, views
-        self.delivered_package()
-        import db
-        asks.request_package(self.conn, "2026-Q3")
-        self.drive(A, deliver=True, stop_before="deliver")
-        with db.tx(self.conn):          # the second build's lines, word for word the first's
-            self.conn.execute("UPDATE packages SET caption=(SELECT caption FROM packages"
-                              " WHERE package_id=1) WHERE package_id=2")
-        with FakeBroker():
-            self.drive(A, deliver=True)
-        notes = self.conn.execute("SELECT render_id, text FROM renders WHERE"
-                                  " kind='package-note' ORDER BY rowid").fetchall()
-        self.assertEqual(len(notes), 2)
-        for rid, text in notes:
-            views.mark_rendering_delivered(self.conn, rid)
-        strip = [t.split("\n")[0][:-len(views.tag_for(r))] + "\n" + t.split("\n", 1)[1]
-                 for r, t in notes]
-        self.assertEqual(strip[0], strip[1])                 # the same words, but the tag
-        for rid, text in notes:
-            self.assertEqual(views.bound_rendering(self.conn, LABEL + "\n" + views.unesc(text))
-                             ["render_id"], rid)
-
-    def test_unquoted_words_still_skip_the_note_and_the_file(self):
-        """The note and the file stay informational for words with no quote: they never
-        take the reply from the view before them."""
-        import db, views
-        self.delivered_package()
-        r = views.build_review(self.conn, view="status")
-        views.mark_rendering_delivered(self.conn, r["render_id"])
-        self._send_last("delivered")
-        # both packages' notes delivered (the job posted the first) after the view
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE kind IN"
-                                           " ('package-note', 'package-file')"
-                                           " AND delivered_at IS NOT NULL").fetchone()[0], 2)
-        self.assertEqual(db.last_delivered(self.conn)["render_id"], r["render_id"])
-        self.assertEqual(views.bound_rendering(self.conn, None)["render_id"], r["render_id"])
+        # simple loop §1: the caption is the whole message — no package note follows
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE"
+                                           " kind='package-note'").fetchone()[0], 0)
 
 
 class PoliteDirectives(StoreCase):

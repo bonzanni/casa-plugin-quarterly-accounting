@@ -500,24 +500,8 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
                            f"req:pkg:{req['request_id']}:delivered")
 
         if outcome == "delivered" and d["package_id"] is not None:
-            # the rows exactly as the package froze them: facts_fp is
-            # db.canonical(reducer.facts_of(row)), what ledger's delivered checks compare;
-            # kind is the one the accountant's copy stands for — shipped under, else the
-            # last known (a row shipped unclassified or not re-read; fix wave F)
-            pk = conn.execute("SELECT manifest_json FROM packages WHERE package_id=?",
-                              (d["package_id"],)).fetchone()
-            for r in json.loads(pk[0])["rows"]:
-                conn.execute("INSERT OR REPLACE INTO delivered_rows(package_id, row_id, pid,"
-                             " facts_fp, kind) VALUES (?,?,?,?,?)",
-                             (d["package_id"], r["row_id"], r["pid"], r["facts_fp"],
-                              r["kind"] or r.get("last_known_kind")))
-            conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
-            # the package arrived: no offer of it stays open, and the accountant's copy is
-            # compared with the bank now (a late report may follow a newer import)
-            close_offers(conn, d["package_id"])
+            changed = settle_delivered(conn, d)
             note = _package_note(conn, d)
-            import ledger
-            changed = ledger.check_delivered_package(conn, d["package_id"])
         out = {"delivery_id": delivery_id, "status": outcome,
                "more": passes.queued_waiting(conn)}    # issue #15: continue_pass next
         if note:
@@ -533,6 +517,29 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
                                           quarter=quarter, package_id=d["package_id"])
             out["speak"] = alerts.pending_in_tx(conn, must=notice)
         return out
+
+
+def settle_delivered(conn, d) -> list:
+    """A package send has arrived (record_delivery's delivered outcome, and get_package
+    right after its deposit, D15): inside the caller's transaction, the rows exactly as the
+    package froze them become the accountant's copy, the package name counts as announced,
+    no offer of the package stays open, and the copy is compared with the bank now (a late
+    report may follow a newer import). Returns the new alerts' ids."""
+    import ledger
+    assert conn.in_transaction
+    # facts_fp is db.canonical(reducer.facts_of(row)), what ledger's delivered checks
+    # compare; kind is the one the accountant's copy stands for — shipped under, else the
+    # last known (a row shipped unclassified or not re-read; fix wave F)
+    pk = conn.execute("SELECT manifest_json FROM packages WHERE package_id=?",
+                      (d["package_id"],)).fetchone()
+    for r in json.loads(pk[0])["rows"]:
+        conn.execute("INSERT OR REPLACE INTO delivered_rows(package_id, row_id, pid,"
+                     " facts_fp, kind) VALUES (?,?,?,?,?)",
+                     (d["package_id"], r["row_id"], r["pid"], r["facts_fp"],
+                      r["kind"] or r.get("last_known_kind")))
+    conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
+    close_offers(conn, d["package_id"])
+    return ledger.check_delivered_package(conn, d["package_id"])
 
 
 def _package_note(conn, d):

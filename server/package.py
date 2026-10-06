@@ -12,7 +12,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-import json
 import os
 import re
 import secrets
@@ -32,6 +31,9 @@ COLUMNS = ("date", "amount", "currency", "direction", "counterparty", "vendor", 
 STATUS = {"matched": "MATCHED", "proposed": "UNCONFIRMED", "open": "MISSING",
           "optional": "OPTIONAL-MISSING", "no-document": "NO-DOCUMENT", "exempt": "NO-DOCUMENT",
           "ineligible": "UNTRACKED"}
+# simple loop D18: a line not documented yet — the caption's "open" count (a pending row
+# is not documented)
+OPEN = ("UNCONFIRMED", "MISSING", "UNCLASSIFIED", "PENDING")
 xml_safe = xlsx.xml_safe
 deterministic_zip = xlsx.zip_files
 
@@ -89,6 +91,7 @@ def _undated(named: dict, docs: dict) -> list:
 
 
 def _freeze(conn, quarter: str) -> dict:
+    import matches
     start, end = dates.quarter_bounds(quarter)
     conn.execute("BEGIN")                 # one consistent WAL read snapshot for the whole build
     try:
@@ -109,17 +112,22 @@ def _freeze(conn, quarter: str) -> dict:
                     row = conn.execute("SELECT * FROM documents WHERE doc_id=?",
                                        (c["document"]["doc_id"],)).fetchone()
                     docs[c["match_id"]] = dict(row)
+                if d["status"] == "proposed" and d["current"]:
+                    # D3 (shape c): a proposal's alternatives ship set aside with its
+                    # chosen document, keyed -doc_id (ints: the render's sort still sorts)
+                    held = {doc["doc_id"] for doc in docs.values()}
+                    for alt in matches.alternatives(conn, d["current"]["match_id"]):
+                        row = conn.execute("SELECT * FROM documents WHERE doc_id=?",
+                                           (alt,)).fetchone()
+                        if row is not None and alt not in held:
+                            docs[-alt] = dict(row)
             lines.append({"row": r, "d": d, "docs": docs})
         history = [r for r in in_q if r["state"] != "active"]
         unmatched = [dict(x) for x in conn.execute(
             "SELECT d.* FROM documents d JOIN document_status s ON s.doc_id=d.doc_id"
             " WHERE s.status='unmatched' AND d.ingest_quarter=? ORDER BY d.doc_id", (quarter,))]
-        snap = conn.execute("SELECT bank_through FROM snapshots ORDER BY snapshot_id DESC"
-                            " LIMIT 1").fetchone()
-        prev = conn.execute(
-            "SELECT p.* , d.settled_at FROM packages p JOIN deliveries d ON d.package_id="
-            "p.package_id WHERE p.quarter=? AND d.status='delivered' ORDER BY d.settled_at DESC,"
-            " p.package_id DESC LIMIT 1", (quarter,)).fetchone()
+        snap = conn.execute("SELECT bank_through, imported_at FROM snapshots ORDER BY"
+                            " snapshot_id DESC LIMIT 1").fetchone()
         # the import every line's freshness was judged against (round E3, Terra S1)
         # every row's date and amount: notes.md names a successor by them, never by id
         facts = {r["row_id"]: {"date": dates.effective_date(r), "amount_minor": r["amount_minor"],
@@ -127,7 +135,8 @@ def _freeze(conn, quarter: str) -> dict:
         return {"snapshot_id": lineage.latest_import(conn), "facts": facts,
                 "binding": dict(b), "lines": lines, "history": history, "unmatched": unmatched,
                 "bank_through": snap["bank_through"] if snap else None,
-                "prev": dict(prev) if prev else None}
+                # simple loop §1: the package is as of the latest check, and says so
+                "as_of": snap["imported_at"] if snap else None}
     finally:
         conn.execute("COMMIT")
 
@@ -136,7 +145,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     files, used, named, manifest_rows, matched_docs = {}, set(), {}, [], []
     placed = {}                     # doc_id -> the document row, for every file named
     missing, unclassified, nice, unresolved_lines, anomalies = [], [], [], [], []
-    unread = []
+    unread, pending, in_scope, open_ = [], [], 0, 0
     table = [list(COLUMNS)]
     for ln in frozen["lines"]:
         r, d = ln["row"], ln["d"]
@@ -153,6 +162,10 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         stale = d is not None and not d["fresh"] and d["status"] not in ("ineligible", "exempt")
         if stale:
             status, exp = "UNCLASSIFIED", {"kind": None, "tier": None}
+        elif d is not None and r["status"] != "BOOK" and status in OPEN:
+            # D18 (plan round 1, Terra S2): a row the bank has not booked is pending,
+            # never missing — set before the MISSING test below
+            status = "PENDING"
         docname, confidence, link, notes, set_aside = "", "", "", [], []
         if not stale and d is not None and d["status"] == "matched" and d["current"]:
             doc = ln["docs"][d["current"]["match_id"]]
@@ -180,6 +193,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
             link = d["link"] or ""
             if stale:
                 unread.append((d, set_aside))
+            elif status == "PENDING":
+                pending.append(d)
             elif status == "MISSING":
                 missing.append((d, link))
             elif status == "UNCLASSIFIED":
@@ -193,6 +208,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 anomalies.append(f"{_head(d)}: bank-feed's history is broken ({why}).")
             if d["unprojectable"]:
                 anomalies.append(f"{_head(d)}: the bank ledger could not take its tag.")
+        in_scope += status != "UNTRACKED"
+        open_ += status in OPEN
         vendor = d["counterparty"] if d else (r["counterparty"] or "")
         table.append([dates.effective_date(r) or "", f"{r['amount_minor'] // 100}.{r['amount_minor'] % 100:02d}",
                       r["currency"], r["direction"], r["counterparty"] or "", vendor, status,
@@ -216,6 +233,9 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     notes += ["", "## Not yet classified", ""]
     notes += [f"- {_head(d)}" + (f" — holds {name}" if name else "")
               for d, name in unclassified] or ["- none"]
+    if pending:
+        notes += ["", "## Pending at the bank", ""]
+        notes += [f"- {_head(d)} — not yet booked by the bank" for d in pending]
     if unread:
         notes += ["", "## Not seen in the last bank check", ""]
         notes += [f"- {_head(d)}" + (f" — holds {', '.join(names)}, set aside until it is "
@@ -264,7 +284,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     files["notes.md"] = ("\n".join(notes) + "\n").encode("utf-8")
     counts = {"payments": len(frozen["lines"]), "with_documents": len(matched_docs),
               "missing": len(missing), "unclassified": len(unclassified), "unread": len(unread),
-              "undated": len(undated)}
+              "undated": len(undated), "in_scope": in_scope, "pending": len(pending),
+              "open": open_}
     return (deterministic_zip(files), digest, partial,
             {"rows": manifest_rows, "documents": sorted(matched_docs), "counts": counts})
 
@@ -306,50 +327,15 @@ def _reserve(stem: str, stamp: str) -> tuple:
             continue
 
 
-def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, size,
-             check=None) -> str:
-    c = manifest["counts"]
-    out = [f"Accounting {dates.quarter_label(quarter)} · {c['payments']} payments · "
-           f"{c['with_documents']} with documents"]
-    if prev is not None:
-        when = dates.short_day(prev["settled_at"])
-        if prev["digest"] == digest:
-            out.append(f"Identical to the package from {when}.")
-        else:
-            added = len(set(manifest["documents"]) - set(json.loads(prev["manifest_json"])
-                                                         .get("documents", [])))
-            out.append(f"{added} document{'s' if added != 1 else ''} added since the package "
-                       f"from {when}." if added else f"Changed since the package from {when}.")
-    tail = [f"{c['missing']} still missing"] if c["missing"] else []
-    if c["unclassified"]:
-        tail.append(f"{c['unclassified']} not yet classified")
-    if tail:
-        out.append(", ".join(tail) + " — listed in notes.md.")
-    if c.get("unread"):
-        out.append(f"{c['unread']} not seen in the last bank check, so shipped unclassified "
-                   "— say \"go and check now\", then rebuild.")
-    if c.get("undated"):
-        n = c["undated"]
-        out.append(f"{n} file{'s are' if n != 1 else ' is'} named by a date not yet read from "
-                   "the document — listed in notes.md.")
-    check = check or {}
-    if check.get("gmail") == "down":
-        out.append("The email search couldn't run, so documents emailed since the last check "
-                   "may be missing.")
-    if check.get("unfinished"):
-        n = check["unfinished"]
-        out.append(f"The check couldn't get through {n} payment{'s' if n != 1 else ''} — say "
-                   "\"rebuild it\" to try again.")
-    if partial:
-        out.append("The quarter isn't over yet.")
-    if oversize:
-        out.append(f"Too large for Telegram ({size / 1e6:.1f} MB; the limit is 20 MB) — kept "
-                   "here; notes.md names the largest files.")
-    if not b["package_name_announced"]:
-        import views
-        out.append(f'Files are named "{views.field(filename)}" — say "call the zips <name>" '
-                   'to change that.')
-    return "\n".join(out)
+def caption_line(quarter, as_of, counts) -> str:
+    """§1 (option A, BRAIN 2026-10-06): the package is as of the latest check, and the
+    caption says so; the details live inside the zip. ONE line: "Q3 · as of 6 Oct · 57 of
+    60 documented · 3 open" — `as_of` is the latest import's time, `counts` the render's
+    (`in_scope`: every line not UNTRACKED; `open`: the OPEN statuses)."""
+    n, open_ = counts["in_scope"], counts["open"]
+    when = f"as of {dates.short_day(as_of[:10])}" if as_of else "no bank check yet"
+    return (f"{dates.quarter_label(quarter).split()[0]} · {when}"
+            f" · {n - open_} of {n} documented · {open_} open")
 
 
 def _request_for_build(conn, quarter: str, package_token, request_id=None) -> int:
@@ -456,19 +442,13 @@ def _build(conn, quarter: str, package_token=None, bound=False, bound_id=None) -
         data, digest, partial, manifest = _render(
             frozen, quarter, today, [f"{h}: {n / 1e6:.1f} MB" for n, h in sizes])
     b = frozen["binding"]
-    check = None
-    if bound and bound_id is not None:
-        row = conn.execute("SELECT check_json FROM package_requests WHERE request_id=?",
-                           (bound_id,)).fetchone()
-        check = json.loads(row["check_json"]) if row is not None and row["check_json"] else None
     stem = f"{b['package_name']}-{quarter}{'-partial' if partial else ''}-{today}"
     fd, path = _reserve(stem, stamp)
     with os.fdopen(fd, "wb") as f:
         f.write(data)
         f.flush()
         os.fsync(f.fileno())
-    caption = _caption(quarter, manifest, frozen["prev"], digest, partial, b, path.name,
-                       oversize, len(data), check)
+    caption = caption_line(quarter, frozen["as_of"], manifest["counts"])
     try:
         with db.tx(conn):
             # the binding check: in the transaction that registers and links the zip

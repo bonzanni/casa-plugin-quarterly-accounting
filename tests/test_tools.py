@@ -16,7 +16,7 @@ sys.modules.setdefault("qa_server", qa_server)
 
 EXPECTED = {
     "ingest_document", "update_document_metadata", "mark_irrelevant", "list_unmatched_documents",
-    "get_counterparty", "upsert_counterparty", "set_expectation",
+    "get_counterparty", "upsert_counterparty", "get_package", "set_expectation",
     "record_match", "propose_match", "relabel_match",
     "import_ledger_export", "list_projections", "record_observation",
     "record_probe", "check_setup", "reset_store",
@@ -103,18 +103,18 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 42)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
+        self.assertEqual(len(EXPECTED), 43)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
                                                 # Task 7: + 2; T8: + ask_state; T9: - job_report (§9);
                                                 # T10: + post_results (§5); T11: + post_package (§6.1);
                                                 # simple loop T4: + decide, record_missing (§2.2);
-                                                # T5: + record_mirror (§2.4)
+                                                # T5: + record_mirror (§2.4); T9: + get_package (§1)
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 42)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 43)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])

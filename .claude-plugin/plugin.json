@@ -48,6 +48,16 @@
         "get_counterparty": {
           "result": "safe"
         },
+        "get_package": {
+          "result": "capability",
+          "provides": [
+            "package"
+          ],
+          "delivers": {
+            "package": "operator_file"
+          },
+          "filename": true
+        },
         "import_ledger_export": {
           "result": "safe"
         },
@@ -190,6 +200,7 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__check_setup",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__decide",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__get_counterparty",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__get_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__import_ledger_export",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__ingest_document",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_next",

@@ -947,7 +947,7 @@ class TestEveryCallTellsItsOwnNotice(Requests):
     RAISERS = {("passes", "_close"), ("delivery", "revoke_superseded_first_sends"),
                ("delivery", "record_delivery"), ("delivery", "recover_staged"),
                ("db", "_settle_staged_email_on_upgrade"), ("job", "_close_oversize"),
-               ("posting", "post_package")}
+               ("posting", "_deposit_package")}
 
     def test_every_notice_raising_site_is_audited(self):
         import ast
@@ -1301,7 +1301,7 @@ class TestReviewC7(Requests):
                                             ("views", "_compose"): True,
                                             ("delivery", "resend_target"): True,
                                             ("delivery", "_package_note"): False,
-                                            ("posting", "post_package"): False,
+                                            ("posting", "_deposit_package"): False,
                                             # simple loop §1: a card stores the S7 grammar
                                             # field `offers` empty (views.FACT_FIELDS); it
                                             # composes no offer

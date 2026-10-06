@@ -26,9 +26,9 @@ class Packages(StoreCase):
         self.assertLessEqual(len(dep["caption"]), 900)
         self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
                          "delivered")
-        notes = self.conn.execute("SELECT delivered_at FROM renders WHERE kind='package-note'"
-                                  ).fetchall()
-        self.assertTrue(notes and all(n[0] for n in notes))     # posted by the next `post`
+        # simple loop §1: the caption is the whole message — no package note follows
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE"
+                                           " kind='package-note'").fetchone()[0], 0)
 
     def test_a_build_after_a_reread_goes_back_to_its_check_inside_the_cursor(self):
         import asks, job
@@ -198,25 +198,6 @@ class Review(StoreCase):
                               ).fetchone()[0]
         self.assertIsNotNone(self.conn.execute("SELECT delivered_at FROM renders WHERE"
                                                " render_id=?", (a,)).fetchone()[0])
-
-    def test_the_note_is_the_captions_rest_and_the_file_caption_its_first_line(self):
-        import asks
-        asks.request_package(self.conn, "2026-Q3")
-        with FakeBroker() as b:
-            self.drive(A, deliver=True)
-        import views
-        cap = self.conn.execute("SELECT caption FROM packages").fetchone()[0]
-        dep = next(d for d in b.deposits if d["slot"] == "package")
-        # #44: the file's caption is a tagged `package-file` rendering of its own
-        rid = self.conn.execute("SELECT render_id FROM renders WHERE"
-                                " kind='package-file'").fetchone()[0]
-        self.assertEqual(dep["caption"], cap.split("\n")[0] + views.tag_for(rid))
-        note = self.conn.execute("SELECT render_id, text, scope_json FROM renders WHERE"
-                                 " kind='package-note'").fetchone()
-        self.assertIn("Files are named", note["text"])
-        self.assertNotIn(cap.split("\n")[0], note["text"])
-        self.assertIn(views.tag_for(note["render_id"]), note["text"].split("\n")[0])
-        self.assertIn("delivery", json.loads(note["scope_json"]))
 
     def test_a_send_last_caption_says_when_it_was_built(self):
         import delivery, posting

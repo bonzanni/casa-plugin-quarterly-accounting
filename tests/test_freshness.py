@@ -762,7 +762,9 @@ class TestPackageWithANonFreshMember(ToolPass):
         st = {r["counterparty"]: (r["status"], r["expectation_kind"], r["document"]) for r in rows}
         self.assertEqual(st["Adobe"], ("UNCLASSIFIED", "", ""))
         self.assertEqual(st["Zapier"], ("MISSING", "invoice", ""))
-        self.assertIn("1 not seen in the last bank check", pkg["caption"])
+        # simple loop §1: one line; the unread row is not documented (UNCLASSIFIED: open)
+        self.assertTrue(pkg["caption"].endswith(" · 0 of 2 documented · 2 open"),
+                        pkg["caption"])
         self.assertIn("## Not seen in the last bank check", z.read("notes.md").decode())
 
 

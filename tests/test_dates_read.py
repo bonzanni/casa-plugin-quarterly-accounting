@@ -90,8 +90,8 @@ class TestThePackageSays(Dates):
     def test_a_file_named_by_an_unread_date_is_counted_and_listed(self):
         self.paired(date=None)
         out, z = self.build()
-        self.assertIn("1 file is named by a date not yet read from the document — listed in "
-                      "notes.md.", out["caption"])
+        # simple loop §1: the caption is one line; the count lives in notes.md
+        self.assertNotIn("not yet read", out["caption"])
         notes = z.read("notes.md").decode()
         self.assertIn("## Dates not yet read from the document\n\n- invoices/"
                       "2026-07-02_Adobe_100.01.pdf — named by the date it was filed with", notes)

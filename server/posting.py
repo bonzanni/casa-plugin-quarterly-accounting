@@ -123,7 +123,7 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
     caption line. A deposit Casa refuses settles the send `failed` (the staged copy taken
     back) and closes its request with a package-not-sent notice — never a send under the
     storage name."""
-    import alerts, dates, delivery, passes
+    import passes
     with db.tx(conn):
         d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?",
                          (delivery_id,)).fetchone()
@@ -144,7 +144,21 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
                           (d["package_id"],)).fetchone()
         line = pk["caption"].split("\n", 1)[0]
         if d["as_built"]:
+            import dates
             line += f" · built {dates.short_day(pk['built_at'])}, as it was then"
+    ref = _deposit_package(conn, d, pk, line, req)
+    return {"package": ref, "delivery_id": delivery_id, "filename": pk["filename"]}
+
+
+def _deposit_package(conn, d, pk, line, req) -> str:
+    """Deposit staged send `d` (package row `pk`) with caption `line`: the tagged
+    `package-file` rendering and the post mark commit first, the deposit is the LAST step.
+    A deposit Casa refuses settles the send `failed` (its staged copy taken back, its
+    caption rendering removed) and — for a request-bound send (`req`) — closes the request
+    with a package-not-sent notice, then refuses with PKG_REFUSED. Returns the reference."""
+    import alerts, delivery
+    delivery_id = d["delivery_id"]
+    with db.tx(conn):
         # #44: the caption is a rendering of its own (`package-file`), tagged (binding V2)
         # and offering its package, so a swipe-reply on the file binds it; its text is the
         # caption in the dialect (a plain caption's backslashes doubled: unesc gives back
@@ -159,13 +173,13 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
                       db.now(), caption.replace("\\", "\\\\"), db.next_seq(conn)))
         # the post mark commits before the deposit: a turn that dies after it leaves the
         # send staged, recovered `uncertain` at a later claim (delivery.stalled_sends);
-        # only record_delivery, on Casa's receipt, settles it delivered
+        # only a recorded outcome settles it delivered
         conn.execute("UPDATE deliveries SET lease_at=?, posted_at=? WHERE delivery_id=?",
                      (db.now(), db.now(), delivery_id))
     try:
-        ref = casa_broker.deposit("package", d["staged_path"], caption=caption, kind="zip",
-                                  filename=pk["filename"])
-    except casa_broker.DepositFailed as exc:
+        return casa_broker.deposit("package", d["staged_path"], caption=caption, kind="zip",
+                                   filename=pk["filename"])
+    except casa_broker.DepositFailed:
         with db.custody_lock():
             with db.tx(conn):
                 delivery.withdraw(conn, [dict(d)], refusal="could not take back the staged "
@@ -185,7 +199,44 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
                                          f"request:{req['request_id']}:posted",
                                          quarter=pk["quarter"])
         raise db.Refusal(PKG_REFUSED)
-    return {"package": ref, "delivery_id": delivery_id, "filename": pk["filename"]}
+
+
+NO_CHECK = "Nothing to package yet — ask me to check the bank first."
+
+
+def get_package(conn, quarter) -> dict:
+    """#1303: a [Get package] tap's stored call, and the desk's typed "send the package".
+    Pure code: builds the zip synchronously from the store's latest state (no bank read, no
+    model), stages it, deposits it as post_package does — the landed file IS the receipt —
+    and records the send delivered (D15). Never called by the job (R6)."""
+    import dates, delivery, package
+    dates.parse_quarter(quarter)
+    if conn.in_transaction:
+        raise RuntimeError("get_package opens its own transactions")
+    if conn.execute("SELECT 1 FROM snapshots").fetchone() is None:
+        raise db.Refusal(NO_CHECK)
+    built = package.build_quarterly_package(conn, quarter, bound=False)   # Task 11: no `bound`
+    if built["oversize"]:
+        raise db.Refusal(f"the {dates.quarter_label(quarter)} package is "
+                         f"{built['size'] / 1e6:.1f} MB, over Telegram's 20 MB limit; it is "
+                         "kept here, and notes.md names the largest files")
+    with db.custody_lock():
+        st = delivery._stage(conn, built["package_id"], None, None, None, None)
+        # Task 11: delivery._stage(conn, package_id, None, None)
+    d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?",
+                     (st["delivery_id"],)).fetchone()
+    pk = conn.execute("SELECT * FROM packages WHERE package_id=?",
+                      (built["package_id"],)).fetchone()
+    ref = _deposit_package(conn, d, pk, pk["caption"], None)    # raises Refusal on a refusal
+    try:
+        with db.tx(conn):
+            if conn.execute("UPDATE deliveries SET status='delivered', settled_at=? WHERE"
+                            " delivery_id=? AND status='staged'",
+                            (db.now(), d["delivery_id"])).rowcount:
+                delivery.settle_delivered(conn, d)
+    except db.Busy:
+        pass       # D15: the send stays staged and posted; the next claim settles it
+    return {"package": ref, "filename": pk["filename"], "delivery_id": d["delivery_id"]}
 
 
 READING_TOO_LONG = ("That is more than I can show for one Apply — nothing was read. Send it "

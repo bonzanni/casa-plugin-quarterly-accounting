@@ -151,8 +151,8 @@ class TestTheCheckRuns(Rounds):
         self.assertEqual(json.loads(self.request()["check_json"]), {"unfinished": 2})
         pkg = self.call("build_quarterly_package", quarter="2026-Q3",
                         package_token=end["package_token"])
-        self.assertIn("The check couldn't get through 2 payments — say \"rebuild it\"",
-                      pkg["caption"])
+        # simple loop §1: the caption is the one dated line — it ships, as of the check
+        self.assertRegex(pkg["caption"], r"^Q3 · as of \d+ \w+ · 0 of 2 documented · 2 open$")
 
     def test_gmail_down_ships_and_says_the_search_could_not_run(self):
         self.seed(2)
@@ -164,7 +164,7 @@ class TestTheCheckRuns(Rounds):
         self.assertEqual(end["next"], "build")
         pkg = self.call("build_quarterly_package", quarter="2026-Q3",
                         package_token=end["package_token"])
-        self.assertIn("The email search couldn't run", pkg["caption"])
+        self.assertRegex(pkg["caption"], r"^Q3 · as of \d+ \w+ · 0 of 2 documented · 2 open$")
 
     def test_a_judgment_out_of_time_or_short_of_its_pages_covers_nothing(self):
         # design D1 (Astra) and D3 (Astra S2): only a whole judge step covers a payment
