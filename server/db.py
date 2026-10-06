@@ -90,6 +90,7 @@ WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
   pass_id TEXT, outcome TEXT,
   render_ids_json TEXT NOT NULL DEFAULT '[]',
   quarter TEXT);                 -- an operator check that names its quarter (ruling Q2)"""
+# removed-name: schema history begin
 # Schema 10's own work_requests, frozen: MIGRATIONS[9] creates it and MIGRATIONS[11] adds
 # quarter, so a store migrated from 9 does not add the column twice.
 WORK_REQUESTS_DDL_V10 = """CREATE TABLE IF NOT EXISTS work_requests (
@@ -102,6 +103,7 @@ WORK_REQUESTS_DDL_V10 = """CREATE TABLE IF NOT EXISTS work_requests (
   pass_id TEXT, outcome TEXT,
   render_ids_json TEXT NOT NULL DEFAULT '[]',
   verdicts_json TEXT NOT NULL DEFAULT '{}');"""
+# removed-name: schema history end
 
 # Schema 10's own claims and runs tables, frozen: MIGRATIONS[9] creates these and
 # MIGRATIONS[10] adds the S7 columns, so a store migrated from 9 does not add them twice.
@@ -632,14 +634,14 @@ def _settle_staged_email_on_upgrade(conn) -> None:
                           " d.channel='email'").fetchall():
         conn.execute("UPDATE deliveries SET status='uncertain', settled_at=?, withdrawn_at=?"
                      " WHERE delivery_id=?", (ts, ts, d["delivery_id"]))
-        conn.execute("UPDATE package_requests SET state='uncertain', updated_at=? WHERE"
+        conn.execute("UPDATE package_requests SET state='uncertain', updated_at=? WHERE"  # removed-name: schema history
                      " delivery_id=? AND state='staged'", (ts, d["delivery_id"]))
         alerts.raise_package(conn, "package-uncertain", f"delivery:{d['delivery_id']}:uncertain",
                              quarter=d["quarter"], package_id=d["package_id"], pass_id="")
 
 
 # A version's data step runs right after MIGRATIONS[version], inside the loop, so a later
-# version's drop can never break an earlier step (MIGRATIONS[11] drops package_requests).
+# version's drop can never break an earlier step (MIGRATIONS[11] drops a table the step reads).
 # The 4 -> 5 store epoch (issue #14) went with the sweep that read it (simple loop §4): no
 # step at 5, and 9 -> 10 only closes a live delegation pass.
 SCHEMA_DATA_STEPS = {9: _close_delegation_pass, 10: _settle_staged_email_on_upgrade}
@@ -759,11 +761,11 @@ def next_seq(conn: sqlite3.Connection) -> int:
 # reply from it (diff round 1, R3; Astra S2: a handover page delivered after `speak`'s
 # resend offer made "send it again" refuse).
 INFORMATIONAL_KINDS = ("handover", "job-stop", "package-file",
-                       "package-note", "job-left")     # the last two: legacy, before 12
+                       "package-note", "job-left")     # removed-name: schema history (legacy kinds, before 12)
 # Of those, the ones a QUOTE can never bind (views.bound_rendering). The package file and
 # a legacy package note are quotable (#44): a swipe-reply "send it again" on either names
 # its package (its scope's `offers`), answered by delivery.resend_target.
-UNQUOTABLE_KINDS = ("handover", "job-stop", "job-left")    # job-left: legacy, before 12
+UNQUOTABLE_KINDS = ("handover", "job-stop", "job-left")    # removed-name: schema history (legacy, before 12)
 
 
 def seen_render(row) -> bool:

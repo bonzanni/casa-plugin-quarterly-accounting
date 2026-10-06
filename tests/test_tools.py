@@ -23,8 +23,7 @@ EXPECTED = {
     "record_search",
     "list_quarter_state", "build_review", "mark_rendering_delivered",
     "stage_for_delivery", "record_delivery", "read_document",
-    # S2 (spec §8, §13): the job's tools replace begin_pass, end_pass, continue_pass,
-    # record_step and more_work
+    # S2 (spec §8, §13): the job's tools
     "job_next", "job_status", "request_work",
     "record_filing",
     # simple loop Task 11 (§4): the sweep's two tools, the package ask and the request-bound
@@ -397,7 +396,7 @@ class TestArgumentTypes(ToolCase):
         bools = [(n, k) for n, t in qa_server.TOOLS.items()
                  for k, v in t["schema"]["properties"].items() if v.get("type") == "boolean"]
         # fix wave F: + fresh_only; + failed; #10: + stopped_by_refusal, out_of_time; #15: +
-        # last_built; #22: + dates_unread; S2: - record_step's three, + record_probe's absent;
+        # last_built; #22: + dates_unread; S2: the job's tools take the old step flags' place;
         # S7 Task 4: - set_exemption's exempt; simple loop Task 11: - the unread-dates
         # listing's flag, - the sweep's not-found flag
         self.assertEqual(len(bools), 12, bools)
