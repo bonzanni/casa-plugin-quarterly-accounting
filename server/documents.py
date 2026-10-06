@@ -34,7 +34,7 @@ MIME = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg",
         "tif": "image/tiff", "tiff": "image/tiff", "xml": "text/plain"}
 # How far into a held PDF read_document looks for the %PDF- header (issue #8).
 PDF_HEADER_WINDOW = 1024
-VENDOR_MAX = 80
+VENDOR_MAX = 200          # e2: the payment unit hands names up to budget.bounded's 200
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _CCY = re.compile(r"^[A-Z]{3}$")
 

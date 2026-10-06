@@ -101,9 +101,13 @@ def build_work(conn, job_id, handover_docs=()) -> int:
 def build_work_in_tx(conn, job_id, handover_docs=()) -> int:
     """build_work inside the caller's transaction (the cursor's, which checked the claim)."""
     assert conn.in_transaction
+    import replace
     for pid, p, row in in_scope(conn):
         why = why_work(conn, pid, p, row)
-        if why is None and handover_docs and _handover_fits(conn, pid, p, row, handover_docs):
+        if handover_docs and (why is None or replace.current(conn, pid) is not None) \
+                and _handover_fits(conn, pid, p, row, handover_docs):
+            # e2 (Astra S2): a handover onto a payment that holds a pairing is answered
+            # through the replace card, whatever else brought it on the list
             why = "handover"
         if why is not None:
             _entry_in(conn, job_id, pid, vendor_of(conn, row), why)
@@ -344,7 +348,9 @@ def payment_unit_in_tx(conn, job_id, hand_seq=None, calls_made=None):
             continue
         live.append((dates.effective_date(row) or "", r["pid"], r, row, p))
     if not live:
-        return None
+        # e2 (Astra S1): a payment settled just now may owe found attachments — they are
+        # handed before the cursor moves on to the mirror and the post
+        return _owed_files_unit(conn, job_id, hand_seq, calls_made)
     _day, pid, r, row, p = min(live, key=lambda x: (x[0], x[1]))
     if calls_made is not None and not unit_fits("payment", calls_made):
         return {"unit": "end-batch"}
@@ -912,11 +918,18 @@ def run_message(conn, job_id, run):
     scheduled = run["started_by"] != "operator"
     stopped, said = _stop_line(conn, run) if not scheduled else (None, [])
     alert_lines, alert_ids = alerts.pending_lines(conn, said=said)
-    extra = alert_lines + _gate_lines(conn, run) + partial_lines(conn, job_id)
-    return cards.compose_end(conn, job_id, scheduled=scheduled,
-                             handover_docs=run_handover_docs(conn, job_id), extra=extra,
-                             ready=owed, alerts=alert_ids, stopped=stopped,
-                             standalone=_handover_only(conn, job_id))
+    incomplete = partial_lines(conn, job_id)
+    extra = alert_lines + _gate_lines(conn, run) + incomplete
+    rid = cards.compose_end(conn, job_id, scheduled=scheduled,
+                            handover_docs=run_handover_docs(conn, job_id), extra=extra,
+                            ready=owed, alerts=alert_ids, stopped=stopped,
+                            standalone=_handover_only(conn, job_id))
+    if rid is None and incomplete:
+        # e2 (Astra S2, rule 5): a scheduled run with nothing new to ask that left work
+        # incomplete says so — through the alerts, the scheduled run's failure channel
+        # (§1), once per run; its post is the pending alerts alone
+        alerts.raise_incomplete(conn, job_id, incomplete)
+    return rid
 
 
 def _handover_only(conn, job_id) -> bool:

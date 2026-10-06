@@ -363,8 +363,13 @@ class Filing(StoreCase):
         self.assertEqual((stored, kb.norm(stored)), ("Adobe Systems", kb.norm("adobe systems")))
 
     def test_a_vendor_is_bounded(self):
+        """e2 (Astra S1): the bound is the payment unit's own (budget.bounded's 200), so the
+        name a unit hands out is always accepted."""
+        import documents
+        self.assertEqual(documents.VENDOR_MAX, 200)
+        self.ingest(b"%PDF-1.4 one", token=self.token, vendor="v" * 200)
         with self.assertRaisesRegex(db.Refusal, "vendor"):
-            self.ingest(b"%PDF-1.4 two", token=self.token, vendor="v" * 81)
+            self.ingest(b"%PDF-1.4 two", token=self.token, vendor="v" * 201)
 
     def test_a_token_bearing_filing_marks_progress_and_a_desk_filing_does_not(self):
         progressed = lambda: self.conn.execute("SELECT progressed FROM claims WHERE gen=?",

@@ -204,6 +204,12 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
                 receipt = _proposal_answer(conn, rid, scope, action, pid, doc_id, grant)
     except db.Refusal as exc:
         receipt, then = f"Nothing was applied: {str(exc).rstrip('.')}.", "fresh"
+    if then == "fresh" and action in ("keep-current", "use-new"):
+        # e2 (Astra S2): a superseded or stale replace card is answered with the payment's
+        # live question, when it has one
+        newer = cards.live_question_card(conn, review_of, pos, pid)
+        if newer is not None and newer != rid:
+            return _answer(conn, receipt, newer)
     nxt = {"fresh": fresh, "onward": onward,
            "next": lambda: cards.next_after(conn, review_of, pos)}[then]()
     return _answer(conn, receipt, nxt)

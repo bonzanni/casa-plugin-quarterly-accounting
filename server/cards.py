@@ -414,6 +414,7 @@ def _receipts(conn, docs) -> tuple:
         if conn.execute("SELECT 1 FROM replace_questions WHERE new_doc_id=? AND state='open'",
                         (doc,)).fetchone():
             continue          # rev 18.4 §R18.3: its question is the "to check" line + card
+                              # (e2: retired questions are closed first — compose_end)
         d = work.describe(conn, held[0]) if held else None
         if d is not None and d["status"] == "proposed":
             if all(x["pid"] != d["pid"] for x in props):
@@ -468,6 +469,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     run's only request was the handover — its message shows only what the handed documents
     changed; otherwise (a check, scheduled or the operator's, that a handover joined) the
     full message, the handover's "Filed." receipt lines added after its head."""
+    replace.open_ones(conn)        # e2 (Astra S2): stale questions retired before the receipts
     st = state(conn)
     q = main_quarter(conn, job_id)
     open_missing = [d for ds in st["missing"].values() for d in ds if not _answered(d)]
@@ -617,6 +619,17 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
                  **_grammar([d])}
         return _store(conn, "review", lines, scope, {pid: 1}, {pid: item_state(d)},
                       docs={pid: docs})
+
+
+def live_question_card(conn, review_of, pos, pid):
+    """e2 (Astra S2): the payment's live question's card, in place of a superseded one —
+    None when it has none."""
+    live = [q for q in replace.open_ones(conn) if q["pid"] == pid]
+    if not live:
+        return None
+    src = json.loads(_row(conn, review_of)["scope_json"])
+    return _replace_card(conn, review_of, pos, len(src.get("order") or []) or 1,
+                         src["quarter"], bool(src.get("scheduled")), live[-1]["question_id"])
 
 
 def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):

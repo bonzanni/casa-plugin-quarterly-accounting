@@ -89,6 +89,14 @@ MIRROR_FAILED = ("{n} bank-ledger update{s} did not go through — tried again a
                  "check.")
 
 
+def raise_incomplete(conn, job_id, lines) -> None:
+    """Rule 5 on a scheduled run with nothing new to ask (e2, Astra S2): its "search
+    incomplete" lines, said once — keyed by the run. Inside the caller's tx."""
+    conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
+                 " VALUES ('run-incomplete', ?, ?, ?)",
+                 (f"incomplete:{job_id}", db.canonical({"lines": list(lines)[:4]}), db.now()))
+
+
 def _ids(unit) -> list:
     """A unit's alert ids: one, or a tuple of them (the refused mirror writes' one line)."""
     return list(unit[0]) if isinstance(unit[0], tuple) else [unit[0]]
@@ -195,6 +203,9 @@ def _units(conn, rows) -> list:
         elif a["kind"] == "run-stopped":
             reason = views.field(json.loads(a["detail"]).get("reason", "").rstrip(". "), 300)
             out.append((a["alert_id"], None, views._wrap(STOPPED.format(reason=reason))))
+        elif a["kind"] == "run-incomplete":
+            out.append((a["alert_id"], None, [w for line in json.loads(a["detail"])["lines"]
+                                              for w in views._wrap(views.clip(line, 300))]))
     failed = tuple(a["alert_id"] for a in rows if a["kind"] == "mirror-failed")
     if failed:                  # d1: every refused mirror write pending, said as one line
         out.append((failed, None, views._wrap(MIRROR_FAILED.format(

@@ -43,6 +43,7 @@ def _handover_onto_pairing(conn, token, pid, e) -> bool:
     """Rev 18.4 §R18.3: a handover entry whose payment already holds a document (a match or
     a proposal) is answered keep or replace — never a match or proposal of another document
     by the job (nothing is replaced without the operator's tap)."""
+    import loop
     import queues
     import replace
     job_id = queues.job_of(conn, token)
@@ -50,7 +51,10 @@ def _handover_onto_pairing(conn, token, pid, e) -> bool:
         return False
     why = conn.execute("SELECT why FROM run_work WHERE job_id=? AND pid=?",
                        (job_id, pid)).fetchone()
-    return why is not None and why[0] == "handover"
+    # e2 (Astra S2): a handed document is never committed onto a paired payment by the job,
+    # whatever listed the payment
+    return (why is not None and why[0] == "handover") or \
+        e.get("doc_id") in loop.run_handover_docs(conn, job_id)
 
 
 def _handover_entry(conn, token, pid, e, outcome) -> dict:
