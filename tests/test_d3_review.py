@@ -85,7 +85,9 @@ class EveryUnitHasABudget(StoreCase):
         self.assertEqual(len(vendor), 4)
         self.assertGreater(len(vendor), loop.HAND_MAX)
         self.assertEqual([u["continued"] for u in vendor], [False, True, True, True])
-        self.assertEqual(vendor[-1]["filed_refs"], ["x-3", "x-2", "x-1"])
+        self.assertNotIn("filed_refs", vendor[-1])          # d5: membership is the probe's
+        self.assertEqual(sorted(r[0] for r in self.conn.execute(
+            "SELECT ref FROM operator_refs WHERE ref LIKE 'x-%'")), ["x-1", "x-2", "x-3"])
         self.assertEqual(self.conn.execute("SELECT status FROM projections").fetchone()[0],
                          "matched")
 

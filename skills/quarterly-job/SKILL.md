@@ -56,9 +56,9 @@ The unit carries `acq`, the bank read.
    data={"accounts": [{account_id, category, label}, …]})` — before the sync: it binds
    the account.
 3. `sync`, then `record_probe(pass_token, kind="bank_sync", ok=…, detail=…, acq=<the unit's acq>, data={"queue": {"workable": <n>, "parked": <n>}})`
-   from that sync's outcome (ok=false with its error if it failed); the counts are
-   the sync's `Queue:` line. tx-classifier may classify on the sync's trailer: never
-   wait for it, and never classify or apply rules yourself.
+   from that sync's outcome (ok=false with its error); the counts are
+   the sync's `Queue:` line. tx-classifier may classify after the sync: never
+   wait for it, nor classify yourself.
 4. `list_backups` once. From that ONE answer: `record_probe(pass_token, kind="ledger",
    ok=true, data={"generation": <Restore generation>, "registered": {<workflow>: <backup id>, …},
    "instance": <the "Ledger instance:" id>, "missing": [<each workflow it marks FILE MISSING>]})`.
@@ -76,13 +76,13 @@ it answers `no transaction #N`, `record_not_found(pass_token, pid, snapshot_id=<
 
 ### `filing`
 
-`search_emails` (`from:me to:me has:attachment newer_than:8d`), then `record_probe(pass_token,
-kind="gmail", ok=…, detail=…, data={"refs": [each attachment's ref, newest first]})`;
-no Gmail tools: no search, `record_probe(pass_token, kind="gmail", ok=false, absent=true)`.
-File each ref its answer lists in `unfiled`, in order; read each, pass its fields:
+`search_emails` (`from:me to:me has:attachment newer_than:8d`); no Gmail tools: no search,
+`record_probe(pass_token, kind="gmail", ok=false, absent=true)`.
+**Which are new:** `record_probe(pass_token, kind="gmail", ok=…, detail=…, data={"refs": [each ref found, newest first]})`
+answers `unfiled`, the refs not yet filed: file those in order, then probe again until
+`unfiled_total` is 0. Read each, pass its fields:
 `ingest_document(source_path, kind, source="manual-email", extraction_author="specialist", source_ref=<message id>:<attachment id>, amount_minor, currency, document_date, issuer, document_number, pass_token)`
-— no `vendor`: your own mail is no vendor's. When `unfiled` was all of `unfiled_total`
-(or no search ran): `record_filing(pass_token)`.
+— no `vendor`: your own mail is no vendor's. Then `record_filing(pass_token)`.
 
 ### `vendor`
 
@@ -101,7 +101,8 @@ One vendor's payments, each with its `revision`, the filed documents that could 
    still uncovered. Record each:
    `record_search(pids=[the payments it was for], search="hinted", queries=[…], found_candidate=…, pass_token)`
    (`search="plain"`, `search="payment"`).
-3. **File** every plausible invoice found (none in `filed_refs`), reading each once:
+3. **File** the plausible invoices found that **Which are new** (refs: message ids)
+   answers `unfiled`, reading each once:
    `ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<message id>, vendor=<the unit's vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`.
 4. **Decide the vendor's payments in ONE call:** `decide(pass_token, entries=[…])`, one
    entry per payment:
@@ -120,7 +121,7 @@ One vendor's payments, each with its `revision`, the filed documents that could 
 5. **Save what worked:** when a vendor search found an invoice,
    `upsert_counterparty(name=<vendor>, hint_sender=<the sender address>, hint_subject=<a subject pattern>, pass_token)`.
 
-A vendor whose invoices sit behind a login: once, research the deepest link to its invoice
+A vendor whose invoices sit behind a login: once, find the deepest link to its invoice
 list and `upsert_counterparty(name, patterns=[bank text], source="portal", document_link=…, pass_token)`.
 
 ### `mirror`

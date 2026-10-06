@@ -399,8 +399,10 @@ class TestJob(TempEnv):
         unfiled ones."""
         f = flat(self.units("filing", "### `vendor`"))
         for phrase in ('`record_probe(pass_token, kind="gmail", ok=false, absent=true)`',
-                       'data={"refs": [each attachment\'s ref, newest first]})`',
-                       "File each ref its answer lists in `unfiled`, in order",
+                       '**Which are new:** `record_probe(pass_token, kind="gmail", ok=…, '
+                       'detail=…, data={"refs": [each ref found, newest first]})` answers '
+                       "`unfiled`, the refs not yet filed: file those in order, then probe "
+                       "again until `unfiled_total` is 0.",
                        "source_ref=<message id>:<attachment id>",
                        'source="manual-email", extraction_author="specialist"',
                        "no `vendor`: your own mail is no vendor's",
@@ -420,25 +422,24 @@ class TestJob(TempEnv):
                       "`max_calls`, stop and call `job_next`: an unfinished unit comes again.",
                       turn)
         f = flat(self.units("filing", "### `vendor`"))
-        self.assertIn("When `unfiled` was all of `unfiled_total` (or no search ran): "
-                      "`record_filing(pass_token)`.", f)
-        self.assertNotIn("filed_refs", f)
+        self.assertIn("Then `record_filing(pass_token)`.", f)
+        self.assertNotIn("filed_refs", JOB)                  # d5: one membership, the probe's
         self.assertNotIn("max_files", JOB)
-        self.assertIn("**File** every plausible invoice found (none in `filed_refs`), reading "
-                      "each once", flat(self.vendor()))
+        self.assertIn("**File** the plausible invoices found that **Which are new** (refs: "
+                      "message ids) answers `unfiled`, reading each once", flat(self.vendor()))
 
     def test_own_mail_and_vendor_filing_pass_the_reading(self):
         """d2 (Astra S2): the model reads each document and passes amount, currency, date,
         issuer and number — own mail with no vendor (a candidate, never an exact_fit), the
         vendor search's filing with the unit's vendor."""
         f = flat(self.units("filing", "### `vendor`"))
-        self.assertIn("read each, pass its fields: `ingest_document(source_path, kind, "
+        self.assertIn("Read each, pass its fields: `ingest_document(source_path, kind, "
                       'source="manual-email", extraction_author="specialist", '
                       "source_ref=<message id>:<attachment id>, " + self.READING, f)
         self.assertNotIn("vendor=", f)
         v = flat(self.vendor())
-        self.assertIn("**File** every plausible invoice found (none in `filed_refs`), reading "
-                      "each once: "
+        self.assertIn("**File** the plausible invoices found that **Which are new** (refs: "
+                      "message ids) answers `unfiled`, reading each once: "
                       '`ingest_document(source_path, kind, source="gmail", '
                       'extraction_author="specialist", source_ref=<message id>, '
                       "vendor=<the unit's vendor>, " + self.READING, v)
@@ -457,7 +458,7 @@ class TestJob(TempEnv):
                  "`searches.plain` is false: the plain vendor-and-dates search once",
                  "Then per-payment searches only for what is still uncovered",
                  '`record_search(pids=[the payments it was for], search="hinted"',
-                 'search="plain"', 'search="payment"', "**File** every plausible invoice",
+                 'search="plain"', 'search="payment"', "**File** the plausible invoices found",
                  "vendor=<the unit's vendor>", "**Decide the vendor's payments in ONE call:**",
                  "**Save what worked:**"]
         pos = [v.index(k) for k in order]

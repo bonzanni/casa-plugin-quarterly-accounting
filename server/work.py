@@ -340,19 +340,22 @@ def triage(conn) -> list:
 
 
 TRIAGE_LIMIT = 50
-# d4 (Astra S1): which of the attachments the job found are not yet filed — decided here,
-# on the EXACT refs (operator_refs keeps each ref whole), never on a clipped copy in a list
-# the model compares. At most UNFILED_SHOWN of them (and UNFILED_BUDGET characters, at
+# d4/d5 (Astra S1, generalized): which of the attachments a search found — own mail or a
+# vendor's — are not yet filed by ANY earlier ingest, of any run: decided here, on the
+# EXACT refs (operator_refs and documents.source_ref keep each whole), never on a list the
+# model compares. At most UNFILED_SHOWN of them (and UNFILED_BUDGET characters, at
 # least one) per answer; the rest are only counted, and come in a later answer
 UNFILED_SHOWN = 20
 UNFILED_BUDGET = 12_000
 
 
 def unfiled(conn, refs) -> dict:
-    """Of `refs` (the attachments the filing's search found, newest first), the ones no
-    operator_refs row holds: {"unfiled": the first of them, exact, "unfiled_total": all}."""
+    """Of `refs` (what a search found, newest first), the ones no ingest filed — no
+    operator_refs row and no document holds the ref: {"unfiled": the first of them, exact,
+    "unfiled_total": all}."""
     todo = [r for r in dict.fromkeys(refs)
-            if conn.execute("SELECT 1 FROM operator_refs WHERE ref=?", (r,)).fetchone() is None]
+            if conn.execute("SELECT 1 FROM operator_refs WHERE ref=? UNION ALL SELECT 1 FROM"
+                            " documents WHERE source_ref=? LIMIT 1", (r, r)).fetchone() is None]
     shown, used = [], 0
     for r in todo[:UNFILED_SHOWN]:
         used += budget.size([r]) + 1

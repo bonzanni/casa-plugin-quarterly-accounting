@@ -11,12 +11,12 @@ driver makes in a turn is counted into `calls_made` (a new turn — a claim — 
             get_transaction; "no transaction #N" -> record_not_found
   filing    one search of the operator's own mail, record_probe(gmail, ok, data.refs) —
             failed when Gmail.down — then each attachment the probe answers `unfiled`,
-            newest first (download, Read, ingest_document with the reading: amount,
-            currency, date, issuer, number; no vendor), and record_filing once none is left
+            newest first, page by page (download, Read, ingest_document with the reading:
+            amount, currency, date, issuer, number; no vendor), then record_filing
   vendor    the skill's search rule (Task 16): only while a payment is uncovered (no exact
             fit, no unheld candidate), the hinted search (a learned hint, not yet run this
-            run), then the plain one (still uncovered, not yet run); each message found
-            filed with ingest_document(vendor=…). Then per payment: one holding a document
+            run), then the plain one (still uncovered, not yet run); each message the gmail
+            probe answers unfiled (d5) filed with ingest_document(vendor=…). Then per payment: one holding a document
             with another same-amount candidate → propose the held one with it as the
             alternative (refused: match the held one); the exact fit or the nearest-dated
             same-currency, same-amount unheld candidate → match; else an unheld candidate →
@@ -223,6 +223,7 @@ class JobDriver:
         self.batch_reported = []        # per batch: a progress report was handed (progressed)
         self._limit = None              # the unit in hand's call budget
         self._reserve = 0               # the calls its closing write needs (loop.CLOSING)
+        self.tool_calls = {}            # plugin tool name -> calls made, every run
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
 
     # --- the bank, as the operator's bank has it ------------------------------------
@@ -601,6 +602,7 @@ class JobDriver:
         import qa_server
         import tools  # noqa: F401  -- registers every tool
         self._spend(closing=name in CLOSING_TOOLS)
+        self.tool_calls[name] = self.tool_calls.get(name, 0) + 1
         out = qa_server.TOOLS[name]["fn"](args)
         if isinstance(out, dict) and isinstance(out.get("refused"), str):
             raise db.Refusal(out["refused"])
@@ -649,21 +651,31 @@ class JobDriver:
                                                 "snapshot_id": imp["snapshot"]})
         return None
 
+    def _unfiled(self, token, refs):
+        """d4/d5, the skill's **Which are new**: the gmail probe with the refs a search
+        found, answered page by page with the exact ones no ingest filed; yields each, then
+        probes again while `unfiled_total` was more than the page."""
+        while refs:
+            out = self._tool("record_probe", {"pass_token": token, "kind": "gmail", "ok": True,
+                                              "data": {"refs": refs}})
+            yield from out["unfiled"]
+            if out["unfiled_total"] <= len(out["unfiled"]):
+                return
+
     def _filing(self, u, token):
-        """The skill's filing: the search, then its gmail probe with every attachment found
-        (data.refs, newest first) — answered with the exact unfiled ones (d4) — each of
-        those filed, downloaded and read once, with the reading (no vendor: own mail is no
-        vendor's); record_filing once the probe says none is left. A unit cut at its
-        `max_calls` comes again (d3)."""
+        """The skill's filing: the search, then **Which are new** (the gmail probe with
+        every attachment ref found), each unfiled one filed in order, downloaded and read
+        once, with the reading (no vendor: own mail is no vendor's); then record_filing. A
+        unit cut at its `max_calls` comes again (d3)."""
         self._spend(1)
         found = self.gmail.search_emails("from:me to:me has:attachment newer_than:8d")
-        out = self._tool("record_probe", {
-            "pass_token": token, "kind": "gmail", "ok": found is not None,
-            **({"detail": "Gmail search failed"} if found is None
-               else {"data": {"refs": [m["ref"] for m in found]}})})
-        todo = out.get("unfiled", []) if found else []
+        if found is None:
+            self._tool("record_probe", {"pass_token": token, "kind": "gmail", "ok": False,
+                                        "detail": "Gmail search failed"})
         by_ref = {m["ref"]: m for m in found or ()}
-        for ref in todo:
+        if not found and found is not None:
+            self._tool("record_probe", {"pass_token": token, "kind": "gmail", "ok": True})
+        for ref in self._unfiled(token, [m["ref"] for m in found or ()]):
             m = by_ref[ref]
             self._spend(2)                                # download_attachment, Read
             self._tool("ingest_document", {
@@ -672,8 +684,7 @@ class JobDriver:
                 "amount_minor": m["amount_minor"], "currency": m["currency"],
                 "document_date": m["date"], "issuer": m["issuer"],
                 "document_number": m["number"], "pass_token": token})
-        if not found or out["unfiled_total"] == len(todo):
-            self._tool("record_filing", {"pass_token": token})
+        self._tool("record_filing", {"pass_token": token})
         return None
 
     def _vendor(self, u, token):
@@ -706,9 +717,11 @@ class JobDriver:
             found = self.gmail.search_emails(query) or []
             self.search_log.append((vendor, kind, query))
             searched.append((kind, query, want, found))
-            for m in found:
-                if m["path"] in seen or m["id"] in u.get("filed_refs", ()):
-                    continue                   # d3: a continuation skips what it filed
+            by_id = {m["id"]: m for m in found}
+            for ref in self._unfiled(token, [m["id"] for m in found]):
+                m = by_id[ref]                 # d5: only what no ingest filed, any run
+                if m["path"] in seen:
+                    continue
                 seen.add(m["path"])
                 self._spend(1)                           # download_attachment
                 out = self._tool("ingest_document", {
@@ -718,8 +731,8 @@ class JobDriver:
                     "document_number": m["number"], "amount_minor": m["amount_minor"],
                     "currency": m["currency"], "vendor": vendor, "pass_token": token})
                 if not out["created"]:
-                    # filed before (ingest's own answer): if it can fit, it is already among
-                    # the unit's candidates with its `held` flag; if not, it is no candidate
+                    # the same bytes filed before: if it can fit, it is already among the
+                    # unit's candidates with its `held` flag; if not, it is no candidate
                     continue
                 filed.append({"doc_id": out["doc_id"], "amount_minor": m["amount_minor"],
                               "currency": m["currency"], "date": m["date"], "held": None})

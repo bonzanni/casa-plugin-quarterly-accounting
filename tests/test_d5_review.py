@@ -1,0 +1,80 @@
+"""Diff round d5 (Astra, 26b68ee..dccbaea), reproduced through the real surface under
+Casa's 80-call cut. Astra S1 (ruled: generalize — the 2nd instance of "which attachment
+refs are already filed"): ONE server-side membership for every attachment ref, own mail
+and a vendor's alike — the gmail probe with the refs a search found answers the exact ones
+no ingest of ANY run filed (work.unfiled); no per-run list, no cap."""
+from tests._base import StoreCase
+from tests.sim_job import JobDriver
+
+CASA_CALLS = 80
+
+
+class OneMembershipAcrossRuns(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.bind()
+
+    def delivered(self, jid):
+        return self.conn.execute("SELECT count(*) FROM renders r JOIN runs u ON"
+                                 " u.end_render_id=r.render_id WHERE u.job_id=? AND"
+                                 " r.delivered_at IS NOT NULL", (jid,)).fetchone()[0]
+
+    def test_astras_two_runs_the_old_invoices_first(self):
+        """Run 1: 40 Zapier payments and invoices matched. Then 43 more of each; the
+        mailbox lists the 40 old invoices first. Run 2 files only the new ones and
+        completes."""
+        drv = JobDriver(self, payments=40)
+        for i in range(40):
+            drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"INV-{i + 1}")
+        drv.casa_cut = CASA_CALLS
+        drv.run_job("d5d5d5d5-a1")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM projections WHERE"
+                                           " status='matched'").fetchone()[0], 40)
+        drv.add_payments([drv.DATES[i % 3] for i in range(40, 83)])
+        for i in range(40, 83):
+            drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"INV-{i + 1}")
+        before = drv.tool_calls["ingest_document"]
+        drv.run_job("d5d5d5d5-a2")
+        self.assertEqual(drv.tool_calls["ingest_document"] - before, 43)  # no old one again
+        self.assertEqual(drv.cuts, 0)
+        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM documents").fetchone()[0], 83)
+        self.assertEqual(dict(self.conn.execute(
+            "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
+            {"matched": 83})
+        run = self.conn.execute("SELECT * FROM runs WHERE job_id='d5d5d5d5-a2'").fetchone()
+        self.assertIsNotNone(run["completed_at"])
+        self.assertFalse(run["partial"])
+        self.assertEqual(self.delivered("d5d5d5d5-a2"), 1)          # one end message
+        again = drv.run_job("d5d5d5d5-a3", started_by="scheduled")
+        self.assertEqual(sum(len(u["calls"]) for u in again if u["unit"] == "mirror"), 0)
+
+    def test_a_ref_filed_in_an_earlier_run_is_not_offered_again(self):
+        """Own mail and a vendor's message alike: the next run's probe answers only the
+        refs no ingest of any run filed."""
+        drv = JobDriver(self, payments=2)
+        own = drv.gmail.own(1000, day=drv.DATES[0], number="OWN-1")
+        drv.gmail.invoice("Zapier", 2000, "EUR", drv.DATES[1], "INV-2")
+        drv.run_job("d5d5d5d5-b1")
+        vendor_ref = drv.gmail.messages[0]["id"]
+        self.assertEqual(sorted(r[0] for r in self.conn.execute(
+            "SELECT ref FROM operator_refs")), sorted([own, vendor_ref]))
+        drv.claim("d5d5d5d5-b2")
+        out = drv._tool("record_probe", dict(pass_token=drv.token, kind="gmail", ok=True,
+                                             data={"refs": ["new-msg:att-1", own, vendor_ref]}))
+        self.assertEqual((out["unfiled"], out["unfiled_total"]), (["new-msg:att-1"], 1))
+
+    def test_a_document_filed_before_the_ref_table_knew_vendor_refs_counts(self):
+        """A document whose source_ref no operator_refs row holds (filed before d5) is
+        still filed for the probe."""
+        import db
+        drv = JobDriver(self, payments=1)
+        drv.claim("d5d5d5d5-c1")
+        doc = drv.file_document(vendor="Zapier", amount_minor=1000)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE documents SET source_ref='legacy-msg' WHERE doc_id=?",
+                              (doc,))
+            self.conn.execute("DELETE FROM operator_refs")
+        out = drv._tool("record_probe", dict(pass_token=drv.token, kind="gmail", ok=True,
+                                             data={"refs": ["legacy-msg", "fresh-msg"]}))
+        self.assertEqual(out["unfiled"], ["fresh-msg"])

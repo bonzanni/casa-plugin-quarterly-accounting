@@ -376,8 +376,8 @@ CREATE TABLE IF NOT EXISTS alerts (
   occurrence_key TEXT NOT NULL UNIQUE, detail TEXT NOT NULL, raised_at TEXT NOT NULL,
   render_id TEXT, sent_at TEXT);
 CREATE TABLE IF NOT EXISTS operator_refs (
-  -- issue #24 (D5): each file the operator supplied (an attachment of a self-addressed
-  -- mail, a Telegram file) by its own ref, once filed, so a pass's capped filing skips it
+  -- issue #24 (D5), d5: each filed file by its own ref (an own-mail attachment, a Telegram
+  -- file, a vendor's message), so a search's refs are answered unfiled or not (work.unfiled)
   ref TEXT PRIMARY KEY, source TEXT NOT NULL, doc_id INTEGER NOT NULL, filed_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at);
 """ + "\n".join((CLAIMS_DDL, WORK_REQUESTS_DDL, RUNS_DDL,
