@@ -76,7 +76,7 @@ class SendAgainBinding(StoreCase):
 
     def test_a_later_view_without_offers_does_not_hide_the_offer(self):
         import delivery, posting, views
-        pkg = self.delivered_package(first_outcome="uncertain")
+        pkg = self.sent_package(first_outcome="uncertain")
         self.assertEqual(delivery.resend_target(self.conn), pkg)
         with FakeBroker():
             out = posting.show_view(self.conn, view="missing")
@@ -95,8 +95,7 @@ class PostOnce(StoreCase):
 
     def test_two_posts_one_deposit(self):
         import asks
-        asks.request_package(self.conn, "2026-Q3")
-        did, tok = self.drive_to_staged(A)
+        did, tok = self.staged_package()
         with FakeBroker() as b:
             first = self.post(did, tok)
             second = self.post(did, tok)
@@ -110,8 +109,7 @@ class PostOnce(StoreCase):
 
     def test_a_posted_send_without_a_receipt_is_still_recovered_uncertain(self):
         import asks, datetime as dt, db, job, steps
-        asks.request_package(self.conn, "2026-Q3")
-        did, tok = self.drive_to_staged(A)
+        did, tok = self.staged_package()
         with FakeBroker():
             self.post(did, tok)
         lapsed = steps._stamp(db._clock() - dt.timedelta(seconds=steps.LEASE_S + 60))
@@ -204,25 +202,13 @@ class NotPostedNotice(StoreCase):
 
     def test_a_refused_deposit(self):
         import asks, tools, qa_server  # noqa: F401
-        asks.request_package(self.conn, "2026-Q3")
-        did, tok = self.drive_to_staged(A)
+        did, tok = self.staged_package()
         with FakeBroker() as b:
             b.refuse = "bad_filename"
             qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
         text = self.notice_text()
         self.assert_plain(text)
         self.assertIn("ask again when you want it", text)
-
-    def test_an_oversized_package(self):
-        import asks, package
-        asks.request_package(self.conn, "2026-Q3")
-        self.patch(package, "MAX_ZIP_BYTES", 10)
-        self.drive(A, deliver=True)
-        posted = " ".join(" ".join(r[0] for r in self.conn.execute(
-            "SELECT text FROM renders WHERE kind='alert'")).split())
-        self.assert_plain(posted)
-        self.assertIn("20 MB", posted)
-
 
 # --- Codex r3 (frozen 3f76ff3): Astra's reproductions, ported as stdlib pins -------------
 
@@ -234,8 +220,7 @@ class R3PostedSendLeftThePlugin(StoreCase):
 
     def test_one_ask_one_deposit_across_an_interrupted_turn(self):
         import asks, tools, qa_server  # noqa: F401
-        asks.request_package(self.conn, "2026-Q3")
-        did, tok = self.drive_to_staged(A)
+        did, tok = self.staged_package()
         with FakeBroker() as b:
             qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
             # the turn dies before record_delivery; a new run starts within the lease
@@ -252,8 +237,7 @@ class R3PostedSendLeftThePlugin(StoreCase):
 
     def test_the_late_receipt_still_upgrades_it(self):
         import asks, delivery, job, tools, qa_server  # noqa: F401
-        asks.request_package(self.conn, "2026-Q3")
-        did, tok = self.drive_to_staged(A)
+        did, tok = self.staged_package()
         with FakeBroker():
             qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
         job.claim(self.conn, B)
@@ -262,8 +246,7 @@ class R3PostedSendLeftThePlugin(StoreCase):
 
     def test_an_import_does_not_revoke_a_posted_send(self):
         import asks, db, delivery, tools, qa_server  # noqa: F401
-        asks.request_package(self.conn, "2026-Q3")
-        did, tok = self.drive_to_staged(A)
+        did, tok = self.staged_package()
         with FakeBroker():
             qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
         with db.tx(self.conn):
@@ -280,8 +263,7 @@ class R3DeliveredNeedsAPost(StoreCase):
 
     def test_delivered_without_a_post_is_refused(self):
         import asks, db, delivery
-        asks.request_package(self.conn, "2026-Q3")
-        did, tok = self.drive_to_staged(A)
+        did, tok = self.staged_package()
         with self.assertRaises(db.Refusal) as cm:
             delivery.record_delivery(self.conn, delivery_id=did, outcome="delivered",
                                      package_token=tok)

@@ -49,32 +49,18 @@ class Asks(StoreCase):
         self.assertTrue(s["live_run"])
         self.assertEqual(s["line"], asks.LINES["check"])
 
-    def test_job_status_stamps_completed_at_only_when_done(self):
-        """T8-a (§10): job_status stamps the run complete exactly when it may end — a run
-        completed through a topic turn is not live, so its asks are closed at the next
-        claim; a run that may not end stays live."""
-        import asks, db, job
+    def test_job_status_is_done_once_the_run_completed(self):
+        """T8-a (§10), simple loop Task 10: job_status says `done` once the run answered
+        `complete` (runs.completed_at) — never for a live run; it stamps nothing itself."""
+        import asks, job
         self.bind()
         job.claim(self.conn, "aaaaaaaa-1")
-        with db.tx(self.conn):
-            self.conn.execute("INSERT OR IGNORE INTO runs(job_id, passes) VALUES (?, 0)",
-                              ("aaaaaaaa-1",))
-        asks.request_work(self.conn, "check", "operator")      # work left: not done
         self.assertFalse(job.status(self.conn, "aaaaaaaa-1")["done"])
         self.assertIsNone(self.conn.execute("SELECT completed_at FROM runs WHERE job_id=?",
                                             ("aaaaaaaa-1",)).fetchone()[0])
         self.run_job_to_complete("bbbbbbbb-2")
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE runs SET completed_at=NULL WHERE job_id=?",
-                              ("bbbbbbbb-2",))
         out = job.status(self.conn, "bbbbbbbb-2")
-        self.assertTrue(out["done"])
-        stamp = self.conn.execute("SELECT completed_at FROM runs WHERE job_id=?",
-                                  ("bbbbbbbb-2",)).fetchone()[0]
-        self.assertIsNotNone(stamp)
-        job.status(self.conn, "bbbbbbbb-2")                   # a second answer keeps it
-        self.assertEqual(self.conn.execute("SELECT completed_at FROM runs WHERE job_id=?",
-                                           ("bbbbbbbb-2",)).fetchone()[0], stamp)
+        self.assertEqual(out, {"done": True, "text": job.RUN_FINISHED})
         self.assertFalse(asks._live_run(self.conn))
 
     def test_ask_state_taken_done_and_refusals(self):

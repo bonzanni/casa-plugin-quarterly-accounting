@@ -149,30 +149,6 @@ class OldSheetQuote(_Q3):
     def test_the_x_one_is_wrong_on_the_old_sheet_commits_nothing(self):
         self._named("the Zapier one is wrong")
 
-    def test_live_job_old_quote(self):
-        """The reviewer's job-driven run (review_job_binding.py), verbatim in shape."""
-        import job
-        import work
-        self.drive("aaaaaaaa-1", stop_before="judge")
-        tok = self._job_driver.token
-        self.assertIsNone(job.fresh_reason(self.conn))
-        pid = self.conn.execute("SELECT pid FROM projections WHERE ended IS NULL ORDER BY pid"
-                                " LIMIT 1").fetchone()[0]
-        first = self.repair(pid, "FIRST", token=tok)
-        with FakeBroker() as b:
-            old = call("show_view", view="check", quarter="2026-Q3")
-            quote = b.proposal()["text"]
-            call("mark_rendering_delivered", render_id=old["render_id"])
-            second = self.repair(pid, "SECOND", token=tok)
-            newer = call("show_view", view="check", quarter="2026-Q3")
-            call("mark_rendering_delivered", render_id=newer["render_id"])
-            out = call("propose_reading", text="all good", quoted=quote)
-        self.assertIsNone(out["reading"])
-        self.assertEqual(self.readings(), 0)
-        self.assertEqual([self.operator_rows(first["match_id"]),
-                          self.operator_rows(second["match_id"])], [0, 0])
-        self.assertIsNotNone(work.describe(self.conn, pid)["current"])
-
 
 class MergedSurvivor(StoreCase):
     """§2 #4/#6: R records the loser of a later lineage merge; the survivor was shown with
@@ -527,21 +503,7 @@ class LegacyReceipt(StoreCase):
         self.assertEqual(c.execute("SELECT count(*) FROM deliveries WHERE posted_at IS NOT"
                                    " NULL").fetchone()[0], 0)
 
-    def test_a_fresh_unposted_s7_send_still_refuses(self):
-        import asks
-        import db
-        import delivery
-        asks.request_package(self.conn, "2026-Q3")
-        did, tok = self.drive_to_staged("aaaaaaaa-1")
-        with self.assertRaises(db.Refusal):
-            delivery.record_delivery(self.conn, delivery_id=did, outcome="delivered",
-                                     package_token=tok)
-        self.assertEqual(self.delivered(self.conn), 0)
 
-
-# ---------------------------------------------------------------------------------------
-# Red cases 7, 8, 11, 13, 15 — R1 quote matching, V2 tags, V3 same facts
-# ---------------------------------------------------------------------------------------
 class _Long(StoreCase):
     """Fifteen vendors with long document numbers (review_d2.py quote_cycle)."""
     N = 15

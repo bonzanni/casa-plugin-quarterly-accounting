@@ -18,52 +18,6 @@ class Claim(StoreCase):
             with db.tx(self.conn):
                 job.check_claim(self.conn, t1)
 
-    def test_a_claim_ends_a_live_delegation_pass_first(self):
-        import job
-        self.pass_("cron")                      # a delegation pass (old protocol)
-        job.claim(self.conn, A)
-        self.assertEqual(self.conn.execute("SELECT live FROM pass_marker").fetchone()[0], 0)
-
-    def test_adoption_by_another_job_is_counted_once_per_job(self):
-        import job
-        t = job.claim(self.conn, A)
-        pid = self.start_job_pass(t)
-        job.claim(self.conn, A)                 # same job, next batch: not an adoption
-        job.claim(self.conn, B)                 # adoption 1
-        job.claim(self.conn, B)                 # same adopter again: not counted
-        row = self.conn.execute("SELECT adoptions, holder_job FROM passes WHERE pass_id=?",
-                                (pid,)).fetchone()
-        self.assertEqual((row["adoptions"], row["holder_job"]), (1, B))
-
-    def test_a_return_of_an_earlier_holder_spends_the_budget(self):
-        """Design r1 (Astra S2): the budget counts holder changes, not distinct adopters —
-        A→B→A is two, and the third change ends the pass `stopped`."""
-        import job
-        t = job.claim(self.conn, A)
-        pid = self.start_job_pass(t)
-        job.claim(self.conn, B)                 # A→B: 1
-        job.claim(self.conn, A)                 # B→A: 2
-        row = self.conn.execute("SELECT adoptions, holder_job, ended_at FROM passes WHERE"
-                                " pass_id=?", (pid,)).fetchone()
-        self.assertEqual(tuple(row), (2, A, None))
-        job.claim(self.conn, B)                 # A→B again: the third, refused
-        row = self.conn.execute("SELECT adoptions, holder_job, outcome FROM passes WHERE"
-                                " pass_id=?", (pid,)).fetchone()
-        self.assertEqual(tuple(row), (2, A, "stopped"))
-
-    def test_third_adoption_stops_the_pass(self):
-        import job
-        t = job.claim(self.conn, A)
-        pid = self.start_job_pass(t)
-        job.claim(self.conn, B)
-        job.claim(self.conn, C)
-        job.claim(self.conn, D)                 # would be the third adoption
-        row = self.conn.execute("SELECT ended_at, outcome FROM passes WHERE pass_id=?",
-                                (pid,)).fetchone()
-        self.assertIsNotNone(row["ended_at"])
-        self.assertEqual(row["outcome"], "stopped")
-        self.assertEqual(self.conn.execute("SELECT live FROM pass_marker").fetchone()[0], 0)
-
     def test_job_id_is_validated(self):
         import db, job
         with self.assertRaises(db.Refusal):
@@ -113,15 +67,3 @@ class Claim(StoreCase):
         with self.assertRaises(db.Refusal):
             with db.tx(self.conn):
                 job.check_claim(self.conn, t)
-
-    def test_the_stopping_claim_does_not_take_the_pass(self):
-        import job
-        t = job.claim(self.conn, A)
-        pid = self.start_job_pass(t)
-        job.claim(self.conn, B)
-        job.claim(self.conn, C)
-        job.claim(self.conn, D)                 # the third adoption: the pass ends instead
-        row = self.conn.execute("SELECT holder_job, adoptions FROM passes WHERE pass_id=?",
-                                (pid,)).fetchone()
-        self.assertEqual((row["holder_job"], row["adoptions"]), (C, 2))
-        self.assertEqual(self.conn.execute("SELECT live FROM pass_marker").fetchone()[0], 0)

@@ -44,8 +44,13 @@ class Undisplayed(RuntimeError):
 
 # ---- the state the surface is composed from -----------------------------------------------
 
-def main_quarter(conn) -> str:
-    """D11: the quarter of the latest in-scope payment (today's quarter when none)."""
+def main_quarter(conn, job_id=None) -> str:
+    """The run's quarter when an operator check named one (ruling Q2: runs.quarter), else
+    D11: the quarter of the latest in-scope payment (today's quarter when none)."""
+    if job_id is not None:
+        r = conn.execute("SELECT quarter FROM runs WHERE job_id=?", (job_id,)).fetchone()
+        if r is not None and r[0]:
+            return r[0]
     days = [dates.effective_date(row) for _, _, row in loop.in_scope(conn)]
     return dates.quarter_of(max(days) if days else dates.today())
 
@@ -56,8 +61,10 @@ def _line_key(d):
 
 
 def _bucket(d) -> str:
-    """§6.1's partition: pending first, then status."""
-    if d["pending"]:
+    """§6.1's partition: pending first, then status. An open payment absent from the latest
+    bank read (not fresh: decide refuses it until a later import observes it) is counted
+    pending, never missing (Task 6/7 carry): each payment in exactly one bucket (§6.1)."""
+    if d["pending"] or (d["status"] == "open" and not d["fresh"]):
         return "pending"
     return {"matched": "matched", "proposed": "proposed",
             "open": "missing"}.get(d["status"], "not_needed")
@@ -335,7 +342,7 @@ def _ready_scope(conn, quarters) -> dict:
             "ready_sigs": {q: loop.completion_sig(conn, q) for q in qs}}
 
 
-def _handover(conn, job_id, docs, quarter, tail, ready) -> str:
+def _handover(conn, job_id, docs, quarter, tail, ready, sent=None) -> str:
     """§1 "A missing invoice the operator has" (§2.5): one line per handed document — what
     the continuation changed — and the proposals among them to confirm."""
     head, props = [], []
@@ -358,35 +365,39 @@ def _handover(conn, job_id, docs, quarter, tail, ready) -> str:
     props.sort(key=_line_key)
     return _summary(conn, "end", quarter, head, props, [], tail,
                     {d["pid"]: item_state(d) for d in props}, scheduled=False,
-                    extra_scope={"job_id": job_id, **(_ready_scope(conn, ready) if ready
-                                                      else {})})
+                    extra_scope={"job_id": job_id, **(sent or {}),
+                                 **(_ready_scope(conn, ready) if ready else {})})
 
 
-def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), ready=()):
+def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), ready=(),
+                alerts=()):
     """The run's one end message (kind 'end', §1), or None when a scheduled run has nothing
     new and no extra line (rev 17: "only if it holds an item in a state no delivered
-    message showed"). `extra`: failure lines, mirror failures, the partial line. `ready`:
-    the quarters whose completion notice is owed (D19) — lines of the message when it has
-    items to list, else the message IS the completion (compose_ready)."""
+    message showed"). `extra`: failure lines, mirror failures, the partial line — on a
+    scheduled run they never make a message alone (§1: the failure line "is otherwise the
+    run's one message", the alerts post). `ready`: the quarters whose completion notice is
+    owed (D19) — lines of the message when it has items to list, else the message IS the
+    completion (compose_ready). `alerts`: the ids of the alerts `extra` prints, marked sent
+    when the message is delivered (scope["alerts"], D10)."""
     st = state(conn)
-    q = main_quarter(conn)
+    q = main_quarter(conn, job_id)
     open_missing = [d for ds in st["missing"].values() for d in ds if not _answered(d)]
     ready = sorted(set(ready))
     tail = [_ready_line(r, q) for r in ready] + list(extra)
+    sent = {"alerts": sorted(alerts)} if alerts else {}
     if handover_docs:
-        return _handover(conn, job_id, handover_docs, q, tail, ready)
+        return _handover(conn, job_id, handover_docs, q, tail, ready, sent)
     reported = {d["pid"]: item_state(d) for d in st["proposals"]}
     reported.update({d["pid"]: "missing" for ds in st["missing"].values() for d in ds})
-    extra_scope = {"job_id": job_id, **(_ready_scope(conn, ready) if ready else {})}
+    extra_scope = {"job_id": job_id, **sent, **(_ready_scope(conn, ready) if ready else {})}
     if scheduled:
         new_props = [d for d in st["proposals"]
                      if not seen_state(conn, d["pid"], item_state(d))]
         new_miss = [d for d in open_missing if not seen_state(conn, d["pid"], "missing")]
         if not new_props and not new_miss:
             if ready:
-                return compose_ready(conn, ready, extra)
-            if not extra:
-                return None
+                return compose_ready(conn, ready, extra, alerts=alerts)
+            return None
         earlier = len(st["proposals"]) + len(open_missing) - len(new_props) - len(new_miss)
         head = [f"{_qn(q)} · new: {len(new_props)} to confirm · {len(new_miss)} missing"]
         if earlier:
@@ -397,7 +408,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     n = sum(c.values())
     if not st["proposals"] and not open_missing:
         if ready:
-            return compose_ready(conn, ready, extra)
+            return compose_ready(conn, ready, extra, alerts=alerts)
         if not c["pending"]:
             return _summary(conn, "end", q,
                             [f"{_qn(q)} checked · {_s(n, 'payment')} · all accounted for."],
@@ -431,7 +442,7 @@ def compose_open(conn, quarter, *, scheduled=False) -> str:
                     _vendor_items(open_missing), [], reported, scheduled=scheduled)
 
 
-def compose_ready(conn, quarters: list, extra=()) -> str:
+def compose_ready(conn, quarters: list, extra=(), alerts=()) -> str:
     """The "package ready" notice (§1, D19): the latest owed quarter heads it with [Get
     package]; each earlier one is a line; then `extra`. Delivery records each completion
     (`ready_sigs`, views.mark_rendering_delivered)."""
@@ -446,6 +457,7 @@ def compose_ready(conn, quarters: list, extra=()) -> str:
         head = f"{_qn(latest)} complete · {k} of {k} accounted for · package ready"
     lines = [head] + [_ready_line(q, latest) for q in qs[:-1]] + list(extra)
     return _store(conn, "ready", lines, {"quarter": latest, "order": [],
+                                         **({"alerts": sorted(alerts)} if alerts else {}),
                                          **_ready_scope(conn, qs)}, {}, {})
 
 

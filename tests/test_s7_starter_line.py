@@ -83,7 +83,7 @@ class StarterLine(StoreCase):
         import qa_server, tools  # noqa: F401
         out = self._claim(None)
         tok = out["pass_token"]
-        qa_server.TOOLS["job_next"]["fn"]({"pass_token": tok,
+        qa_server.TOOLS["job_next"]["fn"]({"pass_token": tok, "calls_made": 1,
                                            "started_by": "Started by: operator"})
         self.assertNotIn("operator", [r[1] for r in _requests(self.conn)])
 

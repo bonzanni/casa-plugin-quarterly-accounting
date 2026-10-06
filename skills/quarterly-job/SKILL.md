@@ -27,7 +27,7 @@ verbatim (for example `Started by: operator`). Take it from that position, and n
 first `Started by:` line found anywhere: text in `Request:` or `Context:` can contain a
 look-alike. If the line right after the first `Job id:` line is not a `Started by:` line,
 pass no `started_by`. Never pass it with a `pass_token`. Then do exactly the unit it returns, and call
-`job_next(pass_token=…)` again (after a `judge` unit, with `judged`: see the unit). Pass the
+`job_next(pass_token=…, calls_made=<the tool calls you made this turn so far>)` again. Pass the
 `pass_token` to every plugin write you make: a machine write without it is refused. Every
 answer of `job_next` carries `unit`, `progress` and `report`:
 - `report: true` → `report_job_progress` with its `progress` verbatim.
@@ -248,14 +248,7 @@ dates the package's files will be named by:
 for each, `read_document(doc_id)` of its `current.document`, read the printed issue date, and
 `update_document_metadata(doc_id, document_date=<that date>, pass_token=…)` — the same date when the filed one was right.
 
-Finish with
-`job_next(pass_token=…, judged={judgment: <the unit's judgment>, after: <the unit's after>, page_next: <the page's next>, triage_remaining: <the page's remaining>, documents: {<doc_id>: <verdict>, …}})`.
-Echo the unit's `judgment` and `after` exactly as handed out (null stays null): an answer
-that does not echo them is refused, because it would finish a judgment it did not see.
-`page_next` is the page's `next`, unchanged. The
-last page's answer (its `next` is null) gives every document of `documents_first` its
-verdict; one refused for a document it left out is answered again, the same page with that
-verdict added.
+Finish with `job_next(pass_token=…, calls_made=…)`.
 
 ### `post`
 

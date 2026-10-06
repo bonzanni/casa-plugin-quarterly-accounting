@@ -16,11 +16,18 @@ BUSY_NO_RESULT = "The accounting job was busy just now. If no result comes, ask 
 DONE_ALREADY = "That's done already — ask me for the status to see it."
 
 
-def request_work(conn, kind, trigger, doc_ids=None) -> dict:
+def request_work(conn, kind, trigger, doc_ids=None, quarter=None) -> dict:
+    """`quarter` (ruling Q2): an operator check that names a quarter ("check Q2") makes it
+    the run's main quarter — the end message's header and its [Get package] quarter."""
     if kind not in ("check", "handover"):
         raise db.Refusal("kind is 'check' or 'handover'")
     if trigger not in ("cron", "operator"):
         raise db.Refusal("trigger is 'cron' or 'operator'")
+    if quarter is not None:
+        import dates
+        if kind != "check":
+            raise db.Refusal("quarter goes with a check")
+        dates.parse_quarter(quarter)
     ids = list(doc_ids or [])
     if kind == "handover" and (not ids or not all(isinstance(i, int) and not isinstance(i, bool)
                                                   for i in ids)):
@@ -37,9 +44,9 @@ def request_work(conn, kind, trigger, doc_ids=None) -> dict:
                 "not among the filed documents: pass the ids the filing gave you. Nothing "
                 "was asked")
         rid = conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json, created_seq,"
-                           " created_at, state) VALUES (?,?,?,?,?, 'queued')",
+                           " created_at, state, quarter) VALUES (?,?,?,?,?, 'queued', ?)",
                            (kind, trigger, json.dumps(ids), db.next_seq(conn),
-                            db.now())).lastrowid
+                            db.now(), quarter)).lastrowid
     return {"request_id": rid, "kind": "work", "line": LINES[kind], "start_job": dict(START)}
 
 
@@ -103,40 +110,28 @@ def ask_state(conn, kind, request_id) -> dict:
     return {"state": state, "live_run": live, "line": line}
 
 
-def take_queued(conn, pass_id, late=False) -> list:
-    """The queued work requests `pass_id` takes: all of them as it begins; once it is live
-    (`late`), only while it has taken fewer than job.LATE_TAKES_MAX — each needs another bank
-    read (F's condition 2) — and the rest stay queued for the next pass (design r1, Terra
-    S1: the pass's acquisitions stay bounded)."""
-    import job
+def take_queued(conn, pass_id) -> list:
+    """The queued work requests the run's pass takes (simple loop §2: one pass per run): all
+    of them, at its claim and at every job_next — a handover asked during the run joins
+    that run's list (§2.5). A package round's pass takes none."""
     assert conn.in_transaction
-    p = conn.execute("SELECT trigger, late_takes FROM passes WHERE pass_id=?",
-                     (pass_id,)).fetchone()
+    p = conn.execute("SELECT trigger FROM passes WHERE pass_id=?", (pass_id,)).fetchone()
     if p is None or p["trigger"] == "package":
         return []                                   # a package round serves its request only
     ids = [r[0] for r in conn.execute("SELECT request_id FROM work_requests WHERE"
                                       " state='queued' ORDER BY request_id")]
-    if late:
-        ids = ids[:max(0, job.LATE_TAKES_MAX - p["late_takes"])]
-        conn.execute("UPDATE passes SET late_takes=late_takes+? WHERE pass_id=?",
-                     (len(ids), pass_id))
     for i in ids:
         conn.execute("UPDATE work_requests SET state='taken', pass_id=? WHERE request_id=?",
                      (pass_id, i))
-    if any(conn.execute("SELECT 1 FROM work_requests WHERE request_id=? AND kind='handover'",
-                        (i,)).fetchone() for i in ids):
-        conn.execute("UPDATE passes SET judge_after=NULL WHERE pass_id=?", (pass_id,))
     return ids
 
 
 def settle_taken(conn, pass_id, outcome) -> None:
+    """The run's pass ended (simple loop §2): every request it took is done, and reported
+    at once — the run's one message (§1) is its result; nothing else is posted for it."""
     assert conn.in_transaction
-    conn.execute("UPDATE work_requests SET state='done', outcome=? WHERE pass_id=? AND"
+    conn.execute("UPDATE work_requests SET state='reported', outcome=? WHERE pass_id=? AND"
                  " state='taken'", (outcome, pass_id))
-    # a cron check with nothing to show is reported at once (spec §6.4)
-    conn.execute("UPDATE work_requests SET state='reported' WHERE pass_id=? AND state='done'"
-                 " AND kind='check' AND trigger='cron' AND outcome IN ('complete',"
-                 " 'interrupted')", (pass_id,))
 
 
 def requeue_taken(conn, pass_id) -> None:

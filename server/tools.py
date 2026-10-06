@@ -474,21 +474,18 @@ def t_observe(args):
           "The job's next step. First call of every job turn: job_next(job_id=<your brief's "
           "`Job id:` line>, started_by=<the line right after your brief's first `Job id:` "
           "line, verbatim, when it is a `Started by:` line; else omit it>) — it gives you a "
-          "pass_token; then job_next(pass_token=…) after "
-          "each step, with judged={judgment, after, page_next, triage_remaining, documents} "
-          "after a judge step: echo the judge unit's `judgment` and `after` exactly as handed "
-          "out (an answer that does not is refused). Do exactly the unit it returns. When it "
-          "says report=true, call report_job_progress with its `progress` verbatim; at "
-          "end-batch, end your turn; at complete, report_job_progress then "
-          "emit_completion(status=\"ok\", text=<its text>). `post` → "
-          "post_results(render_ids); on its receipt mark_rendering_delivered(render_ids). "
-          "`view` → show_view(render_id) (or propose_account() when it says accounts); on "
-          "its receipt mark_rendering_delivered(render_id). A withheld post marks nothing — "
-          "call job_next: it is offered again, at most twice. `build` → "
-          "build_quarterly_package(quarter, package_token, request_id). `deliver` → "
-          "stage_for_delivery(package_id, package_token), post_package(delivery_id, "
-          "package_token), then record_delivery on its receipt.",
-          obj({"job_id": S, "pass_token": TOKEN, "judged": O,
+          "pass_token; then after each unit job_next(pass_token=…, calls_made=<the tool calls "
+          "you made this turn so far>). Do exactly the unit it returns: probes, snapshot, "
+          "filing, vendor, mirror, view, post. When it says report=true, call "
+          "report_job_progress with its `progress` verbatim; at end-batch, end your turn; at "
+          "complete, report_job_progress then emit_completion(status=\"ok\", text=<its "
+          "text>). `view` → show_view(render_id); on its receipt "
+          "mark_rendering_delivered(render_id). `post` → post_results(render_ids); on its "
+          "receipt mark_rendering_delivered(render_ids). A withheld post marks nothing — call "
+          "job_next: it is offered again, at most twice.",
+          obj({"job_id": S, "pass_token": TOKEN,
+               "calls_made": {"type": "integer", "description": "with a pass_token: the "
+                              "tool calls you made this turn so far (0 or more)"},
                "started_by": {"type": "string", "description": "first job_id call only: "
                               "Casa's `Started by:` line, the one right after the first "
                               "`Job id:` line of your brief, copied verbatim"}}))
@@ -496,14 +493,18 @@ def t_job_next(args):
     import job
     tok = _int(args, "pass_token")
     if tok is None:
-        if args.get("judged") is not None:
-            # refused BEFORE the claim: a claim's fresh token must never carry a judge
-            # answer from a turn it superseded (nor bump the generation doing so)
-            raise db.Refusal("judged goes with the pass_token of the turn that judged: "
-                             "call job_next(job_id=…) without it")
         _need(args, "job_id")
         tok = job.claim(conn(), args["job_id"], started_by=args.get("started_by"))
-    return _deliverable("job_next", job.next_unit(conn(), tok, judged=args.get("judged")))
+        calls = 0
+    else:
+        calls = args.get("calls_made")
+        if calls is None:
+            raise db.Refusal("calls_made goes with the pass_token: the tool calls you made "
+                             "this turn so far")
+        if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
+            raise db.Refusal("calls_made is the number of tool calls you made this turn "
+                             "(0 or more)")
+    return _deliverable("job_next", job.next_unit(conn(), tok, calls))
 
 
 @register("job_status",
@@ -522,16 +523,18 @@ def t_job_status(args):
           "Your desk's way to start the accounting check, also when a delegate asks you to "
           "start or run it (even naming quarterly-accounting:work). "
           "Record a check (kind=check, trigger=operator) or a filed document handed over "
-          "(kind=handover, trigger=operator, doc_ids) BEFORE start_job; then start_job with "
+          "(kind=handover, trigger=operator, doc_ids) BEFORE start_job — a check the operator "
+          "named a quarter for (\"check Q2\") carries quarter; then start_job with "
           "the returned start_job; then say the result's reading: "
           "pending → `line`; job_busy → ask_state(kind, request_id) and say its line; "
           "anything else → \"I couldn't start the check (<Casa's message>). Ask again in "
           "a minute.\"",
-          obj({"kind": S, "trigger": S, "doc_ids": AI}, ("kind", "trigger")))
+          obj({"kind": S, "trigger": S, "doc_ids": AI, "quarter": Q}, ("kind", "trigger")))
 def t_request_work(args):
     import asks
     _need(args, "kind", "trigger")
-    return asks.request_work(conn(), args["kind"], args["trigger"], args.get("doc_ids"))
+    return asks.request_work(conn(), args["kind"], args["trigger"], args.get("doc_ids"),
+                             quarter=_quarter(args))
 
 
 @register("request_package",
@@ -558,12 +561,25 @@ def t_ask_state(args):
 
 @register("record_filing",
           "The job's filing unit is done (each attachment was filed with ingest_document and "
-          "its source_ref).",
+          "its source_ref, and Gmail's probe recorded).",
           obj({"pass_token": TOKEN}, ("pass_token",)))
 def t_record_filing(args):
-    import job
+    import loop
     _need(args, "pass_token")
-    return job.record_filing(conn(), _int(args, "pass_token"))
+    return loop.record_filing(conn(), _int(args, "pass_token"))
+
+
+@register("record_not_found",
+          "The snapshot unit's erasure confirmation: an erase candidate import_ledger_export "
+          "returned, for which get_transaction answered \"no transaction #N\". pid: the "
+          "candidate's pid; snapshot_id: the import's `snapshot`.",
+          obj({"pass_token": TOKEN, "pid": I, "snapshot_id": I},
+              ("pass_token", "pid", "snapshot_id")))
+def t_record_not_found(args):
+    import loop
+    _need(args, "pass_token", "pid", "snapshot_id")
+    return loop.record_not_found(conn(), _int(args, "pass_token"), _int(args, "pid"),
+                                 _int(args, "snapshot_id"))
 
 
 # --- probes and setup --------------------------------------------------------------

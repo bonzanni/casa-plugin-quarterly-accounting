@@ -77,10 +77,24 @@ RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
   started_by TEXT, pass_id TEXT,            -- who started the run, its pass (simple loop §3 "Run")
   filed_at TEXT, listed_at TEXT,            -- filing and listing done (§3 "Run")
   mirror_at TEXT, mirrored_at TEXT,         -- mirror calls handed out / all settled (§2.4)
-  end_render_id TEXT,                       -- the end message's rendering (§1)
-  partial INTEGER NOT NULL DEFAULT 0);      -- the run ended partial (§3 "Run")"""
+  end_render_id TEXT,                       -- the end message's rendering (§1); '' = none
+  partial INTEGER NOT NULL DEFAULT 0,       -- the run ended partial (§3 "Run")
+  quarter TEXT);                            -- the run's main quarter, when a check named it"""
 
 WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
+  request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK (kind IN ('check', 'handover')),
+  trigger TEXT NOT NULL CHECK (trigger IN ('cron', 'operator')),
+  doc_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_seq INTEGER NOT NULL, created_at TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued', 'taken', 'done', 'reported')),
+  pass_id TEXT, outcome TEXT,
+  render_ids_json TEXT NOT NULL DEFAULT '[]',
+  verdicts_json TEXT NOT NULL DEFAULT '{}',
+  quarter TEXT);                 -- an operator check that names its quarter (ruling Q2)"""
+# Schema 10's own work_requests, frozen: MIGRATIONS[9] creates it and MIGRATIONS[11] adds
+# quarter, so a store migrated from 9 does not add the column twice.
+WORK_REQUESTS_DDL_V10 = """CREATE TABLE IF NOT EXISTS work_requests (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL CHECK (kind IN ('check', 'handover')),
   trigger TEXT NOT NULL CHECK (trigger IN ('cron', 'operator')),
@@ -576,7 +590,7 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE projections ADD COLUMN note_other_issued_gen INTEGER",
         "ALTER TABLE projections ADD COLUMN note_seen_gen INTEGER",
         "ALTER TABLE probes ADD COLUMN gen INTEGER",
-        CLAIMS_DDL_V10, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL_V10],
+        CLAIMS_DDL_V10, WORK_REQUESTS_DDL_V10, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL_V10],
     # 10 -> 11 (S7): tap keys, readings, account choices, post offers; the run's stamps;
     # the request's latest ask; a send's and a view's post marks. Data steps follow in migrate (after_10_to_11)
     10: ["ALTER TABLE claims ADD COLUMN seq INTEGER",
@@ -616,6 +630,8 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE runs ADD COLUMN mirrored_at TEXT",
          "ALTER TABLE runs ADD COLUMN end_render_id TEXT",
          "ALTER TABLE runs ADD COLUMN partial INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE runs ADD COLUMN quarter TEXT",
+         "ALTER TABLE work_requests ADD COLUMN quarter TEXT",
          RUN_WORK_DDL, RUN_MIRROR_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL],
 }
 

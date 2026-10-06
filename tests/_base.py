@@ -75,58 +75,81 @@ class StoreCase(TempEnv):
         with db.tx(self.conn):
             return fn(self.conn, *args, grant=self.grant(), **kw)
 
-    def run_job_to_complete(self, job_id) -> list:
-        """Job run `job_id`, driven by the S2 simulator (tests/sim_job.py) from its claim
-        until `complete`. Binds the account and builds the driver on first use."""
-        if getattr(self, "_job_driver", None) is None:
-            from tests.sim_job import JobDriver
-            if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
-                self.bind()
-            self._job_driver = JobDriver(self)
-        return self._job_driver.run_job(job_id)
+    def run_job_to_complete(self, job_id, started_by="operator") -> list:
+        """Job run `job_id`, driven by the simple-loop simulator (tests/sim_job.py) from its
+        claim until `complete`. Binds the account and builds the driver on first use."""
+        return self.drive(job_id, started_by=started_by)
 
     def drive(self, job_id, deliver=True, bank_tools=True, stop_before=None,
-              spend_before_posts=None, stop_after=None, package_receipt=True) -> list:
-        """Job run `job_id` through the S2 simulator (S7 §5): `deliver` — each posted
-        rendering's receipt arrives and is marked; `bank_tools=False` — the probes find no
-        bank-feed tools; `stop_before` — return when a unit of that kind is handed out (not
-        done); `spend_before_posts=n` — before the first post/view hand-out, the batch's
-        spend is raised so that unit is swapped for end-batch once; `stop_after="stage"` —
-        a deliver unit stages its send and the turn ends there (§6.1);
-        `package_receipt=False` — a posted package's receipt is withheld (recorded
-        uncertain). The units handed out."""
+              started_by="operator") -> list:
+        """Job run `job_id` through the simulator: `deliver` — each posted rendering's
+        receipt arrives and is marked; `bank_tools=False` — the probes find no bank-feed
+        tools; `stop_before` — return when a unit of that kind is handed out (not done).
+        The units handed out."""
         if getattr(self, "_job_driver", None) is None:
             from tests.sim_job import JobDriver
             if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
                 self.bind()
             self._job_driver = JobDriver(self)
         drv = self._job_driver
-        drv.deliver, drv._no_tools, drv.spend_before_posts = (deliver, not bank_tools,
-                                                              spend_before_posts)
-        drv.stop_after, drv.package_receipt = stop_after, package_receipt
-        if stop_before is not None:
-            n = len(drv.units)
-            drv.run_until(job_id, stop_before)
-            return drv.units[n:]
-        return drv.run_job(job_id)
+        drv.deliver = deliver
+        if not bank_tools:
+            drv.no_bank_tools()
+        else:
+            drv._no_tools = False
+        if stop_before is None:
+            return drv.run_job(job_id, started_by)
+        import job
+        drv.claim(job_id, started_by)
+        units = []
+        for _ in range(200):
+            u = job.next_unit(self.conn, drv.token, drv.calls)
+            drv.calls += 1
+            units.append(u)
+            if u["unit"] in (stop_before, "complete"):
+                return units
+            if u["unit"] == "end-batch":
+                drv.claim(job_id, started_by)
+                continue
+            drv.do(u, drv.token)
+        raise AssertionError(f"no {stop_before} unit: {[u['unit'] for u in units]}")
 
-    def drive_to_staged(self, job_id) -> tuple:
-        """S7 §6.1: a package ask's job run up to its deliver unit's staging (the turn ends
-        there). Returns (delivery_id, package_token)."""
-        self.drive(job_id, deliver=True, stop_after="stage")
-        return self._job_driver.staged
+    def staged_package(self, quarter="2026-Q3"):
+        """A package request's package built and its first send staged under the request's
+        package_token, nothing posted (what drive_to_staged left, without the job: simple
+        loop Task 10). Returns (delivery_id, package_token)."""
+        import delivery
+        import package
+        if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
+            self.bind()
+        token = self.package_token(quarter)
+        pk = package.build_quarterly_package(self.conn, quarter, token)
+        d = delivery.stage_for_delivery(self.conn, channel="telegram",
+                                        package_id=pk["package_id"], package_token=token)
+        return d["delivery_id"], token
 
-    def delivered_package(self, first_outcome="delivered", quarter="2026-Q3", job_id="aaaaaaaa-1"):
-        """A package asked for, built and posted by the job, its first send recorded
-        `first_outcome` (`uncertain`: the receipt was withheld; its notice is posted by the
-        job's next `post` and delivered). Returns the package_id."""
-        import asks
+    def sent_package(self, first_outcome="delivered", quarter="2026-Q3"):
+        """A package built for a request and posted as a file, its first send recorded
+        `first_outcome` (`uncertain`: the receipt was withheld; its notice is then delivered,
+        as a run's post would deliver it). Without the job (simple
+        loop Task 10: the job no longer builds or sends packages) — the request's own
+        build, stage, post_package and record_delivery. Returns the package_id."""
+        import delivery
+        import posting
         from tests.fakebroker import FakeBroker
-        asks.request_package(self.conn, quarter)
+        did, token = self.staged_package(quarter)
+        d = {"delivery_id": did}
         with FakeBroker():
-            self.drive(job_id, deliver=True, package_receipt=first_outcome == "delivered")
-        return self.conn.execute("SELECT package_id FROM packages ORDER BY package_id DESC"
-                                 " LIMIT 1").fetchone()[0]
+            posting.post_package(self.conn, d["delivery_id"], token)
+        delivery.record_delivery(self.conn, delivery_id=d["delivery_id"],
+                                 outcome=first_outcome, package_token=token)
+        if first_outcome != "delivered":           # its notice is posted and delivered
+            import alerts
+            import views
+            r = alerts.pending_rendering(self.conn)
+            views.mark_rendering_delivered(self.conn, r["render_id"])
+        return self.conn.execute("SELECT package_id FROM deliveries WHERE delivery_id=?",
+                                 (did,)).fetchone()[0]
 
     def import_again(self):
         """A newer import lands (a bare snapshots row): every check done before it no
@@ -282,19 +305,11 @@ class StoreCase(TempEnv):
         import job, passes
         StoreCase._runs += 1
         job_id = job_id or "%08x-0000-4000-8000-%012x" % (StoreCase._runs, id(self) % 10**12)
-        self.end_live_pass()
         token = job.claim(self.conn, job_id, started_by=f"Started by: {started_by}")
-        with db.tx(self.conn):
-            # until Task 10, job.claim starts no pass and makes no run: the helper does what
-            # Task 10's claim will; Task 10 deletes these lines and asserts both exist
-            if job.live_job_pass(self.conn) is None:
-                _, pass_id = passes.start_pass(self.conn, started_by, "telegram",
-                                               protocol="job", token=token)
-                self.conn.execute("UPDATE passes SET holder_job=? WHERE pass_id=?",
-                                  (job_id, pass_id))
-            self.conn.execute("INSERT OR IGNORE INTO runs(job_id) VALUES (?)", (job_id,))
-            self.conn.execute("UPDATE runs SET started_by=?, pass_id=(SELECT pass_id FROM"
-                              " pass_marker WHERE id=1) WHERE job_id=?", (started_by, job_id))
+        run = self.conn.execute("SELECT * FROM runs WHERE job_id=?", (job_id,)).fetchone()
+        m = self.conn.execute("SELECT * FROM pass_marker WHERE id=1").fetchone()
+        # job.claim makes the run and starts its one pass (simple loop §2)
+        assert run is not None and m["live"] and run["pass_id"] == m["pass_id"], (run, m)
         b = self.conn.execute("SELECT account_id FROM binding").fetchone()
         accts = [{"account_id": b[0], "category": "company", "label": "Zakelijk"}] if b else []
         passes.record_probe(self.conn, token, "bank_tools", True)

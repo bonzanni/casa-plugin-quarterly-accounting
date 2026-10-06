@@ -615,11 +615,18 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None, 
             failing_since = prev["failing_since"] if (prev and not prev["ok"]
                                                       and prev["failing_since"]) \
                 else f"{now}#{db.next_seq(conn)}"
+        # D10: the Gmail streak counts RUNS (one pass each), not probes — a failure in a run
+        # whose pass already recorded one does not count again; a success ends the streak
+        fail_runs = 0
+        if not ok:
+            fail_runs = (prev["fail_runs"] if prev is not None and not prev["ok"] else 0)
+            if prev is None or prev["ok"] or prev["pass_id"] != pass_id:
+                fail_runs += 1
         conn.execute("INSERT OR REPLACE INTO probes(kind, ok, detail, data_json, observed_at,"
-                     " pass_id, failing_since, gen) VALUES (?,?,?,?,?,?,?,?)",
+                     " pass_id, failing_since, gen, fail_runs) VALUES (?,?,?,?,?,?,?,?,?)",
                      (kind, 1 if ok else 0, detail, db.canonical(data) if data is not None
                       else None, now, pass_id, failing_since,
-                      int(token) if token is not None else None))
+                      int(token) if token is not None else None, fail_runs))
         if kind == "bank_accounts" and ok and data is not None:
             accounts = data.get("accounts") or []
             b = binding.get(conn)

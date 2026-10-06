@@ -32,17 +32,77 @@ COLLECTION = {
 GMAIL_ABSENT = "Gmail isn't connected for the finance specialist — invoices aren't being searched."
 
 
+GMAIL_RUNS = 3              # D10: Gmail's probe failed on this many runs in a row
+SYNC_STALE_DAYS = 7         # D10: the last successful bank sync is older than this
+STALE_SYNC = "Bank not synced since {day} · bank-feed needs attention"
+STOPPED = "Accounting check stopped: {reason}."
+
+
 def evaluate(conn) -> None:
-    for kind in COLLECTION:
-        p = conn.execute("SELECT * FROM probes WHERE kind=?", (kind,)).fetchone()
-        if p is None or p["ok"] or not p["failing_since"]:
-            continue
-        detail = {"detail": p["detail"] or ""}
-        if json.loads(p["data_json"] or "{}").get("absent"):
+    """The failures that need the operator (simple loop §1, D10), each said once per
+    streak — its occurrence key names the streak, so it repeats only after a success ended
+    it and a new one passed the threshold:
+    - bank_sync: the store's last successful sync (max snapshots.bank_through) is more than
+      SYNC_STALE_DAYS old — keyed by that date;
+    - gmail: the probe failed on GMAIL_RUNS runs in a row (probes.fail_runs) — keyed by the
+      streak's start (failing_since);
+    - bound_account: gone from bank-feed (as before)."""
+    import datetime as _dt
+    through = conn.execute("SELECT max(bank_through) FROM snapshots").fetchone()[0]
+    if through is not None and (dates.parse_day(db.now()[:10])
+                                - dates.parse_day(through)) > _dt.timedelta(days=SYNC_STALE_DAYS):
+        conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
+                     " VALUES ('bank_sync', ?, ?, ?)",
+                     (f"bank_sync:stale:{through}", db.canonical({"since": through}), db.now()))
+    g = conn.execute("SELECT * FROM probes WHERE kind='gmail'").fetchone()
+    if g is not None and not g["ok"] and g["failing_since"] and g["fail_runs"] >= GMAIL_RUNS:
+        detail = {"detail": g["detail"] or ""}
+        if json.loads(g["data_json"] or "{}").get("absent"):
             detail["absent"] = True
         conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
-                     " VALUES (?,?,?,?)", (kind, f"{kind}:{p['failing_since']}",
-                                          db.canonical(detail), db.now()))
+                     " VALUES ('gmail', ?, ?, ?)", (f"gmail:{g['failing_since']}",
+                                                    db.canonical(detail), db.now()))
+    p = conn.execute("SELECT * FROM probes WHERE kind='bound_account'").fetchone()
+    if p is not None and not p["ok"] and p["failing_since"]:
+        conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
+                     " VALUES ('bound_account', ?, ?, ?)",
+                     (f"bound_account:{p['failing_since']}",
+                      db.canonical({"detail": p["detail"] or ""}), db.now()))
+
+
+def raise_stop(conn, reason: str) -> int:
+    """A run's pass stopped (simple loop §2 step 1: no bank-feed tools, setup or the bank
+    gate refuses): said once per occurrence of its reason (D10). Inside the caller's tx."""
+    key = f"stop:{' '.join(str(reason).split())}"[:500]
+    conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
+                 " VALUES ('run-stopped', ?, ?, ?)",
+                 (key, db.canonical({"reason": views.clip(str(reason), DETAIL_MAX)}), db.now()))
+    return conn.execute("SELECT alert_id FROM alerts WHERE occurrence_key=?", (key,)).fetchone()[0]
+
+
+LINES_BUDGET = 1500         # UTF-16 units of alert lines one run message carries
+
+
+def pending_lines(conn, budget=LINES_BUDGET) -> tuple:
+    """(lines, alert ids): the undelivered alerts as the lines the run's one message
+    carries (simple loop §1: "the line joins the end message when there is one") — whole
+    occurrences in print order while they fit `budget` (the first always), so the message
+    stays within its limit; the rest wait for the next run's message. The ids go into that
+    message's scope["alerts"], so its delivery marks exactly them sent (D10). Inside the
+    caller's transaction; evaluate() first."""
+    assert conn.in_transaction
+    evaluate(conn)
+    rows = conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL ORDER BY alert_id").fetchall()
+    if not rows:
+        return [], []
+    units = _units(conn, rows)
+    chosen = []
+    for u in units:
+        trial = chosen + [u]
+        if chosen and views.utf16_len("\n".join(_lines(trial)[0])) > budget:
+            break
+        chosen = trial
+    return _lines(chosen)[0], [u[0] for u in chosen]
 
 
 # The package notices (issue #2): what a continuation owes the operator about a
@@ -118,11 +178,17 @@ def _units(conn, rows) -> list:
     for a in rows:
         if a["kind"] in COLLECTION:
             c = json.loads(a["detail"])
-            detail = views.field(c["detail"] or "", DETAIL_MAX)
-            paren = f" ({detail})" if detail else ""
-            text = (GMAIL_ABSENT if a["kind"] == "gmail" and c.get("absent")
-                    else COLLECTION[a["kind"]].format(paren=paren))
+            if a["kind"] == "bank_sync" and c.get("since"):
+                text = STALE_SYNC.format(day=dates.short_day(c["since"]))
+            else:
+                detail = views.field(c.get("detail") or "", DETAIL_MAX)
+                paren = f" ({detail})" if detail else ""
+                text = (GMAIL_ABSENT if a["kind"] == "gmail" and c.get("absent")
+                        else COLLECTION[a["kind"]].format(paren=paren))
             out.append((a["alert_id"], None, views._wrap(text)))
+        elif a["kind"] == "run-stopped":
+            reason = views.field(json.loads(a["detail"]).get("reason", "").rstrip(". "), 300)
+            out.append((a["alert_id"], None, views._wrap(STOPPED.format(reason=reason))))
     for a in rows:
         if a["kind"] in PACKAGE or a["kind"] == "package-uncertain":
             c = json.loads(a["detail"])

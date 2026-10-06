@@ -169,34 +169,49 @@ def start(conn, job_id) -> None:
     """§2.4: one log line when the run's mirror phase starts, so a restart inside it can be
     placed; runs.mirror_at stamped. Once per run."""
     with db.tx(conn):
-        run = conn.execute("SELECT mirror_at FROM runs WHERE job_id=?", (job_id,)).fetchone()
-        if run is None:
-            raise db.Refusal(f"there is no run {job_id}")
-        if run[0]:
-            return
-        rows = len({p for c in plan(conn) for p in c["pids"]})
-        conn.execute("UPDATE runs SET mirror_at=? WHERE job_id=?", (db.now(), job_id))
-    print(f"mirror: start job={job_id} rows={rows}", file=sys.stderr, flush=True)
+        line = start_in_tx(conn, job_id)
+    if line:
+        print(line, file=sys.stderr, flush=True)
+
+
+def start_in_tx(conn, job_id):
+    """start inside the caller's transaction: stamps runs.mirror_at once and returns the
+    log line for the caller to print after its commit (None when already started)."""
+    assert conn.in_transaction
+    run = conn.execute("SELECT mirror_at FROM runs WHERE job_id=?", (job_id,)).fetchone()
+    if run is None:
+        raise db.Refusal(f"there is no run {job_id}")
+    if run[0]:
+        return None
+    rows = len({p for c in plan(conn) for p in c["pids"]})
+    conn.execute("UPDATE runs SET mirror_at=? WHERE job_id=?", (db.now(), job_id))
+    return f"mirror: start job={job_id} rows={rows}"
 
 
 def hand_calls(conn, job_id, budget: int) -> list:
     """The next calls, each {"n", "tool", "args"}: the in-flight ones first (a restart
     between the bank writes and record_mirror re-hands them, D9), then a fresh diff, up to
     `budget`."""
-    budget = max(0, int(budget))
     with db.tx(conn):
-        out = [{"n": r["n"], "tool": r["tool"], "args": json.loads(r["args_json"])[1]}
-               for r in conn.execute("SELECT n, tool, args_json FROM run_mirror WHERE"
-                                     " job_id=? AND state='handed' ORDER BY n", (job_id,))]
-        n = conn.execute("SELECT coalesce(max(n), 0) FROM run_mirror WHERE job_id=?",
-                         (job_id,)).fetchone()[0]
-        for c in _fresh(conn, job_id)[:max(0, budget - len(out))]:
-            n += 1
-            conn.execute("INSERT INTO run_mirror(job_id, n, tool, args_json, pids_json, state)"
-                         " VALUES (?,?,?,?,?, 'handed')",
-                         (job_id, n, c["tool"], db.canonical([c["tool"], c["args"]]),
-                          json.dumps(c["pids"])))
-            out.append({"n": n, "tool": c["tool"], "args": c["args"]})
+        return hand_calls_in_tx(conn, job_id, budget)
+
+
+def hand_calls_in_tx(conn, job_id, budget: int) -> list:
+    """hand_calls inside the caller's transaction (the cursor's, which checked the claim)."""
+    assert conn.in_transaction
+    budget = max(0, int(budget))
+    out = [{"n": r["n"], "tool": r["tool"], "args": json.loads(r["args_json"])[1]}
+           for r in conn.execute("SELECT n, tool, args_json FROM run_mirror WHERE"
+                                 " job_id=? AND state='handed' ORDER BY n", (job_id,))]
+    n = conn.execute("SELECT coalesce(max(n), 0) FROM run_mirror WHERE job_id=?",
+                     (job_id,)).fetchone()[0]
+    for c in _fresh(conn, job_id)[:max(0, budget - len(out))]:
+        n += 1
+        conn.execute("INSERT INTO run_mirror(job_id, n, tool, args_json, pids_json, state)"
+                     " VALUES (?,?,?,?,?, 'handed')",
+                     (job_id, n, c["tool"], db.canonical([c["tool"], c["args"]]),
+                      json.dumps(c["pids"])))
+        out.append({"n": n, "tool": c["tool"], "args": c["args"]})
     return out[:budget]
 
 

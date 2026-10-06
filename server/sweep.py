@@ -315,31 +315,19 @@ def _ended_noop(conn, p) -> dict:
 
 
 def _confirm_erased(conn, pid: int, token=None) -> dict:
-    cur = passes.current_pass(conn)
+    """The sweep's erasure confirmation: ledger.confirm_erased (simple loop Task 10 moved it
+    there, without credit), plus the S2 cursor's credit and the sweep cursor's advance —
+    until Task 11 deletes the sweep."""
     p = lineage.projection(conn, pid)
     if p["ended"] == "erased":
         return _ended_noop(conn, p)
-    if cur is None or cur["snapshot_id"] is None or not cur["account_seen"]:
-        raise db.Refusal("nothing can be judged ended without this pass's own snapshot of the "
-                         "bound account (not checked)")
-    present = conn.execute("SELECT snapshot_id FROM bank_rows WHERE row_id=?",
-                           (p["dest_row_id"],)).fetchone()
-    if present is not None:
-        raise db.Refusal(f"row #{p['dest_row_id']} is in this pass's snapshot; it has not left "
-                         "the ledger")
+    out = ledger.confirm_erased(conn, pid)
     if p["ended"]:
-        # A vanished lineage whose row has since left the ledger (round E3, Astra S2):
-        # the confirmed absence is this import's sweep work for it — it leaves the due
-        # set — and it stays `vanished` (a row that vanished is not an erasure).
-        conn.execute("UPDATE projections SET class_observed_snapshot=?, observed_revision=?"
-                     " WHERE pid=?", (lineage.latest_import(conn), p["revision"], pid))
         job.credit_sweep(conn, token, pid, "settled")       # INV-J8: a settlement completed
-        return _ended_noop(conn, p)
-    ledger.end_lineage(conn, pid, "erased", cur["snapshot_id"])
-    red = lineage.settle(conn, pid)
+        return _ended_noop(conn, lineage.projection(conn, pid))
     job.credit_sweep(conn, token, pid, "erased")            # INV-J8: an erasure confirmed
     _advance(conn, pid)
-    return {"pid": pid, "status": red.status, "ended": "erased", "desired": [],
+    return {"pid": pid, "status": out["status"], "ended": "erased", "desired": [],
             "instructions": {}, "bank_writes": None, "read_back": False}
 
 

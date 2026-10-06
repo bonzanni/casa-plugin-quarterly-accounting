@@ -87,7 +87,7 @@ class Schema12(StoreCase):
         self.assertRegex(self.job_id, job.JOB_ID_RE)
         run = self.conn.execute("SELECT started_by, pass_id FROM runs WHERE job_id=?",
                                 (self.job_id,)).fetchone()
-        self.assertEqual((run[0], run[1]), ("cron", self.pass_id))
+        self.assertEqual((run[0], run[1]), ("scheduled", self.pass_id))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM probes").fetchone()[0], 4)
         first = self.job_id
         self.run_claim()

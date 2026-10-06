@@ -294,7 +294,7 @@ class TestJob(TempEnv):
                       turn)
         first_call = re.search(r"`([a-z_]+)\(", turn).group(1)
         self.assertEqual(first_call, "job_next")
-        for phrase in ("call `job_next(pass_token=…)` again",
+        for phrase in ("call `job_next(pass_token=…, calls_made=",
                        "`report: true` → `report_job_progress` with its `progress` verbatim",
                        '`end-batch` → end the turn',
                        '`complete` → `report_job_progress` with its `progress`, then '
@@ -416,16 +416,6 @@ class TestJob(TempEnv):
 
     def judge(self):
         return self.units("judge", "### `post`")
-
-    def test_the_judge_echoes_its_unit(self):
-        j = self.judge()
-        self.assertIn("`job_next(pass_token=…, judged={judgment: <the unit's judgment>, after: "
-                      "<the unit's after>, page_next: <the page's next>, triage_remaining: "
-                      "<the page's remaining>, documents: {<doc_id>: <verdict>, …}})`", j)
-        self.assertIn("Echo the unit's `judgment` and `after` exactly as handed out", j)
-        self.assertIn("Judge the unit's `documents_first` first", j)
-        self.assertIn("`list_quarter_state(triage=true, quarter=<the unit's quarter>, "
-                      "after=<the unit's after>, limit=8, pass_token=…)`", j)
 
     def test_only_payments_read_since_the_import_are_judged(self):
         j = self.judge()

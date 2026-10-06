@@ -1,4 +1,9 @@
-"""S2 (spec §4–§6): the job's cursor. A job turn's first, token-less job_next claims:
+"""The job's claim and its run's closing words (simple loop, design rev 17 §2): one Casa
+job run is one pass; the cursor is loop.next_unit. What follows `_settle_recovered` beyond
+claim / status / run_end is the S2/S7 cursor, dead code since the simple loop's cutover,
+deleted in plan Task 11.
+
+S2 (spec §4–§6): the job's cursor. A job turn's first, token-less job_next claims:
 the claim rotates the token and records itself in `claims`, and only the newest claim's
 token may act (check_claim). A pass held by another job is adopted: every holder change
 spends one of its ADOPTIONS_MAX adoptions, and a claim that would change it once more
@@ -84,19 +89,23 @@ def _completed(conn, job_id) -> bool:
 
 
 def claim(conn, job_id, started_by=None) -> int:
-    """A job turn's token-less job_next (S7 §4.1, §10). Under the custody lock, taken
-    before the transaction (the store's lock order: the stalled-send recovery removes
-    staged bytes), in one transaction: the claim is recorded with its store sequence
-    (`claims.seq`); a live pass held by another job is adopted (§6.3); the left-behind
-    run's package asks are closed (§10); then a job id's first claim that leaves no live
-    pass and nothing queued records a check (§4.1) — trigger operator when `started_by`
-    is Casa's `Started by: operator`, cron otherwise (#45); a stalled staged send is
-    recovered (§6.1). Nothing restarts a job: no drain, no orphan mark (§9). `started_by`
-    is read by that check only, so a later claim of the job, or a claim that finds an ask
-    queued, ignores it."""
+    """A job turn's token-less job_next (simple loop §2: one Casa job run is one pass).
+    Under the custody lock, taken before the transaction (the stalled-send recovery removes
+    staged bytes), in one transaction:
+    1. a posted send nobody recorded is settled `uncertain` (D15);
+    2. the token rotates and the claim is recorded with its batch (`_batch_of`);
+    3. a job id's first claim makes its run: started_by "operator" iff Casa's starter line
+       says so (#45), else "scheduled";
+    4. a live pass held by another job id is ended `interrupted` (state is persisted:
+       nothing to adopt), its taken requests queued again for this run;
+    5. the run's one pass starts on its first claim (loop.start_pass); a later claim moves
+       the live pass's marker to its token;
+    6. a first claim that finds nothing queued records the implicit check (§4.1), and the
+       pass takes every queued request (loop.take);
+    7. a stalled staged send is recovered (§6.1)."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
-    import delivery, steps
+    import delivery, loop, steps
     with db.custody_lock():                 # the stalled-send recovery removes staged bytes
         with db.tx(conn):
             # r3 #1 (INV-S7-6): a posted send has left the plugin — before anything can
@@ -109,47 +118,36 @@ def claim(conn, job_id, started_by=None) -> int:
                 passes.close_delegation_pass_on_upgrade(conn)        # spec §8
             first = conn.execute("SELECT 1 FROM claims WHERE job_id=?",
                                  (job_id,)).fetchone() is None
-            prev = conn.execute("SELECT job_id FROM claims WHERE job_id<>? ORDER BY gen DESC"
-                                " LIMIT 1", (job_id,)).fetchone() if first else None
             p = live_job_pass(conn)
             token = passes.rotate(conn)
             changed = p is not None and p["holder_job"] != job_id
             conn.execute("INSERT INTO claims(gen, job_id, at, batch, seq) VALUES (?,?,?,?,?)",
                          (token, job_id, db.now(), _batch_of(conn, job_id, token, changed),
                           db.next_seq(conn)))
-            left, exhausted = None, False
-            if changed:
-                left = p["holder_job"]
-            elif prev is not None and not _completed(conn, prev[0]):
-                left = prev[0]
+            if first:
+                conn.execute("INSERT OR IGNORE INTO runs(job_id, started_by) VALUES (?,?)",
+                             (job_id, "operator" if starter_trigger(started_by) == "operator"
+                              else "scheduled"))
             if p is not None:
+                conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
                 if changed:
-                    # spec §6.3, amended (design r1, Astra S2): every claim that takes the
-                    # pass from a different job id spends the budget — a return of an
-                    # earlier holder (A→B→A) too — since each needs a bank read of its own
-                    if p["adoptions"] >= ADOPTIONS_MAX:
-                        stop_exhausted_pass(conn, token, p["pass_id"], job_id)
-                        exhausted = True
-                    else:
-                        held = json.loads(p["adopters_json"])
-                        conn.execute("UPDATE passes SET adoptions=adoptions+1, adopters_json=?,"
-                                     " holder_job=? WHERE pass_id=?",
-                                     (json.dumps(held + [job_id]), job_id, p["pass_id"]))
-                        conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
-                else:
-                    conn.execute("UPDATE pass_marker SET generation=? WHERE id=1", (token,))
-            if left is not None:
-                _close_left_behind(conn, token, left)                         # §10
-            # §4.1, on the state this run will work: after §10's closure and pass-ending
-            # (fix r1 ruling), so a launch left with nothing to do is still a check — but
-            # never on a claim that spent the adoption budget: the operator was just told
-            # "kept stopping — ask again", and a check now would be a restart (G2; r2 ruling)
-            if first and not exhausted and live_job_pass(conn) is None \
-                    and not _queued_any(conn):
-                conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json,"
-                             " created_seq, created_at, state) VALUES ('check', ?, '[]',"
-                             " ?, ?, 'queued')", (starter_trigger(started_by),
-                                                  db.next_seq(conn), db.now()))
+                    # its requests carry over: queued again, this run's pass takes them
+                    import asks
+                    asks.requeue_taken(conn, p["pass_id"])
+                    loop.end_pass(conn, token, "interrupted",
+                                  {"interrupted_by": job_id})
+            run = conn.execute("SELECT * FROM runs WHERE job_id=?", (job_id,)).fetchone()
+            if run["pass_id"] is None and run["completed_at"] is None:
+                loop.start_pass(conn, token, job_id)
+            live = loop.run_pass(conn, conn.execute("SELECT * FROM runs WHERE job_id=?",
+                                                    (job_id,)).fetchone())
+            if live is not None:
+                if first and not _queued_any(conn):
+                    conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json,"
+                                 " created_seq, created_at, state) VALUES ('check', ?, '[]',"
+                                 " ?, ?, 'queued')", (starter_trigger(started_by),
+                                                      db.next_seq(conn), db.now()))
+                loop.take(conn, job_id, live["pass_id"])
             for d in delivery.stalled_sends(conn, steps.LEASE_S):             # §6.1
                 _settle_recovered(conn, d)
             return token
@@ -311,16 +309,10 @@ def require_fresh(conn) -> None:
 
 
 # --- the cursor (spec §5) -----------------------------------------------------------
-def next_unit(conn, token, judged=None) -> dict:
-    with db.tx(conn):
-        check_claim(conn, token)
-        if judged is not None:
-            _judged(conn, token, judged)
-        out = _choose(conn, token)
-        _account(conn, token, out)          # Task 9: budget, progress, report
-        job_id = conn.execute("SELECT job_id FROM claims WHERE gen=?", (token,)).fetchone()[0]
-        _record_offers(conn, out, job_id)
-        return out
+def next_unit(conn, token, calls_made=0) -> dict:
+    """The cursor is the simple loop's (loop.next_unit, design rev 17 §2)."""
+    import loop
+    return loop.next_unit(conn, token, calls_made)
 
 
 def _choose(conn, token) -> dict:
@@ -970,34 +962,18 @@ def _outcome(conn, p) -> str:
 
 
 def record_filing(conn, token) -> dict:
-    import steps
-    with db.tx(conn):
-        check_claim(conn, token)
-        p = live_job_pass(conn)
-        if p is None:
-            raise db.Refusal("no pass is running: call job_next")
-        carry = steps._first_carry(conn, p["pass_id"])
-        carry["filed"] = True
-        steps._set_first_carry(conn, p["pass_id"], carry)
-        credit(conn, token, p["pass_id"], "file:unit")
-    return {"filed": True}
+    import loop
+    return loop.record_filing(conn, token)
 
 
 def status(conn, job_id) -> dict:
-    """Never a claim; it stamps the run complete, as job_next's complete does
-    (ha-casa-app#1180; design delta §3; S7 §10): may this job end now? `done` by THE
-    predicate job_next answers `complete` on (`done`). An operator-message turn in the
-    job's topic calls it last, so a completion Casa refused (unread inbound) is re-issued
-    from the store."""
+    """Never a claim (ha-casa-app#1180; S7 §10): may this job end now? `done` once the run
+    answered `complete` (runs.completed_at) — an operator-message turn in the job's topic
+    calls it last, so a completion Casa refused is re-issued from the store."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
     with db.tx(conn):
-        ok = done(conn, job_id)
-        if ok:
-            conn.execute("INSERT OR IGNORE INTO runs(job_id, passes) VALUES (?, 0)",
-                         (job_id,))
-            conn.execute("UPDATE runs SET completed_at=coalesce(completed_at, ?) WHERE"
-                         " job_id=?", (db.now(), job_id))
+        ok = _completed(conn, job_id)
         return {"done": ok, "text": run_end(conn, job_id)[0] if ok else None}
 
 
@@ -1008,24 +984,17 @@ TOPIC_MAX = 200     # one topic line: Casa keeps a summary's or completion's fir
 
 def run_end(conn, job_id) -> tuple:
     """THE closing words of job run `job_id` (PLAY T7 F2): (the completion's text, its
-    progress summary), shared by job_next's `complete` and job_status. "Finished" only
-    when every pass of the run finished; otherwise each pass of the run that ended
-    stopped, interrupted or failed, with its reason, in the order they began. A pass of
-    the run is one the run held when it ended (every cursor end is under the holder's
-    claim), or one a claim of the run stopped (`stopped_by`, stop_exhausted_pass)."""
-    import views
-    out = []
-    for r in conn.execute(
-            "SELECT outcome, report_json FROM passes WHERE protocol='job' AND ended_at IS NOT"
-            " NULL AND outcome<>'complete' AND (holder_job=? OR"
-            " json_extract(report_json, '$.stopped_by')=?) ORDER BY generation, pass_id",
-            (job_id, job_id)):
-        line = _end_line(r["outcome"], json.loads(r["report_json"] or "{}"))
-        if line not in out:
-            out.append(line)
-    if not out:
-        return RUN_FINISHED, WORDS["complete"]
-    text = views.clip(" ".join(out), TOPIC_MAX)
+    progress summary), shared by job_next's `complete` and job_status. The run has one pass
+    (simple loop §2): "Finished" when it ended complete (or never started), else its end
+    in the operator's words, with the stored stop reason."""
+    import loop, views
+    r = conn.execute("SELECT p.outcome, p.report_json FROM runs u JOIN passes p ON"
+                     " p.pass_id=u.pass_id WHERE u.job_id=? AND p.ended_at IS NOT NULL",
+                     (job_id,)).fetchone()
+    if r is None or r["outcome"] == "complete":
+        return RUN_FINISHED, loop.WORDS["complete"]
+    text = views.clip(_end_line(r["outcome"], json.loads(r["report_json"] or "{}")),
+                      TOPIC_MAX)
     return text, text
 
 

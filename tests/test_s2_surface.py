@@ -89,6 +89,7 @@ class SurfaceBound(StoreCase):
         import alerts, passes
         tok = self.pass_("cron")
         passes.record_probe(self.conn, tok, "gmail", False, absent=True)
+        self.streak()
         speak = alerts.pending_rendering(self.conn)
         self.assertIn("Gmail isn't connected for the finance specialist — invoices aren't "
                       "being searched.", " ".join(speak["text"].split()))
@@ -97,7 +98,16 @@ class SurfaceBound(StoreCase):
         tok = self.pass_("cron")
         passes.record_probe(self.conn, tok, "gmail", True)
         passes.record_probe(self.conn, tok, "gmail", False, "token expired")
+        self.streak()
         self.assertIn("Re-authorise Gmail", alerts.pending_rendering(self.conn)["text"])
+
+    def streak(self):
+        """D10 (Task 10): the Gmail line is said once the probe failed on
+        alerts.GMAIL_RUNS runs in a row."""
+        import alerts, db
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE probes SET fail_runs=? WHERE kind='gmail'",
+                              (alerts.GMAIL_RUNS,))
 
 
 class ToolLayer(StoreCase):
@@ -152,53 +162,13 @@ class ToolLayer(StoreCase):
         self.assertEqual(out["status"], "asked")
         self.assertEqual(out["start_job"]["job"], "quarterly-accounting:work")
 
-    def test_the_descriptions_carry_the_echo_and_the_call_again(self):
+    def test_the_descriptions_carry_calls_made_and_never_a_claim(self):
         import qa_server, tools  # noqa: F401
         nxt = " ".join(qa_server.TOOLS["job_next"]["description"].split())
-        self.assertIn("echo the judge unit's `judgment` and `after`", nxt)
+        self.assertIn("job_next(pass_token=…, calls_made=<the tool calls you made this "
+                      "turn so far>)", nxt)
         status = " ".join(qa_server.TOOLS["job_status"]["description"].split())
         self.assertIn("never a claim", status)
-
-
-class SupersededJudgeAnswer(StoreCase):
-    """Fix round 1 (Task 12 review, I1): a judge answer travels only with the pass_token of
-    the turn that judged. `job_next(job_id=…, judged=…)` is refused BEFORE claiming, so a
-    superseded turn cannot launder its answer through a fresh claim's token."""
-    B = "bbbbbbbb-2"
-
-    call = ToolLayer.call
-
-    def setUp(self):
-        super().setUp()
-        from tests.test_tools import _fresh_conn
-        _fresh_conn(self)._CONN = self.conn
-        self.bind()
-        from tests.sim_job import JobDriver
-        self.drv = JobDriver(self)
-
-    def test_judged_without_a_pass_token_is_refused_before_the_claim(self):
-        import asks, job
-        asks.request_work(self.conn, "check", "operator")
-        u = self.drv.run_until(A_JOB, "judge")
-        t1 = self.drv.token
-        judged = self.drv.do(u, t1)
-        job.claim(self.conn, self.B)                     # another job takes the pass
-        self.assertTrue(self.call("job_next", pass_token=t1, judged=judged)
-                        .startswith("refused: "))
-        gen = self.conn.execute("SELECT max(gen) FROM claims").fetchone()[0]
-        marker = self.conn.execute("SELECT generation FROM pass_marker").fetchone()[0]
-        out = self.call("job_next", job_id=A_JOB, judged=judged)
-        self.assertEqual(out, "refused: judged goes with the pass_token of the turn that "
-                              "judged: call job_next(job_id=…) without it")
-        self.assertEqual(self.conn.execute("SELECT max(gen) FROM claims").fetchone()[0], gen)
-        self.assertEqual(self.conn.execute("SELECT generation FROM pass_marker")
-                         .fetchone()[0], marker)
-        row = self.conn.execute("SELECT finished_at FROM pass_steps WHERE step='judge'"
-                                " ORDER BY rowid DESC LIMIT 1").fetchone()
-        self.assertIsNone(row["finished_at"])
-        # the same call without `judged` is a plain claim, and hands the judge step out again
-        again = self.call("job_next", job_id=A_JOB)
-        self.assertGreater(again["pass_token"], gen)
 
 
 class RefusalsNameNoRemovedTool(StoreCase):
@@ -217,33 +187,6 @@ class ReportOrder(StoreCase):
     """Carry (Task 10): the operator's reply binds to the LAST delivered rendering, so
     the job posts every handover and stop page before a status view (S7 §5: the status
     sheet only when nothing else is owed)."""
-    def test_status_views_come_last(self):
-        import asks, db, job, views
-        with db.tx(self.conn):
-            for kind, trigger, outcome in (("check", "operator", "complete"),
-                                           ("handover", "operator", "complete"),
-                                           ("check", "cron", "stopped")):
-                self.conn.execute(
-                    "INSERT INTO work_requests(kind, trigger, doc_ids_json, created_seq,"
-                    " created_at, state, outcome) VALUES (?,?,?,?,?, 'done', ?)",
-                    (kind, trigger, "[999]" if kind == "handover" else "[]",
-                     db.next_seq(self.conn), db.now(), outcome))
-        tok = job.claim(self.conn, "aaaaaaaa-1")
-        units = []
-        for _ in range(4):
-            u = job.next_unit(self.conn, tok)
-            units.append(u)
-            if u["unit"] == "complete" or u["unit"] == "view":
-                break
-            for rid in u["render_ids"]:
-                views.mark_rendering_delivered(self.conn, rid)
-        handed = [r for u in units if u["unit"] == "post" for r in u["render_ids"]]
-        handed += [u["render_id"] for u in units if u["unit"] == "view"]
-        kinds = [self.conn.execute("SELECT kind FROM renders WHERE render_id=?",
-                                   (r,)).fetchone()[0] for r in handed]
-        self.assertEqual(kinds, ["handover", "job-stop", "status"])
-        self.assertIn(asks.NOT_FOUND, self.render_text(handed[0]))
-
     def test_the_not_found_line_offers_no_resend(self):
         import asks, reply
         self.assertNotIn("send it again", asks.NOT_FOUND)

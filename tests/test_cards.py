@@ -517,8 +517,10 @@ class Cards(LoopCase):
         self.assertEqual(r["kind"], "ready")
         self.assertIn("Q3 complete · 1 of 1 accounted for · package ready", r["text"])
         self.assertIsNone(self.c(cards.compose_end, self.job_id, scheduled=True))
-        rid = self.c(cards.compose_end, self.job_id, scheduled=True, extra=["Gmail is down"])
-        self.assertIn("Gmail is down", self.rendering(rid)[0]["text"])
+        # Task 10: a failure line alone never makes a scheduled end message (§1: it "is
+        # otherwise the run's one message" — the run posts the alerts rendering itself)
+        self.assertIsNone(self.c(cards.compose_end, self.job_id, scheduled=True,
+                                 extra=["Gmail is down"]))
 
     def test_delivery_records_the_notice_and_an_undelivered_one_stays_owed(self):
         import cards, loop, views

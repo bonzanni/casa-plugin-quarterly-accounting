@@ -504,7 +504,38 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         # every revoked delivery whose bytes are still there is withdrawn now; one that
         # cannot be refuses the whole import, which rolls back (round E7)
         delivery.withdraw_revoked(conn)
+        if job_pass:
+            import decide
+            decide.note_progress(conn, token)       # simple loop §2.2: the import persisted
         return out
+
+
+def confirm_erased(conn, pid: int) -> dict:
+    """§2.4 "Erased rows" (rev 14): an erase candidate of the run's import that bank-feed no
+    longer has ("no transaction #N" from get_transaction) ends `erased`. Inside the caller's
+    transaction, under the live pass's own import of the bound account. A row still in that
+    import is refused; a lineage already ended stays as it is (a vanished row that later
+    left the ledger is no erasure)."""
+    import passes
+    assert conn.in_transaction
+    cur = passes.current_pass(conn)
+    p = lineage.projection(conn, pid)
+    if p["ended"] == "erased":
+        return {"pid": pid, "ended": "erased", "status": p["status"]}
+    if cur is None or cur["snapshot_id"] is None or not cur["account_seen"]:
+        raise db.Refusal("nothing can be judged ended without this pass's own snapshot of the "
+                         "bound account (not checked)")
+    if conn.execute("SELECT 1 FROM bank_rows WHERE row_id=?",
+                    (p["dest_row_id"],)).fetchone() is not None:
+        raise db.Refusal(f"row #{p['dest_row_id']} is in this pass's snapshot; it has not left "
+                         "the ledger")
+    if p["ended"]:
+        conn.execute("UPDATE projections SET class_observed_snapshot=?, observed_revision=?"
+                     " WHERE pid=?", (lineage.latest_import(conn), p["revision"], pid))
+        return {"pid": pid, "ended": p["ended"], "status": p["status"]}
+    end_lineage(conn, pid, "erased", cur["snapshot_id"])
+    red = lineage.settle(conn, pid)
+    return {"pid": pid, "ended": "erased", "status": red.status}
 
 
 def check_delivered_kind_half(conn, pid: int) -> int:
