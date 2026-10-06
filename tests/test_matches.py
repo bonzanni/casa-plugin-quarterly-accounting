@@ -182,15 +182,19 @@ class TestOperatorWrites(Base):
 
     def test_confirming_a_conflicted_candidate_whose_document_moved_is_refused(self):
         d = self.doc()
-        a = self.auto(doc_id=d)["match_id"]
-        self.auto(doc_id=self.doc())                            # a and b collide
+        a = self.machine_entry(self.pid, d)                     # a joint machine set:
+        self.machine_entry(self.pid, self.doc())                # a and b both conflicted
+        self.assertEqual(self.state(a), "conflicted")
         self.row(2)
         other = self.lineage_for(2)
         self.classify(other, {"software"})
         self.settle(other)
-        self.auto(pid=other, doc_id=d)                          # d is free (a conflicted) -> active on other
+        # d then paired with another payment (the floor refuses this write as taken now;
+        # a pre-floor store or a merge can still hold it)
+        moved = self.machine_entry(other, d)
+        self.assertEqual(self.state(moved), "matched")
         rid = self.show(self.pid)
-        with self.assertRaises(db.Refusal):
+        with self.assertRaisesRegex(db.Refusal, "since been paired"):
             self.granted(matches.confirm_in_tx, match_id=a, expected_revision=self.rev(match_id=a),
                          render_id=rid)
 

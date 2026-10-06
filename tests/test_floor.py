@@ -75,6 +75,50 @@ class Floor(StoreCase):
         self.assertEqual((out["wrote"], self.rev(self.p1)), (False, rev))
         self.assertEqual(self.conn.execute("SELECT max(seq) FROM log").fetchone()[0], seq)
 
+    def test_a_proposal_replacing_the_own_match_keeps_it_as_an_alternative(self):
+        a = self.write("pair", self.p1, self.doc())["match_id"]
+        doc_a = self.conn.execute("SELECT doc_id FROM matches WHERE match_id=?",
+                                  (a,)).fetchone()[0]
+        b = self.doc()
+        out = self.write("propose", self.p1, b)                  # no alternatives named
+        self.assertEqual((out["state"], out["status"]), ("proposed", "proposed"))
+        self.assertEqual(json.loads(self.conn.execute(
+            "SELECT alternatives_json FROM matches WHERE match_id=?",
+            (out["match_id"],)).fetchone()[0]), [doc_a])
+        import matches
+        self.assertEqual(matches.holders(self.conn, doc_a), [(self.p1, "alternative")])
+        with self.assertRaisesRegex(db.Refusal, "taken"):
+            self.write("pair", self.p2, doc_a)
+
+    def test_the_kept_alternative_counts_against_the_cap(self):
+        self.write("pair", self.p1, self.doc())
+        with self.assertRaisesRegex(db.Refusal, "stays as an alternative: name at most 2"):
+            self.write("propose", self.p1, self.doc(),
+                       alternatives=[self.doc() for _ in range(3)])
+        out = self.write("propose", self.p1, self.doc(),
+                         alternatives=[self.doc() for _ in range(2)])
+        self.assertEqual(len(json.loads(self.conn.execute(
+            "SELECT alternatives_json FROM matches WHERE match_id=?",
+            (out["match_id"],)).fetchone()[0])), 3)
+
+    def test_a_match_replaces_the_own_proposal_outright(self):
+        self.write("propose", self.p1, self.doc())
+        out = self.write("pair", self.p1, self.doc())
+        self.assertEqual(json.loads(self.conn.execute(
+            "SELECT alternatives_json FROM matches WHERE match_id=?",
+            (out["match_id"],)).fetchone()[0]), [])
+
+    def test_a_noop_redecision_stamps_a_missing_date_read(self):
+        d = self.doc()
+        self.write("pair", self.p1, d)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE documents SET date_read_at=NULL WHERE doc_id=?", (d,))
+        rev = self.rev(self.p1)
+        out = self.write("pair", self.p1, d)                      # same date: a no-op
+        self.assertEqual((out["wrote"], self.rev(self.p1)), (False, rev))
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT date_read_at FROM documents WHERE doc_id=?", (d,)).fetchone()[0])
+
     def test_a_redecision_with_a_corrected_date_is_written(self):
         d = self.doc()
         self.write("pair", self.p1, d)

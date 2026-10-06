@@ -243,9 +243,20 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
                                              "that turned up for it is shown as residue"}
     if st.operator_current() is not None:
         raise db.Refusal("the operator confirmed this payment's pairing; it is never reopened")
+    own = _own_machine(st)
+    if kind == "propose":
+        # §2.2 reopening (ruling, Task 3 review): a proposal that replaces the payment's own
+        # machine pairing keeps the replaced document as one of its alternatives, so it stays
+        # held by this payment and on its card; a match replaces it outright (G1)
+        kept = [c.doc_id for c in own if c.doc_id != doc_id and c.doc_id not in alts]
+        if len(alts) + len(kept) > ALTERNATIVES_MAX:
+            raise db.Refusal(
+                f"this proposal replaces the payment's own pairing of "
+                f"{', '.join(f'document #{d}' for d in kept)}, which stays as an alternative: "
+                f"name at most {ALTERNATIVES_MAX - len(kept)} other alternatives")
+        alts += list(dict.fromkeys(kept))
     for d in [doc_id, *alts]:
         _floor_doc(conn, kind, pid, row, exp, d, document_date if d == doc_id else None)
-    own = _own_machine(st)
     want = "matched" if kind == "pair" else "proposed"
     current = (len(own) == 1 and own[0].fp is not None
                and json.loads(own[0].fp)["facts"] == R.facts_of(row))
@@ -258,7 +269,11 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
         # stay valid. A pairing whose payment changed since (its fingerprint's facts differ:
         # the reducer shows it proposed, `facts-changed`) is written again, which
         # re-fingerprints it (plan round 1, Astra S2). A date read that corrects the filed
-        # one (issue #19) is a changed document, so it is written too
+        # one (issue #19) is a changed document, so it is written too. The date-read stamp
+        # (issue #22) is not in any digest: set when missing, it moves no revision
+        if document_date:
+            conn.execute("UPDATE documents SET date_read_at=? WHERE doc_id=? AND"
+                         " date_read_at IS NULL", (db.now(), doc_id))
         return {"applied": True, "wrote": False, "pid": pid, "status": proj["status"],
                 "revision": proj["revision"], "match_id": own[0].match_id, "state": want,
                 "effects": []}
