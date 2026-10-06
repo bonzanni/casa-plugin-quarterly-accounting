@@ -235,7 +235,14 @@ class TestDesk(TempEnv):
     def test_every_flow_and_its_line(self):
         asks = flat(section(SKILL, "## Asks", "## A file the operator sent"))
         for phrase in ('`request_work(kind="check", trigger="operator")`',
-                       "`get_package(quarter=…)`",
+                       '"Check Q2": `request_work(kind="check", trigger="operator", '
+                       'quarter="2026-Q2")`',
+                       '"Send the package", "Give me Q3", "rebuild it", "the package for Q2": '
+                       "`get_package(quarter=…)`, also for the reading's \"rebuild Qn\"; a "
+                       "bare \"send the package\" names no quarter: `get_package()` sends "
+                       "the quarter the operator last checked.",
+                       "built now from what the last check knew; say nothing more after it.",
+                       "The job never sends a package.",
                        "After `request_work`, always `start_job` with the ask's `start_job` "
                        "exactly.",
                        "`pending` → say the ask's `line`",
@@ -244,6 +251,9 @@ class TestDesk(TempEnv):
                        "The ask stays recorded.", "check emailed invoices"):
             self.assertIn(phrase, asks, phrase)
         self.assertLess(asks.index("`request_work("), asks.index("`start_job`"))
+        # simple loop §1: the desk never builds through the old staging path for a package
+        # ask; staging is only "send it again" / "send the last one" (Sending again)
+        self.assertNotIn("stage_for_delivery", asks)
         filing = flat(section(SKILL, "## A file the operator sent", "## Sending again"))
         order = ["`list_inbound_files`", "`share_inbound_file(path)`",
                  "`ingest_document(source_path=<the shared path>",
@@ -274,8 +284,11 @@ class TestDesk(TempEnv):
 
     def test_the_desk_never_does_the_jobs_work(self):
         never = flat(section(SKILL, "## Never"))
-        self.assertIn("Never call `job_next`, `record_filing`, `import_ledger_export` or any "
-                      "pass tool: those are the job's.", never)
+        self.assertIn("Never call `job_next`, `decide`, `record_mirror`, `record_not_found`, "
+                      "`import_ledger_export` or any pass tool: those are the job's.", never)
+        # §2.5: a handover's filing continuation is the job's, but record_filing is no
+        # longer named here (the desk's own filing steps name ingest_document only)
+        self.assertNotIn("record_filing", never)
         self.assertIn("Never ask the operator for an id, a token or a path.", never)
 
 

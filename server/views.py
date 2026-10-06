@@ -1088,7 +1088,9 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
         raise db.Refusal("after is the cursor a previous page's `next` returned")
     if prev is not None and (not isinstance(prev, str) or not _RENDER_ID.fullmatch(prev)):
         raise db.Refusal("prev is the render id the More button carried")
-    q = quarter or dates.quarter_of(db.now()[:10])
+    import cards
+    # ruling Q2b: after an operator's "check Q2" a view with no quarter is Q2's
+    q = quarter or cards.named_quarter(conn) or dates.quarter_of(db.now()[:10])
     dates.parse_quarter(q)
     # binding V2: the render id is minted before composing — its tag ends line 1, counted
     # inside every page budget (_limit), and this page's `next` names it as `prev` (V1)
@@ -1357,12 +1359,15 @@ def _rid_order(rid: str):
 
 def _common_view(rows) -> dict:
     """The show_view arguments of the candidates' common view, else the status view."""
+    import cards
     kinds = {r["kind"] for r in rows}
     scopes = [json.loads(r["scope_json"]) for r in rows]
     quarters = {sc.get("quarter") for sc in scopes}
     pids = {sc.get("pid") for sc in scopes}
     if len(kinds) == 1 and len(quarters) == 1 and len(pids) == 1:
         kind, (q,), (pid,) = next(iter(kinds)), quarters, pids
+        if kind in cards.KINDS:          # simple loop §1: a card recovers as open items
+            return {"view": "open", **({"quarter": q} if q else {})}
         if kind in VIEWS and (kind != "item" or pid is not None):
             out = {"view": kind}
             if q:

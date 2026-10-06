@@ -617,9 +617,11 @@ def t_review(args):
 @register("show_view",
           "Post a view to the operator, with its buttons (Casa posts it, labelled; never "
           "retell it). view: status, missing, check, rest, older, all, item (with pid), "
-          "quarter; page/after/prev from a previous `next`, unchanged. render_id: post that stored "
-          "rendering again (the job's `view` unit). After Casa's receipt "
-          "(casa_delivery.status delivered), call mark_rendering_delivered(render_id).",
+          "quarter, open (the card of what is still open, with its buttons: \"what's "
+          "open\", \"review\"; at most a quarter); page/after/prev from a previous "
+          "`next`, unchanged. render_id: post that stored rendering again (the job's "
+          "`view` unit). After Casa's receipt (casa_delivery.status delivered), call "
+          "mark_rendering_delivered(render_id).",
           obj({"view": S, "quarter": Q, "pid": I, "page": I, "render_id": S, "prev": S,
                "after": {"type": "array", "description": "the cursor from a `next`, unchanged"}}))
 @capability("view")
@@ -754,13 +756,14 @@ def t_post_package(args):
 @register("get_package",
           "The quarter's package as a file, built now from the store's latest state, with "
           "one caption line. A [Get package] button calls it; at the desk, call it for "
-          "\"send the package\", \"give me Q3\" or \"rebuild it\". Never in the job.",
-          obj({"quarter": Q}, ("quarter",)))
+          "\"send the package\", \"give me Q3\" or \"rebuild it\". With no quarter: "
+          "the quarter the operator last checked. Never in the job.",
+          obj({"quarter": Q}))
 @capability("package", receipt=True)
 def t_get_package(args):
-    import posting
-    _need(args, "quarter")
-    return posting.get_package(conn(), _quarter(args))
+    import cards, posting
+    c = conn()
+    return posting.get_package(c, _quarter(args) or cards.main_quarter(c))
 
 
 # --- packaging ---------------------------------------------------------------------

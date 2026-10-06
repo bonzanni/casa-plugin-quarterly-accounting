@@ -31,10 +31,11 @@ class Skills(unittest.TestCase):
         for s in ("show_view", "propose_reading", "post_results", "post_package",
                   "record_delivery", "ask_state", "get_package", "propose_account",
                   "mark_rendering_delivered", "<silent/>", "forward it from Telegram",
-                  "I couldn't start the check"):
+                  "I couldn't start the check", 'show_view(view="open")', "what's open",
+                  "#1305", 'quarter="2026-Q2"', "check_setup"):
             self.assertIn(s, DESK, s)
         for gone in ("job_report", "apply_reply", "build_review(", "send_media", "email it",
-                     "request_package"):  # removed-name: asserted absent
+                     "request_package", "note_render_id"):  # removed-name: asserted absent
             self.assertNotIn(gone, DESK, gone)
 
     def test_the_desk_never_calls_a_buttons_tool(self):
