@@ -22,14 +22,17 @@ def _proposal(text, buttons, revision) -> str:
 
 
 def _keyed(conn, render_id, specs) -> list:
-    """The buttons of `specs` (views.buttons_for), each writing one with a fresh key stored
-    under the rendering. Inside the caller's transaction."""
+    """The buttons of `specs` (views.buttons_for, cards.buttons), each writing one with a
+    fresh key stored under the rendering. A key_spec is (action, pid, doc_id): the key binds
+    all three (simple loop §1: a named candidate's document). Inside the caller's
+    transaction."""
     out = []
     for label, tool, args, key_spec in specs:
         args = dict(args)
         if key_spec is not None:
             key = keys.mint()
-            keys.store_render(conn, render_id, key_spec[0], key_spec[1], key)
+            action, pid, doc_id = key_spec
+            keys.store_render(conn, render_id, action, pid, key, doc_id=doc_id)
             args["key"] = key
         out.append((label, tool, args))
     return out
@@ -40,7 +43,10 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
     """§7.1: render exactly as build_review does (or, with render_id, re-post that stored
     rendering — the job's `view` unit, §5) and deposit it as a proposal: text = the page,
     buttons = §7.2, revision = view:<view>:<quarter>. `prev` is the predecessor page the
-    More button (or a typed "more") names (binding V1)."""
+    More button (or a typed "more") names (binding V1). Simple loop §1: a cards rendering
+    (cards.KINDS) re-posts with its own keyboard (cards.buttons) and the revision of its
+    walk; view="open" composes and posts a fresh open-items card (§1 Recovery)."""
+    import cards
     if walk is not None and (not isinstance(walk, str) or not RENDER_ID.fullmatch(walk)):
         raise db.Refusal("walk is the render id the One by one button carried")
     with db.tx(conn):
@@ -49,32 +55,42 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
                 raise db.Refusal("render_id re-posts a stored rendering: name nothing else")
             r = conn.execute("SELECT * FROM renders WHERE render_id=?",
                              (render_id,)).fetchone() if isinstance(render_id, str) else None
-            if r is None or r["kind"] not in views.VIEWS:
+            if r is None or r["kind"] not in views.VIEWS + cards.KINDS:
                 raise db.Refusal("there is no view rendering by that id")
             if not views.fits_proposal(r["text"]):
                 raise db.Refusal("that rendering is too long for buttons: post it with "
                                  "post_results(render_ids=[…]) instead")
+        elif view == "open":
+            if any(v is not None for v in (pid, page, after, prev)):
+                raise db.Refusal("the open items are one card: name at most its quarter")
+            rid = cards.compose_open(conn, quarter or cards.main_quarter(conn))
+            r = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
         else:
             out = views.review_in_tx(conn, view or "status", quarter, pid, page, after,
                                      prev=prev)
             r = conn.execute("SELECT * FROM renders WHERE render_id=?",
                              (out["render_id"],)).fetchone()
         scope = json.loads(r["scope_json"])
-        if walk is not None and r["kind"] == "item" and scope.get("walk") != walk:
-            # r3 #5: a typed "more" on this page carries the walk, as its More button does
-            scope["walk"] = walk
-            conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
-                         (db.canonical(scope), r["render_id"]))
-        buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r, walk))
-        revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
-        value = _proposal(r["text"], buttons, revision)
-        # r3 #3: stamped posted before the deposit (which stays last) — a view posted by a
-        # tap's stored call is never marked delivered, and a quote of it binds it. The stamp
-        # means "a deposit was attempted at seq n": monotone, never restored on a refusal,
-        # so a late refusal cannot erase a later post's stamp (binding §3, r4 Terra S1). It
-        # only makes the row a quote candidate, and recency never picks among those (R1)
-        conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
-                     (db.next_seq(conn), r["render_id"]))
+        if r["kind"] in cards.KINDS:
+            # keys minted and posted_seq stamped by deposit_of, as for a tap's `next`
+            value = json.dumps(cards.deposit_of(conn, r["render_id"]), ensure_ascii=False)
+        else:
+            if walk is not None and r["kind"] == "item" and scope.get("walk") != walk:
+                # r3 #5: a typed "more" on this page carries the walk, as its More button does
+                scope["walk"] = walk
+                conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
+                             (db.canonical(scope), r["render_id"]))
+            buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r, walk))
+            revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
+            value = _proposal(r["text"], buttons, revision)
+            # r3 #3: stamped posted before the deposit (which stays last) — a view posted by
+            # a tap's stored call is never marked delivered, and a quote of it binds it. The
+            # stamp means "a deposit was attempted at seq n": monotone, never restored on a
+            # refusal, so a late refusal cannot erase a later post's stamp (binding §3, r4
+            # Terra S1). It only makes the row a quote candidate, and recency never picks
+            # among those (R1)
+            conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
+                         (db.next_seq(conn), r["render_id"]))
     ref = casa_broker.deposit("view", value)
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
 

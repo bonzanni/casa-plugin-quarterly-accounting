@@ -233,6 +233,20 @@ def stop_chasing_in_tx(conn, quarter: str, *, grant) -> dict:
     return {"quarter": quarter, "accepted_missing": done}
 
 
+def leave_missing_in_tx(conn, pids, *, grant) -> list:
+    """[Leave missing] (simple loop §1, D7): each payment's missing invoice is the
+    operator's explicit answer — `search_state='accepted-missing'`, settled — inside the
+    caller's transaction, under a tap's grant. Returns the pids it answered."""
+    authority.require(conn, grant)
+    done = []
+    for pid in pids:
+        conn.execute("UPDATE projections SET search_state='accepted-missing' WHERE pid=?",
+                     (pid,))
+        lineage.settle(conn, pid)
+        done.append(pid)
+    return done
+
+
 def set_watermark_in_tx(conn, when: str, *, grant) -> dict:
     """'Start from Q2', inside the caller's transaction, under a tap's grant (S7 §8.1)."""
     authority.require(conn, grant)

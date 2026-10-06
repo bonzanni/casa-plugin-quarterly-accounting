@@ -1301,7 +1301,11 @@ class TestReviewC7(Requests):
                                             ("views", "_compose"): True,
                                             ("delivery", "resend_target"): True,
                                             ("delivery", "_package_note"): False,
-                                            ("posting", "post_package"): False})
+                                            ("posting", "post_package"): False,
+                                            # simple loop §1: a card stores the S7 grammar
+                                            # field `offers` empty (views.FACT_FIELDS); it
+                                            # composes no offer
+                                            ("cards", "_store"): False})
 
 
 PHRASES = ("send it again", "may not have arrived", "didn't go out")

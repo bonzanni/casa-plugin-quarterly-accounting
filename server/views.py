@@ -1224,7 +1224,7 @@ def fits_proposal(text: str) -> bool:
 def buttons_for(conn, r, walk=None) -> list:
     """S7 §7.2: the stored calls of a posted rendering `r` (a renders row), in order, at
     most six, at least one, as (label, tool, args, key_spec). A writing button carries
-    key_spec=(action, pid); the caller mints and stores its key."""
+    key_spec=(action, pid, None); the caller mints and stores its key."""
     scope = json.loads(r["scope_json"])
     rid, kind = r["render_id"], r["kind"]
     proposed, nxt = scope.get("proposed") or [], scope.get("next")
@@ -1233,7 +1233,7 @@ def buttons_for(conn, r, walk=None) -> list:
         more[0][2]["walk"] = walk          # page 2 of a One by one item still offers Next
     if kind in SHEET_VIEWS and proposed:
         out = [("All good", "verdict", {"render_id": rid, "action": "all-good"},
-                ("all-good", None)),
+                ("all-good", None, None)),
                ("One by one", "show_view", {"view": "item", "pid": proposed[0], "walk": rid},
                 None)] + more
     elif kind == "item":
@@ -1242,7 +1242,8 @@ def buttons_for(conn, r, walk=None) -> list:
                     "paired": ("wrong", "no-invoice"),
                     "none": ("no-invoice",)}.get(scope.get("item_state"), ())
         words = {"right": "Right", "wrong": "Wrong", "no-invoice": "No invoice needed"}
-        out = [(words[a], "verdict", {"render_id": rid, "action": a, "pid": pid}, (a, pid))
+        out = [(words[a], "verdict", {"render_id": rid, "action": a, "pid": pid},
+                (a, pid, None))
                for a in verdicts]
         nxt_pid = _walk_next(conn, walk, pid)
         if nxt_pid is not None:
@@ -1455,6 +1456,12 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
         for a in scope.get("alerts", []):
             conn.execute("UPDATE alerts SET sent_at=?, render_id=? WHERE alert_id=?",
                          (now, render_id, a))
+        # simple loop §1 (D19, shape d): a "package ready" notice — or an end message that
+        # carries one — counts as given only once delivered, for the completion composed
+        for q, sig in (scope.get("ready_sigs") or {}).items():
+            conn.execute("INSERT OR IGNORE INTO quarter_notices(quarter) VALUES (?)", (q,))
+            conn.execute("UPDATE quarter_notices SET sig=?, times=times+1, render_id=? WHERE"
+                         " quarter=?", (sig, render_id, q))
         if scope.get("announce_package_name"):
             conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
         import asks
