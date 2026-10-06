@@ -118,7 +118,9 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
     if vendor is not None and (not isinstance(vendor, str) or not vendor.strip()
                                or len(vendor) > VENDOR_MAX):
         raise db.Refusal(f"vendor is the vendor group's name, at most {VENDOR_MAX} characters")
-    vendor = vendor.strip() if vendor is not None else None
+    # whitespace collapsed as kb.norm does (case kept for display): every reader compares
+    # vendors by kb.norm, the run's work list (run_work.vendor) and the vendor marks alike
+    vendor = re.sub(r"\s+", " ", vendor.strip()) if vendor is not None else None
     try:
         name, data = casa_handoff.capture(source_path)
     except casa_handoff.HandoffError as exc:

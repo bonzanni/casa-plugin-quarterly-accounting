@@ -39,6 +39,8 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
     vendor-and-dates search) or payment (a per-payment search). Returns {"recorded": [one
     record_search_in_tx result per payment]}."""
     import decide
+    if pids is not None and pid is not None:
+        raise db.Refusal("pass pids (a vendor search) or pid (one payment), not both")
     if pids is None and pid is not None:
         pids = [pid]
     if not isinstance(pids, (list, tuple)) or not pids or any(

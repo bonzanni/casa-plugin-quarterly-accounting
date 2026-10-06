@@ -5,7 +5,6 @@ An earlier entry's write is in the same transaction, so the document it took is 
 the later ones by construction. "No invoice needed" is never the job's (r9)."""
 from __future__ import annotations
 
-import authorship
 import db
 import lineage
 import matches
@@ -28,15 +27,21 @@ def note_progress(conn, token) -> None:
 def record_outcome(conn, token, pid, outcome, reason=None) -> None:
     """The run's work-list entry for `pid` (run_work, the job of claim `token`) takes
     `outcome`; a payment not on the list: no row, nothing. Marks the batch progressed."""
-    conn.execute("UPDATE run_work SET outcome=?, reason=? WHERE pid=? AND job_id=(SELECT"
-                 " job_id FROM claims WHERE gen=?)", (outcome, reason, pid, int(token)))
+    job = conn.execute("SELECT job_id FROM claims WHERE gen=?", (int(token),)).fetchone()
+    # the work row handed out for this payment: its own pid, or a pid since merged into it
+    rows = [r for r in conn.execute("SELECT pid, handed_upto FROM run_work WHERE job_id=?",
+                                    (job[0],))
+            if lineage.resolve_pid(conn, r["pid"]) == pid] if job is not None else []
+    for r in rows:
+        conn.execute("UPDATE run_work SET outcome=?, reason=? WHERE job_id=? AND pid=?",
+                     (outcome, reason, job[0], r["pid"]))
     # §2.1, per payment (plan round 5): the job considered the documents it was HANDED for
     # this payment — a re-decision that writes nothing included — and no others (plan
     # round 6: a capped hand-out must never mark an unseen document as considered). A
     # decision outside a work entry (no hand-out) advances nothing.
-    conn.execute("UPDATE projections SET considered_seq=max(coalesce(considered_seq, 0),"
-                 " coalesce((SELECT handed_upto FROM run_work WHERE pid=? AND job_id=(SELECT"
-                 " job_id FROM claims WHERE gen=?)), 0)) WHERE pid=?", (pid, int(token), pid))
+    upto = max((r["handed_upto"] or 0 for r in rows), default=0)
+    conn.execute("UPDATE projections SET considered_seq=max(coalesce(considered_seq, 0), ?)"
+                 " WHERE pid=?", (upto, pid))
     note_progress(conn, token)
 
 
@@ -63,16 +68,14 @@ def _labels(e) -> tuple:
 
 
 def missing_in_tx(conn, pid, expected_revision, reason) -> dict:
-    """A `missing` decision, inside the caller's transaction: the payment as handed out,
-    still managed, holding no pairing (§2.2: missing is for a payment no document fits)."""
-    proj = lineage.projection(conn, pid)
-    if proj["revision"] != expected_revision:
-        raise authorship.Stale(pid, "this payment changed since it was handed out; decide it "
-                                    "again with the revision job_next gives now")
-    row = lineage.live_row(conn, proj)
-    if proj["ended"] or not lineage.eligible(conn, row):
-        raise db.Refusal("this payment is not managed any more (ended or ineligible)")
+    """A `missing` decision, inside the caller's transaction: the floor's own preconditions
+    (matches.decidable: as handed out, managed, fresh, a document expected, booked), no
+    operator exemption, and no pairing held (§2.2: missing is for a payment no document
+    fits)."""
+    proj, _row, _exp = matches.decidable(conn, pid, expected_revision)
     st = lineage.fold_of(conn, pid)
+    if st.exemption is not None:
+        raise db.Refusal("the operator exempted this payment: it is not missing")
     if any(c.state in ("matched", "proposed", "conflicted") for c in st.cands.values()):
         raise db.Refusal("this payment holds a pairing: keep it (match the same document) or "
                          "propose; missing is for a payment no document fits")

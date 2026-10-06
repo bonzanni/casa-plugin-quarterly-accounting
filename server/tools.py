@@ -598,7 +598,8 @@ def t_reset(args):
           "turned up, whether the ideas are exhausted or the run ran out of room (incomplete), "
           "whether the payee is unknown (identity_unknown). revive=true to look again. The "
           "pass_token is required, except for a bare revive (no queries, nothing found, not "
-          "exhausted). During a pass, pass the pass_token.",
+          "exhausted). A hinted or plain record counts as the vendor's search only when it "
+          "carries queries, found_candidate or exhausted. During a pass, pass the pass_token.",
           obj({"pids": AI, "pid": I, "search": S, "pass_token": TOKEN, "queries": A,
                "found_candidate": B, "exhausted": B, "incomplete": B, "identity_unknown": B,
                "revive": B}))

@@ -192,19 +192,10 @@ def _floor_doc(conn, kind, pid, row, exp, doc_id, document_date):
     return doc
 
 
-def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=(),
-                  labels=("clean",), rationale="", runners_up=(), document_date=None,
-                  row_digest=None, row_snapshot=None) -> dict:
-    """THE floor (design rev 17 §2 "The floor", R5), at the write, inside the caller's
-    transaction, its token already checked. Every floor refusal raises (db.Refusal or
-    authorship.Stale), so the caller's transaction rolls back whole; an exempt payment
-    returns {"applied": False, "refused": …} and records residue."""
-    assert conn.in_transaction
-    if kind not in ("pair", "propose"):
-        raise ValueError(kind)
-    if document_date is not None:
-        documents._validate({"document_date": document_date})
-    pid = lineage.resolve_pid(conn, pid)
+def decidable(conn, pid, expected_revision):
+    """The job's decision preconditions, shared by every outcome (machine_in_tx and
+    decide.missing_in_tx): the payment as handed out, still managed, in the latest import,
+    expecting a document, booked. `pid` is resolved. Returns (proj, row, exp)."""
     proj = lineage.projection(conn, pid)
     if proj["revision"] != expected_revision:
         raise authorship.Stale(pid, "this payment changed since it was handed out; decide "
@@ -220,6 +211,23 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
         raise db.Refusal("no document is expected for this payment")
     if row["status"] != "BOOK":
         raise db.Refusal("a pending payment is decided once the bank books it")
+    return proj, row, exp
+
+
+def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=(),
+                  labels=("clean",), rationale="", runners_up=(), document_date=None,
+                  row_digest=None, row_snapshot=None) -> dict:
+    """THE floor (design rev 17 §2 "The floor", R5), at the write, inside the caller's
+    transaction, its token already checked. Every floor refusal raises (db.Refusal or
+    authorship.Stale), so the caller's transaction rolls back whole; an exempt payment
+    returns {"applied": False, "refused": …} and records residue."""
+    assert conn.in_transaction
+    if kind not in ("pair", "propose"):
+        raise ValueError(kind)
+    if document_date is not None:
+        documents._validate({"document_date": document_date})
+    pid = lineage.resolve_pid(conn, pid)
+    proj, row, exp = decidable(conn, pid, expected_revision)
     if row_digest is not None and row_digest != R.digest(R.facts_of(row)):
         raise db.Refusal("the payment's facts changed since it was handed out: decide it "
                          "again with what job_next gives now")

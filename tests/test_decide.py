@@ -240,6 +240,74 @@ class Decide(StoreCase):
                          {self.pids[0]: "match", self.pids[1]: "propose"})
         self.assertEqual(self.progressed(), 1)
 
+    # --- fix round 1: missing meets the floor's own preconditions -----------------------
+
+    def outcome(self, pid):
+        return self.conn.execute("SELECT outcome FROM run_work WHERE pid=?",
+                                 (pid,)).fetchone()[0]
+
+    def test_an_exempt_payment_is_never_missing(self):
+        import decide
+        import matches
+        self.work_rows([self.pids[0]])
+        rid = self.show(self.pids[0])
+        self.granted(matches.set_exemption_in_tx, pid=self.pids[0], exempt=True,
+                     expected_revision=self.rev(self.pids[0]), render_id=rid)
+        out = decide.decide(self.conn, self.token, [
+            self.entry(self.pids[0], "match", self.doc()),
+            self.entry(self.pids[0], "missing", reason="x")])
+        self.assertEqual([r["applied"] for r in out["results"]], [False, False])
+        self.assertIn("exempted", out["results"][1]["refused"])
+        self.assertIsNone(self.outcome(self.pids[0]))
+
+    def test_a_no_document_payment_is_never_missing(self):
+        import decide
+        import kb
+        self.work_rows([self.pids[0]])
+        kb.set_expectation(self.conn, scope_type="counterparty", scope="Adobe", kind="none",
+                           author="specialist", token=self.token)
+        out = decide.decide(self.conn, self.token,
+                            [self.entry(self.pids[0], "missing", reason="x")])
+        self.assertIn("no document is expected", out["results"][0]["refused"])
+        self.assertIsNone(self.outcome(self.pids[0]))
+
+    def test_a_pending_payment_is_never_missing(self):
+        import decide
+        self.row(9001, counterparty="Adobe", status="PDNG", booking_date="2026-09-05",
+                 value_date="2026-09-05")
+        pid = self.lineage_for(9001)
+        self.classify(pid, {"software"})
+        self.settle(pid)
+        out = decide.decide(self.conn, self.token, [self.entry(pid, "missing", reason="x")])
+        self.assertIn("pending payment", out["results"][0]["refused"])
+
+    def test_a_payment_not_in_the_latest_import_is_never_missing(self):
+        import decide
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET class_observed_snapshot=NULL WHERE"
+                              " pid=?", (self.pids[0],))
+        out = decide.decide(self.conn, self.token,
+                            [self.entry(self.pids[0], "missing", reason="x")])
+        self.assertIn("latest bank import", out["results"][0]["refused"])
+
+    def test_the_work_row_of_a_merged_away_payment_takes_the_outcome(self):
+        import decide
+        self.row(9002, counterparty="Adobe", booking_date="2026-09-06",
+                 value_date="2026-09-06")
+        loser = self.lineage_for(9002)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET merged_into=? WHERE pid=?",
+                              (self.pids[1], loser))
+        self.work_rows([loser])
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE run_work SET handed_upto=55 WHERE pid=?", (loser,))
+        out = decide.decide(self.conn, self.token,
+                            [self.entry(self.pids[1], "missing", reason="none")])
+        self.assertTrue(out["results"][0]["applied"])
+        self.assertEqual(self.outcome(loser), "missing")
+        self.assertEqual(self.conn.execute("SELECT considered_seq FROM projections WHERE"
+                                           " pid=?", (self.pids[1],)).fetchone()[0], 55)
+
     def test_record_missing_is_one_missing_entry(self):
         import decide
         self.work_rows([self.pids[1]])
@@ -293,6 +361,13 @@ class Filing(StoreCase):
         row = self.conn.execute("SELECT vendor, filed_seq FROM documents WHERE doc_id=?",
                                 (first["doc_id"],)).fetchone()
         self.assertEqual((row["vendor"], row["filed_seq"]), ("Adobe", seq))
+
+    def test_the_stored_vendor_compares_as_the_work_list_does(self):
+        import kb
+        out = self.ingest(b"%PDF-1.4 sp", token=self.token, vendor="  Adobe   Systems ")
+        stored = self.conn.execute("SELECT vendor FROM documents WHERE doc_id=?",
+                                   (out["doc_id"],)).fetchone()[0]
+        self.assertEqual((stored, kb.norm(stored)), ("Adobe Systems", kb.norm("adobe systems")))
 
     def test_a_vendor_is_bounded(self):
         with self.assertRaisesRegex(db.Refusal, "vendor"):
@@ -354,6 +429,9 @@ class VendorSearch(StoreCase):
                                search="vendor", queries=["q"])
         with self.assertRaisesRegex(db.Refusal, "pids is the list"):
             work.record_search(self.conn, pids=[], token=self.token, queries=["q"])
+        with self.assertRaisesRegex(db.Refusal, "not both"):
+            work.record_search(self.conn, pids=self.pids[:1], pid=self.pids[1],
+                               token=self.token, queries=["q"])
         # an identity question or a bare `incomplete` is no search: no flag, no progress
         work.record_search(self.conn, pids=self.pids[:1], token=self.token, search="hinted",
                            identity_unknown=True, incomplete=True)
@@ -369,6 +447,11 @@ class VendorSearch(StoreCase):
         import tools  # noqa: F401
         props = qa_server.TOOLS["record_search"]["schema"]["properties"]
         self.assertIn("pids", props)
+        self.assertIn("counts as the vendor's search only when it carries queries",
+                      qa_server.TOOLS["record_search"]["description"])
+        with self.assertRaisesRegex(db.Refusal, "not both"):
+            qa_server.TOOLS["record_search"]["fn"]({"pids": self.pids[:1], "pid": self.pids[1],
+                                                    "pass_token": self.token})
         self.assertIn("search", props)
         qa_server.TOOLS["record_search"]["fn"]({"pids": self.pids[:2], "search": "plain",
                                                 "pass_token": self.token,
