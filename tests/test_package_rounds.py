@@ -136,7 +136,7 @@ class TestTheCheckRuns(Rounds):
         self.assertEqual(end["next"], "build")
         self.assertEqual(self.request()["round"], 2)
 
-    def test_a_round_that_gets_no_further_ships_and_says_so(self):
+    def test_a_round_that_gets_no_further_still_ships_with_the_one_dated_line(self):
         self.seed(2)
         t = self.ask()["pass_token"]
         for rnd in (1, 2):
@@ -154,7 +154,7 @@ class TestTheCheckRuns(Rounds):
         # simple loop §1: the caption is the one dated line — it ships, as of the check
         self.assertRegex(pkg["caption"], r"^Q3 · as of \d+ \w+ · 0 of 2 documented · 2 open$")
 
-    def test_gmail_down_ships_and_says_the_search_could_not_run(self):
+    def test_gmail_down_still_ships_with_the_one_dated_line(self):
         self.seed(2)
         t = self.ask()["pass_token"]
         c = self.snapshot_round(t)

@@ -278,6 +278,12 @@ def _match_summary(conn, match_id) -> dict:
                          "date_read": d["date_read_at"] is not None}}
 
 
+def is_pending(row) -> bool:
+    """THE pending predicate of the operator's surface (D18): the bank has not booked the
+    row. describe's `pending` — which cards._bucket and the package both read."""
+    return row.get("status") == "PDNG"
+
+
 def describe(conn, pid: int) -> dict:
     pid = lineage.resolve_pid(conn, pid)
     p = lineage.projection(conn, pid)
@@ -293,7 +299,7 @@ def describe(conn, pid: int) -> dict:
         "reasons": json.loads(p["reasons_json"]), "date": eff,
         "quarter": dates.quarter_of(eff) if eff else None,
         "amount_minor": row.get("amount_minor"), "currency": row.get("currency"),
-        "direction": row.get("direction"), "pending": row.get("status") == "PDNG",
+        "direction": row.get("direction"), "pending": is_pending(row),
         "counterparty": kb.display_name(conn, row.get("counterparty")),
         "bank_counterparty": row.get("counterparty"),
         "expectation": {"kind": p["exp_kind"], "tier": p["exp_tier"], "row": p["exp_row"]},

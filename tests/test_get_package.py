@@ -26,6 +26,19 @@ class Case(StoreCase):
         (folder / f"{sha}.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n" + sha.encode())
         return doc_id
 
+    def assert_tally(self, path, caption):
+        """The property (Task 9 review ruling): the caption's tally is the ledger's status
+        tally — in scope = every line not UNTRACKED, open = the OPEN statuses."""
+        import csv, io, re, package
+        with zipfile.ZipFile(path) as z:
+            rows = list(csv.DictReader(io.StringIO(z.read("ledger.csv").decode())))
+        n = sum(r["status"] != "UNTRACKED" for r in rows)
+        open_ = sum(r["status"] in package.OPEN for r in rows)
+        m = re.search(r" · (\d+) of (\d+) documented · (\d+) open$", caption)
+        self.assertIsNotNone(m, caption)
+        self.assertEqual(tuple(map(int, m.groups())), (n - open_, n, open_))
+        return {r["counterparty"]: r["status"] for r in rows}
+
 
 class GetPackage(Case):
     def setUp(self):
@@ -72,8 +85,9 @@ class GetPackage(Case):
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM delivered_rows WHERE package_id=(SELECT package_id FROM"
             " deliveries WHERE delivery_id=?)", (out["delivery_id"],)).fetchone()[0], 3)
+        # the package-note follow-up is removed (§4): no such rendering is ever made
         self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE kind="
-                                           "'package-note'").fetchone()[0], 0)  # removed-name: asserted absent
+                                           "'package-note'").fetchone()[0], 0)
         # the stored caption IS the one line (no rest, so nothing else to post)
         self.assertEqual(self.conn.execute("SELECT caption FROM packages").fetchone()[0],
                          "Q3 · as of 6 Oct · 1 of 3 documented · 2 open")
@@ -87,6 +101,8 @@ class GetPackage(Case):
         self.assertIn("0 of 3 documented · 3 open", broker.deposits[0]["caption"])
         self.assertIn("1 of 3 documented · 2 open", broker.deposits[1]["caption"])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 2)
+        for path, caption in self.conn.execute("SELECT path, caption FROM packages"):
+            self.assert_tally(path, caption)
 
     def test_before_any_bank_check_it_refuses_in_words(self):
         with db.tx(self.conn):
@@ -108,6 +124,27 @@ class GetPackage(Case):
             "SELECT kind FROM renders")])          # the caption the operator never saw goes
         self.assertEqual([r[0] for r in self.conn.execute("SELECT status FROM deliveries")],
                          ["failed"])
+
+    def test_a_failure_after_the_file_landed_leaves_the_send_for_recovery(self):
+        """Review fix 2: once the deposit succeeded nothing may raise. A failure recording
+        the send delivered leaves it staged and posted; the next claim's recovery
+        (posted_unrecorded) settles it uncertain."""
+        import delivery
+        from unittest import mock
+
+        def boom(conn, d):
+            raise RuntimeError("check failed")
+        with FakeBroker() as broker, mock.patch.object(delivery, "settle_delivered", boom):
+            out = self.get()
+        self.assertTrue(out["package"].startswith("casa-cap-"))
+        self.assertEqual(len(broker.deposits), 1)
+        self.assertEqual(out["alerts"], [])
+        row = self.conn.execute("SELECT status, posted_at FROM deliveries WHERE"
+                                " delivery_id=?", (out["delivery_id"],)).fetchone()
+        self.assertEqual(row["status"], "staged")
+        self.assertIsNotNone(row["posted_at"])
+        self.assertEqual([r["delivery_id"] for r in delivery.posted_unrecorded(self.conn)],
+                         [out["delivery_id"]])
 
     def test_other_capability_tools_keep_their_s7_refusal_shape(self):
         import qa_server, tools  # noqa: F401
@@ -135,6 +172,51 @@ class GetPackage(Case):
         # a pending row is not documented: it counts open in the one line (D18)
         self.assertTrue(built["caption"].endswith("0 of 4 documented · 4 open"),
                         built["caption"])
+        self.assert_tally(built["path"], built["caption"])
+
+    def test_every_pending_row_is_pending_whatever_its_status_as_the_cards_say(self):
+        """Task 9 review ruling (spec §2.1, D18): a tracked row the bank has not booked is
+        PENDING in the zip and open in the caption whatever its status — a 0.00 row, an
+        exempt row and a matched row included — exactly the rows cards puts in its
+        pending bucket (one predicate: work.is_pending, describe's `pending`)."""
+        import cards, matches, package
+        pdng = {"status": "PDNG", "booking_date": None}
+        self.row(9020, counterparty="Zero", amount_minor=0, value_date="2026-09-20", **pdng)
+        zero = self.lineage_for(9020)
+        self.row(9021, counterparty="Exempt Co", amount_minor=500, value_date="2026-09-21",
+                 **pdng)
+        exempt = self.lineage_for(9021)
+        for p in (zero, exempt):
+            self.classify(p, {"software"})
+            self.settle(p)
+        self.granted(matches.set_exemption_in_tx, pid=exempt, exempt=True,
+                     expected_revision=self.rev(exempt), render_id=self.show(exempt))
+        self.settle(exempt)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE bank_rows SET status='PDNG' WHERE row_id=9003")
+        self.settle(self.pids[2])
+        self.operator_pair(pid=self.pids[2], doc_id=self.doc_for(3),   # the operator pairs a
+                           expected_revision=self.rev(self.pids[2]),   # pending payment
+                           render_id=self.show(self.pids[2]))
+        self.settle(self.pids[2])
+        statuses = {p: self.conn.execute("SELECT status FROM projections WHERE pid=?",
+                                         (p,)).fetchone()[0]
+                    for p in (zero, exempt, self.pids[2])}
+        self.assertEqual(statuses[exempt], "exempt")
+        self.assertEqual(statuses[self.pids[2]], "matched")
+        self.assertNotIn(statuses[zero], ("open", "proposed"), statuses)   # not open anyway
+        built = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        st = self.assert_tally(built["path"], built["caption"])
+        self.assertEqual({k: st[k] for k in ("Zero", "Exempt Co")},
+                         {"Zero": "PENDING", "Exempt Co": "PENDING"})
+        with zipfile.ZipFile(built["path"]) as z:
+            rows = z.read("ledger.csv").decode().splitlines()
+        self.assertEqual(sum(",PENDING," in r for r in rows), 3)     # the matched one too
+        self.assertTrue(built["caption"].endswith("0 of 5 documented · 5 open"),
+                        built["caption"])
+        # the end message's partition counts exactly these rows pending
+        self.assertEqual(sorted(d["pid"] for d in cards.state(self.conn)["pending"]),
+                         sorted([zero, exempt, self.pids[2]]))
 
     def test_a_proposal_ships_its_alternatives_set_aside_with_the_chosen_document(self):
         import matches, package
@@ -204,7 +286,8 @@ class GetPackageQ2(Case):
         (dep,) = broker.deposits
         self.assertTrue(dep["caption"].startswith("Q2 · as of 6 Oct · 1 of 2 documented · "
                                                   "1 open"), dep["caption"])
-        built = self.conn.execute("SELECT quarter, path FROM packages").fetchone()
+        built = self.conn.execute("SELECT quarter, path, caption FROM packages").fetchone()
+        self.assert_tally(built["path"], built["caption"])
         self.assertEqual(built["quarter"], "2026-Q2")
         with zipfile.ZipFile(built["path"]) as z:
             ledger = z.read("ledger.csv").decode()

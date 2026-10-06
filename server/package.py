@@ -162,9 +162,11 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         stale = d is not None and not d["fresh"] and d["status"] not in ("ineligible", "exempt")
         if stale:
             status, exp = "UNCLASSIFIED", {"kind": None, "tier": None}
-        elif d is not None and r["status"] != "BOOK" and status in OPEN:
-            # D18 (plan round 1, Terra S2): a row the bank has not booked is pending,
-            # never missing — set before the MISSING test below
+        if d is not None and d["pending"] and status != "UNTRACKED":
+            # D18 (plan round 1, Terra S2; Task 9 review ruling): a tracked row the bank has
+            # not booked is PENDING whatever its status — the end message's partition
+            # (cards._bucket, the same describe flag), so the zip, the caption and the
+            # cards agree; set before the MISSING test below
             status = "PENDING"
         docname, confidence, link, notes, set_aside = "", "", "", [], []
         if not stale and d is not None and d["status"] == "matched" and d["current"]:
@@ -191,10 +193,10 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                     unresolved_lines.append((d, name))
         if d is not None:
             link = d["link"] or ""
-            if stale:
-                unread.append((d, set_aside))
-            elif status == "PENDING":
+            if status == "PENDING":
                 pending.append(d)
+            elif stale:
+                unread.append((d, set_aside))
             elif status == "MISSING":
                 missing.append((d, link))
             elif status == "UNCLASSIFIED":

@@ -4,6 +4,7 @@ returns the reference. Nothing here ever returns a key."""
 from __future__ import annotations
 
 import json
+import sys
 
 import casa_broker
 import db
@@ -228,15 +229,27 @@ def get_package(conn, quarter) -> dict:
     pk = conn.execute("SELECT * FROM packages WHERE package_id=?",
                       (built["package_id"],)).fetchone()
     ref = _deposit_package(conn, d, pk, pk["caption"], None)    # raises Refusal on a refusal
+    # Nothing may raise past this point: the file has landed. Any failure to record the
+    # send delivered rolls its transaction back and leaves the send staged and posted, and
+    # the next claim's recovery (delivery.posted_unrecorded) settles it `uncertain` (D15).
+    alerts_ = []
     try:
         with db.tx(conn):
             if conn.execute("UPDATE deliveries SET status='delivered', settled_at=? WHERE"
                             " delivery_id=? AND status='staged'",
                             (db.now(), d["delivery_id"])).rowcount:
-                delivery.settle_delivered(conn, d)
-    except db.Busy:
-        pass       # D15: the send stays staged and posted; the next claim settles it
-    return {"package": ref, "filename": pk["filename"], "delivery_id": d["delivery_id"]}
+                alerts_ = delivery.settle_delivered(conn, d)
+    except Exception as exc:  # noqa: BLE001 — the file landed; recovery settles the send
+        alerts_ = []
+        print(f"get_package: delivery {d['delivery_id']} posted but not recorded "
+              f"({type(exc).__name__}); the next claim settles it", file=sys.stderr,
+              flush=True)
+    # `alerts`: what settle_delivered raised (the delivered copy compared with the bank, as
+    # record_delivery's `speak` reports). A tap has no text beside the file (the landed
+    # file IS the receipt), so they are not spoken here: they stay undelivered alerts, and
+    # the next run's post — or a desk turn's post_results — tells them.
+    return {"package": ref, "filename": pk["filename"], "delivery_id": d["delivery_id"],
+            "alerts": alerts_}
 
 
 READING_TOO_LONG = ("That is more than I can show for one Apply — nothing was read. Send it "
