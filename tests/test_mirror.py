@@ -122,9 +122,9 @@ class Mirror(StoreCase):
                       failed=[{"n": c["n"], "error": "refused: stale generation"}
                               for c in calls])          # not retried this run: owed is 0
         self.assertEqual(mirror.owed(self.conn, job), 0)
-        self.assertEqual(mirror.failed_lines(self.conn, job),
+        self.assertEqual(pending_mirror_lines(self.conn),
                          ["2 bank-ledger updates did not go through — tried again at the "
-                          "next check."])
+                          "next check."])                # d1: alerts, one per row and payload
         self.assertEqual(lineage_error(self.conn, pid), "refused: stale generation")
         self.assertTrue(mirror.plan(self.conn))              # still owed: the next run writes it
         self.run_claim(instance=self.LEDGER)
@@ -136,6 +136,14 @@ class Mirror(StoreCase):
 
 def lineage_error(conn, pid):
     return conn.execute("SELECT last_error FROM projections WHERE pid=?", (pid,)).fetchone()[0]
+
+
+def pending_mirror_lines(conn) -> list:
+    """The refused mirror writes' line as the run's message would carry it (d1: alerts)."""
+    import alerts
+    with db.tx(conn):
+        lines = alerts.pending_lines(conn)[0]          # wrapped: one sentence, joined back
+    return [" ".join(lines)] if lines else []
 
 
 class NoteTexts(Mirror):
@@ -380,7 +388,7 @@ class HandOut(Mirror):
             {"pass_token": self.token, "done": [calls[0]["n"]],
              "failed": [{"n": calls[1]["n"], "error": "refused"}]})
         self.assertEqual(out, {"recorded": 2, "owed": 0})
-        self.assertEqual(mirror.failed_lines(self.conn, self.job_id),
+        self.assertEqual(pending_mirror_lines(self.conn),
                          ["1 bank-ledger update did not go through — tried again at the "
                           "next check."])
 

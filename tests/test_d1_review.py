@@ -1,0 +1,269 @@
+"""Diff round d1 (Astra + Terra, 26b68ee..d7729e3), the three accepted findings, each
+reproduced through the real surface:
+- Terra S1 (ruled: generalize): [Never for X]'s affected set is learned by REHEARSAL — the
+  counterparty rule applied in a savepoint and rolled back — and that exact set is what the
+  vendor card lists and what Never binds (a pending and a proposed payment included);
+- Astra S1: once a run's end message is composed, the run takes no more handovers; they
+  stay queued for the next run (the continuation), which posts their proposal;
+- Astra S2: a failed mirror write is an alert, once per occurrence (pid + payload), in the
+  run's one message — a scheduled run posts it with no new item, and never again."""
+import json
+from tests._base import StoreCase
+from tests.sim_job import JobDriver
+from tests.test_taps_next import _Tapping
+import db                     # server/ is on sys.path once tests._base is imported
+
+
+class NeverIsRehearsed(_Tapping):
+    def pending(self, who="Adobe", amount=200):
+        """A pending (PDNG) payment of `who`."""
+        pid = self.pay(who, amount)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE bank_rows SET status='PDNG' WHERE row_id=?", (self.n,))
+        self.settle(pid)
+        return pid
+
+    def status(self, pid):
+        return self.conn.execute("SELECT status, exp_kind FROM projections WHERE pid=?",
+                                 (pid,)).fetchone()
+
+    def page_of(self, deposit):
+        rid = deposit["buttons"][0]["call"]["arguments"]["render_id"]
+        return rid, sorted(r[0] for r in self.conn.execute(
+            "SELECT pid FROM render_items WHERE render_id=?", (rid,)))
+
+    def test_terras_sequence_the_pending_payment_is_listed_and_bound(self):
+        """Terra d1 S1, exactly: one booked missing Adobe payment and one PDNG Adobe
+        payment; the vendor card; Never. The card lists both (the pending one marked) and
+        Never changes exactly those two."""
+        booked = self.pay("Adobe", 100)
+        pdng = self.pending()
+        page = self.tap(self.end(), "Review 1")["next"]
+        _, bound = self.page_of(page)
+        self.assertEqual(bound, sorted([booked, pdng]))
+        self.assertEqual(len([ln for ln in page["text"].splitlines() if "· pending" in ln]), 1)
+        out = self.tap(page, "Never for Adobe")
+        self.assertEqual(out["receipt"], "Adobe never needs an invoice: 2 payments changed.")
+        self.assertEqual(tuple(self.status(booked)), ("no-document", "none"))
+        self.assertEqual(tuple(self.status(pdng)), ("no-document", "none"))
+
+    def test_a_pending_and_a_proposed_payment_are_listed_marked_and_bound(self):
+        missing = self.pay("Adobe", 100)
+        pdng = self.pending()
+        proposed = self.pay("Adobe", 300)
+        self.propose(proposed, amount_minor=300)
+        import cards
+        with db.tx(self.conn):
+            self.assertEqual(cards.never_set(self.conn, "Adobe"),
+                             sorted([missing, pdng, proposed]))
+        end = self.end()
+        page = self.tap(end, "Review 2")["next"]                  # the proposal card first
+        page = self.tap(page, "Leave for now")["next"]            # then Adobe's vendor card
+        rid, bound = self.page_of(page)
+        self.assertEqual(bound, sorted([missing, pdng, proposed]))
+        lines = page["text"].splitlines()
+        self.assertEqual(sum("· pending" in ln for ln in lines), 1)
+        self.assertEqual(sum("· to confirm" in ln for ln in lines), 1)
+        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                             " render_id=?", (rid,)).fetchone()[0])
+        self.assertEqual(scope["missing"], [missing])             # what the exemption binds
+        out = self.tap(page, "Never for Adobe")
+        self.assertEqual(out["receipt"], "Adobe never needs an invoice: 3 payments changed.")
+        self.assertEqual(self.status(pdng)["status"], "no-document")
+        self.assertEqual(tuple(self.status(proposed)), ("proposed", "none"))
+
+    def test_no_invoice_needed_exempts_only_the_missing_lines(self):
+        missing = self.pay("Adobe", 100)
+        pdng = self.pending()
+        page = self.tap(self.end(), "Review 1")["next"]
+        out = self.tap(page, "No invoice needed for these")
+        self.assertEqual(out["receipt"], "No invoice needed for 1 Adobe payment.")
+        self.assertEqual(self.status(missing)["status"], "exempt")
+        self.assertEqual(self.status(pdng)["status"], "open")
+
+    def _refuses(self, arrive):
+        """A card composed before `arrive()` adds a payment the rule changes: Never commits
+        nothing, and the next card is a fresh page 1 that lists the newcomer."""
+        self.pay("Adobe", 100)
+        page = self.tap(self.end(), "Review 1")["next"]
+        new = arrive()
+        out = self.tap(page, "Never for Adobe")
+        self.assertIn("nothing applied", out["receipt"])
+        self.assertIsNone(self.conn.execute("SELECT exp_kind FROM counterparties WHERE"
+                                            " name='Adobe'").fetchone())
+        self.assertNotEqual(self.status(new)["exp_kind"], "none")
+        self.assertIn("missing invoices · Adobe", out["next"]["text"])
+        self.assertIn(new, self.page_of(out["next"])[1])
+        return out
+
+    def test_never_on_a_card_that_omitted_a_pending_payment_refuses(self):
+        self._refuses(self.pending)
+
+    def test_never_on_a_card_that_omitted_a_proposed_payment_refuses(self):
+        def proposed():
+            p = self.pay("Adobe", 300)
+            self.propose(p, amount_minor=300)
+            return p
+        out = self._refuses(proposed)
+        self.assertIn("· to confirm", out["next"]["text"])
+
+    def test_the_rehearsal_leaves_nothing_behind(self):
+        import cards
+        p = self.pay("Adobe", 100)
+        before = self.status(p)["exp_kind"], self.rev(p)
+        renders = self.conn.execute("SELECT count(*) FROM renders").fetchone()[0]
+        with db.tx(self.conn):
+            self.assertEqual(cards.never_set(self.conn, "Adobe"), [p])
+        self.assertEqual((self.status(p)["exp_kind"], self.rev(p)), before)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM renders").fetchone()[0],
+                         renders)
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM counterparties WHERE"
+                                            " exp_kind='none'").fetchone())
+
+
+class LateHandover(StoreCase):
+    """Astra d1 S1: a handover requested after the run's end message was composed."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        self.drv = JobDriver(self, payments=1)
+
+    def until(self, jid, target, started="operator"):
+        """Claim `jid` and carry out units until `target` is handed out (not done)."""
+        import job
+        self.drv.claim(jid, started)
+        for _ in range(60):
+            u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
+            self.drv.calls += 1
+            if u["unit"] == target:
+                return u
+            self.drv.do(u, self.drv.token)
+        self.fail(f"{target} was never handed out")
+
+    def test_astras_sequence_the_handover_waits_for_the_continuation(self):
+        import cards, job
+        jid = "dadadada-1"
+        self.drv.gmail.invoice("Zapier", 1000, "2026-07-05", "ORIGINAL")
+        first = self.until(jid, "view")                       # the end message is composed
+        composed = self.conn.execute("SELECT end_render_id FROM runs WHERE job_id=?",
+                                     (jid,)).fetchone()[0]
+        self.assertEqual(first["render_id"], composed)
+        path = self.publish("competitor.pdf", b"%PDF-1.4 competitor", producer="telegram")
+        doc = self.drv._tool("ingest_document", dict(
+            source_path=path, kind="invoice", source="manual-telegram",
+            extraction_author="desk", issuer="Zapier", amount_minor=1100, currency="USD",
+            document_date="2026-07-05", document_number="COMPETITOR"))
+        ask = self.drv._tool("request_work", dict(kind="handover", trigger="operator",
+                                                  doc_ids=[doc["doc_id"]]))
+        u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
+        self.assertEqual(u["unit"], "view")                    # not the handover's vendor
+        self.assertEqual(u["render_id"], composed)
+        self.drv.do(u, self.drv.token)
+        units = [x["unit"] for x in self.drv._loop(jid)]
+        self.assertEqual(units, ["complete"])
+        self.assertEqual(self.conn.execute("SELECT state FROM work_requests WHERE"
+                                           " request_id=?", (ask["request_id"],)).fetchone()[0],
+                         "queued")
+        delivered = self.conn.execute("SELECT render_id, text FROM renders WHERE"
+                                      " delivered_at IS NOT NULL").fetchall()
+        self.assertEqual([r[0] for r in delivered], [composed])
+        self.assertIn("accounted for", delivered[0][1])            # the composed one
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM projections WHERE"
+                                           " status='proposed'").fetchone()[0], 0)
+        # the next run — the continuation — takes the handover and posts its proposal
+        cont = "dadadada-2"
+        v = self.until(cont, "vendor")
+        self.assertEqual(self.conn.execute("SELECT state FROM work_requests WHERE"
+                                           " request_id=?", (ask["request_id"],)).fetchone()[0],
+                         "taken")
+        pay = v["payments"][0]
+        out = self.drv._tool("decide", dict(pass_token=self.drv.token, entries=[dict(
+            pid=pay["pid"], outcome="propose", doc_id=doc["doc_id"],
+            expected_revision=pay["revision"], document_date="2026-07-05")]))
+        self.assertEqual(out["applied"], 1)
+        self.drv._loop(cont)
+        end = self.conn.execute("SELECT end_render_id FROM runs WHERE job_id=?",
+                                (cont,)).fetchone()[0]
+        r = self.conn.execute("SELECT * FROM renders WHERE render_id=?", (end,)).fetchone()
+        self.assertIsNotNone(r["delivered_at"])
+        self.assertIn("To confirm:", r["text"])
+        self.assertEqual([b[0] for b in cards.buttons(self.conn, r)],
+                         ["Review 1", "Confirm all 1", "Get package"])
+        self.assertEqual(self.conn.execute("SELECT state FROM work_requests WHERE"
+                                           " request_id=?", (ask["request_id"],)).fetchone()[0],
+                         "reported")                             # the continuation's result
+
+
+class MirrorFailureAlert(StoreCase):
+    """Astra d1 S2: a scheduled run whose mirror write bank-feed refused."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        self.drv = JobDriver(self, payments=1)
+        self.until = LateHandover.until.__get__(self)
+
+    def posts(self, units):
+        return [u for u in units if u["unit"] in ("view", "post")]
+
+    def texts(self, units):
+        out = []
+        for u in self.posts(units):
+            for rid in ([u["render_id"]] if u["unit"] == "view" else u["render_ids"]):
+                out.append(self.conn.execute("SELECT text FROM renders WHERE render_id=?",
+                                             (rid,)).fetchone()[0])
+        return out
+
+    def test_astras_sequence_one_message_then_never_again(self):
+        import version
+        self.drv.run_job("babababa-1")                         # the missing item delivered
+        rid = self.drv.bf.rows()[0]["row_id"]
+        self.drv.bf.call("untag_transaction", row_ids=[rid], tags=["acct::open"],
+                         workflow=version.WORKFLOW,
+                         expected_generation=self.drv.bf.generation())
+        u = self.until("babababa-2", "mirror", "scheduled")    # the repair
+        self.drv.bf.purge_before("2027-01-01")                 # the row erased after export
+        c = u["calls"][0]
+        reply = self.drv.bf.call(c["tool"], **c["args"])
+        self.assertIn("no transaction #", reply)
+        self.drv._tool("record_mirror", dict(pass_token=self.drv.token, done=[],
+                                             failed=[dict(n=c["n"], error=reply)]))
+        units = self.drv._loop("babababa-2")
+        texts = self.texts(units)
+        self.assertEqual(len(texts), 1)
+        self.assertEqual(sum("did not go through" in ln for ln in texts[0].splitlines()), 1)
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM alerts WHERE kind='mirror-failed'"
+                                            " AND sent_at IS NULL").fetchone())
+        again = self.drv.run_job("babababa-3", started_by="scheduled")
+        self.assertEqual(self.posts(again), [])
+
+    def failing(self):
+        """bank-feed refuses every mirror write (the same payload each run)."""
+        def refuse(u, token):
+            self.drv._tool("record_mirror", {"pass_token": token, "done": [], "failed": [
+                {"n": c["n"], "error": "refused: stale generation"} for c in u["calls"]]})
+        self.drv._mirror = refuse
+
+    def test_the_same_failure_recurring_is_said_once(self):
+        self.drv.run_job("cacacaca-1")                         # the missing item delivered
+        self.failing()
+        self.drv.add_payments(["2026-08-20"])                  # a new missing item
+        units = self.drv.run_job("cacacaca-2", started_by="scheduled")
+        texts = self.texts(units)
+        self.assertEqual(len(texts), 1)                        # the new item, with the line
+        self.assertEqual(sum("did not go through" in ln for ln in texts[0].splitlines()), 1)
+        keys = [r[0] for r in self.conn.execute("SELECT occurrence_key FROM alerts WHERE"
+                                                " kind='mirror-failed'")]
+        self.assertTrue(keys)
+        self.assertEqual(self.posts(self.drv.run_job("cacacaca-3", started_by="scheduled")),
+                         [])                                   # same writes refused again
+        self.assertEqual(sorted(r[0] for r in self.conn.execute(
+            "SELECT occurrence_key FROM alerts WHERE kind='mirror-failed'")), sorted(keys))
+
+    def test_an_operator_run_carries_the_line_in_its_end_message(self):
+        self.failing()
+        units = self.drv.run_job("edededed-1")
+        (text,) = self.texts(units)
+        self.assertIn("1 missing", text)
+        self.assertEqual(sum("did not go through" in ln for ln in text.splitlines()), 1)

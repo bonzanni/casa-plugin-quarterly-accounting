@@ -1,9 +1,10 @@
 # server/alerts.py
 """The only things this plugin ever says unprompted (spec §"When the plugin
 may speak first"): collection stopped working, a delivered quarter changed
-underneath, and what became of a package send when no turn was there to say it
+underneath, what became of a package send when no turn was there to say it
 (package notices: it could not be sent, it was taken back or revoked, it may
-not have arrived or did not go out). Once per occurrence, never repeated while the condition
+not have arrived or did not go out), and a bank-ledger write bank-feed refused (d1:
+keyed by the payment and the write's payload). Once per occurrence, never repeated while the condition
 persists, never escalated, no "all better". An occurrence is keyed by the
 moment the condition began (a package notice: by its delivery),
 so a condition that clears and recurs is new. An alert counts as said only
@@ -84,6 +85,15 @@ def raise_stop(conn, reason: str) -> int:
     return conn.execute("SELECT alert_id FROM alerts WHERE occurrence_key=?", (key,)).fetchone()[0]
 
 
+MIRROR_FAILED = ("{n} bank-ledger update{s} did not go through — tried again at the next "
+                 "check.")
+
+
+def _ids(unit) -> list:
+    """A unit's alert ids: one, or a tuple of them (the refused mirror writes' one line)."""
+    return list(unit[0]) if isinstance(unit[0], tuple) else [unit[0]]
+
+
 LINES_BUDGET = 1500         # UTF-16 units of alert lines one run message carries
 
 
@@ -109,7 +119,7 @@ def pending_lines(conn, budget=LINES_BUDGET, said=()) -> tuple:
         if chosen and views.utf16_len("\n".join(_lines(trial)[0])) > budget:
             break
         chosen = trial
-    return _lines(chosen)[0], sorted([u[0] for u in chosen] + said)
+    return _lines(chosen)[0], sorted([i for u in chosen for i in _ids(u)] + said)
 
 
 # The package notices (issue #2): what the operator is owed about a package send. `package-uncertain` and `package-send-failed` offer the
@@ -166,8 +176,9 @@ DETAIL_MAX = 300
 
 def _units(conn, rows) -> list:
     """One unit per occurrence, in the order a rendering prints them: the
-    collection alerts, then the package notices, then each package's changes. A
-    unit is (alert_id, (package, quarter) or None, its wrapped lines)."""
+    collection alerts, then the refused mirror writes (ONE unit for all of them, d1), then
+    the package notices, then each package's changes. A unit is (alert_id — a tuple of
+    them for the mirror's —, (package, quarter) or None, its wrapped lines)."""
     import delivery
     out = []
     for a in rows:
@@ -184,6 +195,10 @@ def _units(conn, rows) -> list:
         elif a["kind"] == "run-stopped":
             reason = views.field(json.loads(a["detail"]).get("reason", "").rstrip(". "), 300)
             out.append((a["alert_id"], None, views._wrap(STOPPED.format(reason=reason))))
+    failed = tuple(a["alert_id"] for a in rows if a["kind"] == "mirror-failed")
+    if failed:                  # d1: every refused mirror write pending, said as one line
+        out.append((failed, None, views._wrap(MIRROR_FAILED.format(
+            n=len(failed), s="" if len(failed) == 1 else "s"))))
     for a in rows:
         if a["kind"] in PACKAGE or a["kind"] == "package-uncertain":
             c = json.loads(a["detail"])
@@ -252,7 +267,8 @@ def _render(units, partial: bool) -> tuple:
     lines, owners = _lines(units)
     out, whole = views.fit_lines(lines, MORE_CLOSING, always_close=partial)
     cut = {o for o in owners[whole:] if o is not None}
-    return "\n".join(out), [u[0] for u in units if u[0] not in cut], whole == len(lines)
+    return ("\n".join(out), [i for u in units if u[0] not in cut for i in _ids(u)],
+            whole == len(lines))
 
 
 def _batch(units, must=None) -> tuple:
@@ -263,7 +279,7 @@ def _batch(units, must=None) -> tuple:
     always in its rendering; the others follow in print order while they fit, and what
     does not fit waits for a later rendering."""
     order = {u[0]: i for i, u in enumerate(units)}
-    first = [u for u in units if u[0] in _musts(must)] or units[:1]
+    first = [u for u in units if set(_ids(u)) & _musts(must)] or units[:1]
     chosen = list(first)
     for u in units:
         if u in chosen:
