@@ -1,8 +1,8 @@
 """Diff round d5 (Astra, 26b68ee..dccbaea), reproduced through the real surface under
 Casa's 80-call cut. Astra S1 (ruled: generalize — the 2nd instance of "which attachment
 refs are already filed"): ONE server-side membership for every attachment ref, own mail
-and a vendor's alike — the gmail probe with the refs a search found answers the exact ones
-no ingest of ANY run filed (work.unfiled); no per-run list, no cap."""
+and a vendor's alike — of the refs a search found, only the exact ones no ingest of ANY run
+filed (work.filed) join the run's queue and are answered as `files`; no per-run list."""
 from tests._base import StoreCase
 from tests.sim_job import JobDriver
 
@@ -59,10 +59,10 @@ class OneMembershipAcrossRuns(StoreCase):
         vendor_ref = drv.gmail.messages[0]["ref"]
         self.assertEqual(sorted(r[0] for r in self.conn.execute(
             "SELECT ref FROM operator_refs")), sorted([own, vendor_ref]))
-        drv.claim("d5d5d5d5-b2")
+        drv.to_unit("d5d5d5d5-b2", "filing")
         out = drv._tool("record_probe", dict(pass_token=drv.token, kind="gmail", ok=True,
                                              data={"refs": ["new-msg:att-1", own, vendor_ref]}))
-        self.assertEqual((out["unfiled"], out["unfiled_total"]), (["new-msg:att-1"], 1))
+        self.assertEqual((out["files"], out["files_total"]), (["new-msg:att-1"], 1))
 
     def test_a_legacy_bare_message_id_counts_for_every_attachment_of_it(self):
         """A vendor document filed before refs named the attachment holds the bare message
@@ -71,7 +71,7 @@ class OneMembershipAcrossRuns(StoreCase):
         not name is offered."""
         import db
         drv = JobDriver(self, payments=1)
-        drv.claim("d5d5d5d5-c1")
+        drv.to_unit("d5d5d5d5-c1", "filing")
         doc = drv.file_document(vendor="Zapier", amount_minor=1000)
         with db.tx(self.conn):
             self.conn.execute("UPDATE documents SET source_ref='legacy-msg' WHERE doc_id=?",
@@ -81,7 +81,7 @@ class OneMembershipAcrossRuns(StoreCase):
                                              data={"refs": ["legacy-msg:att-1",
                                                             "legacy-msg:att-2",
                                                             "fresh-msg:att-1"]}))
-        self.assertEqual(out["unfiled"], ["fresh-msg:att-1"])
+        self.assertEqual(out["files"], ["fresh-msg:att-1"])
 
     def test_one_vendor_email_with_two_invoices_files_and_matches_both(self):
         drv = JobDriver(self, payments=2)                   # Zapier EUR 10.00 and 20.00

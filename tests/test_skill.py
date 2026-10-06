@@ -45,7 +45,9 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              # the simple loop's vendor unit fields (§2.2)
              "exact_fit", "search_window", "vendor_queries",
              # d3: every unit's call budget
-             "max_calls", "unfiled", "unfiled_total"}
+             "max_calls",
+             # queues: a unit's handed items and the probe's / record_search's answer
+             "files", "files_total", "rows", "snapshot_id", "refs", "search"}
 # §15: tools that left the surface in S7 (their functions stay server-side).
 REMOVED_S7 = ("job_report", "apply_reply", "confirm_match", "reject_match", "set_exemption",
               "stop_chasing", "set_watermark", "set_package_name")
@@ -288,9 +290,9 @@ class TestDesk(TempEnv):
         never = flat(section(SKILL, "## Never"))
         self.assertIn("Never call `job_next`, `decide`, `record_mirror`, `record_not_found`, "
                       "`import_ledger_export` or any pass tool: those are the job's.", never)
-        # §2.5: a handover's filing continuation is the job's, but record_filing is no
-        # longer named here (the desk's own filing steps name ingest_document only)
-        self.assertNotIn("record_filing", never)
+        # §2.5: a handover's filing continuation is the job's; the desk's own filing steps
+        # name ingest_document only
+        self.assertNotIn("set_aside", never)
         self.assertIn("Never ask the operator for an id, a token or a path.", never)
 
 
@@ -346,8 +348,8 @@ class TestJob(TempEnv):
 
     def test_the_job_skill_names_exactly_the_new_units_and_rules(self):
         text = (ROOT / "skills/quarterly-job/SKILL.md").read_text()
-        for unit in ("probes", "snapshot", "filing", "vendor", "mirror", "view", "post",
-                     "end-batch", "complete"):
+        for unit in ("probes", "snapshot", "erasures", "filing", "vendor", "mirror", "view",
+                     "post", "end-batch", "complete"):
             self.assertIn(f"`{unit}`", text)
         for gone in ("sweep", "gmail-probe", "`item`", "`judge`", "build_quarterly_package",  # removed-name: asserted absent
                      "list_projections", "record_observation", "judged", "resolves",  # removed-name: asserted absent
@@ -356,15 +358,16 @@ class TestJob(TempEnv):
         for rule in ("calls_made", "decide(", "exact_fit", "hint_sender", "once per run",
                      'search="hinted"', 'search="plain"', "searches.plain",
                      "plain vendor-and-dates search", "record_mirror", "record_not_found",
-                     "certain", "reset_store"):
+                     "certain", "reset_store", "set_aside(", "refs=["):
             self.assertIn(rule, text)
-        self.assertLessEqual(len(text), 9_000)
+        self.assertLessEqual(len(text), 9_600)     # queues: + the erasures unit, refs, set_aside
 
     def test_the_units_come_in_the_loops_order(self):
         """Simple loop §2: probes, snapshot, filing, vendor, mirror, the run's one post."""
         units = section(JOB, "## Units", "## Never")
         order = ["### `probes`", "record_probe", "sync", "### `snapshot`",
-                 "import_ledger_export", "record_not_found", "### `filing`", "### `vendor`",
+                 "import_ledger_export", "### `erasures`", "record_not_found", "### `filing`",
+                 "### `vendor`",
                  "decide(", "### `mirror`", "record_mirror", "### `post`", "### `view`"]
         pos = [units.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
@@ -390,58 +393,59 @@ class TestJob(TempEnv):
 
     def test_every_observation_names_the_import_it_was_read_under(self):
         units = flat(section(JOB, "## Units", "## Never"))
-        self.assertIn("`record_not_found(pass_token, pid, snapshot_id=<the import's "
-                      "snapshot>)`", units)
+        self.assertIn("`record_not_found(pass_token, pid, snapshot_id=<the unit's "
+                      "snapshot_id>)`", units)
+        self.assertIn('`set_aside(pass_token, items=[{"pid": …}], reason="still in '
+                      'bank-feed")`', units)
 
     def test_the_filing_records_gmail_skips_what_is_filed_and_names_no_vendor(self):
         """The gmail probe is the filing's own search (simple loop §2); own mail is no
-        vendor's. d4: the probe carries every ref found; the server answers the exact
-        unfiled ones."""
+        vendor's. d4, queues: the probe carries every ref found, at once; the server queues
+        the exact unfiled ones and answers `files`."""
         f = flat(self.units("filing", "### `vendor`"))
         for phrase in ('`record_probe(pass_token, kind="gmail", ok=false, absent=true)`',
-                       '**Which are new:** `record_probe(pass_token, kind="gmail", ok=…, '
-                       'detail=…, data={"refs": [each ref found, newest first]})` answers '
-                       "`unfiled`, the refs not yet filed: file those in order, then probe "
-                       "again until `unfiled_total` is 0.",
-                       "source_ref=<message id>:<attachment id>",
+                       'then at once `record_probe(pass_token, kind="gmail", ok=…, detail=…, '
+                       'data={"refs": [every attachment found, as <message id>:<attachment '
+                       'id>, newest first]})` — before anything else',
+                       "source_ref=<the ref, exactly>",
                        'source="manual-email", extraction_author="specialist"',
                        "no `vendor`: your own mail is no vendor's",
-                       "`record_filing(pass_token)`"):
+                       '`set_aside(pass_token, items=[{"ref": …}], reason=…)`. Then `job_next`.'):
             self.assertIn(phrase, f, phrase)
-        self.assertLess(f.index('kind="gmail"'), f.index("`record_filing("))
+        self.assertNotIn("record_filing", JOB)          # removed-name: asserted absent
 
     READING = "amount_minor, currency, document_date, issuer, document_number, pass_token)`"
 
-    def test_every_unit_has_a_call_budget_and_filing_records_only_when_drained(self):
-        """d3 (Astra S1, generalized): a unit's `max_calls` — at it the model stops and
-        checkpoints with job_next, the unit comes again; record_filing only when every
-        attachment is filed; a vendor continuation skips what it filed."""
+    def test_every_unit_has_a_call_budget_and_what_it_owes_comes_again(self):
+        """d3, queues: a unit's `max_calls` — at it the model stops and checkpoints with
+        job_next; what the unit still owes is the server's and comes again."""
         turn = flat(section(JOB, "## Every turn", "**Refusals.**"))
         self.assertIn("**Budget:** a unit carries `max_calls`, its closing write (`decide`, "
-                      "`record_filing`, `record_mirror`) included: keep a call for it. At "
-                      "`max_calls`, stop and call `job_next`: an unfinished unit comes again.",
-                      turn)
-        f = flat(self.units("filing", "### `vendor`"))
-        self.assertIn("Then `record_filing(pass_token)`.", f)
-        self.assertNotIn("filed_refs", JOB)                  # d5: one membership, the probe's
+                      "`record_mirror`) included: keep a call for it. At `max_calls`, stop "
+                      "and call `job_next`: what the unit still owes comes again.", turn)
+        self.assertNotIn("filed_refs", JOB)                  # d5: one membership, the server's
         self.assertNotIn("max_files", JOB)
-        self.assertIn("**File** the plausible invoices found that **Which are new** answers "
-                      "`unfiled`, reading each once", flat(self.vendor()))
+        self.assertNotIn("Which are new", JOB)
+        v = flat(self.vendor())
+        self.assertIn("Record each **right after it ran, before anything else**, with every "
+                      "attachment it found:", v)
+        self.assertIn("refs=[each attachment found, as <message id>:<attachment id>; [] when "
+                      "none], pass_token)`", v)
+        self.assertIn("refused while a found attachment is neither filed nor set aside", v)
 
     def test_own_mail_and_vendor_filing_pass_the_reading(self):
         """d2 (Astra S2): the model reads each document and passes amount, currency, date,
         issuer and number — own mail with no vendor (a candidate, never an exact_fit), the
         vendor search's filing with the unit's vendor."""
         f = flat(self.units("filing", "### `vendor`"))
-        self.assertIn("Read each, pass its fields: `ingest_document(source_path, kind, "
+        self.assertIn("read each, pass its fields: `ingest_document(source_path, kind, "
                       'source="manual-email", extraction_author="specialist", '
-                      "source_ref=<message id>:<attachment id>, " + self.READING, f)
+                      "source_ref=<the ref, exactly>, " + self.READING, f)
         self.assertNotIn("vendor=", f)
         v = flat(self.vendor())
-        self.assertIn("**File** the plausible invoices found that **Which are new** answers "
-                      "`unfiled`, reading each once: "
+        self.assertIn("file each, in order, read once: "
                       '`ingest_document(source_path, kind, source="gmail", '
-                      'extraction_author="specialist", source_ref=<message id>:<attachment id>, '
+                      'extraction_author="specialist", source_ref=<the ref, exactly>, '
                       "vendor=<the unit's vendor>, " + self.READING, v)
 
     def vendor(self):
@@ -458,8 +462,8 @@ class TestJob(TempEnv):
                  "`searches.plain` is false: the plain vendor-and-dates search once",
                  "Then per-payment searches only for what is still uncovered",
                  '`record_search(pids=[the payments it was for], search="hinted"',
-                 'search="plain"', 'search="payment"', "**File** the plausible invoices found",
-                 "vendor=<the unit's vendor>", "**Decide the vendor's payments in ONE call:**",
+                 'search="plain"', 'search="payment"', "3. **File** each of its answer's `files`",
+                 "**Decide the vendor's payments in ONE call:**",
                  "**Save what worked:**"]
         pos = [v.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))

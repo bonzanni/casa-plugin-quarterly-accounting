@@ -126,9 +126,6 @@
         "record_delivery": {
           "result": "safe"
         },
-        "record_filing": {
-          "result": "safe"
-        },
         "record_match": {
           "result": "safe"
         },
@@ -154,6 +151,9 @@
           "result": "safe"
         },
         "reset_store": {
+          "result": "safe"
+        },
+        "set_aside": {
           "result": "safe"
         },
         "set_expectation": {
@@ -207,7 +207,7 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__propose_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__read_document",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_delivery",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__record_filing",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__set_aside",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_match",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_missing",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_mirror",

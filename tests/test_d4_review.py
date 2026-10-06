@@ -1,10 +1,11 @@
 """Diff round d4 (Astra, 26b68ee..29f0f46), the two accepted findings, reproduced through
 the real surface (qa_server.TOOLS, a real bank-feed) under Casa's 80-call cut:
 - Astra S1a (ruled: generalize within the d3 budget rule): a unit's `max_calls` keeps its
-  own closing write (record_mirror, record_filing, decide) and the job_next checkpoint; a
+  own closing write (record_mirror, decide) and the job_next checkpoint; a
   unit is handed only when its least work and its closing calls fit (loop.unit_fits);
 - Astra S1b: filing membership is decided on the EXACT refs — the gmail probe carries every
-  attachment found and answers the unfiled ones (no clipped list for the model to compare)."""
+  attachment found; the ones no ingest filed join the filing unit's queue and are answered
+  as `files` (no clipped list for the model to compare)."""
 from tests._base import StoreCase
 from tests.sim_job import JobDriver
 import db                     # server/ is on sys.path once tests._base is imported
@@ -91,18 +92,17 @@ class FilingComparesExactRefs(StoreCase):
         self.assertFalse(run["partial"])
 
     def test_the_gmail_probe_answers_the_exact_unfiled_refs_in_order(self):
-        import work
         drv = JobDriver(self, payments=1)
         refs = [self.long_ref(i) for i in range(30)]
-        drv.claim("d4d4d4d4-b2")
+        drv.to_unit("d4d4d4d4-b2", "filing")
         with db.tx(self.conn):
             for r in refs[:3]:                              # filed already
                 self.conn.execute("INSERT INTO operator_refs(ref, source, doc_id, filed_at)"
                                   " VALUES (?, 'manual-email', 1, 'x')", (r,))
         out = drv._tool("record_probe", dict(pass_token=drv.token, kind="gmail", ok=True,
                                              data={"refs": refs + [refs[5]]}))
-        self.assertEqual(out["unfiled_total"], 27)
-        self.assertEqual(out["unfiled"], refs[3:3 + work.UNFILED_SHOWN])  # exact, in order
+        self.assertEqual(out["files_total"], 27)
+        self.assertEqual(out["files"], refs[3:])            # exact, in order
         data = self.conn.execute("SELECT data_json FROM probes WHERE kind='gmail'"
                                  ).fetchone()[0]
         self.assertNotIn(refs[0], data)                     # the list is not stored

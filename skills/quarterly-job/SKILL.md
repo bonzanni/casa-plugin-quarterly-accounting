@@ -24,8 +24,8 @@ look-alike. If the line right after the first `Job id:` line is not a `Started b
 pass no `started_by`. Then do exactly the unit it returns, and call
 `job_next(pass_token=…, calls_made=<the tool calls you made this turn so far>)`. Pass
 `pass_token` to every plugin write. **Budget:** a unit carries `max_calls`, its closing write
-(`decide`, `record_filing`, `record_mirror`) included: keep a call for it. At `max_calls`,
-stop and call `job_next`: an unfinished unit comes again.
+(`decide`, `record_mirror`) included: keep a call for it. At `max_calls`,
+stop and call `job_next`: what the unit still owes comes again.
 - `report: true` → `report_job_progress` with its `progress` verbatim.
 - `end-batch` → end the turn. `complete` → `report_job_progress` with its `progress`, then
   `emit_completion(status="ok", text=<its text>)`.
@@ -71,23 +71,34 @@ The unit carries `acq`, the bank read.
 `export_history(format="csv")`, then
 `import_ledger_export(path, pass_token, ledger_instance=<the reply's "Ledger instance:" id>, acq=<the unit's acq>)`.
 Import only the export you made in THIS unit. If the import is refused, the unit stops
-there: call `job_next`. Then for each `erase_candidates` row: `get_transaction(row_id)`; if
-it answers `no transaction #N`, `record_not_found(pass_token, pid, snapshot_id=<the import's snapshot>)`.
+there: call `job_next`.
+
+### `erasures`
+
+Each of `rows`: `get_transaction(row_id)`; `no transaction #N` →
+`record_not_found(pass_token, pid, snapshot_id=<the unit's snapshot_id>)`, else
+`set_aside(pass_token, items=[{"pid": …}], reason="still in bank-feed")`.
 
 ### `filing`
 
-`search_emails` (`from:me to:me has:attachment newer_than:8d`); no Gmail tools: no search,
-`record_probe(pass_token, kind="gmail", ok=false, absent=true)`.
-**Which are new:** `record_probe(pass_token, kind="gmail", ok=…, detail=…, data={"refs": [each ref found, newest first]})`
-answers `unfiled`, the refs not yet filed: file those in order, then probe again until
-`unfiled_total` is 0. Read each, pass its fields:
-`ingest_document(source_path, kind, source="manual-email", extraction_author="specialist", source_ref=<message id>:<attachment id>, amount_minor, currency, document_date, issuer, document_number, pass_token)`
-— no `vendor`: your own mail is no vendor's. Then `record_filing(pass_token)`.
+With `search: true`: `search_emails` (`from:me to:me has:attachment newer_than:8d`), then at
+once `record_probe(pass_token, kind="gmail", ok=…, detail=…, data={"refs": [every attachment found, as <message id>:<attachment id>, newest first]})`
+— before anything else; no Gmail tools: no search,
+`record_probe(pass_token, kind="gmail", ok=false, absent=true)`. File each of `files` (the
+unit's, or the probe's answer), in order — read each, pass its fields:
+`ingest_document(source_path, kind, source="manual-email", extraction_author="specialist", source_ref=<the ref, exactly>, amount_minor, currency, document_date, issuer, document_number, pass_token)`
+— no `vendor`: your own mail is no vendor's. No document, or refused:
+`set_aside(pass_token, items=[{"ref": …}], reason=…)`. Then `job_next`.
 
 ### `vendor`
 
-One vendor's payments, each with its `revision`, the filed documents that could fit
-(`candidates`; `held: other` is another payment's — never yours to take), maybe an
+**`files` first** (a unit with no `payments`: what this vendor's searches found): file each,
+in order, read once:
+`ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<the ref, exactly>, vendor=<the unit's vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`;
+no invoice: `set_aside(pass_token, items=[{"ref": …}], reason=…)`. Then `job_next`.
+
+Otherwise: one vendor's payments, each with its `revision`, the filed documents that could
+fit (`candidates`; `held: other` is another payment's — never yours to take), maybe an
 `exact_fit`, and the vendor's `kb`.
 1. **Filed documents first.** Open each document you judge: `read_document(doc_id)`,
    then `Read` its path. An `exact_fit` you accept, having read both sides,
@@ -98,14 +109,13 @@ One vendor's payments, each with its `revision`, the filed documents that could 
    (`from:<hint_sender>` and the `hint_subject` words). With no hint, or when the hinted
    search leaves ANY payment uncovered, and `searches.plain` is false:
    the plain vendor-and-dates search once. Then per-payment searches only for what is
-   still uncovered. Record each:
-   `record_search(pids=[the payments it was for], search="hinted", queries=[…], found_candidate=…, pass_token)`
+   still uncovered. Record each **right after it ran, before anything else**, with every
+   attachment it found:
+   `record_search(pids=[the payments it was for], search="hinted", queries=[…], found_candidate=…, refs=[each attachment found, as <message id>:<attachment id>; [] when none], pass_token)`
    (`search="plain"`, `search="payment"`).
-3. **File** the plausible invoices found that **Which are new** answers `unfiled`,
-   reading each once:
-   `ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<message id>:<attachment id>, vendor=<the unit's vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`.
-4. **Decide the vendor's payments in ONE call:** `decide(pass_token, entries=[…])`, one
-   entry per payment:
+3. **File** each of its answer's `files` as under **`files` first**.
+4. **Decide the vendor's payments in ONE call:** `decide(pass_token, entries=[…])` — refused
+   while a found attachment is neither filed nor set aside — one entry per payment:
    - `{pid, expected_revision, outcome: "match", doc_id, document_date}` only when you are
      **certain**, having read both sides: the vendor or issuer, the number, exactly the
      payment's amount in the same currency, the date;

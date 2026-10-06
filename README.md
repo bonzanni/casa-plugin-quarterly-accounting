@@ -18,8 +18,8 @@ with posted views and their buttons, reads the operator's words into a reading t
 (`propose_reading`), files the documents the operator sends, and asks for the check
 (`request_work`, then Casa's `start_job`). `get_package` builds the freshest quarter package
 from the store on request and sends it as a file in Telegram, open items or not; nothing is
-emailed. `job_status` answers, read-only, whether the job may end; `record_filing` closes the
-job's filing step.
+emailed. `job_status` answers, read-only, whether the job may end; `set_aside` closes a job
+item no other write closes (an attachment that is no invoice, a row bank-feed still has).
 
 ## Requirements
 - **Casa v0.344.38 or newer** (the release carrying #1301, #1302 and #1303, and #1308). #1301

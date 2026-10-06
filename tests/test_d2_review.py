@@ -2,8 +2,8 @@
 through the real surface (qa_server.TOOLS, a real bank-feed):
 - Astra S1a: own-mail filing is handed within a call budget (d3 generalized it to every
   unit: `max_calls`); the model checkpoints with job_next(calls_made) at it, so no batch is
-  cut at Casa's 80 calls without a progress report, and record_filing comes only once the
-  attachments are drained;
+  cut at Casa's 80 calls without a progress report, and filing ends only once its queue
+  (queues: the own-mail search and every attachment it found) is empty;
 - Astra S1b: a handover that joins an operator check keeps the check's full summary and
   Review order, the handover's receipt line added; the handover-only rendering is for a
   standalone continuation;
@@ -53,10 +53,15 @@ class OwnMailFilingIsSliced(StoreCase):
         self.assertFalse(run["partial"])
         self.assertTrue(loop.complete(self.conn, "2026-Q3"))
 
-    def test_filing_is_done_only_on_record_filing(self):
-        """The server re-hands `filing` while the model has not reported the attachments
-        drained (record_filing)."""
+    def test_filing_is_handed_until_its_queue_is_empty(self):
+        """Queues: the server re-hands `filing` while its own-mail search or an attachment
+        it found is still queued; the list is built only after."""
         import job
+
+        def queued():
+            return self.conn.execute("SELECT count(*) FROM run_items WHERE job_id="
+                                     "'d2d2d2d2-a2' AND unit='filing' AND state='queued'"
+                                     ).fetchone()[0]
         g = self.drv.gmail
         for i in range(30):
             g.own(70000 + i)
@@ -68,9 +73,9 @@ class OwnMailFilingIsSliced(StoreCase):
             if u["unit"] == "filing":
                 seen.append(self.conn.execute("SELECT count(*) FROM operator_refs"
                                               ).fetchone()[0])
-                filed_at = self.conn.execute("SELECT filed_at FROM runs WHERE"
-                                             " job_id='d2d2d2d2-a2'").fetchone()[0]
-                self.assertIsNone(filed_at)                 # not drained yet
+                self.assertGreater(queued(), 0)             # not drained yet
+                self.assertIsNone(self.conn.execute(
+                    "SELECT listed_at FROM runs WHERE job_id='d2d2d2d2-a2'").fetchone()[0])
             if u["unit"] == "vendor":
                 break
             if u["unit"] == "end-batch":                    # a fresh batch (turn)
@@ -80,8 +85,9 @@ class OwnMailFilingIsSliced(StoreCase):
         self.assertGreater(len(seen), 1)               # handed again, filed refs growing
         self.assertEqual(seen, sorted(seen))
         self.assertGreater(seen[-1], 0)
-        self.assertIsNotNone(self.conn.execute(
-            "SELECT filed_at FROM runs WHERE job_id='d2d2d2d2-a2'").fetchone()[0])
+        self.assertEqual(queued(), 0)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM operator_refs").fetchone()[0],
+                         30)
 
     def test_every_filed_ref_is_held_exactly(self):
         """More files than d2's old 60-ref cap: every ref is filed once and held whole

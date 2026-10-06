@@ -79,6 +79,10 @@ REMOVED = [
      r"claimed_step|verdicts_json)\b", "dropped columns"),
     (r"\bspent=|sum\(spent\)|\breported=1|runs\(job_id,\s*passes|SET passes\s*=|"
      r"(packages|deliveries)\([^)]*\brequest_id", "dropped columns (qualified)"),
+    # the work queues (operator ruling A) replace the per-unit continuation state
+    (r"\b(record_filing|hand_progressed|idle_hands|HAND_MAX|_settle_hand|unfiled_total)\b|"
+     r"\bruns\.filed_at\b|run\[['\"]filed_at['\"]\]|SET filed_at|['\"]unfiled['\"]",
+     "the per-unit continuation state the queues replace"),
     # test helpers
     (r"\bself\.(handed|close_chunk|hand_empty_chunk|end_with_counts|package_built_unsent|"
      r"stage_stalled_package|check_round|bind_round_and_take|sweep_to_zero|start_job_pass|"

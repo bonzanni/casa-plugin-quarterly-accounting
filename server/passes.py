@@ -116,10 +116,9 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None, 
         data = {**(data or {}), "acq": acq}
     refs = None
     if kind == "gmail" and data is not None and "refs" in data:
-        # d4: the filing's found attachments, exact; answered with the unfiled ones
-        refs = data["refs"]
-        if not isinstance(refs, list) or not all(isinstance(r, str) and r for r in refs):
-            raise db.Refusal("the gmail probe's refs is a list of <message id>:<attachment id>")
+        # d4, queues: the own-mail search's found attachments, exact: the filing unit's items
+        import queues
+        refs = queues.check_refs(data["refs"], "the gmail probe's refs")
         data = {**{k: v for k, v in data.items() if k != "refs"}, "refs_n": len(refs)}
     if kind == "ledger" and data is not None and "missing" in data:
         missing = data["missing"]
@@ -174,10 +173,31 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None, 
                              " ('bound_account', ?, '', NULL, ?, ?, ?)",
                              (1 if present else 0, now, pass_id, since))
         out = {"recorded": kind, "ok": bool(ok), "observed_at": now}
-        if refs is not None:
-            import work
-            out.update(work.unfiled(conn, refs))
+        if kind == "gmail" and token is not None:
+            out.update(_filing_search(conn, token, refs))
         return out
+
+
+def _filing_search(conn, token, refs) -> dict:
+    """Queues: the filing unit's gmail probe closes its own-mail search item (whatever the
+    search's outcome) and enqueues every found attachment no ingest filed yet (work.filed,
+    d5) as the unit's items, in the same commit. Refs go only with the filing unit's
+    probe. Answers the unit's queued attachments to file now (`files`, exact)."""
+    import queues
+    import work
+    job_id = queues.job_of(conn, token)
+    if job_id is None or queues.handed_unit(conn, job_id) != "filing":
+        if refs is not None:
+            raise db.Refusal("refs go with the filing unit's gmail probe (a vendor search "
+                             "records its refs with record_search): call job_next")
+        return {}
+    queues.close(conn, job_id, "search", "own-mail", unit="filing")
+    if refs:
+        todo = [r for r in refs if not work.filed(conn, r)]
+        queues.enqueue(conn, job_id, "filing", "ref", todo)
+    rows = queues.queued(conn, job_id, "filing", "ref")
+    return {"files": [r["key"] for r in queues.take_fitting(rows, 10**6)],
+            "files_total": len(rows)}
 
 
 def store_populated(conn) -> bool:

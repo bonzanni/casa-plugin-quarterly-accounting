@@ -20,12 +20,9 @@ DATE_READ = ("pass document_date: the date printed on the document you opened (i
 
 
 def note_progress(conn, token) -> None:
-    """§2.2 `progressed`: the batch persisted work (a decision, a filing, a search). d3: the
-    run records it too (runs.hand_progressed), so the cursor can tell whether the unit it
-    last handed out persisted anything (loop._settle_hand)."""
+    """§2.2 `progressed`: the batch persisted work (a decision, a filing, a search) — Casa's
+    batch progress report. (A hand-out's own progress is the queues' stamps: queues.settle.)"""
     conn.execute("UPDATE claims SET progressed=1 WHERE gen=?", (int(token),))
-    conn.execute("UPDATE runs SET hand_progressed=1 WHERE job_id=(SELECT job_id FROM claims"
-                 " WHERE gen=?)", (int(token),))
 
 
 def record_outcome(conn, token, pid, outcome, reason=None) -> None:
@@ -37,8 +34,8 @@ def record_outcome(conn, token, pid, outcome, reason=None) -> None:
                                     (job[0],))
             if lineage.resolve_pid(conn, r["pid"]) == pid] if job is not None else []
     for r in rows:
-        conn.execute("UPDATE run_work SET outcome=?, reason=? WHERE job_id=? AND pid=?",
-                     (outcome, reason, job[0], r["pid"]))
+        conn.execute("UPDATE run_work SET outcome=?, reason=?, closed_seq=? WHERE job_id=? AND"
+                     " pid=?", (outcome, reason, db.next_seq(conn), job[0], r["pid"]))
     # §2.1, per payment (plan round 5): the job considered the documents it was HANDED for
     # this payment — a re-decision that writes nothing included — and no others (plan
     # round 6: a capped hand-out must never mark an unseen document as considered). A
@@ -119,6 +116,22 @@ def _entry(conn, token, e, seen) -> dict:
             "status": lineage.projection(conn, pid)["status"]}
 
 
+def _check_order(conn, token, entries) -> None:
+    """Queues rule 3: a vendor with a found attachment still queued (or given up) decides
+    nothing — what a search found is filed (or set aside) before any decision."""
+    import kb
+    import queues
+    job_id = queues.job_of(conn, token)
+    if job_id is None:
+        return
+    pids = {e.get("pid") for e in entries if isinstance(e, dict)}
+    for r in conn.execute("SELECT pid, vendor FROM run_work WHERE job_id=?", (job_id,)):
+        if r["pid"] in pids and queues.blocks_decide(conn, job_id,
+                                                     "vendor:" + kb.norm(r["vendor"])):
+            raise db.Refusal("this vendor's search found attachments not yet filed: file "
+                             "them (or set_aside what is no invoice), then call job_next")
+
+
 def decide(conn, token, entries) -> dict:
     if token is None:
         raise db.Refusal("decide is the job's: pass the pass_token")
@@ -127,6 +140,7 @@ def decide(conn, token, entries) -> dict:
     results, seen = [], set()
     with db.tx(conn):
         passes.check_token(conn, token)
+        _check_order(conn, token, entries)
         for e in entries:
             head = {"pid": e.get("pid") if isinstance(e, dict) else None,
                     "outcome": e.get("outcome") if isinstance(e, dict) else None}

@@ -177,14 +177,17 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
 def _operator_ref(conn, source, source_ref, doc_id) -> bool:
     """Issue #24 (D5), d5: a filed file's own ref (an attachment of a self-addressed mail,
     a Telegram file, a vendor's message), also when its bytes were already held — what
-    work.unfiled answers a search's refs against, across runs. True when the ref is new
+    work.filed answers a search's refs against, across runs. True when the ref is new
     (d2: filing it persisted work)."""
     if source_ref:
+        import queues
         new = conn.execute("SELECT 1 FROM operator_refs WHERE ref=?",
                            (source_ref,)).fetchone() is None
         conn.execute("INSERT OR REPLACE INTO operator_refs(ref, source, doc_id, filed_at)"
                      " VALUES (?,?,?,?)", (source_ref, source, doc_id, db.now()))
-        return new
+        # queues: the ref's closing write — every queued item of it, in every unit and run
+        # (a given-up one stays given up)
+        return queues.close(conn, None, "ref", source_ref) > 0 or new
     return False
 
 

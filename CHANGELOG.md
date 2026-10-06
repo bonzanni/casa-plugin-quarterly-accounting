@@ -18,6 +18,15 @@ builds on it.
   the post. The job entry gains `quietWhenScheduled`: a scheduler-started run is silent unless
   it has something to say. `job_next` hands out the work list; progress is counted at batch end
   (`calls_made`) and a stop is said per streak.
+- **Work queues.** Everything a unit owes is a server row from the moment it is known: each
+  erase candidate (a new `erasures` unit), the own-mail search and every attachment it found,
+  every attachment a vendor search found (`record_search` now carries `refs`, recorded right
+  after the search). A unit ends only when it owes nothing; a unit handed twice without
+  progress gives its items up, visibly ("N attachments found but not filed", "Your own mail
+  was not read", "N erased bank rows not confirmed"), and a run that gave anything up says
+  its missing payments are "search incomplete". `decide` waits for the vendor's found
+  attachments. `set_aside` closes an attachment that is no invoice or a row bank-feed still
+  has; the filing's own closing tool is gone (filing ends when its queue is empty).
 - **The floor and decide.** A match needs the same currency and the exact amount; the machine's
   own pairing is replaced by the operator's, a no-op re-decision changes nothing, and a
   decision applies per vendor group. `record_missing` records a payment with no document.

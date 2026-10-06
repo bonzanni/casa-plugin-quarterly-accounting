@@ -2,7 +2,8 @@
 the real surface (qa_server.TOOLS, a real bank-feed):
 - Astra S1 (ruled: generalize — the 2nd instance after d2's own-mail filing): every unit
   carries a call budget (`max_calls`); at it the model checkpoints with job_next and the
-  unit comes again as a continuation, not counted against HAND_MAX while it persisted work;
+  unit comes again as a continuation, not counted against queues.ATTEMPTS_MAX while it
+  progressed (queues: an item closed or queued, a search kind first recorded);
   progress is reported on the first job_next after the batch persisted anything;
 - Astra S2: the 11 -> 12 migration backfills render_states from delivered legacy
   renderings whose items are provably unchanged, so the first scheduled run after the
@@ -60,34 +61,36 @@ class EveryUnitHasABudget(StoreCase):
                                ("vendor", False)])
         self.assertTrue(all(u["max_calls"] > 0 for u in drv.units[-4:]))
 
-    def test_a_continuation_that_persisted_work_is_not_counted(self):
-        """A vendor hand-out that files one document and stops at its budget is handed
-        again, more often than HAND_MAX, until the group is decided."""
-        import loop
+    def test_a_continuation_that_progressed_is_not_counted(self):
+        """Queues: a vendor hand-out that queues one more found attachment (a per-payment
+        search recorded with its refs) and stops at its budget is handed again, more often
+        than ATTEMPTS_MAX, until the group is decided; each attachment set aside closes."""
+        import queues
         drv = JobDriver(self, payments=1)
         drv.gmail.invoice("Zapier", 1000, "EUR", drv.DATES[0], "INV-1")
         real, n = drv._vendor, [0]
 
         def partial(u, token):
+            if u["files"]:                     # the attachment it queued: no invoice
+                drv._tool("set_aside", {"pass_token": token, "reason": "no invoice",
+                                        "items": [{"ref": r} for r in u["files"]]})
+                return None
             n[0] += 1
-            if n[0] <= 3:                      # files one document, then stops
-                path = self.publish(f"extra-{n[0]}.pdf", b"%PDF-1.4 extra " + str(n[0]).encode())
-                drv._tool("ingest_document", dict(
-                    source_path=path, kind="invoice", source="gmail",
-                    extraction_author="specialist", source_ref=f"x-{n[0]}", vendor="Zapier",
-                    amount_minor=99, currency="EUR", document_date="2026-07-05",
-                    pass_token=token))
+            if n[0] <= 3:                      # one search with one find, then stops
+                drv._tool("record_search", {"pass_token": token, "search": "payment",
+                                            "pids": [p["pid"] for p in u["payments"]],
+                                            "queries": [f"q{n[0]}"], "refs": [f"x-{n[0]}"]})
                 return None
             return real(u, token)
         drv._vendor = partial
         units = drv.run_job("d3d3d3d3-a3")
-        vendor = [u for u in units if u["unit"] == "vendor"]
-        self.assertEqual(len(vendor), 4)
-        self.assertGreater(len(vendor), loop.HAND_MAX)
-        self.assertEqual([u["continued"] for u in vendor], [False, True, True, True])
-        self.assertNotIn("filed_refs", vendor[-1])          # d5: membership is the probe's
+        payments = [u for u in units if u["unit"] == "vendor" and u["payments"]]
+        self.assertEqual(len(payments), 4)
+        self.assertGreater(len(payments), queues.ATTEMPTS_MAX)
+        self.assertEqual([u["continued"] for u in payments], [False, True, True, True])
         self.assertEqual(sorted(r[0] for r in self.conn.execute(
-            "SELECT ref FROM operator_refs WHERE ref LIKE 'x-%'")), ["x-1", "x-2", "x-3"])
+            "SELECT key FROM run_items WHERE kind='ref' AND state='done' AND key LIKE 'x-%'")),
+            ["x-1", "x-2", "x-3"])
         self.assertEqual(self.conn.execute("SELECT status FROM projections").fetchone()[0],
                          "matched")
 
@@ -101,13 +104,14 @@ class EveryUnitHasABudget(StoreCase):
         self.assertTrue(run["partial"])
         self.assertIn("missing · search incomplete", drv.posted_end("d3d3d3d3-a4")["text"])
 
-    def test_a_filing_that_persists_nothing_ends_after_hand_max(self):
-        import loop
+    def test_a_filing_that_persists_nothing_ends_after_attempts_max(self):
+        import queues
         drv = JobDriver(self, payments=1)
-        drv._filing = lambda u, token: None            # never records the filing
+        drv._filing = lambda u, token: None            # never records the own-mail search
         units = drv.run_job("d3d3d3d3-a5")
-        self.assertEqual(sum(u["unit"] == "filing" for u in units), loop.HAND_MAX)
+        self.assertEqual(sum(u["unit"] == "filing" for u in units), queues.ATTEMPTS_MAX)
         self.assertEqual(units[-1]["unit"], "complete")
+        self.assertIn("Your own mail was not read", drv.posted_end("d3d3d3d3-a5")["text"])
 
 
 class MigratedDeliveredStates(StoreCase):

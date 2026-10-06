@@ -240,7 +240,7 @@ class Work(StoreCase):
         self.assertEqual(len(loop.vendor_unit(self.conn, self.job_id)["payments"]), 3)
         self.assertIsNone(loop.vendor_unit(self.conn, self.job_id))   # each part twice
         self.assertEqual(tuple(self.conn.execute(
-            "SELECT count(*), min(handed), max(handed), count(outcome) FROM run_work WHERE"
+            "SELECT count(*), min(attempts), max(attempts), count(outcome) FROM run_work WHERE"
             " job_id=?", (self.job_id,)).fetchone()), (loop.GROUP_MAX + 3, 2, 2, 0))
 
     def test_a_vendors_second_split_group_reuses_the_runs_search(self):
@@ -412,7 +412,7 @@ class Work(StoreCase):
         rid = self.show(pid)                    # the operator pairs it between hand-outs
         self.operator_pair(pid=pid, doc_id=d, expected_revision=self.rev(pid), render_id=rid)
         self.assertIsNone(loop.vendor_unit(self.conn, self.job_id))
-        self.assertEqual(tuple(self.conn.execute("SELECT handed, outcome FROM run_work WHERE"
+        self.assertEqual(tuple(self.conn.execute("SELECT attempts, outcome FROM run_work WHERE"
                                                  " pid=?", (pid,)).fetchone()), (0, "settled"))
 
     def test_left_missing_between_hand_outs_is_settled(self):
@@ -446,7 +446,7 @@ class Work(StoreCase):
         self.assertTrue(out["results"][0]["applied"])
         self.assertIsNone(loop.vendor_unit(self.conn, self.job_id))
         self.assertEqual(tuple(self.conn.execute(
-            "SELECT why, outcome, handed FROM run_work WHERE pid=?", (p,)).fetchone()),
+            "SELECT why, outcome, attempts FROM run_work WHERE pid=?", (p,)).fetchone()),
             ("reopen", "settled", 0))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM run_work WHERE job_id=? AND"
                                            " outcome IS NULL", (self.job_id,)).fetchone()[0], 0)

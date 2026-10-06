@@ -25,7 +25,9 @@ EXPECTED = {
     "stage_for_delivery", "record_delivery", "read_document",
     # S2 (spec §8, §13): the job's tools
     "job_next", "job_status", "request_work",
-    "record_filing",
+    # queues (operator ruling A): record_filing left (filing ends when its queue is empty);  # removed-name: asserted absent
+    # set_aside closes an item no other write closes
+    "set_aside",
     # simple loop Task 11 (§4): the sweep's two tools, the package ask and the request-bound
     # build left the surface (get_package builds; no sweep, no package requests)
     # S7 Task 8 (§4): will the running job take this ask?
@@ -292,7 +294,8 @@ class TestPaging(ToolCase):
                 self.conn.execute("UPDATE projections SET class_observed_at=? WHERE pid=?",
                                   ("2026-09-20T10:00:00Z", pid))
             self.settle(pid)
-            work.record_search(self.conn, pid=pid, token=token, queries=["x"])
+            with db.tx(self.conn):       # the search's bookkeeping alone (no job run)
+                work.record_search_in_tx(self.conn, pid=pid, token=token, queries=["x"])
         r = _json("build_review", view="missing", quarter="2026-Q3")
         self.assertIn('say "all of them"', r["text"])
         seen, pages = set(re.findall(r"Vend\d{3}", r["text"])), 0

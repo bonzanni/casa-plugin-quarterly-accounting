@@ -196,8 +196,9 @@ def hand_calls(conn, job_id, budget: int) -> list:
         return hand_calls_in_tx(conn, job_id, budget)
 
 
-def hand_calls_in_tx(conn, job_id, budget: int) -> list:
-    """hand_calls inside the caller's transaction (the cursor's, which checked the claim)."""
+def hand_calls_in_tx(conn, job_id, budget: int, hand_seq=None) -> list:
+    """hand_calls inside the caller's transaction (the cursor's, which checked the claim).
+    `hand_seq` (queues): the hand-out's id, stamped on every call it carries."""
     assert conn.in_transaction
     budget = max(0, int(budget))
     out = [{"n": r["n"], "tool": r["tool"], "args": json.loads(r["args_json"])[1]}
@@ -212,7 +213,26 @@ def hand_calls_in_tx(conn, job_id, budget: int) -> list:
                      (job_id, n, c["tool"], db.canonical([c["tool"], c["args"]]),
                       json.dumps(c["pids"])))
         out.append({"n": n, "tool": c["tool"], "args": c["args"]})
-    return out[:budget]
+    out = out[:budget]
+    for c in out:
+        conn.execute("UPDATE run_mirror SET hand_seq=? WHERE job_id=? AND n=?",
+                     (hand_seq, job_id, c["n"]))
+    return out
+
+
+def give_up(conn, job_id, attempts_max) -> None:
+    """Queues (rule 2): a call handed out at most `attempts_max` times without the model ever
+    reporting it is failed ("not reported"), said like any refused write; it is not handed
+    again in this run. Inside the caller's transaction."""
+    for r in conn.execute("SELECT n, args_json, pids_json FROM run_mirror WHERE job_id=? AND"
+                          " state='handed' AND attempts >= ?", (job_id, attempts_max)
+                          ).fetchall():
+        err = "not reported"
+        conn.execute("UPDATE run_mirror SET state='failed', error=?, closed_seq=? WHERE"
+                     " job_id=? AND n=?", (err, db.next_seq(conn), job_id, r["n"]))
+        conn.executemany("UPDATE projections SET last_error=? WHERE pid=?",
+                         [(err, pid) for pid in json.loads(r["pids_json"])])
+        _raise_failed(conn, json.loads(r["args_json"]), json.loads(r["pids_json"]), err)
 
 
 def _numbers(items) -> list:
@@ -270,16 +290,16 @@ def record(conn, token, done, failed) -> dict:
                         else (tags - set(args["tags"])))
                 conn.execute("UPDATE projections SET observed_tags_json=?, last_error=NULL"
                              " WHERE pid=?", (json.dumps(sorted(tags)), pid))
-            conn.execute("UPDATE run_mirror SET state='done' WHERE job_id=? AND n=?",
-                         (job_id, n))
+            conn.execute("UPDATE run_mirror SET state='done', closed_seq=? WHERE job_id=? AND"
+                         " n=?", (db.next_seq(conn), job_id, n))
             recorded += 1
         for n, err in fails:
             r = conn.execute("SELECT args_json, pids_json FROM run_mirror WHERE job_id=? AND"
                              " n=? AND state='handed'", (job_id, n)).fetchone()
             if r is None:
                 continue
-            conn.execute("UPDATE run_mirror SET state='failed', error=? WHERE job_id=? AND"
-                         " n=?", (err, job_id, n))
+            conn.execute("UPDATE run_mirror SET state='failed', error=?, closed_seq=? WHERE"
+                         " job_id=? AND n=?", (err, db.next_seq(conn), job_id, n))
             conn.executemany("UPDATE projections SET last_error=? WHERE pid=?",
                              [(err, pid) for pid in json.loads(r["pids_json"])])
             _raise_failed(conn, json.loads(r["args_json"]), json.loads(r["pids_json"]), err)

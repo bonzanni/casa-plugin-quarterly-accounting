@@ -172,8 +172,8 @@ class Carries(StoreCase):
             if rest[-1]["unit"] not in ("complete", "end-batch"):
                 drv.do(rest[-1], drv.token)
         self.assertEqual([u["unit"] for u in rest].count("vendor"), 1)
-        (row,) = self.conn.execute("SELECT why, outcome, handed FROM run_work").fetchall()
-        self.assertEqual(tuple(row), ("handover", "match", 1))
+        (row,) = self.conn.execute("SELECT why, outcome, attempts FROM run_work").fetchall()
+        self.assertEqual(tuple(row), ("handover", "match", 0))
 
     def test_an_alert_raised_between_runs_is_in_the_run_message_and_sent_on_delivery(self):
         """Carries 5 and 10: compose_end binds the alert ids it prints (scope['alerts']); a

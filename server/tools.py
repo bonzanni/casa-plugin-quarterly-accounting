@@ -412,7 +412,7 @@ def t_import(args):
           "line, verbatim, when it is a `Started by:` line; else omit it>) — it gives you a "
           "pass_token; then after each unit job_next(pass_token=…, calls_made=<the tool calls "
           "you made this turn so far>). Do exactly the unit it returns: probes, snapshot, "
-          "filing, vendor, mirror, view, post. Each unit carries max_calls: when your calls "
+          "erasures, filing, vendor, mirror, view, post. Each unit carries max_calls: when your calls "
           "for it reach that, stop and call job_next — an unfinished unit comes again. When "
           "it says report=true, call "
           "report_job_progress with its `progress` verbatim; at end-batch, end your turn; at "
@@ -484,21 +484,22 @@ def t_ask_state(args):
     return asks.ask_state(conn(), args["kind"], _int(args, "request_id"))
 
 
-@register("record_filing",
-          "The job's filing is done: every attachment of your own mail is filed "
-          "(ingest_document with its source_ref) and Gmail's probe recorded. Until then, at "
-          "the unit's max_calls, call job_next: it hands filing again.",
-          obj({"pass_token": TOKEN}, ("pass_token",)))
-def t_record_filing(args):
-    import loop
-    _need(args, "pass_token")
-    return loop.record_filing(conn(), _int(args, "pass_token"))
+@register("set_aside",
+          "Close a handed item no other write closes: a found attachment that is no invoice or "
+          "no file ingest_document takes ({\"ref\": <message id>:<attachment id>}), an erase "
+          "candidate get_transaction still has ({\"pid\": …}). reason: why, in a few words.",
+          obj({"pass_token": TOKEN, "items": {"type": "array", "items": O}, "reason": S},
+              ("pass_token", "items", "reason")))
+def t_set_aside(args):
+    import queues
+    _need(args, "pass_token", "items", "reason")
+    return queues.set_aside(conn(), _int(args, "pass_token"), args["items"], args["reason"])
 
 
 @register("record_not_found",
-          "The snapshot unit's erasure confirmation: an erase candidate import_ledger_export "
-          "returned, for which get_transaction answered \"no transaction #N\". pid: the "
-          "candidate's pid; snapshot_id: the import's `snapshot`.",
+          "The erasures unit's confirmation: an erase candidate it handed, for which "
+          "get_transaction answered \"no transaction #N\". pid: the row's pid; snapshot_id: "
+          "the unit's snapshot_id.",
           obj({"pass_token": TOKEN, "pid": I, "snapshot_id": I},
               ("pass_token", "pid", "snapshot_id")))
 def t_record_not_found(args):
@@ -513,9 +514,9 @@ def t_record_not_found(args):
           "Record what you actually observed this pass: bank_tools, bank_accounts (data.accounts "
           "from list_accounts: account_id, category, label), bank_sync, ledger (data.generation, "
           "data.registered and data.instance — the `Ledger instance:` id — from list_backups), "
-          "gmail (after a search, own mail or a vendor's: data.refs, every attachment found "
-          "as <message id>:<attachment id>, newest first; it answers unfiled, "
-          "the ones no ingest filed yet, and unfiled_total). "
+          "gmail (the filing unit's own-mail search: data.refs, every attachment found "
+          "as <message id>:<attachment id>, newest first; it answers files, the ones to file "
+          "now, and files_total). "
           "bank_sync carries acq, the number job_next handed out with the bank read; a "
           "gmail probe with absent=true (and ok=false) says the Gmail tools are not available "
           "to you at all.",
@@ -562,10 +563,13 @@ def t_reset(args):
           "whether the payee is unknown (identity_unknown). revive=true to look again. The "
           "pass_token is required, except for a bare revive (no queries, nothing found, not "
           "exhausted). A hinted or plain record counts as the vendor's search only when it "
-          "carries queries, found_candidate or exhausted. During a pass, pass the pass_token.",
+          "carries queries, found_candidate or exhausted. During a pass, pass the pass_token. "
+          "In the job, also refs: every attachment the search found, as <message id>:"
+          "<attachment id>, [] when none — recorded right after the search ran; it answers "
+          "files, the vendor's found attachments to file now, and files_total.",
           obj({"pids": AI, "pid": I, "search": S, "pass_token": TOKEN, "queries": A,
                "found_candidate": B, "exhausted": B, "incomplete": B, "identity_unknown": B,
-               "revive": B}))
+               "revive": B, "refs": A}))
 def t_search(args):
     flags = {n: _bool(args, n, False) for n in ("found_candidate", "exhausted", "incomplete",
                                                 "revive")}
@@ -575,8 +579,8 @@ def t_search(args):
         raise db.Refusal("missing argument(s): pids (or pid)")
     return work.record_search(conn(), pids=args.get("pids") or None, pid=_int(args, "pid"),
                               search=args.get("search") or "payment",
-                              token=_int(args, "pass_token"), **_pick(args, ("queries",)),
-                              **flags)
+                              token=_int(args, "pass_token"),
+                              **_pick(args, ("queries", "refs")), **flags)
 
 
 # --- views and replies -------------------------------------------------------------

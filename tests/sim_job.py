@@ -7,22 +7,25 @@ driver makes in a turn is counted into `calls_made` (a new turn — a claim — 
 
   probes    bank-feed's tools, list_accounts, sync, list_backups, the four record_probes
             (bank_sync with the unit's acq), check_setup
-  snapshot  export_history -> import_ledger_export(acq) -> each erase candidate:
-            get_transaction; "no transaction #N" -> record_not_found
-  filing    one search of the operator's own mail, record_probe(gmail, ok, data.refs) —
-            failed when Gmail.down — then each attachment the probe answers `unfiled`,
-            newest first, page by page (download, Read, ingest_document with the reading:
-            amount, currency, date, issuer, number; no vendor), then record_filing
-  vendor    the skill's search rule (Task 16): only while a payment is uncovered (no exact
+  snapshot  export_history -> import_ledger_export(acq)
+  erasures  each handed row: get_transaction; "no transaction #N" -> record_not_found, else
+            set_aside
+  filing    with `search`: one search of the operator's own mail, at once
+            record_probe(gmail, ok, data.refs) — failed when Gmail.down; then each of the
+            unit's (or the probe's) `files` (download, Read, ingest_document with the reading:
+            amount, currency, date, issuer, number; no vendor)
+  vendor    `files` (no payments): each filed with ingest_document(vendor=…). Payments: the
+            skill's search rule (Task 16): only while a payment is uncovered (no exact
             fit, no unheld candidate), the hinted search (a learned hint, not yet run this
-            run), then the plain one (still uncovered, not yet run); each message the gmail
-            probe answers unfiled (d5) filed with ingest_document(vendor=…). Then per payment: one holding a document
+            run), then the plain one (still uncovered, not yet run); each recorded at once
+            with its refs (q5), then each of its answer's `files` filed with
+            ingest_document(vendor=…). Then per payment: one holding a document
             with another same-amount candidate → propose the held one with it as the
             alternative (refused: match the held one); the exact fit or the nearest-dated
             same-currency, same-amount unheld candidate → match; else an unheld candidate →
             propose; else missing. All in ONE decide; a refused entry decided again once
-            (missing, or the held match). Then each search recorded for the payments it was
-            for, and upsert_counterparty(hint_sender=…) when a search found an invoice
+            (missing, or the held match); upsert_counterparty(hint_sender=…) when a search
+            found an invoice
   mirror    each call through bank-feed (a reply starting `refused`, or bank-feed's
             "Nothing was changed.", counts as failed), then one record_mirror
   view      show_view(render_id) under a broker; on the receipt (`deliver`),
@@ -74,7 +77,7 @@ def ledger_state(listing: str) -> dict:
 MAX_UNITS = 600         # a cursor that never finishes is a failure, never a hang
 CASA_IDLE_BATCHES = 3   # Casa ends a run after this many batches without reported progress
 # d4: the writes that close a unit (loop.CLOSING), made from the unit's reserved calls
-CLOSING_TOOLS = ("decide", "record_filing", "record_mirror", "mark_rendering_delivered")
+CLOSING_TOOLS = ("decide", "record_mirror", "mark_rendering_delivered")
 
 
 class CasaCut(Exception):
@@ -495,6 +498,22 @@ class JobDriver:
         self.calls = 1
         return self.token
 
+    def to_unit(self, job_id, unit, started_by="operator"):
+        """Claim, then carry out every unit until `unit` is handed out (not done): its
+        hand-out, as the model holds it then."""
+        self.claim(job_id, started_by)
+        with self._broker():
+            for _ in range(MAX_UNITS):
+                u = job.next_unit(self.conn, self.token, self.calls)
+                self.calls += 1
+                self.last = u
+                if u["unit"] == unit:
+                    return u
+                if u["unit"] in ("end-batch", "complete"):
+                    raise AssertionError(f"{unit} was not handed out before {u['unit']}")
+                self.do(u, self.token)
+        raise AssertionError(f"{unit} was never handed out")
+
     def run_job(self, job_id, started_by="operator") -> list:
         """Claim, then job_next until `complete`, re-claiming (a new turn, a new batch) on
         `end-batch`. Returns every unit handed out."""
@@ -650,38 +669,42 @@ class JobDriver:
         imp = ledger.import_ledger_export(conn, path=self._export(), token=token,
                                           ledger_instance=bf.last_export_instance, acq=u["acq"])
         self.imports.append(imp)
-        for c in imp["erase_candidates"]:
-            if self._bank("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
-                self._tool("record_not_found", {"pass_token": token, "pid": c["pid"],
-                                                "snapshot_id": imp["snapshot"]})
         return None
 
-    def _unfiled(self, token, refs):
-        """d4/d5, the skill's **Which are new**: the gmail probe with the refs a search
-        found, answered page by page with the exact ones no ingest filed; yields each, then
-        probes again while `unfiled_total` was more than the page."""
-        while refs:
-            out = self._tool("record_probe", {"pass_token": token, "kind": "gmail", "ok": True,
-                                              "data": {"refs": refs}})
-            yield from out["unfiled"]
-            if out["unfiled_total"] <= len(out["unfiled"]):
-                return
+    def _erasures(self, u, token):
+        """The skill's erasures: each row asked of bank-feed; gone → record_not_found, still
+        there → set_aside."""
+        for r in u["rows"]:
+            if self._bank("get_transaction", row_id=r["row_id"]).startswith("no transaction #"):
+                self._tool("record_not_found", {"pass_token": token, "pid": r["pid"],
+                                                "snapshot_id": u["snapshot_id"]})
+            else:
+                self._tool("set_aside", {"pass_token": token, "items": [{"pid": r["pid"]}],
+                                         "reason": "still in bank-feed"})
+        return None
+
+    def _mail(self, ref):
+        """The message attachment `ref` names (own mail or a vendor's)."""
+        return next(m for m in self.gmail.own_mail + self.gmail.messages if m["ref"] == ref)
 
     def _filing(self, u, token):
-        """The skill's filing: the search, then **Which are new** (the gmail probe with
-        every attachment ref found), each unfiled one filed in order, downloaded and read
-        once, with the reading (no vendor: own mail is no vendor's); then record_filing. A
-        unit cut at its `max_calls` comes again (d3)."""
-        self._spend(1)
-        found = self.gmail.search_emails("from:me to:me has:attachment newer_than:8d")
-        if found is None:
-            self._tool("record_probe", {"pass_token": token, "kind": "gmail", "ok": False,
-                                        "detail": "Gmail search failed"})
-        by_ref = {m["ref"]: m for m in found or ()}
-        if not found and found is not None:
-            self._tool("record_probe", {"pass_token": token, "kind": "gmail", "ok": True})
-        for ref in self._unfiled(token, [m["ref"] for m in found or ()]):
-            m = by_ref[ref]
+        """The skill's filing: with `search`, the own-mail search and at once the gmail probe
+        with every attachment found; then each of `files` (the unit's, or the probe's)
+        downloaded, read once and filed with the reading (no vendor: own mail is no
+        vendor's). A unit cut at its `max_calls` comes again (queues)."""
+        files = u["files"]
+        if u["search"]:
+            self._spend(1)
+            found = self.gmail.search_emails("from:me to:me has:attachment newer_than:8d")
+            if found is None:
+                self._tool("record_probe", {"pass_token": token, "kind": "gmail", "ok": False,
+                                            "detail": "Gmail search failed"})
+                return None
+            out = self._tool("record_probe", {"pass_token": token, "kind": "gmail", "ok": True,
+                                              "data": {"refs": [m["ref"] for m in found]}})
+            files = out["files"]
+        for ref in files:
+            m = self._mail(ref)
             self._spend(2)                                # download_attachment, Read
             self._tool("ingest_document", {
                 "source_path": m["path"], "kind": "invoice", "source": "manual-email",
@@ -689,8 +712,25 @@ class JobDriver:
                 "amount_minor": m["amount_minor"], "currency": m["currency"],
                 "document_date": m["date"], "issuer": m["issuer"],
                 "document_number": m["number"], "pass_token": token})
-        self._tool("record_filing", {"pass_token": token})
         return None
+
+    def _file_vendor(self, token, vendor, refs) -> list:
+        """The vendor's found attachments, each downloaded, read once and filed (vendor=);
+        the newly filed ones as candidates."""
+        filed = []
+        for ref in refs:
+            m = self._mail(ref)
+            self._spend(2)                                # download_attachment, Read
+            out = self._tool("ingest_document", {
+                "source_path": m["path"], "kind": m["kind"], "source": "gmail",
+                "extraction_author": "specialist", "counterparty": m["vendor"],
+                "source_ref": m["ref"], "issuer": m["vendor"], "document_date": m["date"],
+                "document_number": m["number"], "amount_minor": m["amount_minor"],
+                "currency": m["currency"], "vendor": vendor, "pass_token": token})
+            if out["created"]:
+                filed.append({"doc_id": out["doc_id"], "amount_minor": m["amount_minor"],
+                              "currency": m["currency"], "date": m["date"], "held": None})
+        return filed
 
     def _vendor(self, u, token):
         """The skill's vendor unit (§2.2, plan round 6): filed documents first; the vendor
@@ -700,10 +740,13 @@ class JobDriver:
         from the search that found an invoice (step 5)."""
         import dates
         vendor, pays = u["vendor"], u["payments"]
+        if u["files"]:                      # the skill's **`files` first**
+            self._file_vendor(token, vendor, u["files"])
+            return None
         hint = u["kb"].get("hint_sender") if u["kb"].get("known") else None
         win = u["search_window"]
         span = f" after:{win['after']} before:{win['before']}" if win["after"] else ""
-        filed, seen, searched = [], set(), []
+        filed, searched = [], []
 
         def gap(c, pay):
             if not (c["date"] and pay["date"]):
@@ -722,25 +765,12 @@ class JobDriver:
             found = self.gmail.search_emails(query) or []
             self.search_log.append((vendor, kind, query))
             searched.append((kind, query, want, found))
-            by_id = {m["ref"]: m for m in found}
-            for ref in self._unfiled(token, [m["ref"] for m in found]):
-                m = by_id[ref]                 # d5: only what no ingest filed, any run
-                if m["path"] in seen:
-                    continue
-                seen.add(m["path"])
-                self._spend(1)                           # download_attachment
-                out = self._tool("ingest_document", {
-                    "source_path": m["path"], "kind": m["kind"], "source": "gmail",
-                    "extraction_author": "specialist", "counterparty": m["vendor"],
-                    "source_ref": m["ref"], "issuer": m["vendor"], "document_date": m["date"],
-                    "document_number": m["number"], "amount_minor": m["amount_minor"],
-                    "currency": m["currency"], "vendor": vendor, "pass_token": token})
-                if not out["created"]:
-                    # the same bytes filed before: if it can fit, it is already among the
-                    # unit's candidates with its `held` flag; if not, it is no candidate
-                    continue
-                filed.append({"doc_id": out["doc_id"], "amount_minor": m["amount_minor"],
-                              "currency": m["currency"], "date": m["date"], "held": None})
+            # the skill: recorded right after it ran, with every attachment it found (q5)
+            out = self._tool("record_search", {"pass_token": token, "pids": want or [
+                p["pid"] for p in pays], "search": kind, "queries": [query],
+                "found_candidate": bool(found), "refs": [m["ref"] for m in found]})
+            # each attachment it answers to file (only what no ingest filed, any run: d5)
+            filed.extend(self._file_vendor(token, vendor, out["files"]))
             return found
 
         if uncovered() and hint and not u["searches"]["hinted"]:
@@ -803,13 +833,13 @@ class JobDriver:
             entries.append({**base, "outcome": outcome, "doc_id": pick, "document_date": day})
         entries += [{"pid": p["pid"], "outcome": "missing", "reason": "no invoice found",
                      "expected_revision": p["revision"]} for p in rest]
-        # decided first, then the searches recorded: the record that ages a payment out
-        # (D7) settles it and moves its revision, which a later `missing` at the handed
-        # revision would find changed (review round 1)
         out = self._tool("decide", {"pass_token": token, "entries": entries})
         # the refused entries decided again, once: a held document's proposal as `match` of
         # it; a document the floor rules out for the payment (the bank's rate, #35) as
         # `missing` — as the skill says, "re-decide only the refused entries"
+        if any("changed since it was handed out" in (r.get("refused") or "")
+               for r in out["results"]):
+            return None    # the skill: a refusal → job_next (a search that aged it out, D7)
         redo = [again.get(e["pid"]) or {"pid": e["pid"], "outcome": "missing",
                                         "reason": "no fitting invoice found",
                                         "expected_revision": e["expected_revision"]}
@@ -819,11 +849,6 @@ class JobDriver:
         if redo:
             out = self._tool("decide", {"pass_token": token, "entries": redo})
             assert out["refused"] == 0, out
-        for kind, query, want, found in searched:
-            if want:
-                self._tool("record_search", {"pass_token": token, "pids": want,
-                                             "search": kind, "queries": [query],
-                                             "found_candidate": bool(found)})
         senders = [m["sender"] for _, _, _, found in searched for m in found if not m["sent"]]
         if senders and senders[0] != hint:
             self._tool("upsert_counterparty", {"name": vendor, "hint_sender": senders[0],

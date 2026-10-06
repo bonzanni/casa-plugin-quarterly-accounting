@@ -75,14 +75,12 @@ RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
   job_id TEXT PRIMARY KEY,
   completed_at TEXT,             -- the run answered `complete` (S7 §10)
   started_by TEXT, pass_id TEXT,            -- who started the run, its pass (simple loop §3 "Run")
-  filed_at TEXT, listed_at TEXT,            -- filing and listing done (§3 "Run")
+  listed_at TEXT,                           -- the work list built (§3 "Run")
   mirror_at TEXT, mirrored_at TEXT,         -- mirror calls handed out / all settled (§2.4)
   end_render_id TEXT,                       -- the end message's rendering (§1); '' = none
   partial INTEGER NOT NULL DEFAULT 0,       -- the run ended partial (§3 "Run")
   quarter TEXT,                             -- the run's main quarter, when a check named it
-  hand_unit TEXT, hand_seq INTEGER,         -- d3: the last budgeted unit handed, at this seq
-  hand_progressed INTEGER NOT NULL DEFAULT 0,  -- d3: that unit persisted work since
-  idle_hands INTEGER NOT NULL DEFAULT 0);   -- d3: filing hand-outs in a row that persisted nothing"""
+  hand_unit TEXT, hand_seq INTEGER);        -- queues: the last unit handed (queues.settle), at this seq"""
 
 WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,11 +159,15 @@ RUN_WORK_DDL = """CREATE TABLE IF NOT EXISTS run_work (
   outcome TEXT CHECK (outcome IN ('match', 'propose', 'missing',
                                   'settled')),   -- settled: no longer work at hand-out
   reason TEXT,                   -- a `missing` outcome's reason, as the model gave it (§2.2)
-  handed INTEGER NOT NULL DEFAULT 0,     -- vendor units that carried it (HAND_MAX, D8)
+  attempts INTEGER NOT NULL DEFAULT 0,   -- queues: hand-outs that carried it and progressed nothing
   handed_upto INTEGER,           -- the latest filed_seq among the documents handed out for it
   hinted INTEGER NOT NULL DEFAULT 0,     -- the vendor's learned-hint search ran this run (§2.2)
   plain INTEGER NOT NULL DEFAULT 0,      -- the vendor's plain vendor-and-dates search ran this run
-  hand_seq INTEGER,              -- d3: the hand-out (runs.hand_seq) that last carried it
+  payment INTEGER NOT NULL DEFAULT 0,    -- a per-payment search for it ran this run
+  hand_seq INTEGER,              -- the hand-out (runs.hand_seq) that last carried it
+  seq INTEGER,                   -- queues: when it was (re)listed
+  closed_seq INTEGER,            -- queues: when it took its outcome
+  searched_seq INTEGER,          -- queues: the latest first record of a search kind for it
   PRIMARY KEY (job_id, pid));"""
 # §2.4: the mirror calls a run handed out, numbered, and what became of them (D9);
 # args_json holds the call's canonical [tool, args]. Nothing is planned ahead (round 7)
@@ -174,7 +176,20 @@ RUN_MIRROR_DDL = """CREATE TABLE IF NOT EXISTS run_mirror (
   tool TEXT NOT NULL CHECK (tool IN ('untag_transaction', 'tag_transaction', 'add_note')),
   args_json TEXT NOT NULL, pids_json TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('handed', 'done', 'failed')),
-  error TEXT, PRIMARY KEY (job_id, n));"""
+  error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0, hand_seq INTEGER, closed_seq INTEGER,   -- queues
+  PRIMARY KEY (job_id, n));"""
+# Queues (operator ruling A): every other item a unit owes, from the moment it is known —
+# an erase candidate, the own-mail search, a found attachment (docs queues-design.md)
+RUN_ITEMS_DDL = """CREATE TABLE IF NOT EXISTS run_items (
+  job_id TEXT NOT NULL,
+  unit TEXT NOT NULL,            -- erasures | filing | vendor:<kb.norm vendor>
+  kind TEXT NOT NULL CHECK (kind IN ('erase', 'search', 'ref')),
+  key TEXT NOT NULL,             -- the pid, 'own-mail', <message id>:<attachment id>
+  state TEXT NOT NULL CHECK (state IN ('queued', 'done', 'given_up')),
+  attempts INTEGER NOT NULL DEFAULT 0, hand_seq INTEGER,
+  seq INTEGER NOT NULL, closed_seq INTEGER, reason TEXT,
+  PRIMARY KEY (job_id, unit, kind, key));"""
 # §1 "new state" (rounds 1-2): every state a rendering REPORTS — a payment it displays,
 # or one it only counts (an end message's "4 missing") — read by cards.seen_state. Binding
 # stays in render_items, which holds only the payments whose lines the text displays
@@ -377,12 +392,12 @@ CREATE TABLE IF NOT EXISTS alerts (
   render_id TEXT, sent_at TEXT);
 CREATE TABLE IF NOT EXISTS operator_refs (
   -- issue #24 (D5), d5: each filed file by its own ref (an own-mail attachment, a Telegram
-  -- file, a vendor's message), so a search's refs are answered unfiled or not (work.unfiled)
+  -- file, a vendor's message), so a search's refs are answered unfiled or not (work.filed)
   ref TEXT PRIMARY KEY, source TEXT NOT NULL, doc_id INTEGER NOT NULL, filed_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at);
 """ + "\n".join((CLAIMS_DDL, WORK_REQUESTS_DDL, RUNS_DDL,
                          READINGS_DDL, RENDER_KEYS_DDL, ACCOUNT_CHOICES_DDL, POST_OFFERS_DDL,
-                         RUN_WORK_DDL, RUN_MIRROR_DDL, QUARTER_NOTICES_DDL,
+                         RUN_WORK_DDL, RUN_MIRROR_DDL, RUN_ITEMS_DDL, QUARTER_NOTICES_DDL,
                          RENDER_STATES_DDL)) + "\n"
 
 # Migrations from version N to N+1, appended when the schema changes. Each is
@@ -570,7 +585,6 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE counterparties ADD COLUMN hint_subject TEXT",
          "ALTER TABLE runs ADD COLUMN started_by TEXT",
          "ALTER TABLE runs ADD COLUMN pass_id TEXT",
-         "ALTER TABLE runs ADD COLUMN filed_at TEXT",
          "ALTER TABLE runs ADD COLUMN listed_at TEXT",
          "ALTER TABLE runs ADD COLUMN mirror_at TEXT",
          "ALTER TABLE runs ADD COLUMN mirrored_at TEXT",
@@ -579,10 +593,8 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE runs ADD COLUMN quarter TEXT",
          "ALTER TABLE runs ADD COLUMN hand_unit TEXT",
          "ALTER TABLE runs ADD COLUMN hand_seq INTEGER",
-         "ALTER TABLE runs ADD COLUMN hand_progressed INTEGER NOT NULL DEFAULT 0",
-         "ALTER TABLE runs ADD COLUMN idle_hands INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE work_requests ADD COLUMN quarter TEXT",
-         RUN_WORK_DDL, RUN_MIRROR_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL,
+         RUN_WORK_DDL, RUN_MIRROR_DDL, RUN_ITEMS_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL,
          # ... then the machinery §4 deletes: the sweep, the chunk carry, the judge,
          # credits, nested passes, package requests and the delegation protocol
          # a package asked for and not yet sent is told, once, before its request goes

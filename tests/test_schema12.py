@@ -12,7 +12,7 @@ class Schema12(StoreCase):
     def test_version_tables_and_columns(self):
         import db
         self.assertEqual(db.SCHEMA_VERSION, 12)
-        self.assertTrue({"job_id", "pid", "vendor", "why", "outcome", "reason", "handed", "hinted",
+        self.assertTrue({"job_id", "pid", "vendor", "why", "outcome", "reason", "attempts", "hinted",
                          "plain"}
                         <= self.cols("run_work"))
         self.assertTrue({"job_id", "n", "tool", "args_json", "pids_json", "state", "error"}
@@ -28,8 +28,9 @@ class Schema12(StoreCase):
                            ("counterparties", "hint_sender"),
                            ("counterparties", "hint_subject"), ("runs", "started_by"),
                            ("runs", "end_render_id"), ("runs", "partial"),
-                           ("runs", "mirror_at"), ("runs", "filed_at"),
-                           ("runs", "listed_at")):
+                           ("runs", "mirror_at"), ("runs", "listed_at"),
+                           ("run_work", "attempts"), ("run_work", "closed_seq"),
+                           ("run_mirror", "attempts"), ("run_items", "state")):
             self.assertIn(col, self.cols(table), f"{table}.{col}")
 
     def test_sqlite_can_drop_columns(self):

@@ -20,7 +20,7 @@ class Surface(StoreCase):
                      "request_package", "build_quarterly_package",  # removed-name: asserted absent
                      "list_projections", "record_observation"):     # removed-name: asserted absent
             self.assertNotIn(gone, qa_server.TOOLS)
-        for new in ("job_next", "job_status", "request_work", "record_filing"):
+        for new in ("job_next", "job_status", "request_work", "set_aside"):
             self.assertIn(new, qa_server.TOOLS)
 
     def test_the_job_declaration_is_verbatim(self):
