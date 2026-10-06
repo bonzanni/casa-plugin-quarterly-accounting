@@ -13,6 +13,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT / "server") not in sys.path:
     sys.path.insert(0, str(ROOT / "server"))
 
+import db  # noqa: E402  (server/ is on sys.path just above)
+
 
 class TempEnv(unittest.TestCase):
     def setUp(self):
@@ -267,6 +269,51 @@ class StoreCase(TempEnv):
                             data={"generation": generation, "registered": registered or {},
                                   "instance": instance or self.LEDGER})
         return token
+
+    _runs = 0
+
+    def run_claim(self, started_by="operator", instance=None, generation=0, job_id=None):
+        """A job run as the real cursor makes one: job.claim's claim, the run's pass under
+        the claim's token, its runs row, and the four probes a run records first (the
+        ledger probe carries `instance`). Sets self.job_id, self.token, self.pass_id and
+        returns the token. Every new test of this plan starts its run here; none inserts
+        into claims, runs or run_work itself (work_rows below is the one exception)."""
+        import job, passes
+        StoreCase._runs += 1
+        job_id = job_id or "%08x-0000-4000-8000-%012x" % (StoreCase._runs, id(self) % 10**12)
+        self.end_live_pass()
+        token = job.claim(self.conn, job_id, started_by=f"Started by: {started_by}")
+        with db.tx(self.conn):
+            # until Task 10, job.claim starts no pass and makes no run: the helper does what
+            # Task 10's claim will; Task 10 deletes these lines and asserts both exist
+            if job.live_job_pass(self.conn) is None:
+                _, pass_id = passes.start_pass(self.conn, started_by, "telegram",
+                                               protocol="job", token=token)
+                self.conn.execute("UPDATE passes SET holder_job=? WHERE pass_id=?",
+                                  (job_id, pass_id))
+            self.conn.execute("INSERT OR IGNORE INTO runs(job_id) VALUES (?)", (job_id,))
+            self.conn.execute("UPDATE runs SET started_by=?, pass_id=(SELECT pass_id FROM"
+                              " pass_marker WHERE id=1) WHERE job_id=?", (started_by, job_id))
+        b = self.conn.execute("SELECT account_id FROM binding").fetchone()
+        accts = [{"account_id": b[0], "category": "company", "label": "Zakelijk"}] if b else []
+        passes.record_probe(self.conn, token, "bank_tools", True)
+        passes.record_probe(self.conn, token, "bank_sync", True)
+        passes.record_probe(self.conn, token, "bank_accounts", True, data={"accounts": accts})
+        passes.record_probe(self.conn, token, "ledger", True,
+                            data={"generation": generation, "registered": {},
+                                  "instance": instance or self.LEDGER})
+        self.job_id, self.token = job_id, token
+        self.pass_id = self.conn.execute("SELECT pass_id FROM pass_marker WHERE id=1"
+                                         ).fetchone()[0]
+        return token
+
+    def work_rows(self, pids, vendor="Adobe", why="open"):
+        """The run's work-list entries for `pids`, bound to self.job_id (before Task 6's
+        loop.build_work exists; later tests call build_work)."""
+        with db.tx(self.conn):
+            for pid in pids:
+                self.conn.execute("INSERT OR IGNORE INTO run_work(job_id, pid, vendor, why)"
+                                  " VALUES (?,?,?,?)", (self.job_id, pid, vendor, why))
 
     def accounts_probe(self, accounts):
         """A bank_accounts probe carrying `accounts`, recorded in a pass of its own (then
@@ -571,9 +618,11 @@ class StoreCase(TempEnv):
                                          (pid,)).fetchone()[0]
                 mrevs = {str(r[0]): r[1] for r in self.conn.execute(
                     "SELECT match_id, revision FROM match_state WHERE pid=?", (pid,))}
-                self.conn.execute("INSERT INTO render_items VALUES (?,?,?,?)",
+                self.conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
+                                  " match_revisions_json) VALUES (?,?,?,?)",
                                   (rid, pid, prev, json.dumps(mrevs)))
-                self.conn.execute("INSERT OR REPLACE INTO shown VALUES (?,?,?,?,?)",
+                self.conn.execute("INSERT OR REPLACE INTO shown(pid, render_id, projection_revision,"
+                                  " match_revisions_json, delivered_at) VALUES (?,?,?,?,?)",
                                   (pid, rid, prev, json.dumps(mrevs), db.now()))
         return rid
 

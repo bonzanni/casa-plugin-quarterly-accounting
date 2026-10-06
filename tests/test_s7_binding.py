@@ -701,7 +701,8 @@ class SameFactsLegacy(_Q3):
                                db.next_seq(self.conn)))
             for it in self.conn.execute("SELECT * FROM render_items WHERE render_id=?",
                                         (f["render_id"],)).fetchall():
-                self.conn.execute("INSERT INTO render_items VALUES (?,?,?,?)",
+                self.conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
+                                  " match_revisions_json) VALUES (?,?,?,?)",
                                   (rid2, it["pid"], it["projection_revision"],
                                    it["match_revisions_json"]))
         quote = self.text_of(f["render_id"])

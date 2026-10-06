@@ -14,7 +14,7 @@ class Schema10(StoreCase):
                         <= self.cols("claims"))
         self.assertNotIn("measure_json", self.cols("claims"))     # INV-J8 is credits (§15)
         self.assertEqual({"pass_id", "key", "gen"}, self.cols("credits"))
-        self.assertEqual({"job_id", "passes", "completed_at"}, self.cols("runs"))
+        self.assertTrue({"job_id", "passes", "completed_at"} <= self.cols("runs"))
         self.assertTrue({"request_id", "kind", "trigger", "doc_ids_json", "created_seq",
                          "state", "pass_id", "outcome", "render_ids_json", "verdicts_json"}
                         <= self.cols("work_requests"))
