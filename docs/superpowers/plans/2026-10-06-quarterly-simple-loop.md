@@ -348,6 +348,7 @@ RUN_WORK_DDL = """CREATE TABLE IF NOT EXISTS run_work (
   outcome TEXT CHECK (outcome IN ('match', 'propose', 'missing')),
   reason TEXT,                   -- a `missing` outcome's reason, as the model gave it (§2.2)
   handed INTEGER NOT NULL DEFAULT 0,     -- vendor units that carried it (HAND_MAX, D8)
+  handed_upto INTEGER,           -- the latest filed_seq among the documents handed out for it
   hinted INTEGER NOT NULL DEFAULT 0,     -- the vendor's learned-hint search ran this run (§2.2)
   plain INTEGER NOT NULL DEFAULT 0,      -- the vendor's plain vendor-and-dates search ran this run
   PRIMARY KEY (job_id, pid));"""
@@ -1429,9 +1430,13 @@ def note_progress(conn, token) -> None:
 def record_outcome(conn, token, pid, outcome, reason=None) -> None:
     conn.execute("UPDATE run_work SET outcome=?, reason=? WHERE pid=? AND job_id=(SELECT"
                  " job_id FROM claims WHERE gen=?)", (outcome, reason, pid, int(token)))
-    # §2.1, per payment (plan round 5): every document filed before now was considered for
-    # this payment — a re-decision that writes nothing included
-    conn.execute("UPDATE projections SET considered_seq=? WHERE pid=?", (db.next_seq(conn), pid))
+    # §2.1, per payment (plan round 5): the job considered the documents it was HANDED for
+    # this payment — a re-decision that writes nothing included — and no others (plan
+    # round 6: a capped hand-out must never mark an unseen document as considered). A
+    # decision outside a work entry (no hand-out) advances nothing.
+    conn.execute("UPDATE projections SET considered_seq=max(coalesce(considered_seq, 0),"
+                 " coalesce((SELECT handed_upto FROM run_work WHERE pid=? AND job_id=(SELECT"
+                 " job_id FROM claims WHERE gen=?)), 0)) WHERE pid=?", (pid, int(token), pid))
     note_progress(conn, token)
 
 
@@ -2048,7 +2053,9 @@ def why_work(conn, pid, p, row) -> str | None
 def build_work(conn, job_id, handover_docs=()) -> int
     # inserts run_work rows (INSERT OR IGNORE); returns how many the list holds
 def candidates(conn, pid, row, vendor) -> list[dict]          # §2.2 bullet 2: ALL of them
-def handed_candidates(cands, fit) -> list[dict]              # the ≤ CANDIDATES_MAX handed out
+def triggers(conn, pid, p, row, handover_docs=()) -> list[int]  # the docs that listed it
+def handed_candidates(cands, must) -> list[dict]             # must-docs first, uncapped; then
+                                                             # ≤ CANDIDATES_MAX extras
 def exact_fit(conn, pid, row, vendor, cands) -> int | None    # §2.2 bullet 3
 def vendor_unit(conn, job_id) -> dict | None                  # the next group, or None
 ```
@@ -2216,6 +2223,45 @@ class Work(StoreCase):
         self.assertEqual(len(loop.handed_candidates(cands, None)), loop.CANDIDATES_MAX)
         self.assertTrue(first)
 
+    def test_a_trigger_beyond_the_cap_is_handed_out_and_only_then_considered(self):
+        import decide, loop
+        pid = self.pay(who="Adobe", day="2026-09-02")
+        a = self.doc(vendor="Adobe", document_date="2026-09-01")
+        self.machine_match(pid, a, self.token)
+        for k in range(9):                                   # nine closer extras, not new
+            self.doc(vendor="Figma", issuer="Figma", document_date="2026-09-0%d" % (k + 1))
+        new = self.doc(vendor=None, document_date="2026-09-25")   # gap 23: last by date
+        self.file_later(new)
+        self.assertEqual(self.listed(), [pid])               # reopen
+        unit = loop.vendor_unit(self.conn, self.job_id)
+        shown = [c["doc_id"] for c in unit["payments"][0]["candidates"]]
+        self.assertEqual(shown[0], new)                      # the trigger: first, uncapped
+        self.assertEqual(len(shown), 1 + loop.CANDIDATES_MAX)
+        decide.decide(self.conn, self.token, [{
+            "pid": pid, "outcome": "match", "doc_id": a, "document_date": "2026-09-01",
+            "expected_revision": self.rev(pid)}])             # kept, having seen it
+        self.run_claim()
+        self.assertEqual(self.listed(), [])
+
+    def test_a_handover_after_the_payment_was_decided_reopens_it_in_the_run(self):
+        import asks, decide, loop
+        pid = self.pay(who="Adobe", day="2026-09-02")
+        a = self.doc(vendor="Adobe", document_date="2026-09-01")
+        self.listed()
+        loop.vendor_unit(self.conn, self.job_id)
+        decide.decide(self.conn, self.token, [{
+            "pid": pid, "outcome": "match", "doc_id": a, "document_date": "2026-09-01",
+            "expected_revision": self.rev(pid)}])
+        self.assertIsNone(loop.vendor_unit(self.conn, self.job_id))   # nothing left
+        usd = self.doc(currency="USD", amount_minor=11000, vendor=None)
+        asks.request_work(self.conn, "handover", "operator", [usd])
+        with db.tx(self.conn):
+            asks.take_queued(self.conn, self.pass_id)
+            self.assertEqual(loop.take_handovers(self.conn, self.job_id, [usd]), 1)
+        unit = loop.vendor_unit(self.conn, self.job_id)
+        self.assertEqual([p["pid"] for p in unit["payments"]], [pid])
+        self.assertEqual(unit["payments"][0]["candidates"][0]["doc_id"], usd)
+
     def test_a_rejected_pair_is_neither_a_candidate_nor_the_exact_fit(self):
         import loop, lineage, matches
         pid = self.pay()
@@ -2375,11 +2421,33 @@ def build_work(conn, job_id, handover_docs=()) -> int:
             if why is None and handover_docs and _handover_fits(conn, pid, p, row,
                                                                 handover_docs):
                 why = "handover"
-            if why is not None:
+            if why == "handover":
+                reopen_entry(conn, job_id, pid, vendor_of(conn, row))
+            elif why is not None:
                 conn.execute("INSERT OR IGNORE INTO run_work(job_id, pid, vendor, why) VALUES"
                              " (?,?,?,?)", (job_id, pid, vendor_of(conn, row), why))
         return conn.execute("SELECT count(*) FROM run_work WHERE job_id=?",
                             (job_id,)).fetchone()[0]
+
+
+def reopen_entry(conn, job_id, pid, vendor) -> None:
+    """A handover taken by the run (§2.5: "a handover during a run joins that run's list")
+    puts its payment back on the list even when the run already decided it: outcome
+    cleared, hand-outs reset, why='handover' (plan round 6, Astra S2)."""
+    conn.execute("INSERT INTO run_work(job_id, pid, vendor, why) VALUES (?,?,?, 'handover')"
+                 " ON CONFLICT(job_id, pid) DO UPDATE SET why='handover', outcome=NULL,"
+                 " reason=NULL, handed=0", (job_id, pid, vendor))
+
+
+def take_handovers(conn, job_id, doc_ids) -> int:
+    """Task 10's cursor, when it takes queued handovers mid-run: every eligible payment of
+    the newly handed documents joins (or rejoins) the list. Inside the caller's tx."""
+    n = 0
+    for pid, p, row in in_scope(conn):
+        if _handover_fits(conn, pid, p, row, doc_ids):
+            reopen_entry(conn, job_id, pid, vendor_of(conn, row))
+            n += 1
+    return n
 
 
 def run_handover_docs(conn, job_id) -> list:
@@ -2445,6 +2513,7 @@ def candidates(conn, pid, row, vendor) -> list:
                     "issuer": d["issuer"] or d["counterparty"], "number": d["document_number"],
                     "date": d["document_date"], "amount_minor": d["amount_minor"],
                     "currency": d["currency"], "vendor": d["vendor"],
+                    "filed_seq": d["filed_seq"],
                     "held": (None if not hs else "other" if any(p != pid for p, _ in hs)
                              else "own")})
     day = dates.effective_date(row) or "1970-01-01"
@@ -2452,12 +2521,37 @@ def candidates(conn, pid, row, vendor) -> list:
     return out                      # complete: eligibility and uniqueness are judged on all
 
 
-def handed_candidates(cands, fit) -> list:
-    """What the model is handed: at most CANDIDATES_MAX, the exact fit always among them.
-    The cap is a hand-out size only (plan round 5, Astra S2: capping before the exact-fit
-    and handover tests faked uniqueness and dropped a handed document)."""
-    head = [c for c in cands if c["doc_id"] == fit]
-    return (head + [c for c in cands if c["doc_id"] != fit])[:CANDIDATES_MAX]
+def triggers(conn, pid, p, row, handover_docs=()) -> list:
+    """Every document that puts this payment on the work list: the reopen/competitor
+    documents (filed after its pairing and after its considered_seq, fitting exactly,
+    unheld, never rejected — why_work's own test) and the run's handed-over documents that
+    are its candidates (D17)."""
+    out = []
+    st = lineage.fold_of(conn, pid)
+    own = [c for c in st.cands.values() if c.author == "auto"
+           and c.state in ("matched", "proposed", "conflicted")]
+    if own:
+        since = max(max(c.activation for c in own), p["considered_seq"] or 0)
+        held = {c.doc_id for c in own}
+        out += [d["doc_id"] for d in conn.execute(
+            "SELECT * FROM documents WHERE filed_seq > ? AND irrelevant=0 AND amount_minor IS"
+            " NOT NULL ORDER BY doc_id", (since,))
+            if d["doc_id"] not in held and _fits_exactly(conn, pid, row, d)]
+    if handover_docs:
+        ids = {c["doc_id"] for c in candidates(conn, pid, row, vendor_of(conn, row))}
+        out += [d for d in handover_docs if d in ids and d not in out]
+    return out
+
+
+def handed_candidates(cands, must) -> list:
+    """THE hand-out rule (plan rounds 5–6, generalized after two findings): every document
+    that put the payment on the work list and the exact fit (`must`) are handed out FIRST
+    and uncapped; the cap of CANDIDATES_MAX applies only to the remaining extras. The cap
+    never decides eligibility, uniqueness or what is considered (handed_upto)."""
+    must = [m for m in dict.fromkeys(must) if m is not None]
+    head = [c for m in must for c in cands if c["doc_id"] == m]
+    rest = [c for c in cands if c["doc_id"] not in set(must)][:CANDIDATES_MAX]
+    return head + rest
 
 
 def exact_fit(conn, pid, row, vendor, cands):
@@ -2512,17 +2606,20 @@ def vendor_unit(conn, job_id):
             d = work.describe(conn, pid)
             cands = candidates(conn, pid, row, vendor)          # the complete set
             fit = exact_fit(conn, pid, row, vendor, cands)
+            p0 = lineage.projection(conn, pid)
+            shown = handed_candidates(cands, [fit] + triggers(conn, pid, p0, row, handed_docs))
+            upto = max((c["filed_seq"] or 0 for c in shown), default=0)
             payments.append({
                 "pid": pid, "revision": d["revision"], "date": day,
                 "amount_minor": row["amount_minor"], "currency": row["currency"],
                 "direction": row["direction"], "remittance": row["remittance"],
                 "expectation": d["expectation"], "fx": d["fx"],
                 "holds": d["current"]["document"] if d["current"] else None,
-                "candidates": handed_candidates(cands, fit), "exact_fit": fit,
+                "candidates": shown, "exact_fit": fit,
                 "candidates_total": len(cands),
                 "last_queries": d["search"].get("queries", [])[-3:]})
-            conn.execute("UPDATE run_work SET handed=handed+1 WHERE job_id=? AND pid=?",
-                         (job_id, pid))
+            conn.execute("UPDATE run_work SET handed=handed+1, handed_upto=max(coalesce("
+                         "handed_upto, 0), ?) WHERE job_id=? AND pid=?", (upto, job_id, pid))
         # §2.2 (rev 17): the vendor search is once per vendor per RUN, shared by every split
         # group of the vendor (plan round 4, Astra S2): its window is the whole vendor's in
         # this run; `searches` says which of its two vendor searches ran this run, and
@@ -3821,7 +3918,10 @@ transaction that writes. In order:
    - then calls `record_filing`.
 4. **The work list**, once, when `runs.listed_at` is NULL: `loop.build_work(job_id,
    handover_docs)`. Every reason is a per-payment fact (Task 6), so a re-claim of the same
-   job or a run cut short loses nothing. Queued handover requests taken later in
+   job or a run cut short loses nothing. Queued handover requests taken later in the run go
+   through `loop.take_handovers(conn, job_id, doc_ids)`, which puts each eligible payment
+   back on the list even when the run already decided it (plan round 6). Queued handover
+   requests taken later in
    the run add their payments (`why='handover'`) at the next `job_next` (§2.5 "A handover
    during a run joins that run's list").
 5. **`vendor`** while `calls_made < CALLS_SOFT` and `loop.vendor_unit` returns a group.
@@ -5031,12 +5131,15 @@ class Quarter(StoreCase):
 
     def test_the_mirror_is_exact_and_an_immediate_rerun_writes_nothing(self):
         import mirror
-        for pid in self.buckets():
+        for pid, bucket in self.buckets().items():
             p = self.conn.execute("SELECT dest_row_id, desired_json FROM projections WHERE"
                                   " pid=?", (pid,)).fetchone()
             owned = [t for t in self.drv.bf.tags(p[0]) if t.startswith("acct::")]
+            notes = [n for n in self.drv.bf.notes(p[0]) if n.startswith("Accounting")]
+            if bucket == "pending":                       # D18: nothing mirrored while PDNG
+                self.assertEqual((owned, notes), ([], []))
+                continue
             self.assertEqual(sorted(owned), sorted(json.loads(p[1])))
-            notes = self.drv.bf.notes(p[0])
             self.assertEqual(notes[-1], mirror.note_text(self.conn, pid))
         seq = self.conn.execute("SELECT max(seq) FROM log").fetchone()[0]
         units = self.drv.run_job("eeeeeeee-2", started_by="operator")
@@ -5063,6 +5166,22 @@ class Quarter(StoreCase):
         self.assertIn("acct::open", self.drv.bf.tags(row_id))
         self.assertEqual(self.drv.bf.notes(row_id)[-1],
                          "Accounting: invoice missing (quarterly check)")
+
+    def test_a_stale_hint_falls_back_to_the_plain_search(self):
+        """§2.2 rev 17: the hint's sender changed; the hinted search finds nothing, the plain
+        search finds the invoice; the hint is replaced by what found it."""
+        import kb
+        kb.upsert_counterparty(self.conn, "Linear", hint_sender="old@linear.app",
+                               hint_subject="Linear invoice", token=None)
+        self.drv.gmail.invoice("Linear", 800, "EUR", "2026-09-12", "LIN-7",
+                               sender="billing@linear.app")
+        pid = self.drv.pay_once("Linear", 800, "2026-09-12")
+        self.drv.run_job("eeeeeeee-8", started_by="operator")
+        kinds = [k for k, _ in self.drv.searches_of("Linear")]
+        self.assertEqual(kinds, ["hinted", "plain"])
+        self.assertEqual(self.buckets()[pid], "matched")
+        self.assertEqual(kb.get_counterparty(self.conn, "Linear")["hint_sender"],
+                         "billing@linear.app")
 
     def test_notes_group_and_read_as_plain_words(self):
         calls = [c for u in self.units if u["unit"] == "mirror" for c in u["calls"]]
@@ -5111,6 +5230,33 @@ class Quarter(StoreCase):
     def test_a_scheduled_run_with_nothing_new_is_silent(self):
         units = self.drv.run_job("eeeeeeee-5", started_by="scheduled")
         self.assertFalse([u for u in units if u["unit"] in ("view", "post")])
+
+
+class RealisticQuarter(StoreCase):
+    """§5, §6.1 as code (plan round 6, Terra S2): a Q3-shaped quarter of 60 payments over 18
+    vendors — recurring monthly charges, FX rows with USD invoices, tax and fee rows, one
+    0.00 authorisation, one PDNG row — driven through sim_job with calls_made counted per
+    tool call. Completion, no partial, at most 7 batches, every payment exactly once. The
+    dollar cost is not measurable offline (no model): PLAY measures it (§6.7)."""
+
+    def test_sixty_payments_finish_within_seven_batches(self):
+        import cards
+        self.bind()
+        drv = JobDriver(self, payments=0)
+        rows = drv.quarter_fixture_60()
+        units = drv.run_job("ffffffff-1", started_by="operator")
+        batches = 1 + sum(1 for u in units if u["unit"] == "end-batch")
+        self.assertLessEqual(batches, 7)
+        self.assertEqual(units[-1]["unit"], "complete")
+        self.assertEqual(self.conn.execute("SELECT partial FROM runs WHERE job_id="
+                                           "'ffffffff-1'").fetchone()[0], 0)
+        seen = {}
+        for name, ds in cards.state(self.conn)["by_bucket"].items():
+            for d in ds:
+                self.assertNotIn(d["pid"], seen)
+                seen[d["pid"]] = name
+        self.assertEqual(sorted(seen), sorted(rows.values()))
+        self.assertEqual(len(seen), 60)
 ```
 
   The `JobDriver` additions:
@@ -5122,12 +5268,34 @@ class Quarter(StoreCase):
   - `posted_end(job_id)` → the end message's deposit (`show_view` under a `FakeBroker`);
   - `tap(deposit, label)` → a button's stored call through `qa_server.TOOLS`;
   - `cards.state(conn)["by_bucket"]` is Task 7's partition.
+  - `quarter_fixture_60()`, the realistic shape (§5: 60 payments, 38–44 needing an invoice).
+    Every Gmail invoice comes from its vendor's sender, and six vendors carry learned hints.
+    - **12 recurring vendors × 3 months = 36 rows.** Nine have an exact EUR invoice in
+      Gmail; one (Zapier) issues receipts; two have one month missing.
+    - **4 FX vendors × 2 months = 8 rows.** USD invoices; two are proposed, two matched
+      after the FX screen, and one the bank rate rules out (it stays missing).
+    - **6 tax and fee rows** (`taxes,vat`, `fees`, `finance,interest`).
+    - **4 revenue rows** (`income,recurring,revenue`), each with a sales invoice in Sent.
+    - **2 one-off vendors** with an invoice already filed (`exact_fit`).
+    - **2 more one-off vendors** with nothing anywhere.
+    - **one 0.00 authorisation and one PDNG row.**
+  - **calls_made is counted honestly.** It goes up by one per tool call the sim makes (each
+    bank-feed call, each Gmail search, list and download, each plugin call). The cursor's
+    `end-batch` therefore falls where Casa's would.
   - `book(row_no)` re-fetches the fixture's rows with that row `BOOK` and a booking date
     (bank-feed may give it a new row id, superseding the pending one); `pid_of(row_no)`
     resolves the fixture row's lineage after that (`lineage.resolve_pid`).
   - `Gmail.invoice(vendor, amount_minor, currency, day, number, sender)` holds a message
-    whose PDF the vendor unit files; the sim saves `hint_sender=<sender>` after a vendor
-    search found one (§2.2 step 5).
+    whose PDF the vendor unit files. A hinted search (`from:<hint_sender> …`) finds a
+    message only when its sender equals the hint; a plain search (`<vendor> invoice
+    after:… before:…`) finds the vendor's messages in the window. The sim saves
+    `hint_sender=<sender>` after a vendor search found one (§2.2 step 5).
+  - **The sim's search rule is the skill's** (plan round 6, Terra S2):
+    1. the hinted search when the vendor has a hint and `searches.hinted` is false;
+    2. then, when any of the unit's payments is still uncovered (no candidate fits) and
+       `searches.plain` is false, the plain search, recorded `search="plain"`.
+  - `searches_of(vendor)` returns the `(kind, query)` pairs the sim recorded for it;
+    `pay_once(vendor, amount, day)` adds one payment and returns its pid.
   - The sim's rule for a payment that `holds` a document and has an unheld candidate of the
     same currency and amount: `propose` the held document with the candidate as its
     alternative. If the floor refuses that entry (the candidate is another payment's
@@ -5154,7 +5322,38 @@ Expected: PASS.
   - `gen_post_results` (L436) uses an alert kind that still exists;
   - new `SHAPES`, below.
 - Modify: `scripts/check_casa_shapes.py`, which judges the `next` records (below).
-- Modify: `tests/test_s7_casa_gate.py` — the generator side pins the new case names.
+- Modify: `tests/test_s7_casa_gate.py` — the generator side pins the new case names, and two
+  retained helpers learn the new records (plan round 6, Astra S1):
+  - `CasaGate.thinned` (L73–86) counts a `next` record as `next_card`, not `KIND[r["tool"]]`
+    (its tool is `verdict`, a safe tool with no kind: `KeyError`):
+
+```python
+        for r in deposits:
+            k = "next_card" if "next" in r else KIND[r["tool"]]
+            kinds[k] = kinds.get(k, 0) + 1
+```
+
+  - `test_a_deposit_kind_with_no_deposit_fails` (L92–96) drops EVERY file-delivering
+    capability (`post_package` and `get_package`), not only `post_package`, and expects both
+    "no post_package deposit was judged" and "no get_package deposit was judged":
+
+```python
+    def test_a_deposit_kind_with_no_deposit_fails(self):
+        r = self.check(self.thinned(lambda rec: "next" not in rec
+                                    and KIND.get(rec["tool"]) == "operator_file"))
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("no operator_file deposit was judged", r.stdout)
+        for tool in ("post_package", "get_package"):
+            self.assertIn(f"no {tool} deposit was judged", r.stdout)
+```
+
+  Checked in a disposable worktree of 26b68ee under Casa's interpreter against
+  `quart-casa-0344-37`, with the round-4 file of 187 records (41 `next` records):
+  - the fixed `thinned` raises no `KeyError`;
+  - dropping `propose_account` fails with "no propose_account deposit was judged";
+  - dropping every `operator_file` deposit fails with "no operator_file deposit was judged"
+    and "no post_package deposit was judged" (`get_package` does not exist at 26b68ee);
+  - both exit 1.
 
 **The tree:** `~/Projects/ha-casa-worktrees/quart-casa-0344-37` at tag `v0.344.37` (BRAIN: #1302
 v0.344.35, #1301 v0.344.36, #1303 v0.344.37). Everything is gated against the real
@@ -5563,3 +5762,19 @@ now hinges on a per-payment fact.
 | Astra S2: capping candidates at eight faked `exact_fit` uniqueness and dropped a handed document | Task 6: `candidates()` returns the complete set, which `exact_fit` and `_handover_fits` judge. `handed_candidates()` caps only the hand-out, exact fit first. Pinned: `test_uniqueness_and_handover_eligibility_read_every_candidate` (9 candidates, two exact: no exact fit; the 9th is still handover-eligible). |
 | Astra S2: a left-missing payment makes Never refuse forever | Task 7: an operator walk's vendor card lists the vendor's whole `never_set`, left-missing payments marked `· left missing`, so the bound union can equal it; a scheduled walk keeps its new-only list with no Never. Pinned in Task 8: `test_a_left_missing_payment_is_listed_and_never_still_applies`. |
 | Astra S2: a latest-claim cutoff loses an unreviewed competitor | **Generalized** (Tasks 1, 4, 6, 10): `since_seq` is gone. `projections.considered_seq` is stamped by every applied job decision (`decide.record_outcome`, a no-op re-decision included). A reopening or competitor needs a document whose `filed_seq` is after both the pairing's activation and `considered_seq`; filings and log entries share `counters.seq`, so the two compare. Task 6 tabulates every reason (open, new, reopen/competitor, changed, handover) with its per-payment fact; none reads a claim, run or batch. Pinned: `test_an_unreviewed_competitor_survives_a_reclaim_until_the_job_decides` (a re-claim of the same job still lists it; after the job's no-op decision the next run does not). |
+
+## Plan round 6 dispositions
+
+Astra `gpt-6-astra` medium: DO NOT SHIP (2 S1, 2 S2). Terra `gpt-5.6-terra` medium: SHIP WITH
+FIXES (2 S2). All six were accepted and folded. As asked, the candidate cap was generalized
+after its second finding.
+
+| finding | disposition |
+|---|---|
+| Astra S1: Task 16's mirror test contradicts D18 for the PDNG row | Task 16: a pending row asserts no owned tag and no accounting note; tags against `desired_json` and the latest note are compared for booked rows only. The simpler of the two options was taken: `desired_json` stays the reducer's, and the mirror alone treats pending (D18). |
+| Astra S1: retained Casa-gate tests break on the new records | Task 17: `CasaGate.thinned` counts `next` records as `next_card`; the file-kind negative test drops every `operator_file` capability (`post_package` and `get_package`) and expects both. Verified under Casa's interpreter against v0.344.37 in a disposable worktree: no KeyError; both negative cases fail as they should (exit 1). |
+| Astra S2: a capped hand-out marked an unseen competitor considered | **Generalized** (Tasks 1, 4, 6). The hand-out rule is `handed_candidates(cands, must)`: every document that put the payment on the list (`triggers()`: the reopen/competitor documents by why_work's own test, and the run's handed-over documents) and the exact fit come first and uncapped; the cap of 8 applies only to the extras. `run_work.handed_upto` records the latest `filed_seq` handed out, and `considered_seq` advances only to it, never past an unseen document; a decision outside a hand-out advances nothing. Every reader of the capped list was checked against the rule: `exact_fit`, `_handover_fits` and `triggers` read the complete set; only the model's hand-out is capped. Pinned: `test_a_trigger_beyond_the_cap_is_handed_out_and_only_then_considered` (machine match, 9 closer extras, a newly filed trigger: handed first, 1 + 8 shown, and the next run's list is empty only after the decision). |
+| Astra S2: a handover after its payment was decided cannot requeue it | Task 6 / Task 10: `reopen_entry()` upserts the work entry (`why='handover'`, outcome cleared, hand-outs reset). `build_work` uses it for handover entries, and the cursor calls `loop.take_handovers()` when it takes queued handovers mid-run. Pinned: `test_a_handover_after_the_payment_was_decided_reopens_it_in_the_run`, through the real `asks.request_work` / `take_queued`. |
+| Terra S2: the sim never runs the plain fallback | Task 16 (sim rules): hinted when the vendor has a hint, then the plain search whenever the unit is still uncovered and `searches.plain` is false. Gmail's fake tells hinted searches (by sender) from plain ones (by vendor and window). Pinned end to end: `test_a_stale_hint_falls_back_to_the_plain_search` (the hinted search finds nothing, the plain one the invoice, the payment matched, the hint replaced). |
+| Terra S2: the e2e is 9 payments with no batch bound | Task 16: `RealisticQuarter.test_sixty_payments_finish_within_seven_batches`. A 60-payment fixture of §5's shape (18 vendors: recurring, FX, tax/fees, revenue, `exact_fit`, nothing-found, one 0.00 and one PDNG) runs through sim_job with calls_made counted per tool call. It asserts completion, no partial, ≤ 7 batches and every payment exactly once. The dollar cost is not measurable offline; PLAY measures it (§6.7). |
+
