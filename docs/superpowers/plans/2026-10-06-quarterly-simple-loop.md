@@ -51,8 +51,9 @@ it. The two deltas are folded in Tasks 7, 8, 10 and 13.
 **Bases:**
 - Plugin: `feat/s7-quarterly-off-ellen` at `26b68ee` (manifest 0.10.0, never tagged; schema
   11; 1416 tests green in 753 s).
-- Casa: `~/Projects/ha-casa-worktrees/quart-s7-casa` at `bcebd66b`. #1301, #1302 and #1303
-  are NOT in it. `casa:` paths are relative to `casa/rootfs/opt/casa/` there.
+- Casa: `~/Projects/ha-casa-worktrees/quart-casa-0344-37` at tag `v0.344.37` (the floor; the
+  Casa gate runs there). The earlier review tree `quart-s7-casa` at `bcebd66b` predates
+  #1301–#1303; line references marked `bcebd66b` below are from it. `casa:` paths are relative to `casa/rootfs/opt/casa/` there.
 - bank-feed: `~/Projects/casa-specialist-finance/plugins/bank-feed/server` at `d9151dd`
   (0.25.0). The suite's vendored copy is `tests/upstream/component-v0.21.0`.
 
@@ -70,9 +71,9 @@ it. The two deltas are folded in Tasks 7, 8, 10 and 13.
   writes its additive half and freezes `DDL_V11`. Task 11 appends its drops to the same
   list. A fresh store's DDL equals the migrated one at every task end
   (`tests/schema_history.py` pins it).
-- **Casa floor = the Casa release carrying #1301, #1302 and #1303.** It is not yet tagged.
-  README and CHANGELOG write "the Casa release carrying #1301, #1302 and #1303
-  (v0.344.NN)". The exact number is the ONE value DRIVE fills, and both files say so.
+- **Casa floor = v0.344.37**, the release carrying #1301, #1302 and #1303 (BRAIN, all three
+  released: #1302 v0.344.35, #1301 v0.344.36, #1303 v0.344.37). README and CHANGELOG name
+  it.
 - **No in-plugin fallbacks.** There is no Casa min-version manifest field. An older Casa
   refuses the manifest through `jobs_invalid` on `quietWhenScheduled`
   (`casa:plugin_store.py:1242–1277`), and that is the refusal BRAIN accepted (§1).
@@ -313,6 +314,7 @@ D19. **One message per run, the completion first** (plan round 2, Astra S1 + Ter
 - Modify: `server/db.py` — `SCHEMA_VERSION` (L24), the DDL constants (L56–120), `DDL` (L122–368), `MIGRATIONS` (L372–538), `migrate` (L555–581)
 - Modify: `server/binding.py` — `_TABLES_TO_WIPE` (L145–150)
 - Modify: `tests/schema_history.py` — add `DDL_V11`, `build_v11_store`
+- Modify: `tests/_base.py` — the fixture helper `run_claim` / `work_rows` (Step 4b); the column lists of L574/L576
 - Modify: `tests/test_s2_schema.py`, `tests/test_s7_schema.py` — version pins `== 11` → `>= 11`
 - Create: `tests/test_schema12.py`
 
@@ -353,9 +355,11 @@ RUN_MIRROR_DDL = """CREATE TABLE IF NOT EXISTS run_mirror (
   args_json TEXT NOT NULL, pids_json TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('owed', 'handed', 'done', 'failed')),
   error TEXT, PRIMARY KEY (job_id, n));"""
-# §3 "Per quarter": the completion a "package ready" notice was posted for (§1)
+# §3 "Per quarter": the completion a "package ready" notice was delivered for (§1) — by
+# its signature, so a reopening and a re-completion within one run is still a new one
 QUARTER_NOTICES_DDL = """CREATE TABLE IF NOT EXISTS quarter_notices (
-  quarter TEXT PRIMARY KEY, notified INTEGER NOT NULL DEFAULT 0,
+  quarter TEXT PRIMARY KEY,
+  sig TEXT,                      -- loop.completion_sig of the completion last delivered
   times INTEGER NOT NULL DEFAULT 0, render_id TEXT);"""
 ```
 
@@ -400,7 +404,7 @@ class Schema12(StoreCase):
                         <= self.cols("run_work"))
         self.assertTrue({"job_id", "n", "tool", "args_json", "pids_json", "state", "error"}
                         <= self.cols("run_mirror"))
-        self.assertTrue({"quarter", "notified", "times", "render_id"}
+        self.assertTrue({"quarter", "sig", "times", "render_id"}
                         <= self.cols("quarter_notices"))
         for table, col in (("projections", "mirror_note"), ("documents", "vendor"),
                            ("documents", "filed_seq"), ("matches", "alternatives_json"),
@@ -449,8 +453,8 @@ class Schema12(StoreCase):
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO run_work(job_id, pid, vendor, why) VALUES"
                               " ('j', 1, 'Adobe', 'open')")
-            self.conn.execute("INSERT INTO quarter_notices(quarter, notified) VALUES"
-                              " ('2026-Q3', 1)")
+            self.conn.execute("INSERT INTO quarter_notices(quarter, sig) VALUES"
+                              " ('2026-Q3', 'x')")
         binding.reset_store(self.conn)
         for t in ("run_work", "run_mirror", "quarter_notices"):
             self.assertEqual(self.conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0], 0, t)
@@ -536,6 +540,63 @@ def build_v11_store(path, with_rows=False):
 
     The gate, run at the end of this step and again in Task 11, must print nothing:
     `grep -rnE "INSERT (OR [A-Z]+ )?INTO [a-z_]+ VALUES" server tests scripts`.
+
+- [ ] **Step 4b: The ONE fixture helper for every new test** (plan round 3: hand-inserted
+  `claims` / `runs` / work rows produced invalid job ids — `JOB_ID_RE` is
+  `^[0-9a-fA-F-]{8,64}$`, job.py:20 — and duplicate `claims.gen`). In `tests/_base.py`,
+  next to `pass_`:
+
+```python
+    _runs = 0
+
+    def run_claim(self, started_by="operator", instance=None, generation=0, job_id=None):
+        """A job run as the real cursor makes one: job.claim's claim, the run's pass under
+        the claim's token, its runs row, and the four probes a run records first (the
+        ledger probe carries `instance`). Sets self.job_id, self.token, self.pass_id and
+        returns the token. Every new test of this plan starts its run here; none inserts
+        into claims, runs or run_work itself (work_rows below is the one exception)."""
+        import job, passes
+        StoreCase._runs += 1
+        job_id = job_id or "%08x-0000-4000-8000-%012x" % (StoreCase._runs, id(self) % 10**12)
+        self.end_live_pass()
+        token = job.claim(self.conn, job_id, started_by=f"Started by: {started_by}")
+        with db.tx(self.conn):
+            # until Task 10, job.claim starts no pass and makes no run: the helper does what
+            # Task 10's claim will; Task 10 deletes these lines and asserts both exist
+            if job.live_job_pass(self.conn) is None:
+                _, pass_id = passes.start_pass(self.conn, started_by, "telegram",
+                                               protocol="job", token=token)
+                self.conn.execute("UPDATE passes SET holder_job=? WHERE pass_id=?",
+                                  (job_id, pass_id))
+            self.conn.execute("INSERT OR IGNORE INTO runs(job_id) VALUES (?)", (job_id,))
+            self.conn.execute("UPDATE runs SET started_by=?, pass_id=(SELECT pass_id FROM"
+                              " pass_marker WHERE id=1) WHERE job_id=?", (started_by, job_id))
+        b = self.conn.execute("SELECT account_id FROM binding").fetchone()
+        accts = [{"account_id": b[0], "category": "company", "label": "Zakelijk"}] if b else []
+        passes.record_probe(self.conn, token, "bank_tools", True)
+        passes.record_probe(self.conn, token, "bank_sync", True)
+        passes.record_probe(self.conn, token, "bank_accounts", True, data={"accounts": accts})
+        passes.record_probe(self.conn, token, "ledger", True,
+                            data={"generation": generation, "registered": {},
+                                  "instance": instance or self.LEDGER})
+        self.job_id, self.token = job_id, token
+        self.pass_id = self.conn.execute("SELECT pass_id FROM pass_marker WHERE id=1"
+                                         ).fetchone()[0]
+        return token
+
+    def work_rows(self, pids, vendor="Adobe", why="open"):
+        """The run's work-list entries for `pids`, bound to self.job_id (before Task 6's
+        loop.build_work exists; later tests call build_work)."""
+        with db.tx(self.conn):
+            for pid in pids:
+                self.conn.execute("INSERT OR IGNORE INTO run_work(job_id, pid, vendor, why)"
+                                  " VALUES (?,?,?,?)", (self.job_id, pid, vendor, why))
+```
+
+  Checked against 26b68ee in a disposable worktree: two `run_claim()` calls give two
+  claims, two passes and two runs. A token-fenced write (`kb.upsert_counterparty(token=…)`)
+  is accepted, and `bank_write_gate` allows. `_base.py` imports `db` at module level for
+  the helper.
 
 - [ ] **Step 5: Run the tests**
 
@@ -795,7 +856,7 @@ class Floor(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
-        self.token = self.pass_()
+        self.token = self.run_claim()
         self.p1 = self._payment(1, "Adobe", 10000)
         self.p2 = self._payment(2, "Adobe", 10000)
 
@@ -918,21 +979,28 @@ the write is not refused); the re-decision writes a new activation.
 - [ ] **Step 3: Implement `machine_in_tx`** in `server/matches.py`:
 
 ```python
-TAKEN_SQL = (
-    "SELECT 1 FROM match_state s JOIN projections p ON p.pid=s.pid WHERE s.doc_id=:d"
-    " AND s.pid<>:p AND (s.state IN ('matched','proposed') OR (s.state='conflicted'"
+HOLDERS_SQL = (
+    "SELECT s.pid, s.state AS how FROM match_state s JOIN projections p ON p.pid=s.pid"
+    " WHERE s.doc_id=:d AND (s.state IN ('matched','proposed') OR (s.state='conflicted'"
     " AND p.status='proposed' AND p.current_match IS NULL))"
-    " UNION ALL SELECT 1 FROM match_state s JOIN matches m ON m.match_id=s.match_id,"
-    " json_each(m.alternatives_json) j WHERE s.pid<>:p AND s.state='proposed'"
-    " AND j.value=:d LIMIT 1")
+    " UNION ALL SELECT s.pid, 'alternative' FROM match_state s JOIN matches m ON"
+    " m.match_id=s.match_id, json_each(m.alternatives_json) j WHERE s.state='proposed'"
+    " AND j.value=:d")
 ALTERNATIVES_MAX = 3      # §1: up to four named candidates on a card, the chosen one included
 
 
+def holders(conn, doc_id) -> list:
+    """THE ownership of a document (R5), the one function the floor, the candidates and the
+    exact fit all read (plan round 3, Astra + Terra S2: a second query advertised a live
+    proposal's alternative as unheld): every (pid, how) holding it — `matched`, `proposed`,
+    `conflicted` (a joint set, D3) or `alternative` (a live proposal's, D3)."""
+    return [(r["pid"], r["how"]) for r in conn.execute(HOLDERS_SQL, {"d": doc_id})]
+
+
 def taken_elsewhere(conn, doc_id, pid) -> bool:
-    """R5: a document already in a match or proposal of ANOTHER payment counts as taken —
-    a joint proposal's candidates (D3) and a live proposal's alternatives too. What `pid`
-    itself holds is never taken against `pid` (§2.2 reopening)."""
-    return conn.execute(TAKEN_SQL, {"d": doc_id, "p": pid}).fetchone() is not None
+    """R5: held by ANOTHER payment. What `pid` itself holds is never taken against `pid`
+    (§2.2 reopening)."""
+    return any(p != pid for p, _ in holders(conn, doc_id))
 
 
 def _own_machine(st) -> list:
@@ -1214,7 +1282,7 @@ class Decide(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
-        self.token = self.pass_()
+        self.token = self.run_claim()
         self.pids = []
         for n in (1, 2, 3):
             self.row(n, counterparty="Adobe", amount_minor=10000,
@@ -1275,15 +1343,7 @@ class Decide(StoreCase):
 
     def test_the_outcome_lands_on_the_runs_work_list_and_marks_progress(self):
         import decide
-        job = self.conn.execute("SELECT job_id FROM claims WHERE gen=?",
-                                (self.token,)).fetchone()
-        if job is None:                       # a pass_() token: give it a claim and a list
-            with db.tx(self.conn):
-                self.conn.execute("INSERT INTO claims(gen, job_id, at, batch) VALUES"
-                                  " (?, 'jjjjjjjj-1', 'x', ?)", (self.token, self.token))
-        with db.tx(self.conn):
-            self.conn.execute("INSERT INTO run_work(job_id, pid, vendor, why) VALUES"
-                              " ('jjjjjjjj-1', ?, 'Adobe', 'open')", (self.pids[2],))
+        self.work_rows([self.pids[2]])         # the run's work list (the fixture helper)
         decide.decide(self.conn, self.token, [self.entry(self.pids[2], "missing",
                                                           reason="nothing in mail")])
         self.assertEqual(tuple(self.conn.execute(
@@ -1593,7 +1653,7 @@ class Mirror(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
-        self.token = self.pass_(instance=self.LEDGER)
+        self.token = self.run_claim(instance=self.LEDGER)
 
     def payment(self, n, who="Adobe", observed=(), amount=10000):
         self.row(n, counterparty=who, amount_minor=amount, booking_date="2026-09-02",
@@ -1661,11 +1721,7 @@ class Mirror(StoreCase):
         import mirror
         for n in (1, 2):
             self.payment(n)
-        job = "jjjjjjjj-1"
-        with db.tx(self.conn):
-            self.conn.execute("INSERT INTO claims(gen, job_id, at, batch) VALUES (?,?,?,?)",
-                              (self.token, job, "x", self.token))
-            self.conn.execute("INSERT INTO runs(job_id) VALUES (?)", (job,))
+        job = self.job_id                      # the run run_claim() made
         n = mirror.start(self.conn, job)
         handed = mirror.hand(self.conn, job, budget=50)
         self.assertEqual(len(handed), n)
@@ -1675,11 +1731,7 @@ class Mirror(StoreCase):
     def test_a_failed_write_is_kept_for_the_end_message_and_retried_next_run(self):
         import mirror
         pid = self.payment(1)
-        job = "jjjjjjjj-2"
-        with db.tx(self.conn):
-            self.conn.execute("INSERT INTO claims(gen, job_id, at, batch) VALUES (?,?,?,?)",
-                              (self.token, job, "x", self.token))
-            self.conn.execute("INSERT INTO runs(job_id) VALUES (?)", (job,))
+        job = self.job_id                      # the run run_claim() made
         mirror.start(self.conn, job)
         calls = mirror.hand(self.conn, job, budget=50)
         mirror.record(self.conn, self.token, done=[],
@@ -1986,19 +2038,13 @@ import json
 from tests._base import StoreCase
 import db                     # server/ is on sys.path once tests._base is imported
 
-JOB = "jjjjjjjj-0001"
 
 
 class Work(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
-        self.token = self.pass_()
-        with db.tx(self.conn):
-            self.conn.execute("INSERT INTO claims(gen, job_id, at, batch, seq) VALUES"
-                              " (?,?,?,?,0)", (self.token, JOB, "x", self.token))
-            self.conn.execute("INSERT INTO runs(job_id, started_by) VALUES (?, 'operator')",
-                              (JOB,))
+        self.token = self.run_claim()
         self.n = 0
 
     def pay(self, who="Adobe", amount=10000, day="2026-09-02", status="BOOK",
@@ -2013,9 +2059,9 @@ class Work(StoreCase):
 
     def listed(self, since=0):
         import loop
-        loop.build_work(self.conn, JOB, since)
+        loop.build_work(self.conn, self.job_id, since)
         return [r[0] for r in self.conn.execute(
-            "SELECT pid FROM run_work WHERE job_id=? ORDER BY vendor, pid", (JOB,))]
+            "SELECT pid FROM run_work WHERE job_id=? ORDER BY vendor, pid", (self.job_id,))]
 
     def test_what_needs_work_and_what_never_does(self):
         import matches
@@ -2055,13 +2101,13 @@ class Work(StoreCase):
         a2 = self.pay(who="Adobe", day="2026-09-05")
         a1 = self.pay(who="Adobe", day="2026-07-01")
         import loop
-        loop.build_work(self.conn, JOB, 0)
-        unit = loop.vendor_unit(self.conn, JOB)
+        loop.build_work(self.conn, self.job_id, 0)
+        unit = loop.vendor_unit(self.conn, self.job_id)
         self.assertEqual(unit["vendor"], "Adobe")
         self.assertEqual([p["pid"] for p in unit["payments"]], [a1, a2])
         # nothing was decided: the group is handed once more (D8), then the next vendor
-        self.assertEqual(loop.vendor_unit(self.conn, JOB)["vendor"], "Adobe")
-        third = loop.vendor_unit(self.conn, JOB)
+        self.assertEqual(loop.vendor_unit(self.conn, self.job_id)["vendor"], "Adobe")
+        third = loop.vendor_unit(self.conn, self.job_id)
         self.assertEqual((third["vendor"], [p["pid"] for p in third["payments"]]),
                          ("Zapier", [z]))
 
@@ -2080,6 +2126,21 @@ class Work(StoreCase):
         self.doc(vendor="Adobe", document_date="2026-09-03")        # a second fit
         cands = loop.candidates(self.conn, pid, row, "Adobe")
         self.assertIsNone(loop.exact_fit(self.conn, pid, row, "Adobe", cands))
+
+    def test_a_live_proposals_alternative_is_held_for_another_payment(self):
+        import loop, lineage, matches
+        p1 = self.pay(who="Adobe", day="2026-09-02")
+        p2 = self.pay(who="Adobe", day="2026-09-03")
+        a = self.doc(vendor="Adobe", document_date="2026-09-01")
+        b = self.doc(vendor="Adobe", document_date="2026-09-02")
+        matches.propose_match(self.conn, pid=p1, doc_id=a, expected_revision=self.rev(p1),
+                              token=self.token, document_date="2026-09-01", alternatives=[b])
+        row = lineage.live_row(self.conn, lineage.projection(self.conn, p2))
+        cands = loop.candidates(self.conn, p2, row, "Adobe")
+        held = {c["doc_id"]: c["held"] for c in cands}
+        self.assertEqual((held[a], held[b]), ("other", "other"))
+        self.assertIsNone(loop.exact_fit(self.conn, p2, row, "Adobe", cands))
+        self.assertTrue(matches.taken_elsewhere(self.conn, b, p2))   # the floor agrees
 
     def test_a_rejected_pair_is_neither_a_candidate_nor_the_exact_fit(self):
         import loop, lineage, matches
@@ -2101,16 +2162,14 @@ class Work(StoreCase):
         pid = self.pay()
         self.machine_match(pid, self.doc(), self.token)               # EUR, matched
         usd = self.doc(currency="USD", amount_minor=11000, vendor=None)  # handed over
+        import asks
+        req = asks.request_work(self.conn, "handover", "operator", [usd])["request_id"]
         with db.tx(self.conn):
-            req = self.conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json,"
-                                    " created_seq, created_at, state, pass_id) VALUES"
-                                    " ('handover', 'operator', ?, 0, 'x', 'taken', 'pp')",
-                                    (json.dumps([usd]),)).lastrowid
-            self.conn.execute("UPDATE runs SET pass_id='pp' WHERE job_id=?", (JOB,))
-        loop.build_work(self.conn, JOB, 10**9, handover_docs=[usd])
+            asks.take_queued(self.conn, self.pass_id)          # the run's own pass takes it
+        loop.build_work(self.conn, self.job_id, 10**9, handover_docs=[usd])
         self.assertEqual(self.conn.execute("SELECT why FROM run_work WHERE pid=?",
                                            (pid,)).fetchone()[0], "handover")
-        unit = loop.vendor_unit(self.conn, JOB)
+        unit = loop.vendor_unit(self.conn, self.job_id)
         self.assertEqual([p["pid"] for p in unit["payments"]], [pid])
         self.assertIn(usd, [c["doc_id"] for c in unit["payments"][0]["candidates"]])
         self.assertTrue(req)
@@ -2119,8 +2178,8 @@ class Work(StoreCase):
         import loop
         for i in range(loop.GROUP_MAX + 3):
             self.pay(who="Adobe", day="2026-08-%02d" % (i % 28 + 1))
-        loop.build_work(self.conn, JOB, 0)
-        first = loop.vendor_unit(self.conn, JOB)
+        loop.build_work(self.conn, self.job_id, 0)
+        first = loop.vendor_unit(self.conn, self.job_id)
         self.assertEqual(len(first["payments"]), loop.GROUP_MAX)
 ```
 
@@ -2251,11 +2310,6 @@ def _handover_fits(conn, pid, p, row, doc_ids) -> bool:
     return bool(ids & set(doc_ids))
 
 
-def _holder(conn, doc_id):
-    return conn.execute("SELECT pid, state FROM match_state WHERE doc_id=? AND state IN"
-                        " ('matched', 'proposed')", (doc_id,)).fetchone()
-
-
 def _gap(a, b) -> int:
     return abs((dates.parse_day(a[:10]) - dates.parse_day(b[:10])).days)
 
@@ -2279,8 +2333,8 @@ def candidates(conn, pid, row, vendor) -> list:
             if fx.screen(fxp, row["amount_minor"], row["currency"], d["amount_minor"],
                          d["currency"]) is not None:
                 continue
-        h = _holder(conn, d["doc_id"])
-        if h is not None and h["pid"] != pid and h["state"] == "matched":
+        hs = matches.holders(conn, d["doc_id"])      # the floor's own ownership function
+        if any(p != pid and how == "matched" for p, how in hs):
             continue
         if matches.rejected_by_operator(conn, pid, d, facts, kind, fxp) is not None:
             continue
@@ -2288,7 +2342,8 @@ def candidates(conn, pid, row, vendor) -> list:
                     "issuer": d["issuer"] or d["counterparty"], "number": d["document_number"],
                     "date": d["document_date"], "amount_minor": d["amount_minor"],
                     "currency": d["currency"], "vendor": d["vendor"],
-                    "held": None if h is None else ("own" if h["pid"] == pid else "other")})
+                    "held": (None if not hs else "other" if any(p != pid for p, _ in hs)
+                             else "own")})
     day = dates.effective_date(row) or "1970-01-01"
     out.sort(key=lambda c: (_gap(c["date"], day) if c["date"] else 10**6, c["doc_id"]))
     return out[:CANDIDATES_MAX]
@@ -2513,11 +2568,12 @@ composes its `next` in the tap's own transaction.
   `ready_quarters`. When it has nothing to list (operator: nothing open anywhere;
   scheduled: nothing new), it returns `compose_ready(ready, extra)` instead: the run's one
   message is the completion.
-- **Delivery records the notice** (shape d): `views.mark_rendering_delivered` gains, next to
-  its `alerts` loop (L1457–1459), `for q in scope.get("ready_quarters", [])`: `INSERT OR
-  IGNORE INTO quarter_notices(quarter) VALUES (q)`, then `UPDATE quarter_notices SET
-  notified=1, times=times+1, render_id=? WHERE quarter=?`. A notice composed and never
-  delivered stays owed.
+- **Delivery records the notice** (shape d): the rendering's scope stores `ready_sigs =
+  {quarter: loop.completion_sig(conn, quarter)}` at composition. `views.mark_rendering_delivered`
+  gains, next to its `alerts` loop (L1457–1459), for each `q, sig` in it: `INSERT OR IGNORE
+  INTO quarter_notices(quarter) VALUES (q)`, then `UPDATE quarter_notices SET sig=?,
+  times=times+1, render_id=? WHERE quarter=?`. A notice composed and never delivered stays
+  owed.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2532,19 +2588,13 @@ import json
 from tests._base import StoreCase
 import db                     # server/ is on sys.path once tests._base is imported
 
-JOB = "jjjjjjjj-0007"
 
 
 class Cards(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
-        self.token = self.pass_()
-        with db.tx(self.conn):
-            self.conn.execute("INSERT INTO claims(gen, job_id, at, batch) VALUES (?,?,?,?)",
-                              (self.token, JOB, "x", self.token))
-            self.conn.execute("INSERT INTO runs(job_id, started_by) VALUES (?, 'operator')",
-                              (JOB,))
+        self.token = self.run_claim()
         self.n = 0
 
     def pay(self, who="Adobe", amount=10000, day="2026-09-02"):
@@ -2559,9 +2609,10 @@ class Cards(StoreCase):
     def propose(self, pid, **doc):
         import matches
         d = self.doc(**doc)
+        date = self.conn.execute("SELECT document_date FROM documents WHERE doc_id=?",
+                                 (d,)).fetchone()[0]            # the stored date, unchanged
         matches.propose_match(self.conn, pid=pid, doc_id=d, expected_revision=self.rev(pid),
-                              token=self.token, document_date=doc.get("document_date",
-                                                                      "2026-09-01"))
+                              token=self.token, document_date=date)
         return d
 
     def c(self, fn, *a, **k):
@@ -2584,7 +2635,7 @@ class Cards(StoreCase):
         self.propose(p1, currency="USD", amount_minor=2200, document_number="ABC-123")
         self.propose(p2, amount_minor=4120, document_number="INV-88")
         self.pay("Twilio")                                          # missing
-        rid = self.c(cards.compose_end, JOB, scheduled=False)
+        rid = self.c(cards.compose_end, self.job_id, scheduled=False)
         r, scope = self.rendering(rid)
         text = r["text"]
         self.assertIn("Q3 checked · 3 payments", text)
@@ -2599,7 +2650,7 @@ class Cards(StoreCase):
         for i in range(25):
             p = self.pay("V%02d" % i, 1000 + i)
             self.propose(p, amount_minor=1000 + i, issuer="V%02d" % i)
-        rid = self.c(cards.compose_end, JOB, scheduled=False)
+        rid = self.c(cards.compose_end, self.job_id, scheduled=False)
         self.assertNotIn("Confirm all", " ".join(self.labels(rid)))
         self.assertEqual(self.labels(rid)[-1], "Get package")
 
@@ -2607,7 +2658,7 @@ class Cards(StoreCase):
         import cards
         p = self.pay()
         self.machine_match(p, self.doc(), self.token)
-        rid = self.c(cards.compose_end, JOB, scheduled=False)
+        rid = self.c(cards.compose_end, self.job_id, scheduled=False)
         self.assertIn("all accounted for", self.rendering(rid)[0]["text"])
         self.assertEqual(self.labels(rid), ["Get package"])
 
@@ -2615,7 +2666,7 @@ class Cards(StoreCase):
         import cards, views
         for i in range(60):
             self.pay("Adobe", 100 + i, "2026-%02d-%02d" % (7 + i % 3, i % 28 + 1))
-        end = self.c(cards.compose_end, JOB, scheduled=False)
+        end = self.c(cards.compose_end, self.job_id, scheduled=False)
         first = self.c(cards.card, end, 0)
         r, scope = self.rendering(first)
         self.assertGreater(len(scope["pages"]), 1)
@@ -2630,11 +2681,11 @@ class Cards(StoreCase):
     def test_a_scheduled_run_lists_only_new_state_items(self):
         import cards, views
         old = self.pay("Adobe")
-        end = self.c(cards.compose_end, JOB, scheduled=False)
+        end = self.c(cards.compose_end, self.job_id, scheduled=False)
         views.mark_rendering_delivered(self.conn, end)
-        self.assertIsNone(self.c(cards.compose_end, JOB, scheduled=True))   # nothing new
+        self.assertIsNone(self.c(cards.compose_end, self.job_id, scheduled=True))   # nothing new
         new = self.pay("Adobe", 777)
-        rid = self.c(cards.compose_end, JOB, scheduled=True)
+        rid = self.c(cards.compose_end, self.job_id, scheduled=True)
         r, scope = self.rendering(rid)
         self.assertIn("1 earlier item still open", r["text"])
         self.assertEqual(scope["order"], [{"v": "Adobe", "pids": [new]}])
@@ -2645,16 +2696,16 @@ class Cards(StoreCase):
     def test_an_end_message_posted_but_never_delivered_is_not_seen(self):
         import cards
         self.pay("Adobe")
-        end = self.c(cards.compose_end, JOB, scheduled=False)
+        end = self.c(cards.compose_end, self.job_id, scheduled=False)
         with db.tx(self.conn):
             cards.deposit_of(self.conn, end)              # posted_seq stamped, no receipt
-        self.assertIsNotNone(self.c(cards.compose_end, JOB, scheduled=True))
+        self.assertIsNotNone(self.c(cards.compose_end, self.job_id, scheduled=True))
 
     def test_item_states_are_recorded_with_the_rendering(self):
         import cards
         p = self.pay()
         d = self.propose(p)
-        rid = self.c(cards.compose_end, JOB, scheduled=False)
+        rid = self.c(cards.compose_end, self.job_id, scheduled=False)
         st = self.conn.execute("SELECT item_state FROM render_items WHERE render_id=? AND"
                                " pid=?", (rid, p)).fetchone()[0]
         self.assertEqual(st, f"proposed:{d}")
@@ -2662,8 +2713,8 @@ class Cards(StoreCase):
     def test_the_ready_notice_and_the_all_answered_card(self):
         import cards
         with db.tx(self.conn):
-            self.conn.execute("INSERT INTO quarter_notices(quarter, notified, times) VALUES"
-                              " ('2026-Q3', 0, 1)")              # completed once before
+            self.conn.execute("INSERT INTO quarter_notices(quarter, sig, times) VALUES"
+                              " ('2026-Q3', 'an-earlier-completion', 1)")  # completed before
         rid = self.c(cards.compose_ready, ["2026-Q3"])
         self.assertIn("Q3 complete · updated · package ready", self.rendering(rid)[0]["text"])
         self.assertEqual(self.labels(rid), ["Get package"])
@@ -2889,19 +2940,13 @@ import json
 from tests._base import StoreCase
 import db                     # server/ is on sys.path once tests._base is imported
 
-JOB = "jjjjjjjj-0008"
 
 
 class Taps(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
-        self.token = self.pass_()
-        with db.tx(self.conn):
-            self.conn.execute("INSERT INTO claims(gen, job_id, at, batch) VALUES (?,?,?,?)",
-                              (self.token, JOB, "x", self.token))
-            self.conn.execute("INSERT INTO runs(job_id, started_by) VALUES (?, 'operator')",
-                              (JOB,))
+        self.token = self.run_claim()
         self.n = 0
 
     def pay(self, who="Adobe", amount=10000, day="2026-09-02"):
@@ -2913,11 +2958,17 @@ class Taps(StoreCase):
         self.settle(pid)
         return pid
 
+    def stored_date(self, doc_id):
+        return self.conn.execute("SELECT document_date FROM documents WHERE doc_id=?",
+                                 (doc_id,)).fetchone()[0]
+
     def propose(self, pid, alternatives=(), **doc):
+        """The document's own stored date is the date read (plan round 3, Astra S1: a fixed
+        date rewrote INV-88's 2 Aug, and a retry under another date is changed evidence)."""
         import matches
         d = self.doc(**doc)
         matches.propose_match(self.conn, pid=pid, doc_id=d, expected_revision=self.rev(pid),
-                              token=self.token, document_date="2026-09-01",
+                              token=self.token, document_date=self.stored_date(d),
                               alternatives=list(alternatives))
         return d
 
@@ -2934,7 +2985,7 @@ class Taps(StoreCase):
     def end(self):
         import cards
         with db.tx(self.conn):
-            return cards.deposit_of(self.conn, cards.compose_end(self.conn, JOB,
+            return cards.deposit_of(self.conn, cards.compose_end(self.conn, self.job_id,
                                                                   scheduled=False))
 
     def test_review_walks_card_by_card_and_ends_on_all_answered(self):
@@ -2999,7 +3050,7 @@ class Taps(StoreCase):
         self.tap(card, "Wrong")
         with self.assertRaisesRegex(db.Refusal, "operator rejected"):
             matches.propose_match(self.conn, pid=p, doc_id=alt, expected_revision=self.rev(p),
-                                  token=self.token, document_date="2026-09-01")
+                                  token=self.token, document_date=self.stored_date(alt))
 
     def test_exempting_page_one_leaves_page_two_answerable(self):
         for i in range(30):
@@ -3253,12 +3304,12 @@ def reject_alternatives_in_tx(conn, *, grant, pid, doc_ids, render_id) -> None:
 
   | where | rule | task |
   |---|---|---|
-  | taken | a live proposal's alternatives are taken (`TAKEN_SQL`) | 3 |
+  | taken | a live proposal's alternatives are taken (`matches.holders`, the one ownership function) | 3 |
   | revisions | the match digest covers the alternatives' facts; `settle_doc_holders` reaches them | 3 |
   | floor | each alternative passes `_floor_doc` (rejection, FX screen, taken) | 3 |
   | candidates / exact fit | a rejected alternative is never a candidate | 6 |
   | Wrong / pick | every displayed alternative not chosen is rejected | 8 |
-  | Confirm / Confirm all | the operator pairs the chosen one; the alternatives are freed (the match is no longer `proposed`, so `TAKEN_SQL` lets them go) | 8 |
+  | Confirm / Confirm all | the operator pairs the chosen one; the alternatives are freed (the match is no longer `proposed`, so `holders` no longer lists them) | 8 |
   | mirror note | "(or k other invoice(s))" | 5 |
   | package | the alternatives' files ship set aside under `unresolved/` with the chosen one | 9 |
 
@@ -3348,7 +3399,7 @@ class GetPackage(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
-        self.token = self.pass_()
+        self.token = self.run_claim()
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
                               " bank_through) VALUES ('p', '2026-10-06T09:00:00Z', 0, 0,"
@@ -3396,7 +3447,9 @@ class GetPackage(StoreCase):
         with FakeBroker() as broker:
             out = self.get()
         self.assertIsNone(out["package"])
-        self.assertIn("bank", out["refused"])
+        self.assertEqual(out["receipt"], "Nothing to package yet — ask me to check the bank "
+                                         "first.")                 # Casa posts it (v0.344.37)
+        self.assertEqual(out["refused"], out["receipt"])
         self.assertEqual(broker.deposits, [])
 
     def test_a_pending_row_is_pending_in_the_zip_never_missing(self):
@@ -3459,7 +3512,7 @@ def caption_line(quarter, as_of, counts) -> str:
   `posting.get_package`:
 
 ```python
-NO_CHECK = "there is no bank check yet to build the package from — ask me to check first"
+NO_CHECK = "Nothing to package yet — ask me to check the bank first."
 
 
 def get_package(conn, quarter) -> dict:
@@ -3496,6 +3549,16 @@ def get_package(conn, quarter) -> dict:
     return {"package": ref, "filename": pk["filename"], "delivery_id": d["delivery_id"]}
 ```
 
+  **The refusal shape** (Casa v0.344.37: a [Get package] tap whose tool answers the no-post
+  shape is treated like a More no-post, and the plugin's own `receipt` sentence is the tap's
+  answer; `casa:result_broker.py:1599–1631`, `casa:specialist_desk.py:1160`).
+  `tools.capability(slot, receipt=False)` gains the flag. With `receipt=True`, a refusal
+  answers `{slot: None, "refused": <words>, "receipt": <the same words>}`, e.g.
+  `{"package": None, "refused": "Nothing to package yet — ask me to check the bank first.",
+  "receipt": "Nothing to package yet — ask me to check the bank first."}`. A deposit Casa
+  refused answers with `NOT_POSTED`, its words also as the `receipt`. Only `get_package`
+  sets the flag; the other capability tools keep S7's shape.
+
   `_deposit_package` is `post_package`'s body from L137 on (the tagged `package-file`
   rendering, `posted_at`, the deposit, the refusal settlement), with the request bits only
   when `req` is not None. `post_package` keeps its token checks and calls it.
@@ -3508,7 +3571,7 @@ def get_package(conn, quarter) -> dict:
           "one caption line. A [Get package] button calls it; at the desk, call it for "
           "\"send the package\", \"give me Q3\" or \"rebuild it\". Never in the job.",
           obj({"quarter": Q}, ("quarter",)))
-@capability("package")
+@capability("package", receipt=True)
 def t_get_package(args):
     import posting
     _need(args, "quarter")
@@ -3552,6 +3615,8 @@ git add tests/test_get_package.py && git commit -am "feat(loop): get_package —
   - Manifest: `record_not_found` safe.
 - Rewrite: `tests/sim_job.py` (below).
 - Modify: `tests/_base.py`:
+  - `run_claim` (Task 1) loses its pre-claim lines: `job.claim` now starts the pass and makes
+    the run. The helper asserts both exist;
   - `run_job_to_complete` and `drive` (L75–108) drive the new `JobDriver`; `drive` keeps
     `deliver`, `bank_tools` and `stop_before` only;
   - `drive_to_staged` and `delivered_package` (L110–126) are deleted.
@@ -3707,19 +3772,28 @@ def complete(conn, quarter) -> bool:
     return seen
 
 
+def completion_sig(conn, quarter) -> str:
+    """What a completion is: the quarter's in-scope payments and how each is accounted for.
+    A reopening that completes again — within one run or across runs — has another one
+    (plan round 3, Astra S2: a late payment imported and matched in the same run left a
+    `notified` flag that never saw the reopening)."""
+    return db.canonical(sorted(
+        [pid, p["status"], p["search_state"]] for pid, p, row in in_scope(conn)
+        if dates.quarter_of(dates.effective_date(row)) == quarter))
+
+
 def owed_notices(conn) -> list:
-    """§1 "Once per completion": the quarters complete now whose completion was not yet
-    DELIVERED (shape d: views.mark_rendering_delivered sets `notified`). A quarter that
-    reopened loses its mark, so its next completion says "updated" (`times` > 0)."""
+    """§1 "Once per completion": the quarters complete now whose completion — its
+    signature — was not yet DELIVERED (shape d). `times` > 0 makes the next one "updated".
+    Read-only: nothing is reset when a quarter reopens; the signature tells."""
     out = []
     quarters = sorted({dates.quarter_of(dates.effective_date(r)) for _, _, r in in_scope(conn)})
     for q in quarters:
-        n = conn.execute("SELECT * FROM quarter_notices WHERE quarter=?", (q,)).fetchone()
-        if complete(conn, q):
-            if n is None or not n["notified"]:
-                out.append(q)
-        elif n is not None and n["notified"]:
-            conn.execute("UPDATE quarter_notices SET notified=0 WHERE quarter=?", (q,))
+        if not complete(conn, q):
+            continue
+        n = conn.execute("SELECT sig FROM quarter_notices WHERE quarter=?", (q,)).fetchone()
+        if n is None or n["sig"] != completion_sig(conn, q):
+            out.append(q)
     return out
 ```
 
@@ -3855,7 +3929,7 @@ class Completion(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
-        self.token = self.pass_()
+        self.token = self.run_claim()
         self.row(1, booking_date="2026-09-10", value_date="2026-09-10")
         self.pid = self.lineage_for(1)
         self.classify(self.pid, {"software"})
@@ -3939,8 +4013,25 @@ class Completion(StoreCase):
                               (posts[0]["render_id"],)).fetchone()
         self.assertTrue(r[0].startswith("Q3 complete · "), r[0])
         self.assertEqual(json.loads(r[1])["ready_quarters"], ["2026-Q3"])
-        self.assertEqual(self.conn.execute("SELECT notified FROM quarter_notices WHERE"
+        self.assertEqual(self.conn.execute("SELECT times FROM quarter_notices WHERE"
                                            " quarter='2026-Q3'").fetchone()[0], 1)
+
+    def test_a_reopening_completed_within_one_run_is_notified_again(self):
+        import cards, loop, views
+        self.snap("2026-10-03")
+        self.granted(lambda c, grant: __import__("work").leave_missing_in_tx(
+            c, [self.pid], grant=grant))
+        with self.patch_clock(_dt("2026-10-06")):
+            with db.tx(self.conn):
+                views_rid = cards.compose_ready(self.conn, ["2026-Q3"])
+            views.mark_rendering_delivered(self.conn, views_rid)
+            self.row(6, booking_date="2026-09-25", value_date="2026-09-25")   # late Q3 row
+            p6 = self.lineage_for(6)
+            self.classify(p6, {"software"})
+            self.settle(p6)
+            self.machine_match(p6, self.doc(document_date="2026-09-24"), self.token)
+            with db.tx(self.conn):                       # no run ever saw Q3 incomplete
+                self.assertEqual(loop.owed_notices(self.conn), ["2026-Q3"])
 
 
 def _dt(day):
@@ -4036,9 +4127,8 @@ git add tests/test_loop_run.py tests/test_loop_completion.py && git commit -am "
 - Tests: delete or trim per the table below.
 
 **Interfaces:**
-- `StoreCase.pass_(…)` → returns a token: a run's claim (`job.claim(conn, "%08x-0000-test" %
-  n, started_by="Started by: operator")`), then the four probes exactly as today
-  (`_base.py:251–269`).
+- `StoreCase.pass_(…)` becomes `run_claim(…)`'s alias (Task 1's helper: a valid hex job id, the
+  real claim and its run). Every kept test that called `pass_` keeps its call.
 - `StoreCase.end_live_pass()` → `loop.end_pass(conn, token, "complete")` when a pass is live.
 - After this task, `grep -rn "steps\.\|sweep\.\|package_requests\|package_token\|credit(\|judge\|MAX_PASSES\|W_REFRESH\|require_fresh\|list_projections\|record_observation\|request_package\|set_epoch\|note_seq" server/`
   prints nothing.
@@ -4082,13 +4172,14 @@ files this plan keeps). Each assertion or INSERT is edited or removed in Step 4:
 
 | file | delete | keep |
 |---|---|---|
-| `job.py` | L20–35 except `JOB_ID_RE`; L76–80; L159–186 (`_settle_recovered` moves into `claim`); L204–1101 except `status` (L1000), `RUN_FINISHED` / `TOPIC_MAX` / `run_end` / `_end_line` (L1018–1057) | `check_claim`, `STARTED_BY`, `starter_trigger`, `claim` (Task 10), `next_unit` → loop |
-| `passes.py` | `begin_pass` L84–145, `_open_request*` L175–194, `_bind_round`, `queued_waiting`, `requeue` L197–219, `_terminalize`, `snapshot_fate`, `round_fate`, `settle_snapshot_request`, `_close` L221–337, `open_request`, `check_package_token`, `throughput`, `stored_report`, `end_pass`, `_end_pass_tx`, `_round_judged`, `_judgment_uncovered`, `judgment_gap`, `_judgment_owed`, `_hand_over` L353–578; `OPEN_REQUEST`, `CLOSED_WORD`, `BUSY`, `ago`; `close_delegation_pass_on_upgrade` | `_marker`, `current_pass`, `_age_s`, `rotate`, `start_pass` (job only), `protocol_of`, `check_token`, `record_probe`, `store_populated`, `_write`, `bank_write_gate`, `_gate_in_tx`, `poison`, `remember_ledger`, `LEDGER_RE`, `_decide_gate` |
+| `job.py` | L20–35 except `JOB_ID_RE`; L76–80; L159–186 (`_settle_recovered` moves into `claim`); L204–1101 except `status` (L1000), `RUN_FINISHED` / `TOPIC_MAX` / `run_end` / `_end_line` (L1018–1057) | `check_claim`, `STARTED_BY`, `starter_trigger`, `claim` (Task 10; its stalled-send lease is `passes.LEASE_S`, no longer `steps.LEASE_S`), `next_unit` → loop; `OFFER_MAX`, `POST_MAX`, `POST_CHARS`, `offers`, `_offer` (posting.py:87–102, alerts.py:247–274 and the loop's posts read them) |
+| `passes.py` | `begin_pass` L84–145, `_open_request*` L175–194, `_bind_round`, `queued_waiting`, `requeue` L197–219, `_terminalize`, `snapshot_fate`, `round_fate`, `settle_snapshot_request`, `_close` L221–337, `open_request`, `check_package_token`, `throughput`, `stored_report`, `end_pass`, `_end_pass_tx`, `_round_judged`, `_judgment_uncovered`, `judgment_gap`, `_judgment_owed`, `_hand_over` L353–578; `OPEN_REQUEST`, `CLOSED_WORD`, `BUSY`; `close_delegation_pass_on_upgrade` | `_marker`, `current_pass`, `_age_s`, `ago` (views.py:558 reads it), `LEASE_S` (job.claim's stalled-send lease), `rotate`, `start_pass` (job only), `protocol_of`, `check_token`, `record_probe`, `store_populated`, `_write`, `bank_write_gate`, `_gate_in_tx`, `poison`, `remember_ledger`, `LEDGER_RE`, `_decide_gate` |
 | `steps.py` | all (970 lines) | — |
 | `sweep.py` | all (486 lines); `_confirm_erased` moved to `ledger.confirm_erased` in Task 10 | — |
 | `asks.py` | `request_package` L46–66; the `package` kind of `ask_state`; `requeue_taken`, `record_verdicts`, `handover_covered` L142–198; the result machinery L201–397 (`mark_reported`, `_undelivered`, `_result_class`, `_result_tx`, `_sibling_ids`, `_render_result`, `_insert`, `_pages`, `_stop_line`, `_case_lines`, `_case`, `_doc_label`, `_amount`) — the end message is the result (Task 7) | `request_work`, `_live_run`, `ask_state` (work), `take_queued`, `settle_taken` |
 | `work.py` | `TRIAGE_LIMIT`.. chunk sizing L293–321; `searched_since`, `handled_since`, `hand_order`, `searched_for`, `check_work`, `grow_owed`, `check_report`, `package_work`, `judge_due*`, `_fx_fits`, `work_list`, `cut`, `dates_unread`, `judge_whole`, `package_check`, `work_item` (L398–722 except `list_quarter_state` without `unread_dates`) | `record_search*`, age-out, `quarter_pids`, `stop_chasing_in_tx`, `set_watermark_in_tx`, `describe`, `triage`, `filed_refs`, `listed`, `_paged`, `list_quarter_state`, `leave_missing_in_tx` |
-| `delivery.py` | `request_of_package`; the `package_token` half of `_check_pass`; `stage_for_delivery`'s request paths (L139–174); `_staged_again`; `record_delivery`'s request and credit lines (L478–481, L486–497); `_package_note` L538–553 | staging, resend, last_built, recovery, `settle_delivered`, offers |
+| `views.py` | in `mark_rendering_delivered`, the `import asks` / `asks.mark_reported(conn, render_id)` lines (L1464–1465): their function is deleted (plan round 3, Astra S1, reproduced at 26b68ee: an AttributeError rolls the delivery back, `delivered_at` stays NULL) | the rest |
+| `delivery.py` | `stalled_sends`' `steps._age` (L383) → `passes._age_s`; `request_of_package`; the `package_token` half of `_check_pass`; `stage_for_delivery`'s request paths (L139–174); `_staged_again`; `record_delivery`'s request and credit lines (L478–481, L486–497); `_package_note` L538–553 | staging, resend, last_built, recovery, `settle_delivered`, offers |
 | `package.py` | `_request_for_build`, `RECHECK`, `stale_check`, `_Recheck` L366–429; `bound`, `request_id` and `check` in `build_quarterly_package` / `_build` | `_freeze`, `_render`, `caption_line`, `build_quarterly_package(conn, quarter)` (custody lock, then `_build(conn, quarter)`) |
 | `posting.py` | `post_package`'s `package_token` and request settlement (L133–136, L174–180) | `_deposit_package`, `get_package` |
 | `lineage.py` | `STATUS_PHRASE`, `_note_body`, `note_text` L228–246; the `note_seq` / `note_body` writes in `settle` L330–341 | everything else |
@@ -4166,9 +4257,9 @@ grep -nE "(packages|deliveries)\(.*request_id" server/*.py
     def test_the_deleted_machinery_leaves_no_table_or_column(self):
         tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE"
                                                   " type='table'")}
-        self.assertFalse({"credits", "cursor", "pass_steps", "package_requests"} & tables)
-        self.assertFalse({"judge_epoch", "w_refreshes", "adoptions"} & self.cols("passes"))
-        self.assertFalse({"note_seq", "readback_owed", "observed_revision"}
+        self.assertFalse({"credits", "cursor", "pass_steps", "package_requests"} & tables)  # removed-name: asserted absent
+        self.assertFalse({"judge_epoch", "w_refreshes", "adoptions"} & self.cols("passes"))  # removed-name: asserted absent
+        self.assertFalse({"note_seq", "readback_owed", "observed_revision"}  # removed-name: asserted absent
                          & self.cols("projections"))
         self.assertNotIn("spent", self.cols("claims"))
 
@@ -4207,15 +4298,103 @@ Expected: FAIL (the tables exist; `steps` and `sweep` import).
 | `test_alerts.py`, `test_fit.py`, `test_views.py`, `test_reply.py`, `test_documents.py`, `test_work.py`, `test_s7_escape.py` | harness only: `pass_` / `end_live_pass`; `handed(...)` calls deleted |
 | `tests/_procs.py` | delete `continue_pass` (L234) |
 
-- [ ] **Step 5: Run the tests**
+- [ ] **Step 5: THE closing gate — no removed name has a caller** (plan round 3: the same
+  shape twice, `bound` in r2 and `mark_reported` in r3, so it is generalized). Create
+  `scripts/check_removed.py` (stdlib) and `tests/test_check_removed.py`, which runs it and
+  asserts exit 0. The script scans every `*.py` and `*.md` under `server/`, `tests/`,
+  `scripts/` and `skills/`, plus `.claude-plugin/plugin.json`, for each pattern in
+  `REMOVED`. It prints each hit as `file:line: pattern (what was removed)` and exits 1 on
+  any hit. The only exemptions:
+  - `server/db.py` between `MIGRATIONS: dict` and its closing `}` (schema history);
+  - `tests/schema_history.py`;
+  - the script itself and its test;
+  - a line ending `# removed-name: asserted absent` (a test that asserts a name is gone, as
+    Tasks 11 and 13 do).
 
-Run: `python3 -m unittest discover -s tests -t . && python3 scripts/check_tool_agreement.py && python3 scripts/scan_identifiers.py .`
+```python
+# scripts/check_removed.py — REMOVED: (regex, what was removed). Word-bounded, qualified where
+# the bare word is common (spent, reported, passes, request_id, credit).
+REMOVED = [
+    # modules
+    (r"\bimport (steps|sweep)\b|\b(steps|sweep)\.[a-z_]", "server/steps.py, server/sweep.py"),
+    (r"\blegacy_tools\b|from tests import [^\n]*\bsim\b|\btests\.sim\b|\bsim\.(run_pass|"
+     r"package_pass|observe_and_repair|ledger_state|sweep_)", "tests/legacy_tools.py, tests/sim.py"),
+    # job.py
+    (r"\bjob\.(credit|credit_sweep|credit_search|_acq|hand_acquisition|fresh_reason|require_fresh|"
+     r"measure|stop_exhausted_pass|_choose|_take|run_passes|done|_done_now|_sends|_oversize|"
+     r"_close_oversize|_left_owed|_left_render|_exhausted_alerts|_posts|_accounts_owed|"
+     r"_record_offers|_begin_next|_first|_step|_poisoned|_acquisition|_continue_acquisition|"
+     r"_stop|_sweep|_gmail|_judge|_start_judgment|restart_cause|bounded|_judge_unit|"
+     r"_unjudged_handovers|_doc_key|_judged|_credit_page|_report_extras|_read_age_note|"
+     r"_outcome|record_filing|_account|_summary|_settle_recovered|_close_left_behind)\b",
+     "the S2/S7 cursor"),
+    (r"\b(ADOPTIONS_MAX|LATE_TAKES_MAX|MAX_PASSES_PER_JOB|K_STATES|K_SEARCH|UNIT_COST|"
+     r"BATCH_RESERVE|TURNS_PER_BATCH|W_S|W_REFRESH_MAX|LEFT_WAITING|LEFT_BEHIND|BOUNDED|"
+     r"UNBOUNDED|EMPTY_CHUNK)\b|\bjob\.(NOT_READ|OTHER_JOB|LATE_ASK|UNSWEPT|STALE)\b",
+     "the cursor's budgets and freshness"),
+    # passes.py
+    (r"\bpasses\.(begin_pass|_open_request|_open_request_channel|_bind_round|queued_waiting|"
+     r"requeue|_terminalize|snapshot_fate|round_fate|settle_snapshot_request|_close|"
+     r"open_request|check_package_token|throughput|stored_report|end_pass|_end_pass_tx|"
+     r"_round_judged|_judgment_uncovered|judgment_gap|_judgment_owed|_hand_over|"
+     r"close_delegation_pass_on_upgrade|OPEN_REQUEST|CLOSED_WORD|BUSY)\b",
+     "the delegation and package-request machinery"),
+    # asks.py
+    (r"\basks\.(request_package|requeue_taken|record_verdicts|handover_covered|mark_reported|"
+     r"_undelivered|_result_class|_result_tx|_sibling_ids|_render_result|_insert|_pages|"
+     r"_stop_line|_case_lines|_case|_doc_label|_amount)\b", "the ask results and package asks"),
+    # work.py, delivery.py, package.py, lineage.py, reducer.py, matches.py, views.py, db.py
+    (r"\bwork\.(chunk_size|CHUNK_FIRST|CHUNK_LATER|searched_since|handled_since|hand_order|"
+     r"searched_for|check_work|grow_owed|check_report|package_work|judge_due|judge_due_pids|"
+     r"judge_due_state|_fx_fits|work_list|cut|judge_whole|package_check|work_item|"
+     r"dates_unread|ELLEN_TURNS|TRIAGE_LIMIT)\b", "the chunk and judge machinery"),
+    (r"\bdelivery\.(request_of_package|_staged_again|_package_note)\b|\bnote_render_id\b",
+     "the request-bound sends and the package note"),
+    (r"\bpackage\.(_request_for_build|RECHECK|stale_check|_Recheck|_caption)\b|"
+     r"\bbound\s*=\s*(True|False)\b", "request-bound builds"),
+    (r"\blineage\.(STATUS_PHRASE|_note_body|note_text|_doc_kinds)\b|Accounting revision",
+     "the revision-numbered note"),
+    (r"\b(kind_verdict|effective_kind|_why_not_kind|_walk_next)\b|\bmatches\._machine\b",
+     "the deleted pairing gates and the walk's Next"),
+    (r"\bdb\.(set_epoch|epoch)\b|store_epoch_at|['\"](package-note|job-left|package-stopped|"
+     r"package-failed)['\"]|\balerts\.pass_notices\b", "the note epoch and the dropped kinds"),
+    # tools and arguments
+    (r"\b(list_projections|record_observation|request_package|more_work|continue_pass|"
+     r"record_step)\b|[\"'`]build_quarterly_package",
+     "removed tools (the function package.build_quarterly_package stays; its TOOL goes)"),
+    (r"\b(package_token|judged|unread_dates|dates_unread)\s*=|\blate\s*=\s*(True|False)|"
+     r"['\"](judged|package_token|resolves|dates_unread)['\"]",
+     "removed arguments (lineage.append keeps its own `resolves=`)"),
+    # tables and columns (schema 12 drops)
+    (r"\b(pass_steps|package_requests)\b|\b(FROM|INTO|UPDATE|TABLE)\s+(credits|cursor)\b",
+     "dropped tables (`cursor` and `credits` qualified: views pages by a cursor)"),
+    (r"\b(orphaned_by|adoptions|adopters_json|read_seq|w_refreshes|judge_after|w_pending|"
+     r"judge_epoch|late_takes|swept_at|observed_revision|note_seen_seq|note_seen_rev|"
+     r"note_seen_at|note_issued_at|note_issued_seq|note_other_issued_at|readback_owed|"
+     r"note_issued_gen|note_other_issued_gen|note_seen_gen|read_snapshot|note_seq|note_body|"
+     r"claimed_step|verdicts_json)\b", "dropped columns"),
+    (r"\bspent=|sum\(spent\)|\breported=1|runs\(job_id,\s*passes|SET passes\s*=|"
+     r"(packages|deliveries)\([^)]*\brequest_id", "dropped columns (qualified)"),
+    # test helpers
+    (r"\b(handed|hand|close_chunk|hand_empty_chunk|end_with_counts|package_built_unsent|"
+     r"stage_stalled_package|check_round|bind_round_and_take|sweep_to_zero|start_job_pass|"
+     r"drive_to_staged|delivered_package)\(|self\.package_token\(", "deleted test helpers"),
+]
+```
+
+  A word-boundary hit in prose (a comment or a docstring) is a hit:
+  the prose is rewritten, because it names a mechanism that no longer exists.
+
+- [ ] **Step 6: Run the tests**
+
+Run: `python3 scripts/check_removed.py && python3 -m unittest discover -s tests -t . && python3 scripts/check_tool_agreement.py && python3 scripts/scan_identifiers.py .`
 Expected: PASS. Record the new test count and wall time in the commit (26b68ee: 1416 tests,
 753 s).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
+git add scripts/check_removed.py tests/test_check_removed.py
 git rm server/steps.py server/sweep.py tests/sim.py tests/legacy_tools.py tests/test_check_chunks.py tests/test_continuation.py tests/test_round_chunks.py tests/test_package_rounds.py tests/test_sweep_real.py tests/test_s2_clockless.py tests/test_s2_credits.py tests/test_s2_diff_r2.py tests/test_s2_diff_r3.py tests/test_s2_package_rounds.py tests/test_s2_readback.py tests/test_s2_notes.py tests/test_s2_cursor.py tests/test_package_requests.py
 git commit -am "refactor(loop): delete the sweep, the chunk carry, the judge, credits, nested passes, package requests and the delegation protocol; schema 12 drops (§4)"
 ```
@@ -4256,14 +4435,13 @@ from tests._base import StoreCase, apply_now
 import db                     # server/ is on sys.path once tests._base is imported
 from tests.fakebroker import FakeBroker
 
-JOB = "jjjjjjjj-0012"
 
 
 class Desk(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
-        self.token = self.pass_()
+        self.token = self.run_claim()
         self.pid = None
 
     def test_whats_open_posts_a_fresh_open_items_card(self):
@@ -4293,8 +4471,7 @@ class Desk(StoreCase):
                                   document_date="2026-09-01")
             pids.append(p)
         with db.tx(self.conn):
-            self.conn.execute("INSERT OR IGNORE INTO runs(job_id) VALUES (?)", (JOB,))
-            rid = cards.compose_end(self.conn, JOB, scheduled=False)
+            rid = cards.compose_end(self.conn, self.job_id, scheduled=False)
             cards.deposit_of(self.conn, rid)
         quoted = self.conn.execute("SELECT text FROM renders WHERE render_id=?",
                                    (rid,)).fetchone()[0]
@@ -4308,10 +4485,10 @@ class Desk(StoreCase):
         import pathlib
         text = (pathlib.Path(__file__).resolve().parents[1]
                 / "skills/quarterly-accounting/SKILL.md").read_text()
-        for phrase in ("get_package", "what's open", 'show_view(view="open")'):
+        for phrase in ("get_package", "what's open", 'show_view(view="open")', "#1305"):
             self.assertIn(phrase, text)
-        self.assertNotIn("request_package", text)
-        self.assertNotIn("note_render_id", text)
+        self.assertNotIn("request_package", text)  # removed-name: asserted absent
+        self.assertNotIn("note_render_id", text)  # removed-name: asserted absent
         self.assertLessEqual(len(text), 10_000)
 ```
 
@@ -4329,7 +4506,8 @@ rendering; the skill still names `request_package`).
 
 "What's open?", "review", "what's left to check?": `show_view(view="open")` — the card
 with what is still open and its buttons (also after a walk of cards stopped, or after
-[Get package]). "How are the books?", "what's missing?", "show me Q2", "more", "all of
+[Get package]). A button that answers "expired" (a card whose send timed out, Casa #1305)
+is recovered the same way: say "review" and the card comes again. "How are the books?", "what's missing?", "show me Q2", "more", "all of
 them", "show item N": `show_view(view=…, quarter=…, page=…, after=…)` as before. After
 the receipt, `mark_rendering_delivered(render_id)`. You never press a button.
 
@@ -4392,13 +4570,13 @@ git add tests/test_desk_loop.py && git commit -am "feat(loop): the desk — what
         for unit in ("probes", "snapshot", "filing", "vendor", "mirror", "view", "post",
                      "end-batch", "complete"):
             self.assertIn(f"`{unit}`", text)
-        for gone in ("sweep", "gmail-probe", "`item`", "`judge`", "build_quarterly_package",
-                     "list_projections", "record_observation", "judged", "resolves",
+        for gone in ("sweep", "gmail-probe", "`item`", "`judge`", "build_quarterly_package",  # removed-name: asserted absent
+                     "list_projections", "record_observation", "judged", "resolves",  # removed-name: asserted absent
                      "set_expectation(", "window (default 10 days)"):
             self.assertNotIn(gone, text)
         for rule in ("calls_made", "decide(", "exact_fit", "hint_sender", "once per run",
                      "plain vendor-and-dates search", "record_mirror", "record_not_found",
-                     "certain"):
+                     "certain", "reset_store"):
             self.assertIn(rule, text)
         self.assertLessEqual(len(text), 9_000)
 ```
@@ -4504,7 +4682,8 @@ call `job_next`.
 ## Never
 You never speak to the operator except as above. Never call `request_work`, `start_job`,
 `get_package`, `set_expectation` or any button's tool (`verdict`, `apply_reading`,
-`cancel_reading`, `bind_account`): the operator's taps and the desk make those.
+`cancel_reading`, `bind_account`): the operator's taps and the desk make those. Never call a
+protected tool (`reset_store`): a scheduled run is quiet and has no one to confirm it.
 ```
 
   The probes unit keeps today's five steps verbatim (SKILL.md:66–83 at 26b68ee), with "for a
@@ -4561,6 +4740,7 @@ git commit -am "docs(loop): the job skill for the simple loop — vendor units, 
         for f in ("README.md", "CHANGELOG.md"):
             text = (ROOT / f).read_text()
             self.assertIn("#1301, #1302 and #1303", text, f)
+            self.assertIn("v0.344.37", text, f)
             self.assertIn("quietWhenScheduled", text, f)
         self.assertIn("0.10.0 was never released", (ROOT / "CHANGELOG.md").read_text())
 ```
@@ -4571,8 +4751,7 @@ git commit -am "docs(loop): the job skill for the simple loop — vendor units, 
 - [ ] **Step 3: Write the files.** README "Requirements" bullet, replacing L22–30:
 
 ```markdown
-- **Casa: the release carrying #1301, #1302 and #1303 (v0.344.NN — DRIVE fills in the
-  number when it is tagged).** #1301 lets the job run silently when the scheduler starts it
+- **Casa v0.344.37 or newer** (the release carrying #1301, #1302 and #1303). #1301 lets the job run silently when the scheduler starts it
   (`quietWhenScheduled`), #1302 lets a tap's receipt post the next card, and #1303 lets a
   [Get package] button deliver the file. An older Casa refuses this plugin's manifest
   (`casa.jobs invalid: entry 1 field quietWhenScheduled`): the plugin does not load. There is
@@ -4586,8 +4765,7 @@ git commit -am "docs(loop): the job skill for the simple loop — vendor units, 
   - the upgrade notes: schema 12; the first run writes one plain note per row (D14); the
     S7 renderings' buttons go stale once (Task 2);
   - the same floor sentence;
-  - `"Requires the Casa release carrying #1301, #1302 and #1303 (v0.344.NN, filled in by
-    DRIVE)."`
+  - `"Requires Casa v0.344.37 or newer (the release carrying #1301, #1302 and #1303)."`
 
 - [ ] **Step 4: Run the tests**
 
@@ -4859,7 +5037,7 @@ Expected: PASS.
   `git add tests/test_quarter_e2e.py && git commit -am "test(loop): a whole quarter end to end through the real tools and bank-feed (§6)"`
 
 ---
-### Task 17: The Casa gate — every new deposit shape through Casa's real validators (§1, §7 conventions, #1301–#1303)
+### Task 17: The Casa gate — every new deposit shape through Casa's real validators, at the floor v0.344.37 (§1, #1301–#1303)
 
 **Files:**
 - Modify: `tests/gen_casa_shapes.py`:
@@ -4868,30 +5046,52 @@ Expected: PASS.
   - `build()` (L207) loses `handed` / `record_search`;
   - `gen_post_results` (L436) uses an alert kind that still exists;
   - new `SHAPES`, below.
-- Modify: `scripts/check_casa_shapes.py`: `CASA_PRE_FLOOR=1` (below).
+- Modify: `scripts/check_casa_shapes.py`, which judges the `next` records (below).
 - Modify: `tests/test_s7_casa_gate.py` — the generator side pins the new case names.
 
-**What can be gated against the Casa tree today (`bcebd66b`) and what waits:**
+**The tree:** `~/Projects/ha-casa-worktrees/quart-casa-0344-37` at tag `v0.344.37` (BRAIN: #1302
+v0.344.35, #1301 v0.344.36, #1303 v0.344.37). Everything is gated against the real
+validators. There is no pre-floor mode. These were checked in that tree, against the
+plugin at 26b68ee (plan round 3):
+- **The checker runs there unchanged:** today's generator and checker give `OK: 146 records`.
+- **#1301, the manifest:** `plugin_store._JOB_FIELDS` accepts `quietWhenScheduled`, a bool
+  (`casa:plugin_store.py:1242–1244, 1315–1317`). `validate_manifest` judges the real
+  manifest.
+- **#1303, a [Get package] button:**
+  - `stored_calls._entry_ok` accepts a capability whose one slot delivers `operator_file`
+    (`casa:stored_calls.py:140–146`). A proposal carrying a button that calls the plugin's
+    `post_package` passes `result_broker.proposal_ok`.
+  - The same proposal is refused `bad_proposal` by the old tree `bcebd66b`, so the gate
+    discriminates.
+  - `get_package` gets the same entry shape, so every card's [Get package] button is
+    judged by the real `proposal_ok` through the existing deposit path.
+- **#1302, the next card:** Casa posts it through `specialist_desk._post_next_card`
+  (`casa:specialist_desk.py:1228–1265`). That function judges the `next` object with
+  `result_broker.proposal_ok(value, call)`, where `call.entry` is the TAPPED tool's entry
+  (`verdict`, a safe tool). It is posted only beside a receipt (`result_broker._receipt_of`,
+  L1599–1617). A real card judged that way returns `None` (accepted).
 
-| shape | today | waits for |
-|---|---|---|
-| proposal card (Review): text, ≤ 6 buttons, `pick` labels from hostile document numbers, keyed `verdict` stored calls | yes: deposited through `show_view`'s `view` slot | #1302 only for the `next` channel itself |
-| vendor page (each page, the last with [Never for X], hostile vendor names, the 240-payment set of r11) | yes, as above | #1302 (the channel) |
-| end message, open-items card, all-answered card, ready notice: text and every `verdict` button | text: yes | **#1303**: their [Get package] stored call to a capability tool is refused by today's `stored_calls` (`casa:stored_calls.py:133–143`) |
-| `get_package` file deposit (`filename`, kind zip, the one caption line, hostile package name) | yes: same contract shape as `post_package` | — |
-| a tap's `{"receipt", "next"}` result | no validator in the tree | **#1302** |
-| the manifest (`quietWhenScheduled`) | refused (`jobs_invalid`, `casa:plugin_store.py:1242–1277`) | **#1301** |
+**The checker's `next` records:** a record `{"case": "<case>:next", "tool": "verdict", "next":
+<the tap result's next object>}` is judged exactly as `_post_next_card` does:
 
-**`CASA_PRE_FLOOR=1`**: a mode of the checker, explicit and printed. It is never the release
-gate.
-- It validates a copy of the manifest with `quietWhenScheduled` removed.
-- It requires every record tagged `"needs": "#1303"` to be refused by exactly the stored-call
-  rule for a capability button, and nothing else.
-- It prints `PRE-FLOOR: n records wait for #1303; the manifest's quietWhenScheduled waits for
-  #1301`.
+```python
+        if "next" in rec:                     # #1302: judged as specialist_desk._post_next_card
+            entry = by_wire[rec["tool"]][1]   # the tapped tool's own entry (verdict)
+            call = types.SimpleNamespace(identity=_identity(enforcement_role="finance"),
+                                         entry=entry, tool_use_id=f"t{n}", contract_map=cmap,
+                                         protected={})
+            parsed, why = rb.proposal_ok(json.dumps(rec["next"], ensure_ascii=False), call)
+            if parsed is None:
+                bad.append((n, why or "next refused", rec["case"]))
+            else:
+                kinds["next_card"] = kinds.get("next_card", 0) + 1
+                judged.append(rec["case"])
+            continue
+```
 
-Without the flag, the checker runs the full gate. It must pass against the Casa tree carrying
-#1301–#1303 before the release (the "After the tasks" gate).
+The tap result's `receipt` is checked to be a non-empty string, which is what `_receipt_of`
+requires before it reads `next`. The header's `kinds` counts `next_card`. `REQUIRED_KINDS`
+gains `"next_card"`.
 
 **New `SHAPES`**, each over a fresh store with hostile text in every dynamic field (S7's
 `HOSTILE`):
@@ -4899,19 +5099,19 @@ Without the flag, the checker runs the full gate. It must pass against the Casa 
 - `gen_end_message_scheduled` (new items, plus "earlier items still open");
 - `gen_end_message_nothing_to_ask`;
 - `gen_end_message_handover`;
+- `gen_end_message_with_completion` (D19);
 - `gen_open_items`;
 - `gen_all_answered`;
 - `gen_ready_notice`;
 - `gen_review_cards` (a 4-candidate proposal, a set, a single);
 - `gen_vendor_pages` (240 payments of one vendor);
 - `gen_vendor_pages_scheduled`;
-- `gen_get_package`.
+- `gen_get_package` (the file, and the no-post `receipt` refusal before any bank check).
 
-Every proposal record goes through `Shapes.call` (L83) with the tool `show_view` and
-`render_id` (the re-post path of Task 7). Every writing button is tapped (L141). The tap's
-`next` (Task 8) is itself recorded as a `show_view` deposit case `"<case>:next"`, so its
-body passes the same proposal checks Casa will apply to it (#1302: "the same deposit
-checks as any card").
+Every proposal goes through `Shapes.call` (L83) as a `show_view` re-post of its stored
+rendering (Task 7's path). The checker then judges its body, every [Get package] stored call
+included. Every writing button is tapped (L141), and each tap's `next` is recorded as a
+`"<case>:next"` record.
 
 - [ ] **Step 1: Write the failing test** (in `tests/test_s7_casa_gate.py`):
 
@@ -4921,36 +5121,36 @@ checks as any card").
         records = g.generate().records
         cases = {r["case"] for r in records}
         for prefix in ("end:operator", "end:scheduled", "end:nothing", "end:handover",
-                       "open-items", "all-answered", "ready", "review:candidates",
-                       "review:set", "review:single", "vendor:page1", "vendor:last",
-                       "vendor:scheduled", "get_package"):
+                       "end:completion", "open-items", "all-answered", "ready",
+                       "review:candidates", "review:set", "review:single", "vendor:page1",
+                       "vendor:last", "vendor:scheduled", "get_package"):
             self.assertTrue(any(c.startswith(prefix) for c in cases), prefix)
-        waits = [r for r in records if r.get("needs") == "#1303"]
-        self.assertTrue(waits)
-        self.assertTrue(all(any(b["label"] == "Get package"
-                                for b in json.loads(r["body"]["value"])["buttons"])
-                            for r in waits))
-        self.assertTrue(any(r["case"].endswith(":next") for r in records))
+        nexts = [r for r in records if "next" in r]
+        self.assertTrue(nexts)
+        self.assertTrue(all(r["tool"] == "verdict" and isinstance(r["next"], dict)
+                            for r in nexts))
+        get = [r for r in records if r.get("tool") == "show_view" and any(
+            b["call"]["tool"] == "get_package"
+            for b in json.loads(r["body"]["value"])["buttons"] if "call" in b)]
+        self.assertTrue(get)                       # #1303 buttons reach the real validator
 ```
 
 - [ ] **Step 2: Run it and see it fail.**
   Run: `python3 -m unittest tests.test_s7_casa_gate -v` → FAIL.
 
-- [ ] **Step 3: Implement** the generators and the checker mode as specified.
+- [ ] **Step 3: Implement** the generators and the checker's `next` records as specified.
 
-- [ ] **Step 4: Run the suite and the gate in its pre-floor mode**
+- [ ] **Step 4: Run the suite and the gate at the floor**
 
-Run: `python3 -m unittest discover -s tests -t . && python3 tests/gen_casa_shapes.py /tmp/qa-shapes.jsonl && CASA_PRE_FLOOR=1 CASA_TREE=~/Projects/ha-casa-worktrees/quart-s7-casa/casa/rootfs/opt/casa CASA_TESTS=~/Projects/ha-casa-worktrees/quart-s7-casa/tests ~/Projects/ha-casa-app/venv_test/bin/python scripts/check_casa_shapes.py /tmp/qa-shapes.jsonl`
-Expected: suite PASS; gate `OK` with its `PRE-FLOOR:` line.
+Run: `python3 -m unittest discover -s tests -t . && python3 tests/gen_casa_shapes.py /tmp/qa-shapes.jsonl && CASA_TREE=~/Projects/ha-casa-worktrees/quart-casa-0344-37/casa/rootfs/opt/casa CASA_TESTS=~/Projects/ha-casa-worktrees/quart-casa-0344-37/tests ~/Projects/ha-casa-app/venv_test/bin/python scripts/check_casa_shapes.py /tmp/qa-shapes.jsonl`
+Expected: suite PASS; gate `OK`, with `next_card` among the judged kinds.
 
 - [ ] **Step 5: Commit.**
-  `git commit -am "test(loop): the Casa gate covers every new deposit shape; pre-floor mode until #1301–#1303 land (§1)"`
+  `git commit -am "test(loop): the Casa gate at v0.344.37 — every new deposit, every next card, every Get package button (§1, #1301–#1303)"`
 
 ## After the tasks
 
-1. **The full gate against the floor.** Once DRIVE's Casa tree carries #1301, #1302 and
-   #1303, run the Task 17 gate without `CASA_PRE_FLOOR` against it. Fill the version number
-   in README and CHANGELOG. That is the one value DRIVE gives.
+1. **The gate at the floor** (Task 17) is part of every later fix round.
 2. **Plan, diff, and post-fix reviews** per the delegation policy: Astra `gpt-6-astra`
    medium and Terra `gpt-5.6-terra` medium, double SHIP, re-review after fixes, both
    verdicts and the round count in the PR body.
@@ -5076,3 +5276,23 @@ also applied one level wider, to the same shape of miss:
 | Astra S2: an undelivered end message counts as seen | Task 7: `seen_state` counts the run's own messages only once delivered; posted-only counts only for tap cards (`review`, `vendor-page`). Pinned: `test_an_end_message_posted_but_never_delivered_is_not_seen`. Shape (d): a ready notice is recorded at delivery, not at composition (`mark_rendering_delivered` → `quarter_notices`; Task 10's `owed_notices` and its test). |
 | (found while verifying) a plan test module importing `db` before `tests._base` fails on its own ("No module named 'db'"; reproduced) | All 12 plan test snippets import `db` after `tests._base`. |
 
+
+## Plan round 3 dispositions
+
+Astra `gpt-6-astra` medium: DO NOT SHIP (3 S1, 2 S2). Terra `gpt-5.6-terra` medium: SHIP WITH
+FIXES (the same holder finding). All were accepted and folded. Two shapes recurred, so each
+was generalized instead of patched: one closing gate for removed names, and one fixture
+helper for runs. Casa's shipped contract (BRAIN) is folded too.
+
+| finding | disposition |
+|---|---|
+| Astra S1: `asks.mark_reported` deleted but called by `views.mark_rendering_delivered` | Task 11 deletes the call (views.py:1464–1465). Reproduced at 26b68ee: AttributeError, the delivery rolls back, `delivered_at` stays NULL. **Generalized** (second time after r2's `bound`): Task 11 Step 5 adds `scripts/check_removed.py` and its test, the ONE closing gate. It holds 18 patterns covering every deleted module, function, constant, tool, argument, table, column and test helper. It greps `server/`, `tests/`, `scripts/`, `skills/` and the manifest, and fails on any hit outside the deletion itself. Run over 26b68ee's retained files, it finds only genuine callers (`_walk_next`, `mark_reported`, the request paths in `posting.py`, the wipe list, the desk skill). That sweep found three more retained callers, now fixed in Task 11: `passes.ago` (views.py:558: kept), `steps._age` (delivery.py:383 → `passes._age_s`), and `job.POST_MAX` / `POST_CHARS` / `OFFER_MAX` (posting, alerts: kept in job.py). |
+| Astra S1: `pass_`'s job id is refused by `JOB_ID_RE`; setUps duplicate `claims.gen` | **Generalized:** Task 1 Step 4b adds the ONE fixture helper `StoreCase.run_claim()` on the real `job.claim`. It uses a valid hex job id and gives the run its pass, its `runs` row and the four probes; `work_rows()` is the one work-list writer. All 9 new test files use it, with no raw INSERT INTO claims/runs. `pass_` becomes its alias in Task 11, and Task 10 trims the helper once `claim` makes the run itself. Prototyped at 26b68ee: two runs give two claims, passes and runs; a fenced write is accepted; the gate allows. |
+| Astra S1: the Taps helper rewrote INV-88's date; the Wrong retry used another date | Tasks 7 and 8: `propose` passes each document's stored date (`stored_date`), and the retry uses the alternative's stored date, so the rejection binds the same facts. |
+| Astra S2 + Terra: a live proposal's alternative was advertised unheld (`held=None`, `exact_fit`) while the floor refused it | Task 3: `matches.holders(conn, doc_id)` is the ONE ownership function (`HOLDERS_SQL`, including `json_each(alternatives_json)`). `taken_elsewhere`, `loop.candidates` and `exact_fit` all read it; Task 6's second query (`_holder`) is gone. Pinned: `test_a_live_proposals_alternative_is_held_for_another_payment`. |
+| Astra S2: a reopening completed within one run lost its updated notice | Task 1 / Task 10: `quarter_notices.sig` replaces the `notified` flag. `loop.completion_sig` (the quarter's payments and how each is accounted for) is stored at delivery; a notice is owed when the current signature differs. Nothing has to observe the reopening. Pinned: `test_a_reopening_completed_within_one_run_is_notified_again`. |
+| BRAIN: Casa floor v0.344.37 | Global Constraints, Bases, README and CHANGELOG (Task 14) name v0.344.37; the test asserts it. |
+| BRAIN: a `get_package` no-post is a More no-post; its `receipt` is the answer | Task 9: `tools.capability("package", receipt=True)` adds `"receipt"` to the no-post shape ("Nothing to package yet — ask me to check the bank first."). Read in v0.344.37 at `result_broker.py:1599–1631` and `specialist_desk.py:1160`. |
+| BRAIN: a quiet run never calls a protected tool | Task 13: the job skill's Never section names `reset_store`; the skill test asserts it. |
+| BRAIN: Casa #1305 (an expired card) | Task 12: the desk skill's recovery names it ("review" → `show_view(view="open")`); the desk test asserts it. |
+| BRAIN: the gate at v0.344.37 | Task 17 is rewritten against `quart-casa-0344-37`, and the pre-floor mode is dropped. Verified in that tree: today's gate passes (`OK: 146 records`), and v0.344.37 validates the real manifest (`quietWhenScheduled`). A card carrying a file-capability button passes `proposal_ok` there and is refused `bad_proposal` by `bcebd66b`. A real card judged as `_post_next_card` judges it (the tapped `verdict`'s entry) is accepted. The checker judges every tap's `next` that way (`next_card` kind). |
