@@ -1,6 +1,6 @@
 {
   "name": "quarterly-accounting",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Quarterly accounting preparation: matches every business-account transaction to the document it needs, mirrors the decisions into bank-feed as acct:: tags and notes, answers from its own store, and builds a quarter's zip on request.",
   "author": {
     "name": "Nicola Bonzanni"
@@ -21,7 +21,10 @@
     "resultContract": {
       "version": 1,
       "tools": {
-        "apply_reply": {
+        "apply_reading": {
+          "result": "safe"
+        },
+        "ask_state": {
           "result": "safe"
         },
         "bind_account": {
@@ -33,10 +36,10 @@
         "build_review": {
           "result": "safe"
         },
-        "check_setup": {
+        "cancel_reading": {
           "result": "safe"
         },
-        "confirm_match": {
+        "check_setup": {
           "result": "safe"
         },
         "get_counterparty": {
@@ -49,9 +52,6 @@
           "result": "safe"
         },
         "job_next": {
-          "result": "safe"
-        },
-        "job_report": {
           "result": "safe"
         },
         "job_status": {
@@ -72,8 +72,45 @@
         "mark_rendering_delivered": {
           "result": "safe"
         },
+        "post_package": {
+          "result": "capability",
+          "provides": [
+            "package"
+          ],
+          "delivers": {
+            "package": "operator_file"
+          },
+          "filename": true
+        },
+        "post_results": {
+          "result": "capability",
+          "provides": [
+            "results"
+          ],
+          "delivers": {
+            "results": "operator_message"
+          }
+        },
+        "propose_account": {
+          "result": "capability",
+          "provides": [
+            "accounts"
+          ],
+          "delivers": {
+            "accounts": "operator_proposal"
+          }
+        },
         "propose_match": {
           "result": "safe"
+        },
+        "propose_reading": {
+          "result": "capability",
+          "provides": [
+            "reading"
+          ],
+          "delivers": {
+            "reading": "operator_proposal"
+          }
         },
         "read_document": {
           "result": "safe"
@@ -96,9 +133,6 @@
         "record_search": {
           "result": "safe"
         },
-        "reject_match": {
-          "result": "safe"
-        },
         "relabel_match": {
           "result": "safe"
         },
@@ -111,22 +145,19 @@
         "reset_store": {
           "result": "safe"
         },
-        "set_exemption": {
-          "result": "safe"
-        },
         "set_expectation": {
           "result": "safe"
         },
-        "set_package_name": {
-          "result": "safe"
-        },
-        "set_watermark": {
-          "result": "safe"
+        "show_view": {
+          "result": "capability",
+          "provides": [
+            "view"
+          ],
+          "delivers": {
+            "view": "operator_proposal"
+          }
         },
         "stage_for_delivery": {
-          "result": "safe"
-        },
-        "stop_chasing": {
           "result": "safe"
         },
         "update_document_metadata": {
@@ -134,28 +165,35 @@
         },
         "upsert_counterparty": {
           "result": "safe"
+        },
+        "verdict": {
+          "result": "safe"
         }
       }
     },
     "provides_tools": [
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__apply_reply",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__apply_reading",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__ask_state",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__bind_account",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_quarterly_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_review",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__cancel_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__check_setup",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__confirm_match",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__get_counterparty",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__import_ledger_export",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__ingest_document",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_next",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__job_report",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_status",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_projections",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_quarter_state",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_unmatched_documents",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__mark_irrelevant",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__mark_rendering_delivered",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__post_package",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__post_results",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__propose_account",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__propose_match",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__propose_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__read_document",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_delivery",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_filing",
@@ -163,19 +201,16 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_observation",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_probe",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_search",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__reject_match",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__relabel_match",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__request_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__request_work",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__reset_store",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__set_exemption",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__set_expectation",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__set_package_name",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__set_watermark",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__show_view",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__stage_for_delivery",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__stop_chasing",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__update_document_metadata",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__upsert_counterparty"
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__upsert_counterparty",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__verdict"
     ],
     "eraseTool": "reset_store",
     "protectedTools": [

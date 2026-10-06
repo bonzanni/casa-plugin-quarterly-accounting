@@ -47,13 +47,188 @@ class StoreCase(TempEnv):
         import db
         self.conn = db.open_store()
         self.addCleanup(self.conn.close)
+        import tools
+        tools._CONN = self.conn
+        self.addCleanup(setattr, tools, "_CONN", None)
 
     def bind(self, account="acc-biz", label="Zakelijk", watermark="2026-07-01"):
         import binding
         import db
-        binding.bind_account(self.conn, account, label)
         with db.tx(self.conn):
+            binding.bind_in_tx(self.conn, account, label, grant=self.grant())
             self.conn.execute("UPDATE binding SET watermark=?", (watermark,))
+
+    @staticmethod
+    def grant():
+        """S7 §8.1: the operator's authority, as a keyed tap holds it. Tests are the one
+        place outside taps.py that construct one (the grep pin reads server/ only)."""
+        import authority
+        return authority.OperatorGrant("verdict", "test")
+
+    def granted(self, fn, *args, **kw):
+        """An operator write (an *_in_tx form) in its own transaction, under a test grant —
+        what the public wrappers did before S7 §8.1 removed them."""
+        import db
+        with db.tx(self.conn):
+            return fn(self.conn, *args, grant=self.grant(), **kw)
+
+    def run_job_to_complete(self, job_id) -> list:
+        """Job run `job_id`, driven by the S2 simulator (tests/sim_job.py) from its claim
+        until `complete`. Binds the account and builds the driver on first use."""
+        if getattr(self, "_job_driver", None) is None:
+            from tests.sim_job import JobDriver
+            if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
+                self.bind()
+            self._job_driver = JobDriver(self)
+        return self._job_driver.run_job(job_id)
+
+    def drive(self, job_id, deliver=True, bank_tools=True, stop_before=None,
+              spend_before_posts=None, stop_after=None, package_receipt=True) -> list:
+        """Job run `job_id` through the S2 simulator (S7 §5): `deliver` — each posted
+        rendering's receipt arrives and is marked; `bank_tools=False` — the probes find no
+        bank-feed tools; `stop_before` — return when a unit of that kind is handed out (not
+        done); `spend_before_posts=n` — before the first post/view hand-out, the batch's
+        spend is raised so that unit is swapped for end-batch once; `stop_after="stage"` —
+        a deliver unit stages its send and the turn ends there (§6.1);
+        `package_receipt=False` — a posted package's receipt is withheld (recorded
+        uncertain). The units handed out."""
+        if getattr(self, "_job_driver", None) is None:
+            from tests.sim_job import JobDriver
+            if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
+                self.bind()
+            self._job_driver = JobDriver(self)
+        drv = self._job_driver
+        drv.deliver, drv._no_tools, drv.spend_before_posts = (deliver, not bank_tools,
+                                                              spend_before_posts)
+        drv.stop_after, drv.package_receipt = stop_after, package_receipt
+        if stop_before is not None:
+            n = len(drv.units)
+            drv.run_until(job_id, stop_before)
+            return drv.units[n:]
+        return drv.run_job(job_id)
+
+    def drive_to_staged(self, job_id) -> tuple:
+        """S7 §6.1: a package ask's job run up to its deliver unit's staging (the turn ends
+        there). Returns (delivery_id, package_token)."""
+        self.drive(job_id, deliver=True, stop_after="stage")
+        return self._job_driver.staged
+
+    def delivered_package(self, first_outcome="delivered", quarter="2026-Q3", job_id="aaaaaaaa-1"):
+        """A package asked for, built and posted by the job, its first send recorded
+        `first_outcome` (`uncertain`: the receipt was withheld; its notice is posted by the
+        job's next `post` and delivered). Returns the package_id."""
+        import asks
+        from tests.fakebroker import FakeBroker
+        asks.request_package(self.conn, quarter)
+        with FakeBroker():
+            self.drive(job_id, deliver=True, package_receipt=first_outcome == "delivered")
+        return self.conn.execute("SELECT package_id FROM packages ORDER BY package_id DESC"
+                                 " LIMIT 1").fetchone()[0]
+
+    def import_again(self):
+        """A newer import lands (a bare snapshots row): every check done before it no
+        longer describes the bank (issue #15, D2)."""
+        import db
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
+                              " VALUES (NULL, ?, 0, 0)", (db.now(),))
+
+    def patch(self, obj, name, value):
+        """`obj.name = value` for this test, restored at cleanup."""
+        from unittest import mock
+        p = mock.patch.object(obj, name, value)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def insert_render(self, kind, text) -> str:
+        """A stored rendering of `kind` holding `text`, undelivered. Its render id."""
+        import db
+        with db.tx(self.conn):
+            rid = f"r{db.next_seq(self.conn)}"
+            self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
+                              " text, membership_json) VALUES (?,?, '{}', ?, ?, '[]')",
+                              (rid, kind, db.now(), text))
+        return rid
+
+    def render_text(self, render_id) -> str:
+        return self.conn.execute("SELECT text FROM renders WHERE render_id=?",
+                                 (render_id,)).fetchone()[0]
+
+    def operator_pair(self, *, pid, doc_id, expected_revision, render_id):
+        """The operator pairs a document with a payment they were shown (what
+        record_match(author="operator") did before S7 §8.1: in the server only a tap's
+        confirm_in_tx reaches matches._operator_pair; tests drive it directly)."""
+        import authorship
+        import db
+        import matches
+        with db.tx(self.conn):
+            pid = matches._operator_pid(self.conn, pid)
+            authorship.require_projection(self.conn, pid, render_id, expected_revision)
+            return matches._operator_pair(self.conn, pid, doc_id, render_id)
+
+    EXTRA_PAYEES = ("Notion", "Figma", "Slack", "Linear")
+
+    def sheet_fixture(self, payee="Zapier", amount=9900, day="2026-09-17", guesses=1):
+        """A bound store with `guesses` payments each holding one guessed machine pairing
+        (the first to `payee`, the rest to EXTRA_PAYEES), and a delivered check view that
+        shows them (S7 sheet tests, under a Q3 clock — Ruling F3). Returns {render_id, pid,
+        match_id, doc_id, revision, match_revision, payee} for the first payment, and
+        `pids`: every guessed payment, in printed order."""
+        import datetime as dt
+        import db
+        import views
+        made = []
+        with self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc)):
+            self.bind()
+            self._fixture_token = self.pass_()
+            with db.tx(self.conn):
+                self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
+                                  " bank_through) VALUES ('p', 'x', 0, 0, '2026-09-20')")
+            self._fixture_guess = (payee, amount, day, 0)
+            for _ in range(guesses):
+                made.append(self.add_guess())
+            r = views.build_review(self.conn, view="check", quarter="2026-Q3")
+            views.mark_rendering_delivered(self.conn, r["render_id"])
+        listed = views.render_items(self.conn, r["render_id"])
+        assert all(m[1] in listed for m in made), r["text"]
+        who, pid, mid, doc_id = made[0]
+        return {"render_id": r["render_id"], "pid": pid, "match_id": mid, "doc_id": doc_id,
+                "revision": self.rev(pid), "match_revision": self.rev(match_id=mid),
+                "payee": payee,
+                "pids": [m[1] for m in sorted(made, key=lambda m: r["text"].index(m[0]))]}
+
+    def add_guess(self):
+        """One more payment with a guessed machine pairing, after sheet_fixture's: the first
+        to its payee, the next to EXTRA_PAYEES in turn, each EUR 10 more. Returns (payee,
+        pid, match_id, doc_id). Not shown until a view of it is delivered."""
+        import datetime as dt
+        import matches
+        payee, amount, day, i = self._fixture_guess
+        self._fixture_guess = (payee, amount, day, i + 1)
+        who = payee if i == 0 else self.EXTRA_PAYEES[i - 1]
+        cents = amount + 1000 * i
+        with self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc)):
+            n = 1 + (self.conn.execute("SELECT max(row_id) FROM bank_rows").fetchone()[0] or 0)
+            self.row(n, counterparty=who, amount_minor=cents, booking_date=day, value_date=day)
+            pid = self.lineage_for(n)
+            self.classify(pid, {"software"})
+            self.settle(pid)
+            doc_id = self.doc(counterparty=who, issuer=who, amount_minor=cents, document_date=day)
+            mid = matches.record_match(self.conn, pid=pid, doc_id=doc_id, author="auto",
+                                       expected_revision=self.rev(pid),
+                                       row_snapshot=StoreCase.snapshot(self, pid),
+                                       token=self._fixture_token,
+                                       labels=("guessed",))["match_id"]
+        return who, pid, mid, doc_id
+
+    def rejudge(self, pid):
+        """A machine relabel of `pid`'s current pairing under the fixture's pass token, as
+        the job re-judging a payment would: it moves that match's revision."""
+        import matches
+        mid = self.conn.execute("SELECT match_id FROM match_state WHERE pid=? AND state IN"
+                                " ('matched','proposed')", (pid,)).fetchone()[0]
+        return matches.relabel_match(self.conn, match_id=mid, labels=("no-ref",),
+                                     token=self._fixture_token)
 
     LEDGER = "a" * 32             # the bank-feed ledger instance id the fixtures bind to
 
@@ -92,6 +267,12 @@ class StoreCase(TempEnv):
                             data={"generation": generation, "registered": registered or {},
                                   "instance": instance or self.LEDGER})
         return token
+
+    def accounts_probe(self, accounts):
+        """A bank_accounts probe carrying `accounts`, recorded in a pass of its own (then
+        ended), as a check records list_accounts' answer."""
+        self.pass_("operator", accounts=accounts)
+        self.end_live_pass()
 
     def start_job_pass(self, token, trigger="operator"):
         """A job pass started under claim `token` (S2 §3), held by that claim's job id —
@@ -189,6 +370,26 @@ class StoreCase(TempEnv):
                               (lapsed,))
         return token
 
+    def stage_stalled_package(self, quarter="2026-Q3"):
+        """A package's first send staged and never settled, its holder gone: package_built_
+        unsent(), staged under its package_token, then the delivery's lease set to a lapsed
+        time — the stalled send any claim recovers (S7 §6.1; S2's job_report recovery case,
+        moved here). Returns its delivery_id."""
+        import datetime as _dt
+        import db
+        import delivery
+        import steps
+        token = self.package_built_unsent(quarter)
+        pkg = self.conn.execute("SELECT package_id FROM package_requests WHERE state='built'"
+                                ).fetchone()[0]
+        d = delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg,
+                                        package_token=token)
+        lapsed = steps._stamp(db._clock() - _dt.timedelta(seconds=steps.LEASE_S + 60))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE deliveries SET lease_at=?, created_at=? WHERE"
+                              " delivery_id=?", (lapsed, lapsed, d["delivery_id"]))
+        return d["delivery_id"]
+
     def check_round(self, token, gmail_ok=True, triage_remaining=0):
         """The rest of a package round (issue #15): Ellen's Gmail round (its probe) and
         the judge step, finished whole."""
@@ -213,6 +414,30 @@ class StoreCase(TempEnv):
             self.conn.execute("INSERT OR REPLACE INTO bank_rows(%s) VALUES (%s)"
                               % (",".join(r), ",".join("?" * len(r))), tuple(r.values()))
         return r
+
+    def seed_payments(self, rows, tags=("software",)):
+        """Bind, then admit one searched, classified, settled payment per dict in `rows`
+        (bank-row overrides, e.g. counterparty / amount_minor). Returns the pids."""
+        import db
+        import work
+        self.bind()
+        token = self.pass_()
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
+                              " bank_through) VALUES ('p1', 'x', 0, 0, '2026-09-20')")
+        pids = []
+        for n, over in enumerate(rows, 1):
+            self.row(n, booking_date="2026-09-14", value_date="2026-09-14", **over)
+            pid = self.lineage_for(n)
+            self.classify(pid, set(tags))
+            with db.tx(self.conn):
+                self.conn.execute("UPDATE projections SET class_observed_at=? WHERE pid=?",
+                                  ("2026-09-20T10:00:00Z", pid))
+            self.settle(pid)
+            self.handed(pid)
+            work.record_search(self.conn, pid=pid, token=token, queries=["x"])
+            pids.append(pid)
+        return pids
 
     def lineage_for(self, row_id):
         import db
@@ -339,7 +564,7 @@ class StoreCase(TempEnv):
             self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
                               " delivered_at, text, membership_json, delivered_seq)"
                               " VALUES (?,?,?,?,?,?,?,?)",
-                              (rid, "status", "{}", db.now(), db.now(), "",
+                              (rid, "status", S7_EMPTY_SCOPE, db.now(), db.now(), "",
                                json.dumps(list(pids)), db.next_seq(self.conn)))
             for pid in pids:
                 prev = self.conn.execute("SELECT revision FROM projections WHERE pid=?",
@@ -362,6 +587,48 @@ class StoreCase(TempEnv):
     def snapshot(self, pid):
         import lineage
         return lineage.live_row(self.conn, lineage.projection(self.conn, pid))
+
+
+# what an S7 rendering stores for its grammar-read fields when it prints nothing that fills
+# them (reply r5: a view that LACKS one was composed by an earlier version)
+S7_EMPTY_SCOPE = ('{"names": {}, "next": null, "offers": [], "pid": null, "proposed": [],'
+                  ' "quarter": null, "refs": {}, "walk": null}')
+
+
+def untag(text: str) -> str:
+    """A rendering's text without its first-line tag (binding V2: " · <n>", the render id's
+    digits) — for pins of composed text that predate the tag."""
+    import re
+    first, sep, rest = text.partition("\n")
+    return re.sub(r" \u00b7 \d+$", "", first) + sep + rest
+
+
+def apply_now(conn, text, quoted=None) -> dict:
+    """S7 §8: the operator's words read (propose_reading) and, when a reading was posted,
+    its Apply tapped — what apply_reply did in one call before S7. The result is shaped
+    like the old one: `receipt` is the Apply receipt, or `say` when nothing was proposed;
+    `applied` is the reading's plan once applied ([] otherwise); `instructions`, `reshow`,
+    `understood` and `not_a_reply` come from the proposal; `proposal` is the posted text."""
+    import json
+    import posting
+    import qa_server
+    import tools  # noqa: F401 — registers the tools
+    from tests.fakebroker import FakeBroker
+    with FakeBroker() as b:
+        out = posting.propose_reading(conn, text, quoted)
+    res = dict(out, proposal=None, applied=[])
+    if out["reading"] is None:
+        res["receipt"] = out["say"]
+        return res
+    prop = json.loads(b.deposits[-1]["value"])
+    res["proposal"] = prop["text"]
+    call = next(x for x in prop["buttons"] if x["label"] == "Apply")["call"]
+    res["receipt"] = qa_server.TOOLS[call["tool"]]["fn"](call["arguments"])["receipt"]
+    row = conn.execute("SELECT state, plan_json FROM readings WHERE reading_id=?",
+                       (out["reading_id"],)).fetchone()
+    if row["state"] == "applied":
+        res["applied"] = json.loads(row["plan_json"])
+    return res
 
 
 def hand(conn, pids):

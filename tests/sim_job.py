@@ -15,8 +15,22 @@ everything; the driver never chooses a unit, an outcome or a token of its own.
   item        at most 4 queries, nothing found; record_search with them
   judge       one triage page (limit 8; a package also one dates_unread page); then
               job_next(judged={page_next, triage_remaining, documents})
+  post        S7 §5: post_results(render_ids); on the receipt (`deliver`), each marked
+  view        show_view(render_id) (or propose_account for accounts); on the receipt
+              (`deliver`), marked
+  build       S7 §6.1: build_quarterly_package(quarter, package_token, request_id)
+  deliver     stage_for_delivery(package_id, package_token), post_package (to the test's
+              broker, else a tests.fakebroker of its own), then record_delivery — `delivered` on the
+              receipt (`package_receipt`), else `uncertain`. `stop_after="stage"`: the
+              turn ends right after staging (nothing posted, nothing recorded)
+
+build and deliver go through the real tools (qa_server.TOOLS), each call carrying the
+unit's pass_token as the skill says every write does (#43: the suite then runs the call
+shape the model makes, not a direct call the model never makes).
 """
 from __future__ import annotations
+
+import os
 
 import binding
 import job
@@ -29,6 +43,7 @@ import work
 from tests import bankfeed, sim
 
 CUT = object()          # the unit's turn ended part-way (cut_after_import)
+STOP = object()         # the driver stops here (stop_after)
 MAX_UNITS = 600         # a cursor that never finishes is a failure, never a hang
 
 
@@ -79,6 +94,11 @@ class JobDriver:
         self.last = None
         self.token = None
         self.units = []
+        self.deliver = True             # S7 §5: Casa's receipt arrives for every post
+        self.spend_before_posts = None
+        self.package_receipt = True     # Casa's receipt arrives for a posted package
+        self.stop_after = None
+        self.staged = None              # (delivery_id, package_token) of the last staging
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
 
     # --- the bank, as the operator's bank has it ------------------------------------
@@ -136,6 +156,8 @@ class JobDriver:
         units, judged = [], None
         job_id = self._job_of(token)
         for _ in range(MAX_UNITS):
+            if self.spend_before_posts is not None:
+                self._spend_before(judged)
             u = job.next_unit(self.conn, self.token, judged=judged)
             judged = None
             units.append(u)
@@ -152,6 +174,8 @@ class JobDriver:
                 self.token = job.claim(self.conn, job_id)
                 continue
             r = self.do(u, self.token)
+            if r is STOP:
+                return units
             if r is CUT:
                 self.token = job.claim(self.conn, job_id)
                 continue
@@ -164,6 +188,82 @@ class JobDriver:
         """Carry out unit `u` under claim `token`. Returns the judge's `judged`, CUT when
         the unit's turn ended part-way, else None."""
         return getattr(self, "_" + u["unit"].replace("-", "_"))(u, token)
+
+    def _spend_before(self, judged) -> None:
+        """When the next unit would be the run's first post/view, raise the batch's spend
+        to `spend_before_posts` − BATCH_RESERVE − 1, so _account swaps that unit for
+        end-batch exactly once. Read off the cursor in a savepoint rolled back."""
+        import db
+        with db.tx(self.conn):
+            self.conn.execute("SAVEPOINT peek")
+            try:
+                if judged is not None:
+                    job._judged(self.conn, self.token, judged)
+                nxt = job._choose(self.conn, self.token)["unit"]
+            finally:
+                self.conn.execute("ROLLBACK TO peek")
+                self.conn.execute("RELEASE peek")
+            if nxt in ("post", "view"):
+                self.conn.execute("UPDATE claims SET spent=? WHERE gen=?",
+                                  (self.spend_before_posts - job.BATCH_RESERVE - 1, self.token))
+                self.spend_before_posts = None
+
+    def _post(self, u, token):
+        """post_results(render_ids); on Casa's receipt, mark_rendering_delivered each."""
+        import views
+        if self.deliver:
+            for rid in u["render_ids"]:
+                views.mark_rendering_delivered(self.conn, rid)
+        return None
+
+    def _view(self, u, token):
+        """show_view(render_id) — or propose_account() when it says accounts (nothing to
+        mark); on Casa's receipt, mark_rendering_delivered(render_id)."""
+        import views
+        if self.deliver and not u.get("accounts"):
+            views.mark_rendering_delivered(self.conn, u["render_id"])
+        return None
+
+    def _tool(self, name, args):
+        """#43: the plugin tool `name` called the way the model calls it — through
+        qa_server.TOOLS, with the arguments the skill names. A posting tool's no-post shape
+        (`refused`) is raised as the refusal it carries, as a direct call would raise it."""
+        import db
+        import qa_server
+        import tools  # noqa: F401  -- registers every tool
+        out = qa_server.TOOLS[name]["fn"](args)
+        if isinstance(out, dict) and out.get("refused") is not None:
+            raise db.Refusal(out["refused"])
+        return out
+
+    def _build(self, u, token):
+        """The skill's build unit, with the pass_token every write carries ("Pass the
+        pass_token to every plugin write you make")."""
+        self._tool("build_quarterly_package", {"quarter": u["quarter"],
+                                               "package_token": u["package_token"],
+                                               "request_id": u["request_id"],
+                                               "pass_token": u["pass_token"]})
+        return None
+
+    def _deliver(self, u, token):
+        """The skill's deliver unit, through the real tools, each call carrying the unit's
+        package_token and its pass_token (#43: the live model passed both)."""
+        pkg, tok = u["package_token"], u["pass_token"]
+        st = self._tool("stage_for_delivery", {"package_id": u["package_id"],
+                                               "package_token": pkg, "pass_token": tok})
+        self.staged = (st["delivery_id"], pkg)
+        if self.stop_after == "stage":
+            return STOP
+        args = {"delivery_id": st["delivery_id"], "package_token": pkg, "pass_token": tok}
+        if os.environ.get("CASA_BROKER_SOCKET"):        # the test's own broker listens
+            self._tool("post_package", dict(args))
+        else:
+            from tests.fakebroker import FakeBroker
+            with FakeBroker():
+                self._tool("post_package", dict(args))
+        self._tool("record_delivery",
+                   {**args, "outcome": "delivered" if self.package_receipt else "uncertain"})
+        return None
 
     def _probes(self, u, token):
         conn, bf = self.conn, self.bf

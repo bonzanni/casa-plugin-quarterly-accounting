@@ -39,8 +39,8 @@ class TestKB(StoreCase):
         self.assertIn("Zapier", str(cm.exception))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 1)
         # the ruling, addressed by the bank text, lands on the one owner and applies
-        kb.set_expectation(self.conn, scope_type="counterparty", scope="BCK*ZAPIER",
-                           kind="none", author="operator", render_id="r1")
+        self.granted(kb.set_expectation_in_tx, scope_type="counterparty", scope="BCK*ZAPIER",
+                     kind="none", author="operator", render_id="r1")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 1)
         self.assertEqual(lineage.projection(self.conn, self.pid)["exp_kind"], "none")
 
@@ -88,31 +88,37 @@ class TestKB(StoreCase):
 
     def test_counterparty_none_override(self):
         kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
-        kb.set_expectation(self.conn, scope_type="counterparty", scope="Zapier", kind="none",
-                           author="operator", render_id="r1")
+        self.granted(kb.set_expectation_in_tx, scope_type="counterparty", scope="Zapier",
+                     kind="none", author="operator", render_id="r1")
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual((p["exp_kind"], p["exp_row"]), ("none", 2))
-        kb.set_expectation(self.conn, scope_type="counterparty", scope="Zapier",
-                           kind="default", author="operator", render_id="r1")
+        self.granted(kb.set_expectation_in_tx, scope_type="counterparty", scope="Zapier",
+                     kind="default", author="operator", render_id="r1")
         self.assertEqual(lineage.projection(self.conn, self.pid)["exp_row"], 11)
 
     def test_operator_author_needs_a_delivered_render(self):
-        with self.assertRaises(db.Refusal):
+        import authority
+        with self.assertRaises(db.Refusal) as cm:     # S7 §8.1: never through the tool
             kb.set_expectation(self.conn, scope_type="chain", scope="salary", kind="none",
-                               author="operator", render_id="nope")
+                               author="operator", render_id="r1")
+        self.assertEqual(str(cm.exception), authority.TAP_ONLY)
+        with self.assertRaises(db.Refusal):
+            self.granted(kb.set_expectation_in_tx, scope_type="chain", scope="salary", kind="none",
+                         author="operator", render_id="nope")
 
     def test_chain_overrides_are_operator_only_and_validated(self):
         with self.assertRaises(db.Refusal):
             kb.set_expectation(self.conn, scope_type="chain", scope="salary", kind="none",
                                author="specialist")
         with self.assertRaises(db.Refusal):
-            kb.set_expectation(self.conn, scope_type="chain", scope="salary, tax", kind="none",
-                               author="operator", render_id="r1")      # a conflicting scope
-        with self.assertRaises(db.Refusal):
-            kb.set_expectation(self.conn, scope_type="chain", scope="software", kind="invoice",
-                               tier=None, author="operator", render_id="r1")  # tier required
-        kb.set_expectation(self.conn, scope_type="chain", scope="software", kind="receipt",
-                           tier="optional", author="operator", render_id="r1")
+            self.granted(kb.set_expectation_in_tx, scope_type="chain", scope="salary, tax",
+                         kind="none", author="operator",
+                         render_id="r1")                     # a conflicting scope
+        with self.assertRaises(db.Refusal):     # tier required (validated at the tool, S7)
+            kb.set_expectation(self.conn, scope_type="counterparty", scope="Adobe",
+                               kind="invoice", tier=None, author="specialist")
+        self.granted(kb.set_expectation_in_tx, scope_type="chain", scope="software", kind="receipt",
+                     tier="optional", author="operator", render_id="r1")
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual((p["exp_kind"], p["exp_tier"]), ("receipt", "optional"))
 
@@ -146,8 +152,8 @@ class TestKB(StoreCase):
         # fix wave F: "no invoices ever for Zapier" is the operator's; a specialist's
         # later set_expectation (or its removal) is refused, and the ruling stands
         kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
-        kb.set_expectation(self.conn, scope_type="counterparty", scope="Zapier", kind="none",
-                           author="operator", render_id="r1")
+        self.granted(kb.set_expectation_in_tx, scope_type="counterparty", scope="Zapier",
+                     kind="none", author="operator", render_id="r1")
         for kind, tier in (("receipt", "required"), ("default", None)):
             with self.assertRaisesRegex(db.Refusal, "the operator"):
                 kb.set_expectation(self.conn, scope_type="counterparty", scope="Zapier",
@@ -156,8 +162,8 @@ class TestKB(StoreCase):
         e = kb.get_counterparty(self.conn, "Zapier")
         self.assertEqual(e["exp_author"], "operator")
         # the operator may change their own ruling
-        kb.set_expectation(self.conn, scope_type="counterparty", scope="Zapier",
-                           kind="receipt", tier="required", author="operator", render_id="r1")
+        self.granted(kb.set_expectation_in_tx, scope_type="counterparty", scope="Zapier",
+                     kind="receipt", tier="required", author="operator", render_id="r1")
         self.assertEqual(lineage.projection(self.conn, self.pid)["exp_kind"], "receipt")
 
     def test_chain_override_replaces_the_previous_normalized_scope(self):
@@ -168,10 +174,11 @@ class TestKB(StoreCase):
         pid2 = self.lineage_for(2)
         self.classify(pid2, {"refund"})
         self.settle(pid2)
-        kb.set_expectation(self.conn, scope_type="chain", scope="income, refund", kind="none",
-                           author="operator", render_id="r1")
-        kb.set_expectation(self.conn, scope_type="chain", scope="refund", kind="credit-note",
-                           tier="required", author="operator", render_id="r1")
+        self.granted(kb.set_expectation_in_tx, scope_type="chain", scope="income, refund",
+                     kind="none", author="operator", render_id="r1")
+        self.granted(kb.set_expectation_in_tx, scope_type="chain", scope="refund",
+                     kind="credit-note", tier="required", author="operator",
+                     render_id="r1")
         rows = self.conn.execute("SELECT scope FROM chain_overrides").fetchall()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["scope"], "refund")

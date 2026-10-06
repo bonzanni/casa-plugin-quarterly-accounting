@@ -21,7 +21,7 @@ import expectation as ex
 
 ALLOWED_EXT = {".pdf", ".png", ".jpg", ".webp", ".heic", ".gif", ".tif", ".tiff", ".xml"}
 SOURCES = ("gmail", "manual-telegram", "manual-email")
-EXTRACTION_AUTHORS = ("resident", "specialist")
+EXTRACTION_AUTHORS = ("desk", "specialist")   # S7 §4: a stored "resident" stays readable
 EDITABLE = ("kind", "counterparty", "issuer", "document_date", "document_number",
             "amount_minor", "currency", "recipient")
 # What read_document sends each held kind as (issue #6). Claude Code 2.1.273 shows a
@@ -105,7 +105,8 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
     if source not in SOURCES:
         raise db.Refusal(f"source is one of {', '.join(SOURCES)}")
     if extraction_author not in EXTRACTION_AUTHORS:
-        raise db.Refusal("extraction_author is 'resident' or 'specialist'")
+        raise db.Refusal("extraction_author is 'desk' (a desk turn's filing) or 'specialist' (a"
+                         " job pass's filing, with its pass_token)")
     fields = {"kind": kind, "document_date": document_date, "currency": currency,
               "amount_minor": amount_minor}
     _validate(fields)

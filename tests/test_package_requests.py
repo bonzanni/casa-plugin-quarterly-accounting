@@ -19,6 +19,7 @@ import delivery  # noqa: E402
 import package  # noqa: E402
 import passes  # noqa: E402
 import steps  # noqa: E402
+import views  # noqa: E402
 
 TAKEN = "refused: this package request has been taken over by a later turn"
 
@@ -146,7 +147,7 @@ class TestHandOver(Requests):
         self.assertIsNone(end["next"])
         self.assertEqual(end["request"]["state"], "stopped")
         self.assertEqual(end["speak"]["text"], "I couldn't build the Q3 2026 package: the bound "
-                                               "account is gone\nfrom bank-feed.")
+                                               "account is gone\nfrom bank\\-feed.")
         self.assertTrue(self.text("end_pass", pass_token=c["pass_token"],
                                   outcome="stopped").startswith(STALE))
         first, second = self.claim(), self.claim()
@@ -223,7 +224,8 @@ class TestAStaleHolderCannotSend(Requests):
         speak = out["end"]["speak"]
         self.assertEqual(speak["render_id"], r["speak"]["render_id"])     # the same offer
         self.call("mark_rendering_delivered", render_id=speak["render_id"])
-        self.assertIn("resend", self.call("apply_reply", text="send it again")["instructions"])
+        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
+        self.assertIn("resend", self.call("propose_reading", text="send it again")["instructions"])
         y = self.call("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(y["filename"], pkg["filename"])
         self.assertNotEqual(y["path"], d["path"])
@@ -236,15 +238,6 @@ class TestAStaleHolderCannotSend(Requests):
         self.call("mark_rendering_delivered", render_id=speak["render_id"])
         z = self.call("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(len({d["path"], y["path"], z["path"]}), 3)       # two resends, two paths
-
-    def test_the_email_entry_is_taken_back_too(self):
-        self.seed(1, documents=1)
-        _, _, d = self.staged(channel="email")
-        entry = pathlib.Path(d["path"]).parent
-        self.assertTrue(entry.exists())
-        self.clock.advance(delivery.EMAIL_RECOVERY_LEASE_S)        # an email waits for its tap
-        self.assertIsNone(self.claim()["continue"]["next"])
-        self.assertFalse(entry.exists())
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores the mode")
     def test_a_removal_that_fails_refuses_the_claim_and_changes_nothing(self):
@@ -385,7 +378,8 @@ class TestPackageNotices(Requests):
         self.call("mark_rendering_delivered", render_id=speak["render_id"])
         self.assertIsNone(self.claim()["speak"])
         os.unlink(d["path"])
-        self.assertIn("resend", self.call("apply_reply", text="send it again")["instructions"])
+        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
+        self.assertIn("resend", self.call("propose_reading", text="send it again")["instructions"])
         self.assertEqual(self.call("stage_for_delivery", channel="telegram",
                                    resend=True)["filename"], pkg["filename"])
 
@@ -405,7 +399,7 @@ class TestPackageNotices(Requests):
         self.assertTrue(speak["text"].endswith(alerts.MORE_CLOSING))       # the rest waits
         self.assertLess(len(scope["alerts"]), 17)
         import views
-        self.assertLessEqual(views.utf16_len(speak["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(speak["text"]), views.BODY_LIMIT)
         self.call("mark_rendering_delivered", render_id=speak["render_id"])
         rest = self.claim()["speak"]                                      # the older ones follow
         self.assertNotIn("may not have arrived", rest["text"])
@@ -681,23 +675,21 @@ class TestReviewC1(Requests):
         p, pkg, d = self.staged()
         self.call("record_delivery", delivery_id=d["delivery_id"], outcome="delivered",
                   package_token=p)
-        text = self.text("stage_for_delivery", channel="email", package_id=pkg["package_id"],
+        text = self.text("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
                          package_token=p)
         self.assertEqual(text, "refused: the Q3 2026 package was already sent — nothing "
-                               "changed. To have it again, or by email, ask for the package "
-                               "again.")
+                               "changed. To have it again, ask for the package again.")
         import views
         for word in views.FORBIDDEN:
             self.assertNotIn(word, text)
 
-    def test_a_request_is_staged_on_its_own_channel(self):
-        # M4
+    def test_a_request_is_never_staged_by_email(self):
+        # M4, S7 §6.2: no email — packages come as a file on Telegram
         self.seed(1, documents=1)
         p, pkg = self.built()
         self.assertEqual(self.text("stage_for_delivery", channel="email",
                                    package_id=pkg["package_id"], package_token=p),
-                         "refused: this package was asked for by telegram — stage it by "
-                         "telegram, or ask for the package again by email")
+                         "refused: " + delivery.EMAIL_GONE)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0], 0)
 
 
@@ -867,9 +859,6 @@ class TestEveryUnsentDeliveryIsTold(Requests):
     def test_a_revoked_resend_is_told_on_telegram(self):
         self.resend_revoked("telegram")
 
-    def test_a_revoked_resend_is_told_on_email(self):
-        self.resend_revoked("email")
-
     def test_a_failed_or_uncertain_resend_is_told(self):
         self.seed(1, documents=1)
         p, pkg, d = self.staged()
@@ -906,7 +895,7 @@ class TestAStagedSendIsRecoveredByItsDelivery(Requests):
     def recovered(self, channel):
         pkg, again = self.stalled_resend(channel)
         staged = pathlib.Path(again["path"])
-        target = staged.parent if channel == "email" else staged
+        target = staged
         self.assertTrue(target.exists())
         other = db.open_store()                         # a restart: a new session
         self.addCleanup(other.close)
@@ -927,13 +916,10 @@ class TestAStagedSendIsRecoveredByItsDelivery(Requests):
         self.assertIsNone(steps.claim(other)["continue"])
         out = sim.run_pass(self.conn, self.bf)
         self.assertEqual(out["import"]["revoked_deliveries"], [])
-        self.assertIn(pkg["filename"], out["end"]["speak"]["text"])
+        self.assertIn(views.field(pkg["filename"]), out["end"]["speak"]["text"])
 
     def test_a_stalled_resend_is_taken_back_and_told_on_telegram(self):
         self.recovered("telegram")
-
-    def test_a_stalled_resend_is_taken_back_and_told_on_email(self):
-        self.recovered("email")
 
     def test_a_resend_inside_its_lease_is_left_alone(self):
         _, again = self.stalled_resend("telegram")
@@ -959,7 +945,9 @@ class TestEveryCallTellsItsOwnNotice(Requests):
     returns that notice in its own `speak`, however many older alerts wait. The audit
     of every place a notice is raised is pinned so a new one cannot go unlisted."""
     RAISERS = {("passes", "_close"), ("delivery", "revoke_superseded_first_sends"),
-               ("delivery", "record_delivery"), ("delivery", "recover_staged")}
+               ("delivery", "record_delivery"), ("delivery", "recover_staged"),
+               ("db", "_settle_staged_email_on_upgrade"), ("job", "_close_oversize"),
+               ("posting", "post_package")}
 
     def test_every_notice_raising_site_is_audited(self):
         import ast
@@ -1004,7 +992,7 @@ class TestEveryCallTellsItsOwnNotice(Requests):
         _, pkg, _ = self.staged()
         self.fill_alerts()
         self.clock.advance(steps.LEASE_S)
-        self.assert_told(self.claim()["speak"], pkg["filename"], "continue_pass")
+        self.assert_told(self.claim()["speak"], views.field(pkg["filename"]), "continue_pass")
 
     def test_record_delivery(self):
         self.seed(1, documents=1)
@@ -1023,31 +1011,21 @@ class TestEveryCallTellsItsOwnNotice(Requests):
         self.assert_told(end["speak"], "I couldn't build the Q3 2026 package", "end_pass")
 
 
-class TestAnEmailWaitsForItsTap(Requests):
-    """Review C4 (H2): an email waits for the operator's approval tap, so its staged
-    send is not recovered for a day; and a send recovery settled `uncertain` that
-    turns out delivered is upgraded by that evidence."""
-    def test_an_email_send_has_a_day_before_it_is_recovered(self):
-        self.seed(1, documents=1)
-        _, _, d = self.staged("email")
-        self.clock.advance(steps.LEASE_S + 60)
-        self.assertIsNone(self.claim()["continue"])
-        self.assertTrue(pathlib.Path(d["path"]).exists())
-        self.clock.advance(delivery.EMAIL_RECOVERY_LEASE_S)
-        self.assertIsNone(self.claim()["continue"]["next"])
-        self.assertFalse(pathlib.Path(d["path"]).exists())
-
+class TestARecoveredSendIsUpgradedByEvidence(Requests):
+    """Review C4 (H2): a send recovery settled `uncertain` that turns out delivered is
+    upgraded by that evidence. (Its email half — a day's lease for the approval tap — went
+    with email, S7 §6.2.)"""
     def recovered(self, channel):
         self.seed(1, documents=1)
         p, pkg, d = self.staged(channel)
-        self.clock.advance(delivery.EMAIL_RECOVERY_LEASE_S + 1)
+        self.clock.advance(steps.LEASE_S + 1)
         r = self.claim()
         self.assertIsNone(r["continue"]["next"])
         self.assertIn("may not have arrived", r["speak"]["text"])
         return p, pkg, d
 
     def test_a_delivery_recorded_after_recovery_upgrades_it(self):
-        p, pkg, d = self.recovered("email")
+        p, pkg, d = self.recovered("telegram")
         out = self.call("record_delivery", delivery_id=d["delivery_id"], outcome="delivered",
                         message_id="m-1", package_token=p)
         self.assertEqual(out["status"], "delivered")
@@ -1061,7 +1039,7 @@ class TestAnEmailWaitsForItsTap(Requests):
                                   (f"delivery:{d['delivery_id']}:uncertain",)).fetchone()
         self.assertIsNotNone(stale["sent_at"])                     # no stale offer remains
         self.assertIsNone(self.claim()["speak"])
-        self.assertEqual(self.text("stage_for_delivery", channel="email", resend=True),
+        self.assertEqual(self.text("stage_for_delivery", channel="telegram", resend=True),
                          "refused: nothing is waiting to be sent again")
 
     def test_a_delivery_recorded_after_recovery_upgrades_it_without_the_token(self):
@@ -1087,7 +1065,7 @@ class TestAPackageThatArrivedIsNeverOfferedAgain(Requests):
     ARRIVED = "refused: the Q3 2026 package did arrive (sent 28 Sep) — nothing to send again"
 
     def lease(self, channel):
-        return delivery.EMAIL_RECOVERY_LEASE_S if channel == "email" else steps.LEASE_S
+        return steps.LEASE_S
 
     def upgraded_then_the_resend_stalls(self, channel):
         self.seed(1, documents=1)
@@ -1118,9 +1096,6 @@ class TestAPackageThatArrivedIsNeverOfferedAgain(Requests):
 
     def test_after_an_upgrade_a_stalled_resend_offers_nothing_on_telegram(self):
         self.upgraded_then_the_resend_stalls("telegram")
-
-    def test_after_an_upgrade_a_stalled_resend_offers_nothing_on_email(self):
-        self.upgraded_then_the_resend_stalls("email")
 
     def test_a_delivered_resend_closes_the_offer_still_open(self):
         self.seed(1, documents=1)
@@ -1224,7 +1199,7 @@ class TestReviewC6(Requests):
         self.call("mark_rendering_delivered", render_id=out["speak"]["render_id"])
         os.unlink(d["path"])
         view = self.call("build_review", view="status", quarter="2026-Q3")
-        self.assertIn(pkg["filename"], view["text"])
+        self.assertIn(views.field(pkg["filename"]), view["text"])
         self.assertIn("didn't go out", view["text"])
         self.call("mark_rendering_delivered", render_id=view["render_id"])
         again = self.call("stage_for_delivery", channel="telegram", resend=True)
@@ -1263,8 +1238,11 @@ class TestReviewC7(Requests):
         view = self.call("build_review", view="status", quarter="2026-Q3")
         self.assertNotIn(pkg["filename"], view["text"])
         self.call("mark_rendering_delivered", render_id=view["render_id"])
-        self.assertTrue(self.text("stage_for_delivery", channel="telegram",
-                                  resend=True).startswith("refused: nothing is waiting"))
+        # final fix wave I-2 (§6.3): "send it again" binds to the latest delivered rendering
+        # that OFFERS a package — the failed send's notice, not the status view after it —
+        # and that offer, no longer eligible, is answered with its own reason
+        self.assertEqual(self.text("stage_for_delivery", channel="telegram", resend=True),
+                         "refused: " + self.STALE)
 
     def test_an_untold_failed_offer_is_told_without_the_invitation(self):
         self.seed(1, documents=1)
@@ -1288,7 +1266,7 @@ class TestReviewC7(Requests):
         self.assertIsNone(self.conn.execute("SELECT revoked_at FROM deliveries WHERE"
                                             " delivery_id=?", (d["delivery_id"],)).fetchone()[0])
         view = self.call("build_review", view="status", quarter="2026-Q3")
-        self.assertIn(pkg["filename"], view["text"])
+        self.assertIn(views.field(pkg["filename"]), view["text"])
         self.call("mark_rendering_delivered", render_id=view["render_id"])
         again = self.call("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(again["filename"], pkg["filename"])
@@ -1307,7 +1285,7 @@ class TestReviewC7(Requests):
                               " 'staged', ?, ?)", (pkg["package_id"], db.now(), db.now()))
         self.fill_alerts(1)                      # another pass's alert forces a new rendering
         speak = self.claim()["speak"]
-        self.assertIn(pkg["filename"], speak["text"])       # the outcome is still told
+        self.assertIn(views.field(pkg["filename"]), speak["text"])       # the outcome is still told
         self.assertNotIn("send it again", speak["text"])    # but not offered
         self.assertNotIn("offers", self.scope(speak))
 
@@ -1315,16 +1293,24 @@ class TestReviewC7(Requests):
         # structural pin (tightened in C8): every function that composes offer wording
         # (the phrases), an offer scope ("offers" in any form) or an offer-carrying block
         # CALLS delivery.offerable() or delivery.resend_refusal() — none decides alone
+        # #44 (Ruling #44): the package note and the file's caption carry the package they
+        # are about in `offers`, whatever its state — they compose no offer wording, and
+        # resend_target answers that package with resend_refusal's own sentence
         self.assertEqual(offer_builders(), {("alerts", "_units"): True,
                                             ("alerts", "pending_in_tx"): True,
                                             ("views", "_compose"): True,
-                                            ("delivery", "resend_target"): True})
+                                            ("delivery", "resend_target"): True,
+                                            ("delivery", "_package_note"): False,
+                                            ("posting", "post_package"): False})
 
 
 PHRASES = ("send it again", "may not have arrived", "didn't go out")
-# the phrase's owner, the reply grammar that PARSES it, and the one collector of what
-# views._compose built (views._review: build_review's in-transaction body, S2 Task 10)
-EXEMPT = {("delivery", "offer_lines"), ("reply", "_clauses"), ("views", "_review")}
+# the phrase's owner, the reply grammar that PARSES it, the one collector of what
+# views._compose built (views._review: build_review's in-transaction body, S2 Task 10), and
+# the reply grammar's record of its bound rendering (reply._Scope.__init__ and its one
+# read helper, get), which READS that rendering's stored offers (binding R4) and composes none
+EXEMPT = {("delivery", "offer_lines"), ("reply", "_clauses"), ("views", "_review"),
+          ("reply", "__init__"), ("reply", "get")}
 
 
 def offer_builders() -> dict:

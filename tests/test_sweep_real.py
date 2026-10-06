@@ -96,7 +96,7 @@ class Base(StoreCase):
     def ingest(self, **kw):
         path = self.publish("inv-%d.pdf" % len(kw), PDF + repr(kw).encode())
         args = dict(source_path=path, kind="invoice", source="gmail",
-                    extraction_author="resident", counterparty="Zapier", issuer="Zapier",
+                    extraction_author="desk", counterparty="Zapier", issuer="Zapier",
                     amount_minor=1000, currency="EUR", document_date="2026-07-05")
         args.update(kw)
         return documents.ingest_document(self.conn, **args)["doc_id"]
@@ -170,11 +170,11 @@ class TestFourFailures(Base):
                                      expected_revision=self.rev(pid), token=self.token,
                                      row_snapshot=self.snapshot(pid))["match_id"]
         rid = self.show(pid)
-        matches.reject_match(self.conn, match_id=mid_a, expected_revision=self.rev(match_id=mid_a),
-                             render_id=rid)
+        self.granted(matches.reject_in_tx, match_id=mid_a,
+                     expected_revision=self.rev(match_id=mid_a),
+                     render_id=rid)
         rid = self.show(pid)
-        matches.record_match(self.conn, pid=pid, doc_id=b, author="operator",
-                             expected_revision=self.rev(pid), render_id=rid)
+        self.operator_pair(pid=pid, doc_id=b, expected_revision=self.rev(pid), render_id=rid)
         for start in (["acct::open"], ["acct::matched", "acct::proposed"]):
             cur = self.owned(r)
             if cur:
@@ -232,8 +232,8 @@ class TestEndsAndErasure(Base):
         old_pid = self.pid_of(self.rid())
         d = self.ingest()
         rid = self.show(old_pid)
-        matches.record_match(self.conn, pid=old_pid, doc_id=d, author="operator",
-                             expected_revision=self.rev(old_pid), render_id=rid)
+        self.operator_pair(pid=old_pid, doc_id=d, expected_revision=self.rev(old_pid),
+                           render_id=rid)
         self.new_pass()
         self.bf.purge_before("2026-08-01")                         # before the pass
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])      # this pass's own sync

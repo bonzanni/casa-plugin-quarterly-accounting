@@ -87,7 +87,7 @@ def ingest_paused(source_path, installed, resume, out):
     try:
         _report(out, lambda: documents.ingest_document(
             conn, source_path=source_path, kind="invoice", source="gmail",
-            extraction_author="resident"))
+            extraction_author="desk"))
     finally:
         conn.close()
 

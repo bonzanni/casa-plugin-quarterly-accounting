@@ -14,7 +14,6 @@ import ledger
 import matches
 import package
 import passes
-import reply
 import steps
 import sweep
 import views
@@ -94,17 +93,13 @@ class Undeliverable(RuntimeError):
 
 
 def _deliverable(tool: str, out):
-    """The final invariant (fix wave D round 2): every operator-facing text a
-    tool returns — a view's `text`, a `speak.text`, apply_reply's
-    `receipt` and each of its `receipt_pages`, job_report's `texts[i].text` — is at
-    most TELEGRAM_LIMIT UTF-16 units; otherwise the call fails loudly (isError)."""
+    """The final invariant (fix wave D round 2): every text a tool returns — a view's
+    `text`, a `speak.text`, a `receipt` and each of its `receipt_pages` — is at most
+    TELEGRAM_LIMIT UTF-16 units; otherwise the call fails loudly (isError)."""
     if not isinstance(out, dict):
         return out
     texts = [("text", out.get("text")), ("receipt", out.get("receipt"))]
     texts += [(f"receipt_pages[{i}]", t) for i, t in enumerate(out.get("receipt_pages") or [])]
-    # job_report's results (S2 §6.4): every page is a message of its own
-    texts += [(f"texts[{i}].text", t.get("text") if isinstance(t, dict) else t)
-              for i, t in enumerate(out.get("texts") or [])]
     speak = out.get("speak")
     if isinstance(speak, dict):
         texts.append(("speak.text", speak.get("text")))
@@ -114,6 +109,41 @@ def _deliverable(tool: str, out):
                                 f"over Telegram's {views.TELEGRAM_LIMIT}; it cannot be sent — "
                                 "this is a bug, report it")
     return out
+
+
+NOT_POSTED = ("this could not be posted ({code}) — nothing was sent. Ask again; if it keeps "
+              "happening, say what you asked for")
+
+
+def capability(slot):
+    """A posting tool (S7 §3): Casa's result contract for a delivering tool. The result is
+    `{slot: <reference>, ...}` after a deposit, or the explicit no-post shape — every slot
+    present as null and nothing deposited (INV-PLUG-028) — for a refusal or a deposit Casa
+    refused, so the words reach the model instead of a withheld result. The function
+    deposits LAST (the store is committed first): nothing can raise after the deposit."""
+    import casa_broker
+
+    def wrap(fn):
+        def inner(args):
+            try:
+                return fn(args)
+            except db.Refusal as exc:
+                return {slot: None, "refused": str(exc)}
+            except casa_broker.DepositFailed as exc:
+                return {slot: None, "refused": NOT_POSTED.format(code=exc.code)}
+        return inner
+    return wrap
+
+
+def keyed(fn):
+    """A tap's handler (S7 §7.3, §8, §11): its answer is the tap's receipt, which Casa posts
+    from a JSON object's `receipt` (INV-PROP-002) — a refusal included, in the same shape."""
+    def inner(args):
+        try:
+            return fn(args)
+        except db.Refusal as exc:
+            return {"receipt": str(exc)}
+    return inner
 
 
 QUARTER_WORDS = "a quarter is written like 2026-Q3 (Q3 and Q3 2026 are fine too)"
@@ -132,22 +162,6 @@ def _quarter(args, name="quarter"):
     return q
 
 
-def _when(args) -> str:
-    """set_watermark's start: a quarter (as _quarter) or a day, YYYY-MM-DD."""
-    v = args["when"]
-    q = dates.normalize_quarter(v, db.now()[:10])
-    if q is not None:
-        return q
-    try:
-        if not isinstance(v, str) or len(v) != 10:
-            raise ValueError
-        dates.parse_day(v)
-    except ValueError:
-        raise db.Refusal(f"the start is a quarter ({QUARTER_WORDS}) or a day like 2026-04-01, "
-                         f"not \"{v}\"") from None
-    return v
-
-
 def _pick(args, names):
     return {n: args[n] for n in names if n in args and args[n] is not None}
 
@@ -159,8 +173,8 @@ O = {"type": "object"}
 A = {"type": "array", "items": {"type": "string"}}
 AI = {"type": "array", "items": {"type": "integer"}}
 TOKEN = {"type": "integer", "description": "the pass_token job_next gave you in this turn"}
-PKG_TOKEN = {"type": "integer", "description": "the package_token job_report's `continue` "
-                                               "gave you"}
+PKG_TOKEN = {"type": "integer", "description": "the package_token the job's build or deliver "
+                                               "unit gave you"}
 Q = {"type": "string", "description": "YYYY-Qn, e.g. 2026-Q3 (Qn and Qn YYYY accepted)"}
 
 
@@ -173,7 +187,9 @@ def obj(props, required=()):
           "File a document into custody. source_path must be a path in Casa's handoff folder "
           "(gmail's download_attachment, or share_inbound_file for a document the operator "
           "sent); any other path is refused. Bytes are copied and hashed; filing the same bytes "
-          "twice returns the same doc_id. The metadata is your provisional reading, for filing. During a pass, pass the pass_token.",
+          "twice returns the same doc_id. The metadata is your provisional reading, for filing. "
+          "extraction_author is desk (a desk turn's filing, no token) or specialist (the "
+          "job's filing). During a pass, pass the pass_token.",
           obj({"source_path": S, "kind": S, "source": S, "extraction_author": S,
                "counterparty": S, "issuer": S, "document_date": S, "document_number": S,
                "amount_minor": I, "currency": S, "recipient": S, "source_ref": S,
@@ -265,8 +281,8 @@ def t_upsert_cp(args):
 @register("set_expectation",
           "What document a counterparty or a classification chain needs: kind (invoice, "
           "sales-invoice, credit-note, payslip, statement, receipt, none, or default to remove) "
-          "and tier (required/optional). Chains are the operator's; an operator author needs the "
-          "render_id of a view they were shown. During a pass, pass the pass_token.",
+          "and tier (required/optional). author is 'specialist' (chains and the operator's own "
+          "rulings are theirs, set by a tap). During a pass, pass the pass_token.",
           obj({"scope_type": S, "scope": S, "kind": S, "tier": S, "author": S, "render_id": S,
                "pass_token": TOKEN}, ("scope_type", "scope", "kind", "author")))
 def t_set_exp(args):
@@ -290,9 +306,8 @@ def _date_read(args) -> None:
 @register("record_match",
           "Pair a payment (pid) with a document. author='auto' (the specialist, during a pass: "
           "pass_token, row_digest: the item's value from list_quarter_state, labels, resolves naming exactly "
-          "the payment's unresolved candidates — its candidate_ids, and document_date: " + DATE_READ + ") "
-          "or 'operator' (render_id and the revision the "
-          "operator was shown). expected_revision is the payment's revision. During a pass, pass the pass_token.",
+          "the payment's unresolved candidates — its candidate_ids, and document_date: " + DATE_READ + "). "
+          "expected_revision is the payment's revision. During a pass, pass the pass_token.",
           obj({"pid": I, "doc_id": I, "author": S, "expected_revision": I, "render_id": S,
                "labels": A, "rationale": S, "runners_up": A, "resolves": AI, "row_snapshot": O,
                "row_digest": S, "document_date": S, "pass_token": TOKEN},
@@ -330,31 +345,6 @@ def t_propose(args):
         token=_int(args, "pass_token"), document_date=args.get("document_date"))
 
 
-@register("confirm_match",
-          "The operator approves a pairing they were shown (proposed, or a candidate beside "
-          "another). render_id + the pairing's shown revision. Prefer apply_reply, which binds "
-          "these for you.",
-          obj({"match_id": I, "expected_revision": I, "render_id": S},
-              ("match_id", "expected_revision", "render_id")))
-def t_confirm(args):
-    _need(args, "match_id", "expected_revision", "render_id")
-    return matches.confirm_match(conn(), match_id=_int(args, "match_id"),
-                                 expected_revision=_int(args, "expected_revision"),
-                                 render_id=args["render_id"])
-
-
-@register("reject_match",
-          "The operator removes a pairing they were shown; payment and document both stay. "
-          "Prefer apply_reply.",
-          obj({"match_id": I, "expected_revision": I, "render_id": S},
-              ("match_id", "expected_revision", "render_id")))
-def t_reject(args):
-    _need(args, "match_id", "expected_revision", "render_id")
-    return matches.reject_match(conn(), match_id=_int(args, "match_id"),
-                                expected_revision=_int(args, "expected_revision"),
-                                render_id=args["render_id"])
-
-
 @register("relabel_match",
           "Change a machine pairing's confidence labels (clean, guessed, no-ref, partial-search, "
           "recipient?) when later evidence arrives — e.g. a competing invoice. Specialist, "
@@ -367,20 +357,6 @@ def t_relabel(args):
                                  labels=tuple(args["labels"]), rationale=args.get("rationale"),
                                  runners_up=args.get("runners_up"),
                                  token=_int(args, "pass_token"))
-
-
-@register("set_exemption",
-          "The operator says one payment needs no document (exempt=true; drops any pairing) or "
-          "needs one after all (exempt=false). render_id + the shown revision. Prefer "
-          "apply_reply.",
-          obj({"pid": I, "exempt": B, "expected_revision": I, "render_id": S},
-              ("pid", "exempt", "expected_revision", "render_id")))
-def t_exempt(args):
-    _need(args, "pid", "expected_revision", "render_id")
-    exempt = _bool(args, "exempt")
-    return matches.set_exemption(conn(), pid=_int(args, "pid"), exempt=exempt,
-                                 expected_revision=_int(args, "expected_revision"),
-                                 render_id=args["render_id"])
 
 
 # --- the ledger and the sweep --------------------------------------------------
@@ -440,14 +416,26 @@ def t_observe(args):
 # --- the job (S2 §3, §5, §6.4, §13) -------------------------------------------------
 @register("job_next",
           "The job's next step. First call of every job turn: job_next(job_id=<your brief's "
-          "`Job id:` line>) — it gives you a pass_token; then job_next(pass_token=…) after "
+          "`Job id:` line>, started_by=<the line right after your brief's first `Job id:` "
+          "line, verbatim, when it is a `Started by:` line; else omit it>) — it gives you a "
+          "pass_token; then job_next(pass_token=…) after "
           "each step, with judged={judgment, after, page_next, triage_remaining, documents} "
           "after a judge step: echo the judge unit's `judgment` and `after` exactly as handed "
           "out (an answer that does not is refused). Do exactly the unit it returns. When it "
           "says report=true, call report_job_progress with its `progress` verbatim; at "
           "end-batch, end your turn; at complete, report_job_progress then "
-          "emit_completion(status=\"ok\", text=<its text>).",
-          obj({"job_id": S, "pass_token": TOKEN, "judged": O}))
+          "emit_completion(status=\"ok\", text=<its text>). `post` → "
+          "post_results(render_ids); on its receipt mark_rendering_delivered(render_ids). "
+          "`view` → show_view(render_id) (or propose_account() when it says accounts); on "
+          "its receipt mark_rendering_delivered(render_id). A withheld post marks nothing — "
+          "call job_next: it is offered again, at most twice. `build` → "
+          "build_quarterly_package(quarter, package_token, request_id). `deliver` → "
+          "stage_for_delivery(package_id, package_token), post_package(delivery_id, "
+          "package_token), then record_delivery on its receipt.",
+          obj({"job_id": S, "pass_token": TOKEN, "judged": O,
+               "started_by": {"type": "string", "description": "first job_id call only: "
+                              "Casa's `Started by:` line, the one right after the first "
+                              "`Job id:` line of your brief, copied verbatim"}}))
 def t_job_next(args):
     import job
     tok = _int(args, "pass_token")
@@ -458,7 +446,7 @@ def t_job_next(args):
             raise db.Refusal("judged goes with the pass_token of the turn that judged: "
                              "call job_next(job_id=…) without it")
         _need(args, "job_id")
-        tok = job.claim(conn(), args["job_id"])
+        tok = job.claim(conn(), args["job_id"], started_by=args.get("started_by"))
     return _deliverable("job_next", job.next_unit(conn(), tok, judged=args.get("judged")))
 
 
@@ -474,28 +462,15 @@ def t_job_status(args):
     return job.status(conn(), args["job_id"])
 
 
-@register("job_report",
-          "Ellen: on every notification about the accounting job (pass the id it names and "
-          "status: ok for a clean finish, cancelled when it says \"Cancelled by user\" — "
-          "nothing restarts — error for any other end) and at the end of every accounting "
-          "turn (no arguments) — "
-          "after the operator's message was answered or applied, never before. Send "
-          "`speak` first, then every `texts` entry in the order given, each verbatim and each "
-          "then mark_rendering_delivered (the operator's reply binds to the last one shown). "
-          "With `more: true`, call job_report again after sending what you got: more pages "
-          "wait. Do a `continue` as Packaging step 3 says; if `start_job` is set, call "
-          "start_job with it.",
-          obj({"job_id": S, "status": S}))
-def t_job_report(args):
-    import asks
-    return _deliverable("job_report", asks.job_report(conn(), job_id=args.get("job_id"),
-                                                      status=args.get("status")))
-
-
 @register("request_work",
-          "Ellen: record a check (kind=check, trigger cron|operator) or a handed-over "
-          "document (kind=handover, trigger=operator, doc_ids) BEFORE start_job; then call "
-          "start_job with the returned start_job and say the returned line.",
+          "Your desk's way to start the accounting check, also when a delegate asks you to "
+          "start or run it (even naming quarterly-accounting:work). "
+          "Record a check (kind=check, trigger=operator) or a filed document handed over "
+          "(kind=handover, trigger=operator, doc_ids) BEFORE start_job; then start_job with "
+          "the returned start_job; then say the result's reading: "
+          "pending → `line`; job_busy → ask_state(kind, request_id) and say its line; "
+          "anything else → \"I couldn't start the check (<Casa's message>). Ask again in "
+          "a minute.\"",
           obj({"kind": S, "trigger": S, "doc_ids": AI}, ("kind", "trigger")))
 def t_request_work(args):
     import asks
@@ -504,13 +479,25 @@ def t_request_work(args):
 
 
 @register("request_package",
-          "Ellen: ask for a quarter's package (channel telegram or email) BEFORE start_job; "
-          "then start_job with the returned start_job, and say the returned line.",
-          obj({"quarter": Q, "channel": S}, ("quarter", "channel")))
+          "Ask for a quarter's package BEFORE start_job; then start_job with the returned "
+          "start_job; then say the result's reading: "
+          "pending → `line`; job_busy → ask_state(kind, request_id) and say its line; "
+          "anything else → \"I couldn't start the check (<Casa's message>). Ask again in "
+          "a minute.\"",
+          obj({"quarter": Q}, ("quarter",)))
 def t_request_package(args):
     import asks
-    _need(args, "quarter", "channel")
-    return asks.request_package(conn(), _quarter(args), args["channel"])
+    _need(args, "quarter")
+    return asks.request_package(conn(), _quarter(args))
+
+
+@register("ask_state",
+          "Read-only: will the running accounting job take this ask? Say its `line`.",
+          obj({"kind": S, "request_id": I}, ("kind", "request_id")))
+def t_ask_state(args):
+    import asks
+    _need(args, "kind", "request_id")
+    return asks.ask_state(conn(), args["kind"], _int(args, "request_id"))
 
 
 @register("record_filing",
@@ -546,38 +533,11 @@ def t_probe(args):
 @register("check_setup",
           "What the pass can reach, as timestamped observations; whether it can run; whether "
           "bank-feed writes are allowed and with which expected_generation; the self-check "
-          "sentences to say when it cannot run.",
+          "sentences to say when it cannot run; when it asks which account is the business "
+          "account, call propose_account().",
           obj({}))
 def t_check(args):
     return binding.check_setup(conn())
-
-
-@register("bind_account",
-          "Bind the business account when the operator named it (only needed when several "
-          "company accounts exist; one is bound automatically). During a pass, pass the "
-          "pass_token.",
-          obj({"account_id": S, "label": S, "pass_token": TOKEN}, ("account_id",)))
-def t_bind(args):
-    _need(args, "account_id")
-    return binding.bind_account(conn(), args["account_id"], args.get("label", ""),
-                                _int(args, "pass_token"))
-
-
-@register("set_watermark",
-          "Move the start earlier (a quarter — YYYY-Qn, e.g. 2026-Q2; Qn and Qn YYYY accepted — "
-          "or YYYY-MM-DD): 'start from Q2'. Later is not offered.",
-          obj({"when": S}, ("when",)))
-def t_watermark(args):
-    _need(args, "when")
-    return work.set_watermark(conn(), _when(args))
-
-
-@register("set_package_name",
-          "Change the zip filename prefix: 'call the zips <name>'.",
-          obj({"name": S}, ("name",)))
-def t_pkg_name(args):
-    _need(args, "name")
-    return binding.set_package_name(conn(), args["name"])
 
 
 @register("reset_store",
@@ -610,15 +570,6 @@ def t_search(args):
                               **_pick(args, ("queries",)), **flags)
 
 
-@register("stop_chasing",
-          "'stop chasing Q2': that quarter's missing items stay listed and ship as MISSING but "
-          "are never searched again.",
-          obj({"quarter": Q}, ("quarter",)))
-def t_stop(args):
-    _need(args, "quarter")
-    return work.stop_chasing(conn(), _quarter(args))
-
-
 # --- views and replies -------------------------------------------------------------
 @register("list_quarter_state",
           "Every payment of a quarter with its state, or triage=true for what needs searching "
@@ -632,8 +583,8 @@ def t_stop(args):
           "its payments whose paired document's date was never read on the document "
           "(`dates_unread`, paged the same way): read each and confirm its date with "
           "update_document_metadata. Read it fresh for every "
-          "question; never answer from memory. Counts and totals come from build_review."
-          " During a pass, pass the pass_token.",
+          "question; never answer from memory. It posts nothing: show_view posts a view to "
+          "the operator. During a pass, pass the pass_token.",
           obj({"quarter": Q, "triage": B, "fresh_only": B, "limit": I, "pass_token": TOKEN,
                "pid": I, "dates_unread": B,
                "after": {"type": "array", "description": "the cursor from the previous `next`, "
@@ -648,12 +599,11 @@ def t_state(args):
 
 
 @register("build_review",
-          "Render a view (status, missing, check, rest, older, all, item, quarter) as finished "
-          "text. Send the text VERBATIM — do not retell, reorder or add figures — then call "
-          "mark_rendering_delivered with its render_id. If the send fails, do not. When the "
-          "operator says \"all of them\" or \"more\", call build_review again with exactly the "
-          "arguments in `next` (view, quarter, page, after); `next` is null when nothing is left.",
-          obj({"view": S, "quarter": Q, "pid": I, "page": I,
+          "Read-only: renders a view (status, missing, check, rest, older, all, item, quarter) "
+          "as text for your own reading. It posts nothing: never send its text to the operator "
+          "and never mark it delivered — show_view posts a view, with its buttons. `next` is "
+          "the arguments of the following page (null when nothing is left).",
+          obj({"view": S, "quarter": Q, "pid": I, "page": I, "prev": S,
                "after": {"type": "array", "description": "the cursor from the previous `next`, "
                                                           "passed back unchanged"}}))
 def t_review(args):
@@ -662,69 +612,192 @@ def t_review(args):
         raise db.Refusal("after is the cursor a previous page's `next` returned")
     return _deliverable("build_review", views.build_review(
         conn(), view=args.get("view") or "status", quarter=_quarter(args),
-        pid=_int(args, "pid"), page=_int(args, "page"), after=after))
+        pid=_int(args, "pid"), page=_int(args, "page"), after=after, prev=args.get("prev")))
+
+
+@register("show_view",
+          "Post a view to the operator, with its buttons (Casa posts it, labelled; never "
+          "retell it). view: status, missing, check, rest, older, all, item (with pid), "
+          "quarter; page/after/prev from a previous `next`, unchanged. render_id: post that stored "
+          "rendering again (the job's `view` unit). After Casa's receipt "
+          "(casa_delivery.status delivered), call mark_rendering_delivered(render_id).",
+          obj({"view": S, "quarter": Q, "pid": I, "page": I, "walk": S, "render_id": S,
+               "prev": S,
+               "after": {"type": "array", "description": "the cursor from a `next`, unchanged"}}))
+@capability("view")
+def t_show_view(args):
+    import posting
+    after = args.get("after")
+    if after is not None and not isinstance(after, list):
+        raise db.Refusal("after is the cursor a previous page's `next` returned")
+    return posting.show_view(conn(), view=args.get("view"), quarter=_quarter(args),
+                             pid=_int(args, "pid"), page=_int(args, "page"), after=after,
+                             walk=args.get("walk"), render_id=args.get("render_id"),
+                             prev=args.get("prev"))
+
+
+@register("verdict",
+          "A button's call: only a tap on the operator's own button makes it. Never call it "
+          "yourself — it refuses without the button's key.",
+          obj({"render_id": S, "action": S, "pid": I, "key": S},
+              ("render_id", "action", "key")))
+@keyed
+def t_verdict(args):
+    import taps
+    return taps.verdict(conn(), args.get("render_id"), args.get("action"),
+                        _int(args, "pid"), args.get("key"))
+
+
+@register("propose_reading",
+          "The operator's words about the accounting (a swipe-reply's words, or the brief "
+          "of a delegation): pass them VERBATIM as text, and the quoted post's text as "
+          "quoted when your context has one. Nothing is applied: a change is posted to "
+          "the operator to Apply. `say`: say it as your answer, verbatim. `instructions`: "
+          "run each (an instruction {\"show_view\": {…}} is show_view with exactly those "
+          "arguments — \"more\" and \"all of them\" come so; show_view for \"show the rest\", "
+          "\"show older\", \"show item N\"; "
+          "request_package then start_job for \"rebuild Qn\"; resend and send-last as "
+          "your skill says). `reshow`: show_view(view=\"item\", pid=…) for each. "
+          "`understood: false`: nothing was read as an accounting reply.",
+          obj({"text": S, "quoted": S}, ("text",)))
+@capability("reading")
+def t_propose_reading(args):
+    import posting
+    _need(args, "text")
+    return posting.propose_reading(conn(), args["text"], args.get("quoted"))
+
+
+@register("apply_reading",
+          "A button's call: only a tap on the operator's own button makes it. Never call it "
+          "yourself — it refuses without the button's key.",
+          obj({"reading_id": I, "key": S}, ("reading_id", "key")))
+@keyed
+def t_apply_reading(args):
+    import taps
+    return taps.apply_reading(conn(), _int(args, "reading_id"), args.get("key"))
+
+
+@register("cancel_reading",
+          "A button's call: only a tap on the operator's own button makes it. Never call it "
+          "yourself — it refuses without the button's key.",
+          obj({"reading_id": I, "key": S}, ("reading_id", "key")))
+@keyed
+def t_cancel_reading(args):
+    import taps
+    return taps.cancel_reading(conn(), _int(args, "reading_id"), args.get("key"))
+
+
+@register("propose_account",
+          "Ask the operator which company account is the business account (check_setup says "
+          "when): posts the choices with buttons. Never bind it yourself.",
+          obj({"after": I}))
+@capability("accounts")
+def t_propose_account(args):
+    import posting
+    after = args.get("after")
+    return posting.propose_account(conn(), 0 if after is None else after)
+
+
+@register("bind_account",
+          "A button's call: only a tap on the operator's own button makes it. Never call it "
+          "yourself — it refuses without the button's key.",
+          obj({"choice": I, "key": S}, ("choice", "key")))
+@keyed
+def t_bind_account(args):
+    import taps
+    return taps.bind_account(conn(), args.get("choice"), args.get("key"))
+
+
+@register("post_results",
+          "Post stored renderings to the operator as one message (Casa posts it, labelled; "
+          "never retell it): the job's `post` unit's render_ids, or a render id a tool "
+          "returned for the operator (a notice, a package's details). After Casa's receipt "
+          "(casa_delivery.status delivered), call mark_rendering_delivered(render_ids=<the "
+          "returned render_ids>); with none returned, nothing was posted.",
+          obj({"render_ids": A}, ("render_ids",)))
+@capability("results")
+def t_post_results(args):
+    import posting
+    return posting.post_results(conn(), args.get("render_ids"))
 
 
 @register("mark_rendering_delivered",
-          "Call right after a rendering (or a `speak`, or a job_report text) was sent successfully. Only this "
-          "makes it count as shown.",
-          obj({"render_id": S}, ("render_id",)))
+          "Call after Casa's receipt for a post (casa_delivery.status delivered): "
+          "render_ids=<the render_ids post_results returned>, or render_id=<the view's "
+          "render_id>. Only this makes it count as shown; a withheld post marks nothing.",
+          obj({"render_id": S, "render_ids": A}))
 def t_delivered(args):
+    ids = args.get("render_ids")
+    if ids is not None:
+        if (not isinstance(ids, list) or not ids
+                or not all(isinstance(r, str) for r in ids)):
+            raise db.Refusal("render_ids is the list post_results returned")
+        return {"marked": [views.mark_rendering_delivered(conn(), r) for r in ids]}
     _need(args, "render_id")
     return views.mark_rendering_delivered(conn(), args["render_id"])
 
 
-@register("apply_reply",
-          "Pass the operator's reply VERBATIM when it reads as a correction, approval, exemption "
-          "or instruction about the accounting. Applies only what resolves, bound to what they "
-          "were shown. Send EVERY entry of receipt_pages, in order, each as its own message "
-          "(receipt is the first page). Also returns items to show again (build_review item) "
-          "and instructions for you (rebuild, resend, show views; \"show item N\" is "
-          "build_review(view=\"item\", pid=N)). `understood: false`: nothing in the message "
-          "was read as a reply and nothing applied — unless it was plainly an approval or "
-          "correction, answer it as conversation and send none of it.",
-          obj({"text": S}, ("text",)))
-def t_reply(args):
-    _need(args, "text")
-    return _deliverable("apply_reply", reply.apply_reply(conn(), args["text"]))
+@register("post_package",
+          "Post a staged package to the operator as a file (Casa posts it, labelled, under "
+          "the package's name). After Casa's receipt (casa_delivery.status delivered): "
+          "record_delivery(delivery_id, outcome=\"delivered\"); withheld or no receipt: "
+          "record_delivery(outcome=\"uncertain\") — never post it again yourself. A send staged "
+          "for a package request (the job's deliver unit) needs that unit's package_token.",
+          obj({"delivery_id": I, "package_token": PKG_TOKEN}, ("delivery_id",)))
+@capability("package")
+def t_post_package(args):
+    import posting
+    _need(args, "delivery_id")
+    return posting.post_package(conn(), _int(args, "delivery_id"), _int(args, "package_token"))
 
 
 # --- packaging ---------------------------------------------------------------------
 @register("build_quarterly_package",
           "Build the quarter's zip from what is known now (partial while the quarter runs), for "
-          "the package request whose package_token job_report's `continue` gave you. Returns "
-          "its path and the caption to send with it.",
-          obj({"quarter": Q, "package_token": PKG_TOKEN}, ("quarter", "package_token")))
+          "the package request the job's build unit names: pass its quarter, package_token "
+          "and request_id. Returns the package_id.",
+          obj({"quarter": Q, "package_token": PKG_TOKEN,
+               "request_id": {"type": "integer",
+                              "description": "the request_id the job's build unit gave you"}},
+              ("quarter", "package_token")))
 def t_build(args):
     _need(args, "quarter", "package_token")
     return package.build_quarterly_package(conn(), _quarter(args),
-                                           _int(args, "package_token"))
+                                           _int(args, "package_token"),
+                                           request_id=_int(args, "request_id"))
 
 
 @register("stage_for_delivery",
-          "Stage a built package (package_id) or one invoice (doc_id) for telegram (send_media) or "
-          "email (gmail send_email to the operator's own address only, with the returned "
-          "request_id). Then record_delivery. For apply_reply's `resend` instruction (\"send it "
-          "again\") pass resend=true and neither id: it stages the exact file the last view the "
-          "operator saw offered, or refuses with the words to say. For its `send last` "
-          "instruction pass last_built=true (and the quarter it names, if any) and neither "
-          "id: the last package built, unchanged; send it with the returned caption. A package built for a "
-          "package request needs its package_token; staging it again returns the same send. "
-          "Telegram: pass the returned filename to send_media. During a pass, pass the "
-          "pass_token.",
-          obj({"channel": S, "package_id": I, "doc_id": I, "resend": B, "last_built": B,
-               "quarter": Q, "pass_token": TOKEN, "package_token": PKG_TOKEN}, ("channel",)))
+          "Stage a built package (package_id) to post to the operator. Then "
+          "post_package(delivery_id), then record_delivery. For propose_reading's `resend` "
+          "instruction (\"send it again\") pass resend=true and neither id: it stages the "
+          "exact file the last view the operator saw offered, or refuses with the words to "
+          "say; its `stage_for_delivery` instruction (a reply to one message) gives the "
+          "arguments, render_id included. For its `send last` instruction pass last_built=true (and the quarter it "
+          "names, if any) and neither id: the last package built, unchanged. A package built "
+          "for a package request needs its package_token (the job's deliver unit gives it: "
+          "that unit's check has ended, and the package_token admits the send); staging it "
+          "again returns the same send. channel is telegram (the default). During a pass, "
+          "pass the pass_token.",
+          obj({"channel": S, "package_id": I, "resend": B, "render_id": S, "last_built": B,
+               "quarter": Q, "pass_token": TOKEN, "package_token": PKG_TOKEN}))
 def t_stage(args):
-    _need(args, "channel")
+    if args.get("doc_id") is not None:
+        # final fix wave T11-a: post_package posts packages only, so a staged document
+        # could never go out (and nothing would recover it); the server path stays
+        raise db.Refusal("a single document is not sent from here — nothing was staged")
     resend = _bool(args, "resend", False)
-    package_id, doc_id = _int(args, "package_id"), _int(args, "doc_id")
+    package_id = _int(args, "package_id")
+    render_id = args.get("render_id")
+    if render_id is not None and not resend:
+        raise db.Refusal("render_id goes with resend=true, as the reading's instruction says")
     if resend:
-        if package_id is not None or doc_id is not None:
+        if package_id is not None:
             raise db.Refusal("resend stages what the operator was offered: name no package "
-                             "or document with it")
-        package_id = delivery.resend_target(conn())
-    return delivery.stage_for_delivery(conn(), channel=args["channel"],
-                                       package_id=package_id, doc_id=doc_id,
+                             "with it")
+        package_id = delivery.resend_target(conn(), render_id)
+    return delivery.stage_for_delivery(conn(), channel=args.get("channel") or "telegram",
+                                       package_id=package_id,
                                        pass_token=_int(args, "pass_token"),
                                        package_token=_int(args, "package_token"),
                                        resend=resend,
@@ -733,12 +806,13 @@ def t_stage(args):
 
 
 @register("record_delivery",
-          "Record a send's outcome: delivered (email: only with the message id), uncertain (a "
-          "timeout — never resend by yourself), failed. A send staged for a package request "
-          "needs its package_token. For a package recorded uncertain or failed it returns "
-          "`speak`: send its text verbatim, then mark_rendering_delivered with its render_id — "
-          "it is what lets the operator say \"send it again\". During a pass, pass the "
-          "pass_token.",
+          "Record a send's outcome: delivered (on Casa's receipt), uncertain (withheld or no "
+          "receipt — never post it again yourself), failed. A send staged for a package "
+          "request needs its package_token (the job's deliver unit's: it admits the record "
+          "after that unit's check has ended). Returns `speak` (uncertain/failed) or "
+          "`note_render_id` (delivered): post it with post_results(render_ids=[…]), then mark "
+          "it delivered on the receipt — in a job turn the next `post` does it for you. "
+          "During a pass, pass the pass_token.",
           obj({"delivery_id": I, "outcome": S, "message_id": S, "pass_token": TOKEN,
                "package_token": PKG_TOKEN}, ("delivery_id", "outcome")))
 def t_record_delivery(args):

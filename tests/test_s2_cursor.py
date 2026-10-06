@@ -22,7 +22,8 @@ class CheckPass(StoreCase):
         self.assertIn("judge", kinds)
         self.assertEqual(kinds[-1], "complete")
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("done", "complete"))
+        # S7 §5: the job posted the result and its receipt was marked
+        self.assertEqual((r["state"], r["outcome"]), ("reported", "complete"))
 
     def test_a_turn_cut_mid_item_rehands_that_item_first(self):
         import asks, job
@@ -56,7 +57,8 @@ class CheckPass(StoreCase):
             passes.poison(self.conn, "the bank ledger changed during this pass")
         self.drv.run_job(A)
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
+        # S7 §5: the job posted the result and its receipt was marked
+        self.assertEqual((r["state"], r["outcome"]), ("reported", "stopped"))
 
     def test_two_w_refreshes_import_twice(self):
         import asks, datetime as _dt, db, job
@@ -79,7 +81,8 @@ class CheckPass(StoreCase):
         asks.request_work(self.conn, "check", "operator")
         self.drv.run_job(A)
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
+        # S7 §5: the job posted the result and its receipt was marked
+        self.assertEqual((r["state"], r["outcome"]), ("reported", "stopped"))
 
     def test_a_failed_sync_does_not_stop_the_pass(self):
         """PLAY T7 F1 (as v0.8.0): a failed sync imports bank-feed's cached ledger and the
@@ -89,7 +92,8 @@ class CheckPass(StoreCase):
         asks.request_work(self.conn, "check", "operator")
         self.drv.run_job(A)
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("done", "complete"))
+        # S7 §5: the job posted the result and its receipt was marked
+        self.assertEqual((r["state"], r["outcome"]), ("reported", "complete"))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0], 1)
 
     def test_eight_asks_that_each_stop_at_once_all_get_dispositions(self):
@@ -97,7 +101,7 @@ class CheckPass(StoreCase):
         self.drv.bankfeed.restore_since_install()        # every pass stops at its probes
         for q in ("2025-Q1", "2025-Q2", "2025-Q3", "2025-Q4",
                   "2026-Q1", "2026-Q2", "2026-Q3", "2026-Q4"):
-            asks.request_package(self.conn, q, "telegram")
+            asks.request_package(self.conn, q)
         asks.request_work(self.conn, "check", "operator")
         # one Casa job run begins at most MAX_PASSES_PER_JOB passes (spec §15); the
         # standing retry starts the next job, which takes the rest
@@ -234,7 +238,8 @@ class HandoverMidJudgment(StoreCase):
         self.drv.next_until(t2, "complete")
         r = self.conn.execute("SELECT state, outcome, verdicts_json FROM work_requests WHERE"
                               " request_id=?", (rid,)).fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("done", "complete"))
+        # S7 §5: the job posted the result and its receipt was marked
+        self.assertEqual((r["state"], r["outcome"]), ("reported", "complete"))
         import json
         v = json.loads(r["verdicts_json"])[str(doc)]
         self.assertGreater(v["judge"], created)

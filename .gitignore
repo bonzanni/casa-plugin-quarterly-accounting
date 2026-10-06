@@ -1,3 +1,4 @@
 __pycache__/
 *.pyc
 .tmp/
+tests/casa_shapes.jsonl

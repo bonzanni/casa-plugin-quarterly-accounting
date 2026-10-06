@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 
+import authority
 import db
 import expectation as ex
 
@@ -88,7 +89,7 @@ def upsert_counterparty(conn, name, *, patterns=(), source=None, document_link=N
 
 def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, link_note=None,
                  search_hint=None, notes=None, window_days=None) -> dict:
-    """The upsert inside the caller's transaction (apply_reply's identity clause
+    """The upsert inside the caller's transaction (a reading's identity clause
     checks the shown revision in the same transaction as this write)."""
     import lineage
     if not (name or "").strip():
@@ -135,26 +136,36 @@ def _refuse_shared_bank_text(conn, entry, texts) -> None:
             continue
         shared = set(mine) & _texts(r["name"], json.loads(r["patterns_json"]))
         if shared:
-            raise db.Refusal(f"the bank text {mine[min(shared)]!r} already belongs to "
-                             f"{r['name']}; change {r['name']} instead, or give this "
+            # the names are printed escaped (S7 INV-S7-7): this refusal reaches the
+            # operator's receipt through reply._say
+            import views
+            owner = views.field(r["name"])
+            raise db.Refusal(f"the bank text '{views.field(mine[min(shared)])}' already "
+                             f"belongs to {owner}; change {owner} instead, or give this "
                              "counterparty another name")
 
 
-def _require_delivered_render(conn, render_id) -> None:
-    r = conn.execute("SELECT delivered_at FROM renders WHERE render_id=?",
+def _require_seen_render(conn, render_id) -> None:
+    """An operator rule's provenance is a SEEN rendering — delivered, or posted by show_view
+    (db.seen_render; binding §2 #11: the reading's one bound rendering R)."""
+    r = conn.execute("SELECT delivered_at, posted_seq FROM renders WHERE render_id=?",
                      (render_id,)).fetchone() if render_id else None
-    if r is None or r["delivered_at"] is None:
+    if not db.seen_render(r):
         raise db.Refusal("an operator decision must come from a view the operator was shown "
-                         "(a delivered render_id)")
+                         "(a delivered or posted render_id)")
 
 
 def set_expectation(conn, *, scope_type, scope, kind, tier=None, author, render_id=None,
                     token=None) -> dict:
     import passes
+    if author == "operator":
+        # S7 §8.1: the operator's expectation is set by a tap (set_expectation_in_tx under
+        # a grant), never by a tool call
+        raise db.Refusal(authority.TAP_ONLY)
+    if author != "specialist":
+        raise db.Refusal("author is 'specialist'")
     if scope_type not in ("counterparty", "chain"):
         raise db.Refusal("scope_type is 'counterparty' or 'chain'")
-    if author not in ("operator", "specialist"):
-        raise db.Refusal("author is 'operator' or 'specialist'")
     if kind != "default":
         if kind not in ex.KINDS + ("none",):
             raise db.Refusal(f"kind is one of {', '.join(ex.KINDS)}, 'none' or 'default'")
@@ -169,14 +180,16 @@ def set_expectation(conn, *, scope_type, scope, kind, tier=None, author, render_
 
 
 def set_expectation_in_tx(conn, *, scope_type, scope, kind, tier=None, author,
-                          render_id=None) -> dict:
-    """The override inside the caller's transaction, so apply_reply can check,
-    in that same transaction, that every payment it changes was shown."""
+                          render_id=None, grant=None) -> dict:
+    """The override inside the caller's transaction, so a reading can check, in that same
+    transaction, that every payment it changes was shown. An operator author needs a tap's
+    grant (S7 §8.1)."""
     import lineage
     if kind == "none":
         tier = None
     if author == "operator":
-        _require_delivered_render(conn, render_id)
+        authority.require(conn, grant)
+        _require_seen_render(conn, render_id)
     if scope_type == "chain":
         if author != "operator":
             raise db.Refusal("a class-level expectation is the operator's to set")
@@ -212,8 +225,9 @@ def set_expectation_in_tx(conn, *, scope_type, scope, kind, tier=None, author,
         if author == "specialist" and e["exp_author"] == "operator":
             # the operator's ruling on this payee ("no invoices ever for X") is theirs
             # to change; a specialist's write never silently replaces it (fix wave F)
-            raise db.Refusal(f"the operator set what {e['name']} needs; only the operator "
-                             "changes it — nothing was changed")
+            import views
+            raise db.Refusal(f"the operator set what {views.field(e['name'])} needs; only "
+                             "the operator changes it — nothing was changed")
         if kind == "default":
             conn.execute("UPDATE counterparties SET exp_kind=NULL, exp_tier=NULL,"
                          " exp_author=NULL, updated_at=? WHERE cp_id=?", (db.now(), e["cp_id"]))

@@ -437,15 +437,13 @@ def _lease_fresh(lease_at) -> bool:
     return lease_at is not None and _age(lease_at) < LEASE_S
 
 
-def _choose(conn, sends_only=False):
+def _choose(conn):
     """What a claim would take now: ("pass", marker, step), ("delivery", a stalled
-    staged send), ("request", row), ("round", queued request), or ("none", answer).
-    `sends_only` (S2 §6.4, the job's sends-only claim): never the pass or a round —
-    only ("delivery", …), ("request", …) or ("none", …)."""
+    staged send), ("request", row), ("round", queued request), or ("none", answer)."""
     m = _live_pass(conn)
     fresh = m is not None and _lease_fresh(m["lease_at"])
     running = None
-    if m is not None and not sends_only:
+    if m is not None:
         step = latest(conn, m["pass_id"])
         if step is not None:
             ended = _ended(step)
@@ -469,7 +467,7 @@ def _choose(conn, sends_only=False):
                             " 'built') ORDER BY request_id").fetchall():
         if not _lease_fresh(req["lease_at"]):
             return ("request", req)
-    if m is None and not sends_only:
+    if m is None:
         # issue #15: no pass is live and a package request waits for a round of its check
         req = conn.execute("SELECT * FROM package_requests WHERE state='queued'"
                            " ORDER BY request_id LIMIT 1").fetchone()
@@ -547,23 +545,6 @@ def claim(conn, delegation_id=None, delegation_status=None) -> dict:
             continue
     raise db.Busy("the accounting store kept changing under this call; nothing was claimed "
                   "— ask again")
-
-
-def _claim_sends_tx(conn) -> dict:
-    """A sends-only claim (S2 §6.4): a stalled staged send, or a buildable or built
-    package request whose lease lapsed. The caller holds the custody lock and the
-    write transaction."""
-    assert conn.in_transaction
-    cand = _choose(conn, sends_only=True)
-    if cand[0] == "delivery":
-        out = _claim_delivery(conn, cand[1])
-    elif cand[0] == "request":
-        out = _claim_request(conn, cand[1])
-    else:
-        return {"continue": None}
-    out["more"] = passes.queued_waiting(conn)
-    _fits(out)
-    return out
 
 
 class Oversized(RuntimeError):

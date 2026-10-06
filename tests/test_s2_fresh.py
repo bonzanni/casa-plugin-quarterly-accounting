@@ -239,7 +239,7 @@ class FreshnessF(Acquisition):
         # setUp's check pass ends first and the package round takes the marker
         with db.tx(self.conn):
             passes._end_pass_tx(self.conn, self.tok, "interrupted", {})
-        asks.request_package(self.conn, "2026-Q3", "telegram")
+        asks.request_package(self.conn, "2026-Q3")
         self.pid = self.start_job_pass(self.tok, trigger="package")
         self.bind_round_and_take(self.pid)
         acq = self.handed()

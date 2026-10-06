@@ -10,24 +10,38 @@ import unittest
 from tests._base import ROOT, StoreCase, TempEnv
 import db  # noqa: E402
 import qa_server  # noqa: E402
+import views  # noqa: E402
 
 sys.modules.setdefault("qa_server", qa_server)
 
 EXPECTED = {
     "ingest_document", "update_document_metadata", "mark_irrelevant", "list_unmatched_documents",
     "get_counterparty", "upsert_counterparty", "set_expectation",
-    "record_match", "propose_match", "confirm_match", "reject_match", "relabel_match",
-    "set_exemption",
+    "record_match", "propose_match", "relabel_match",
     "import_ledger_export", "list_projections", "record_observation",
-    "record_probe", "check_setup", "bind_account", "set_watermark",
-    "set_package_name", "reset_store",
-    "record_search", "stop_chasing",
-    "list_quarter_state", "build_review", "mark_rendering_delivered", "apply_reply",
+    "record_probe", "check_setup", "reset_store",
+    "record_search",
+    "list_quarter_state", "build_review", "mark_rendering_delivered",
     "build_quarterly_package", "stage_for_delivery", "record_delivery", "read_document",
     # S2 (spec §8, §13): the job's tools replace begin_pass, end_pass, continue_pass,
     # record_step and more_work
-    "job_next", "job_status", "job_report", "request_work", "request_package",
+    "job_next", "job_status", "request_work", "request_package",
     "record_filing",
+    # S7 Task 8 (§4): will the running job take this ask?
+    "ask_state",
+    # S7 Task 9 (§9): job_report left the surface (the job posts its own results)
+    # S7 §8.1: confirm_match, reject_match, set_exemption, bind_account, set_watermark,
+    # set_package_name, stop_chasing and apply_reply left the surface (a tap's grant only)
+    # S7 §7 (Task 5): a view posted with its buttons, and the verdict a button carries
+    "show_view", "verdict",
+    # S7 §8 (Task 6): typed words read into a reading, and its Apply / Cancel buttons
+    "propose_reading", "apply_reading", "cancel_reading",
+    # S7 §11 (Task 7): the business account chosen by button
+    "propose_account", "bind_account",
+    # S7 §5 (Task 10): the job posts its own results
+    "post_results",
+    # S7 §6.1 (Task 11): the job posts the package as a file, under its name
+    "post_package",
 }
 
 
@@ -85,14 +99,16 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 38)             # S2: 37 - 5 removed + 6 added
+        self.assertEqual(len(EXPECTED), 39)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
+                                                # Task 7: + 2; T8: + ask_state; T9: - job_report (§9);
+                                                # T10: + post_results (§5); T11: + post_package (§6.1)
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 38)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 39)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
@@ -117,7 +133,7 @@ class TestSurface(TempEnv):
     def test_missing_argument_is_a_refusal_not_a_crash(self):
         import tools  # noqa: F401
         out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                "params": {"name": "apply_reply", "arguments": {}}})
+                                "params": {"name": "get_counterparty", "arguments": {}}})
         self.assertTrue(out["result"]["content"][0]["text"].startswith("refused:"))
 
     def test_a_refusal_is_not_an_error(self):
@@ -138,25 +154,18 @@ class TestDeliverableBoundary(TempEnv):
         from unittest import mock
         import asks
         import delivery
-        import reply
         import views
         big = "x" * 4097
         cases = [("build_review", views, "build_review", {"render_id": "r1", "text": big},
                   {}),
-                 # S2: job_report's result pages and its speak (end_pass's, before S2)
-                 ("job_report", asks, "job_report",
-                  {"texts": [{"render_id": "r1", "text": "ok"},
-                             {"render_id": "r2", "text": big}], "speak": None}, {}),
-                 ("job_report", asks, "job_report",
-                  {"texts": [], "speak": {"render_id": "r1", "text": big}}, {}),
-                 ("apply_reply", reply, "apply_reply",
-                  {"receipt": "ok", "receipt_pages": ["ok", big]}, {"text": "all good"}),
+                 # S7 Task 9 (§9): job_report (texts, speak) left the surface
                  # fix wave F: the offer an uncertain package send returns
                  ("record_delivery", delivery, "record_delivery",
                   {"speak": {"render_id": "r1", "text": big}},
-                  {"delivery_id": 1, "outcome": "uncertain"}),
-                 ("apply_reply", reply, "apply_reply",
-                  {"receipt": big, "receipt_pages": [big]}, {"text": "all good"})]
+                  {"delivery_id": 1, "outcome": "uncertain"})]
+        # S7: apply_reply (receipt, receipt_pages) left the surface (Task 4); a reading's
+        # proposal and its Apply receipt are fitted by construction (views.fit_message,
+        # views.fits_proposal), pinned in test_s7_readings and test_fit
         for tool, mod, fn, out, args in cases:
             with mock.patch.object(mod, fn, lambda *a, _o=out, **k: _o):
                 res = _tool(tool, **args)
@@ -218,8 +227,8 @@ class TestPassTokens(ToolCase):
 
 
 class TestResend(ToolCase):
-    """'send it again': apply_reply emits the instruction `resend`; Ellen calls
-    stage_for_delivery(resend=true), which stages what the last delivered
+    """'send it again': propose_reading returns the instruction `resend`; the desk turn
+    calls stage_for_delivery(resend=true), which stages what the last delivered
     rendering offered (delivery.resend_target)."""
     def setUp(self):
         super().setUp()
@@ -249,8 +258,9 @@ class TestResend(ToolCase):
     def test_send_it_again_stages_the_offered_package(self):
         self.send(self.a["package_id"], "uncertain")
         self.send(self.b["package_id"], "delivered")
-        self.assertIn(self.a["filename"], self.show())
-        self.assertIn("resend", _json("apply_reply", text="send it again")["instructions"])
+        self.assertIn(views.field(self.a["filename"]), self.show())
+        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
+        self.assertIn("resend", _json("propose_reading", text="send it again")["instructions"])
         staged = _json("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(staged["filename"], self.a["filename"])
         self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),
@@ -333,7 +343,7 @@ class TestMachineWritesNeedAPass(ToolCase):
                     and "pass_token" not in t["schema"]["required"]
                     # S2: job_next's first call claims with job_id; its token is not a write's
                     and n != "job_next"]
-        self.assertEqual(len(optional), 11, optional)       # + list_quarter_state (the clock)
+        self.assertEqual(len(optional), 10, optional)       # + list_quarter_state (the clock); S7: - bind_account
         for n in optional:
             self.assertIn("During a pass, pass the pass_token.",
                           qa_server.TOOLS[n]["description"], n)
@@ -389,8 +399,9 @@ class TestArgumentTypes(ToolCase):
         bools = [(n, k) for n, t in qa_server.TOOLS.items()
                  for k, v in t["schema"]["properties"].items() if v.get("type") == "boolean"]
         # fix wave F: + fresh_only; + failed; #10: + stopped_by_refusal, out_of_time; #15: +
-        # last_built; #22: + dates_unread; S2: - record_step's three, + record_probe's absent
-        self.assertEqual(len(bools), 15, bools)
+        # last_built; #22: + dates_unread; S2: - record_step's three, + record_probe's absent;
+        # S7 Task 4: - set_exemption's exempt
+        self.assertEqual(len(bools), 14, bools)
         for n, k in bools:
             res = _tool(n, **{k: "false"})
             text = res["content"][0]["text"]
@@ -455,23 +466,24 @@ class TestSetupSentence(ToolCase):
 
 
 class TestInstallSmoke(TempEnv):
-    def test_resident_files_specialist_reads_the_same_record_resident_stages_it(self):
+    def test_one_server_files_another_reads_the_same_record(self):
+        # final fix wave T11-a: a single document is no longer staged from the surface
+        # (post_package posts packages only); the staging half now pins the refusal
         env = dict(os.environ)
         resident, specialist = _server(env), _server(env)
         try:
             path = self.publish("smoke.pdf", b"%PDF-1.4\nsmoke\n%%EOF\n")
             filed = json.loads(_call(resident, "ingest_document", 1, source_path=path,
                                      kind="invoice", source="manual-telegram",
-                                     extraction_author="resident", counterparty="Smoke",
+                                     extraction_author="desk", counterparty="Smoke",
                                      amount_minor=100, currency="EUR",
                                      document_date="2026-09-01"))
             seen = json.loads(_call(specialist, "list_unmatched_documents", 2))
             self.assertEqual([d["doc_id"] for d in seen["documents"]], [filed["doc_id"]])
-            staged = json.loads(_call(resident, "stage_for_delivery", 3, channel="telegram",
-                                      doc_id=filed["doc_id"]))
-            self.assertTrue(os.path.exists(staged["path"]))
-            stored = next((self.data / "documents").rglob("*.pdf"))
-            self.assertEqual(pathlib.Path(staged["path"]).read_bytes(), stored.read_bytes())
+            staged = _call(resident, "stage_for_delivery", 3, channel="telegram",
+                           doc_id=filed["doc_id"])
+            self.assertEqual(staged, "refused: a single document is not sent from here — "
+                                     "nothing was staged")
         finally:
             for p in (resident, specialist):
                 p.stdin.close()

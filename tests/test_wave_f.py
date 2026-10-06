@@ -9,6 +9,7 @@ from unittest import mock
 from tests._base import StoreCase  # noqa: F401
 from tests.test_tools import ToolCase, _json, _text, _tool
 import db  # noqa: E402
+import views  # noqa: E402
 
 AUTUMN = dt.datetime(2026, 10, 5, 9, 0, tzinfo=dt.timezone.utc)
 
@@ -44,18 +45,10 @@ class TestQuarterWords(ToolCase):
                     package_token=self.package_token())
         self.assertIn("-2026-Q3-", out["filename"])
 
-    def test_stop_chasing_q3_and_start_from_q2(self):
-        self.assertEqual(_json("stop_chasing", quarter="q3")["quarter"], "2026-Q3")
-        self.assertEqual(_json("set_watermark", when="Q2")["watermark"], "2026-04-01")
-        self.assertEqual(_json("set_watermark", when="2026-03-15")["watermark"], "2026-03-15")
-
     def test_anything_else_is_a_refusal_in_words_never_an_error(self):
         calls = [("build_review", {"view": "quarter", "quarter": "the third quarter"}),
                  ("list_quarter_state", {"quarter": "Q5"}),
                  ("build_quarterly_package", {"quarter": "Q3-2026", "package_token": 1}),
-                 ("stop_chasing", {"quarter": "summer"}),
-                 ("set_watermark", {"when": "Q7"}),
-                 ("set_watermark", {"when": "2026-13-45"}),
                  ("build_review", {"view": "quarter", "quarter": 3})]
         for name, args in calls:
             res = _tool(name, **args)
@@ -67,7 +60,7 @@ class TestQuarterWords(ToolCase):
     def test_the_schemas_show_the_format(self):
         import qa_server
         for name, arg in (("build_review", "quarter"), ("build_quarterly_package", "quarter"),
-                          ("list_quarter_state", "quarter"), ("stop_chasing", "quarter"),
+                          ("list_quarter_state", "quarter"),
                           ("list_projections", "quarter")):
             desc = qa_server.TOOLS[name]["schema"]["properties"][arg].get("description", "")
             self.assertIn("YYYY-Qn, e.g. 2026-Q3 (Qn and Qn YYYY accepted)", desc, name)
@@ -139,12 +132,13 @@ class TestSendItAgainAfterATimeout(ToolCase):
         staged = _json("stage_for_delivery", channel="telegram", package_id=self.pkg["package_id"])
         out = _json("record_delivery", delivery_id=staged["delivery_id"], outcome="uncertain")
         speak = out["speak"]
-        self.assertEqual(speak["text"], f"{self.pkg['filename']} may not have arrived —\n"
+        self.assertEqual(speak["text"], f"{views.field(self.pkg['filename'])} may not have arrived —\n"
                                         'say "send it again".')
         for f in os.listdir(self.outbox):          # Casa consumed the outbox copy on send
             os.unlink(self.outbox / f)
         _json("mark_rendering_delivered", render_id=speak["render_id"])
-        self.assertIn("resend", _json("apply_reply", text="send it again")["instructions"])
+        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
+        self.assertIn("resend", _json("propose_reading", text="send it again")["instructions"])
         again = _json("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(again["filename"], self.pkg["filename"])
         self.assertNotEqual(again["path"], staged["path"])          # a path of its own

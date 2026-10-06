@@ -56,7 +56,7 @@ class TestSchema(TempEnv):
     def _assert_current_behaviour(self, c, old_seq: int, deliveries=1, first_sent=False):
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
-        self.assertEqual(db.SCHEMA_VERSION, 10)
+        self.assertEqual(db.SCHEMA_VERSION, 11)
         # the migrated store has every column and index a fresh store has
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
@@ -125,7 +125,7 @@ class TestSchema(TempEnv):
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)
         self.assertEqual(c2.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "10")
+                         .fetchone()[0], "11")
 
     def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
         # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
@@ -257,7 +257,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "10")
+                         .fetchone()[0], "11")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -279,7 +279,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "10")
+                         .fetchone()[0], "11")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -302,7 +302,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "10")
+                         .fetchone()[0], "11")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):

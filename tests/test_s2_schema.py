@@ -7,14 +7,14 @@ class Schema10(StoreCase):
 
     def test_version_and_new_tables(self):
         import db
-        self.assertEqual(db.SCHEMA_VERSION, 10)
+        self.assertGreaterEqual(db.SCHEMA_VERSION, 10)
         self.assertEqual(self.conn.execute(
-            "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "10")
+            "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], str(db.SCHEMA_VERSION))
         self.assertTrue({"gen", "job_id", "at", "spent", "reported", "batch", "closed"}
                         <= self.cols("claims"))
         self.assertNotIn("measure_json", self.cols("claims"))     # INV-J8 is credits (§15)
         self.assertEqual({"pass_id", "key", "gen"}, self.cols("credits"))
-        self.assertEqual({"job_id", "passes"}, self.cols("runs"))
+        self.assertEqual({"job_id", "passes", "completed_at"}, self.cols("runs"))
         self.assertTrue({"request_id", "kind", "trigger", "doc_ids_json", "created_seq",
                          "state", "pass_id", "outcome", "render_ids_json", "verdicts_json"}
                         <= self.cols("work_requests"))

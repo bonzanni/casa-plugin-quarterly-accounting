@@ -50,6 +50,9 @@ def evaluate(conn) -> None:
 # package, so "send it again" binds to the rendering that printed them (D3).
 PACKAGE = {
     "package-stopped": "I couldn't build the {quarter} package: {reason}.",
+    # a BUILT package that could not be posted (Casa refused the deposit, or it is over
+    # Telegram's limit): no Casa code reaches the operator (final fix wave T11-d)
+    "package-not-sent": "I couldn't send the {quarter} package{why} — ask again when you want it.",
     "package-failed": "I couldn't read the bank for the {quarter} package — ask for it again.",
     "package-revoked": "The bank was re-read before I could send the {quarter} package — ask "
                        "for it again and I'll rebuild it.",
@@ -115,7 +118,7 @@ def _units(conn, rows) -> list:
     for a in rows:
         if a["kind"] in COLLECTION:
             c = json.loads(a["detail"])
-            detail = views.clip(c["detail"] or "", DETAIL_MAX)
+            detail = views.field(c["detail"] or "", DETAIL_MAX)
             paren = f" ({detail})" if detail else ""
             text = (GMAIL_ABSENT if a["kind"] == "gmail" and c.get("absent")
                     else COLLECTION[a["kind"]].format(paren=paren))
@@ -131,14 +134,15 @@ def _units(conn, rows) -> list:
                 fname = conn.execute("SELECT filename FROM packages WHERE package_id=?",
                                      (c["package_id"],)).fetchone()[0]
                 lines = delivery.offer_lines(fname) if why is None \
-                    else views._wrap(f"{fname} may not have arrived — {why}.")
+                    else views._wrap(f"{views.field(fname)} may not have arrived — {why}.")
             elif a["kind"] == "package-send-failed" and why is not None:
                 lines = views._wrap(f"The {dates.quarter_label(c['quarter'])} package didn't go "
                                     f"out — {why}.")
             else:
-                reason = (c.get("reason") or "").rstrip(". ")
+                reason = views.field((c.get("reason") or "").rstrip(". "), 300)
                 lines = views._wrap(PACKAGE[a["kind"]].format(
-                    quarter=dates.quarter_label(c["quarter"]), reason=reason))
+                    quarter=dates.quarter_label(c["quarter"]), reason=reason,
+                    why=f" ({reason})" if reason else ""))
             out.append((a["alert_id"], None, lines))
     changed = []
     for a in rows:
@@ -216,7 +220,7 @@ def pending_rendering(conn, must=None):
         return pending_in_tx(conn, must)
 
 
-def pending_in_tx(conn, must=None):
+def pending_in_tx(conn, must=None, skip=()):
     """evaluate(), the read of undelivered alerts, composition and the renders
     INSERT all run under ONE db.tx: end_pass frees the pass marker before
     calling here, so a fresh pass can begin, re-observe the same still-failing
@@ -237,11 +241,17 @@ def pending_in_tx(conn, must=None):
     Runs inside the caller's write transaction: record_delivery raises its
     package notice and composes the rendering that says it in one commit. A
     rendering that prints a notice offering a package names that package in its
-    scope's `offers`, so "send it again" binds to it (D3)."""
+    scope's `offers`, so "send it again" binds to it (D3).
+
+    `skip` (S7 §5): alert ids left out — the job's cursor passes the occurrences whose
+    rendering this run already handed out job.OFFER_MAX times, so the next rendering
+    composes the following ones."""
     assert conn.in_transaction
     evaluate(conn)
-    rows = conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL"
-                         " ORDER BY alert_id").fetchall()
+    skip = set(skip)
+    rows = [r for r in conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL"
+                                    " ORDER BY alert_id").fetchall()
+            if r["alert_id"] not in skip]
     if not rows:
         return None
     text, ids = _batch(_units(conn, rows), must)
@@ -259,9 +269,11 @@ def pending_in_tx(conn, must=None):
         r = conn.execute("SELECT text, scope_json FROM renders WHERE render_id=? AND"
                          " delivered_at IS NULL", (rid,)).fetchone()
         # reused only if it is still deliverable: a rendering saved oversized by
-        # earlier code is re-composed through the fit instead (round 3)
+        # earlier code is re-composed through the fit instead (round 3) — measured
+        # against the deposit body's budget (S7 §7.6), so a pre-S7 one up to Telegram's
+        # limit is re-fitted and three always join within job.POST_CHARS
         if r is not None and json.loads(r["scope_json"]) == scope \
-                and views.utf16_len(r["text"]) <= views.TELEGRAM_LIMIT:
+                and views.utf16_len(r["text"]) <= views.BODY_LIMIT:
             return {"render_id": rid, "text": r["text"]}
     rid = f"r{db.next_seq(conn)}"
     conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"

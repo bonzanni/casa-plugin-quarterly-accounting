@@ -16,12 +16,12 @@ class Requests(StoreCase):
 
     def test_a_package_ask_opens_a_queued_request_without_a_pass(self):
         import asks
-        out = asks.request_package(self.conn, "2026-Q3", "telegram")
+        out = asks.request_package(self.conn, "2026-Q3")
         self.assertEqual(out["status"], "asked")
         self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
                          "queued")
         self.assertEqual(self.conn.execute("SELECT live FROM pass_marker").fetchone(), None)
-        self.assertEqual(asks.request_package(self.conn, "2026-Q3", "email")["status"],
+        self.assertEqual(asks.request_package(self.conn, "2026-Q3")["status"],
                          "already")
 
     def test_taken_only_by_the_live_pass_and_settled_at_its_end(self):
@@ -80,7 +80,7 @@ class Requests(StoreCase):
 
     def test_exhausted_adoptions_close_a_package_round_and_leave_other_work_queued(self):
         import asks, job
-        asks.request_package(self.conn, "2026-Q3", "telegram")
+        asks.request_package(self.conn, "2026-Q3")
         t = job.claim(self.conn, A)
         pid = self.start_job_pass(t, trigger="package")
         self.bind_round_and_take(pid)
@@ -153,7 +153,7 @@ class Requests(StoreCase):
         """A job pass's package request is settled with token=None (§6.4): job_report
         claims a buildable one at once, so it holds no lease another turn waits out."""
         import asks, db, job, passes, steps
-        asks.request_package(self.conn, "2026-Q3", "telegram")
+        asks.request_package(self.conn, "2026-Q3")
         t = job.claim(self.conn, A)
         pid = self.start_job_pass(t, trigger="package")
         self.bind_round_and_take(pid)
@@ -214,7 +214,7 @@ class Requests(StoreCase):
         before it began stays queued for the next check pass."""
         import asks, job
         asks.request_work(self.conn, "check", "operator")
-        asks.request_package(self.conn, "2026-Q3", "telegram")
+        asks.request_package(self.conn, "2026-Q3")
         t = job.claim(self.conn, A)
         pid = self.start_job_pass(t, trigger="package")
         self.assertEqual(self.bind_round_and_take(pid), [])

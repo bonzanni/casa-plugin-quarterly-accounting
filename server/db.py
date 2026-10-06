@@ -15,12 +15,13 @@ import fcntl
 import json
 import os
 import pathlib
+import re
 import sqlite3
 import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -60,7 +61,8 @@ CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   gen INTEGER PRIMARY KEY, job_id TEXT NOT NULL, at TEXT NOT NULL,
   spent INTEGER NOT NULL DEFAULT 0, reported INTEGER NOT NULL DEFAULT 0,
   batch INTEGER NOT NULL,        -- the batch this claim belongs to: its first claim's gen
-  closed INTEGER NOT NULL DEFAULT 0);   -- this claim was answered end-batch or complete"""
+  closed INTEGER NOT NULL DEFAULT 0,    -- this claim was answered end-batch or complete
+  seq INTEGER);                  -- the store sequence taken at the claim (S7 §10)"""
 
 # INV-J8 (spec §15): what the job earned, once per pass and key, under the claim that
 # earned it; and each Casa job run's pass count (MAX_PASSES_PER_JOB)
@@ -69,7 +71,8 @@ CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (
   PRIMARY KEY (pass_id, key));"""
 CREDITS_GEN_DDL = "CREATE INDEX IF NOT EXISTS ix_credits_gen ON credits(gen);"
 RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
-  job_id TEXT PRIMARY KEY, passes INTEGER NOT NULL DEFAULT 0);"""
+  job_id TEXT PRIMARY KEY, passes INTEGER NOT NULL DEFAULT 0,
+  completed_at TEXT);            -- the run answered `complete` (S7 §10)"""
 
 WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,6 +84,40 @@ WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
   pass_id TEXT, outcome TEXT,
   render_ids_json TEXT NOT NULL DEFAULT '[]',
   verdicts_json TEXT NOT NULL DEFAULT '{}');"""
+
+# Schema 10's own claims and runs tables, frozen: MIGRATIONS[9] creates these and
+# MIGRATIONS[10] adds the S7 columns, so a store migrated from 9 does not add them twice.
+CLAIMS_DDL_V10 = """CREATE TABLE IF NOT EXISTS claims (
+  gen INTEGER PRIMARY KEY, job_id TEXT NOT NULL, at TEXT NOT NULL,
+  spent INTEGER NOT NULL DEFAULT 0, reported INTEGER NOT NULL DEFAULT 0,
+  batch INTEGER NOT NULL,        -- the batch this claim belongs to: its first claim's gen
+  closed INTEGER NOT NULL DEFAULT 0);   -- this claim was answered end-batch or complete"""
+RUNS_DDL_V10 = """CREATE TABLE IF NOT EXISTS runs (
+  job_id TEXT PRIMARY KEY, passes INTEGER NOT NULL DEFAULT 0);"""
+
+# S7 (spec §7.5, §8, §11, §5): what a tap may spend, a typed reading awaiting its tap, an
+# account page's frozen choices, and how often this run handed out each rendering
+READINGS_DDL = """CREATE TABLE IF NOT EXISTS readings (
+  reading_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL UNIQUE,      -- 128 random bits, minted into the proposal's deposit only
+  text TEXT NOT NULL,            -- the words the desk turn received, verbatim
+  quoted TEXT,                   -- the quoted post's text, when the desk context had one
+  render_id TEXT,                -- the rendering the reading was bound to (§8)
+  plan_json TEXT NOT NULL,       -- the writes, each with the revisions it read
+  created_seq INTEGER NOT NULL, created_at TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('open', 'applied', 'cancelled', 'stale')),
+  settled_at TEXT);"""
+RENDER_KEYS_DDL = """CREATE TABLE IF NOT EXISTS render_keys (
+  key TEXT PRIMARY KEY, render_id TEXT NOT NULL,
+  action TEXT NOT NULL,          -- all-good | right | wrong | no-invoice
+  pid INTEGER,                   -- NULL for all-good
+  created_at TEXT NOT NULL, spent_at TEXT);"""
+ACCOUNT_CHOICES_DDL = """CREATE TABLE IF NOT EXISTS account_choices (
+  key TEXT NOT NULL, n INTEGER NOT NULL, account_id TEXT NOT NULL, label TEXT NOT NULL,
+  created_at TEXT NOT NULL, spent_at TEXT, PRIMARY KEY (key, n));"""
+POST_OFFERS_DDL = """CREATE TABLE IF NOT EXISTS post_offers (
+  render_id TEXT NOT NULL, job_id TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (render_id, job_id));"""
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -155,7 +192,8 @@ CREATE TABLE IF NOT EXISTS package_requests (
   round INTEGER NOT NULL DEFAULT 0,        -- rounds of its check finished (#15)
   remaining INTEGER,                       -- what the last round left (#15)
   check_json TEXT,                         -- what the caption says about the check (#15)
-  checked_snapshot INTEGER);               -- the import its finished check ran on (#15)
+  checked_snapshot INTEGER,                -- the import its finished check ran on (#15)
+  asked_seq INTEGER NOT NULL DEFAULT 0);   -- the request's latest ask (S7 §10)
 CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state);
 CREATE TABLE IF NOT EXISTS probes (
   kind TEXT PRIMARY KEY, ok INTEGER NOT NULL, detail TEXT, data_json TEXT,
@@ -284,7 +322,8 @@ CREATE TABLE IF NOT EXISTS renders (
   created_at TEXT NOT NULL, delivered_at TEXT, text TEXT NOT NULL,
   membership_json TEXT NOT NULL,
   delivered_seq INTEGER,         -- store sequence at delivery: what "most recent delivered" orders by
-  binding INTEGER);              -- job_report's latest hand-out: 1 notification, 0 operator turn (R5)
+  binding INTEGER,               -- job_report's latest hand-out: 1 notification, 0 operator turn (R5)
+  posted_seq INTEGER);           -- S7 r3 #3: show_view deposited it (attempted; monotone, never cleared)
 CREATE TABLE IF NOT EXISTS render_items (
   render_id TEXT NOT NULL, pid INTEGER NOT NULL, projection_revision INTEGER NOT NULL,
   match_revisions_json TEXT NOT NULL, PRIMARY KEY (render_id, pid));
@@ -308,7 +347,8 @@ CREATE TABLE IF NOT EXISTS deliveries (
   revoked_at TEXT,               -- an unsent first send an import superseded (fix E5)
   withdrawn_at TEXT,             -- staged bytes taken back when a stalled send was recovered
   lease_at TEXT,                 -- a staged send's lease: past LEASE_S it is recovered
-  as_built INTEGER NOT NULL DEFAULT 0);   -- "send me the last package you built" (#15)
+  as_built INTEGER NOT NULL DEFAULT 0,   -- "send me the last package you built" (#15)
+  posted_at TEXT);               -- S7 §6.1: post_package deposited it (at most once)
 -- every delivery has a path of its own: a holder that was superseded can never hold
 -- the path of a later copy
 CREATE UNIQUE INDEX IF NOT EXISTS ux_deliveries_staged_path ON deliveries(staged_path);
@@ -324,7 +364,8 @@ CREATE TABLE IF NOT EXISTS operator_refs (
   -- mail, a Telegram file) by its own ref, once filed, so a pass's capped filing skips it
   ref TEXT PRIMARY KEY, source TEXT NOT NULL, doc_id INTEGER NOT NULL, filed_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at);
-""" + "\n".join((CLAIMS_DDL, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL)) + "\n"
+""" + "\n".join((CLAIMS_DDL, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL,
+                         READINGS_DDL, RENDER_KEYS_DDL, ACCOUNT_CHOICES_DDL, POST_OFFERS_DDL)) + "\n"
 
 # Migrations from version N to N+1, appended when the schema changes. Each is
 # a list of statements applied inside the migrating transaction.
@@ -476,7 +517,24 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE projections ADD COLUMN note_other_issued_gen INTEGER",
         "ALTER TABLE projections ADD COLUMN note_seen_gen INTEGER",
         "ALTER TABLE probes ADD COLUMN gen INTEGER",
-        CLAIMS_DDL, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL],
+        CLAIMS_DDL_V10, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL_V10],
+    # 10 -> 11 (S7): tap keys, readings, account choices, post offers; the run's stamps;
+    # the request's latest ask; a send's and a view's post marks. Data steps follow in migrate (after_10_to_11)
+    10: ["ALTER TABLE claims ADD COLUMN seq INTEGER",
+         "ALTER TABLE runs ADD COLUMN completed_at TEXT",
+         "ALTER TABLE package_requests ADD COLUMN asked_seq INTEGER NOT NULL DEFAULT 0",
+         "UPDATE package_requests SET asked_seq = created_seq",
+         "UPDATE package_requests SET channel='telegram' WHERE channel='email' AND state IN"
+         " ('queued', 'snapshot', 'snapshot-done', 'built')",
+         "DELETE FROM meta WHERE key='drain' OR key LIKE 'cancelled:%'",
+         "ALTER TABLE deliveries ADD COLUMN posted_at TEXT",
+         # R5 + the d3 amendment: a v0.9.0 telegram package send, staged or recovered
+         # uncertain, may already have gone out (send_media) — its late receipt is accepted
+         # (an email send is settled uncertain at the upgrade instead)
+         "UPDATE deliveries SET posted_at = created_at WHERE status IN ('staged', 'uncertain')"
+         " AND channel = 'telegram' AND package_id IS NOT NULL AND posted_at IS NULL",
+         "ALTER TABLE renders ADD COLUMN posted_seq INTEGER",
+         READINGS_DDL, RENDER_KEYS_DDL, ACCOUNT_CHOICES_DDL, POST_OFFERS_DDL],
 }
 
 
@@ -518,7 +576,28 @@ def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:
             set_epoch(conn)     # §4: a read confirms a note only >= Z after the migration
             import passes       # lazy: passes imports db
             passes.close_delegation_pass_on_upgrade(conn)
+        if current < 11:
+            _settle_staged_email_on_upgrade(conn)
         conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
+
+
+def _settle_staged_email_on_upgrade(conn) -> None:
+    """S7 §14: no email after S7 (G3). A send staged for email at the upgrade can no longer
+    be sent by anyone (finance's Gmail is read-only): it is settled `uncertain`, withdrawn,
+    with its package notice — "send it again" then sends it here, as a file. Its handoff
+    copy is left to the handoff folder's own retention (the custody lock is not taken
+    inside the migration's transaction)."""
+    import alerts
+    ts = now()
+    for d in conn.execute("SELECT d.*, p.quarter FROM deliveries d JOIN packages p ON"
+                          " p.package_id=d.package_id WHERE d.status='staged' AND"
+                          " d.channel='email'").fetchall():
+        conn.execute("UPDATE deliveries SET status='uncertain', settled_at=?, withdrawn_at=?"
+                     " WHERE delivery_id=?", (ts, ts, d["delivery_id"]))
+        conn.execute("UPDATE package_requests SET state='uncertain', updated_at=? WHERE"
+                     " delivery_id=? AND state='staged'", (ts, d["delivery_id"]))
+        alerts.raise_package(conn, "package-uncertain", f"delivery:{d['delivery_id']}:uncertain",
+                             quarter=d["quarter"], package_id=d["package_id"], pass_id="")
 
 
 def _statements(script: str) -> list[str]:
@@ -606,11 +685,25 @@ def next_seq(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT value FROM counters WHERE name='seq'").fetchone()[0]
 
 
-# Renderings that offer nothing to answer (S2 §6.4): a handover's case lines and a stop
-# line. Delivered after a view or an offer, they never take the operator's reply from it
-# (diff round 1, R3; Astra S2: a handover page delivered after `speak`'s resend offer
-# made "send it again" refuse).
-INFORMATIONAL_KINDS = ("handover", "job-stop")
+# Renderings that offer nothing to answer (S2 §6.4): a handover's case lines, a stop
+# line, a package's details note, the package file's caption and the run's asks-waiting
+# line (S7 §4.2, §6.1). Delivered after a view or an offer, they never take the operator's
+# reply from it (diff round 1, R3; Astra S2: a handover page delivered after `speak`'s
+# resend offer made "send it again" refuse).
+INFORMATIONAL_KINDS = ("handover", "job-stop", "package-note", "job-left", "package-file")
+# Of those, the ones a QUOTE can never bind (views.bound_rendering). The package's note
+# and file are quotable (#44): a swipe-reply "send it again" on either names its package
+# (their scope's `offers`), answered by delivery.resend_target.
+UNQUOTABLE_KINDS = ("handover", "job-stop", "job-left")
+
+
+def seen_render(row) -> bool:
+    """§1 of the binding design: the ONE "seen" predicate — a rendering marked delivered, or
+    one show_view posted (posted_seq: a deposit was attempted). It makes a rendering a quote
+    candidate (views.bound_rendering) and an operator rule's provenance (kb); it is never
+    continuation evidence (V1: a continued page merges only its explicit predecessor)."""
+    return row is not None and (row["delivered_at"] is not None
+                                or row["posted_seq"] is not None)
 
 
 def last_delivered(conn: sqlite3.Connection):
@@ -621,28 +714,30 @@ def last_delivered(conn: sqlite3.Connection):
     renderings (INFORMATIONAL_KINDS) are skipped: they offer nothing to answer, so the
     reply is still about what came before them.
 
-    A NON-binding rendering (binding = 0: handed out last by the job_report of an
-    operator's turn, diff round 1 R5) is returned like any other — it is what the
-    operator saw last — and is a refusal boundary, never skipped to an older one
-    (diff round 2, R6): a reply whose effect depends on a rendering's contents checks
-    `non_binding` and refuses (NEWER_SINCE). NULL: never handed out by job_report."""
+    S7 §9: it binds a reading's words that carry no quote (views.bound_rendering), and
+    "send it again" to the offer last seen."""
     return conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND kind NOT IN"
                         " (%s) ORDER BY delivered_seq DESC, delivered_at DESC, rowid DESC"
                         " LIMIT 1" % ",".join("?" * len(INFORMATIONAL_KINDS)),
                         INFORMATIONAL_KINDS).fetchone()
 
 
-def non_binding(render) -> bool:
-    """R6: `render` (a renders row, or None) was handed out last by an operator turn's
-    job_report: nothing that reads its contents may act on it."""
-    return render is not None and render["binding"] == 0
-
-
-# R6: the refusal at a non-binding boundary, in the operator's words (no machinery)
-NEWER_SINCE = ("I've sent you new results since, so I can't tell what that is about — "
-               "nothing applied. Ask me for the sheet, or name the payment.")
-NEWER_SINCE_RESEND = ("I've sent you new results since that offer, so I can't tell which "
-                      "package you mean — nothing was sent. Ask me for the package again.")
+@contextlib.contextmanager
+def savepoint(conn: sqlite3.Connection, name: str):
+    """A nested unit inside the caller's write transaction (S7 §8: one reading's clauses run
+    in ONE transaction, each clause in a savepoint of its own). Any exception rolls the
+    savepoint back and re-raises; the outer transaction stays open."""
+    assert conn.in_transaction, "a savepoint lives inside the write transaction"
+    if not re.fullmatch(r"[a-z_]{1,32}", name):
+        raise ValueError(name)
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute(f"ROLLBACK TO {name}")
+        conn.execute(f"RELEASE {name}")
+        raise
+    conn.execute(f"RELEASE {name}")
 
 
 @contextlib.contextmanager

@@ -18,6 +18,7 @@ import hashlib
 import json
 import re
 import textwrap
+import unicodedata
 
 import amounts
 import binding
@@ -29,6 +30,9 @@ import work
 WIDTH = 64
 CAP = 8
 TELEGRAM_LIMIT = 4096
+LABEL_ALLOWANCE = 64       # Casa's "📊 <display name>" label line: the plugin cannot read it
+PROPOSAL_SETTLE_RESERVE = 1 + 2 + 2 * 32     # casa:result_broker.py, a83d6aa8
+BODY_LIMIT = TELEGRAM_LIMIT - PROPOSAL_SETTLE_RESERVE - LABEL_ALLOWANCE - 1   # 3964 (S7 §7.6)
 VIEWS = ("status", "missing", "check", "rest", "older", "all", "item", "quarter")
 KIND_WORD = {"invoice": "invoice", "sales-invoice": "sales invoice", "credit-note": "credit note",
              "payslip": "payslip", "statement": "statement", "receipt": "receipt",
@@ -78,13 +82,75 @@ class _Names:
 
 
 _NAMES = None
+_TAG = ""                   # binding V2: the first-line tag of the rendering being composed
+
+
+def tag_for(render_id: str) -> str:
+    """Binding V2: every rendering composed after S7 ends its first line with " · <n>", its
+    render id's digits — a separator and digits only, no machinery word — so two post-S7
+    renderings never match one quote, whatever Casa's raw truncation does to the rest."""
+    return f" {MARK} {render_id[1:]}"
+
+
+def _limit() -> int:
+    """The body budget a page is filled to: BODY_LIMIT less the tag line 1 will carry."""
+    return BODY_LIMIT - utf16_len(_TAG)
+
+
+def field_raw(text, units: int = FIELD_MAX) -> str:
+    """A literal free-text field: MARK neutralized, clipped to `units` with a
+    digest of its FULL value ("…·3f9a"), as long as this rendering needs for
+    all its clipped values to print distinct. NOT escaped (see `field`)."""
+    return _field(text, units, _NAMES.digest if _NAMES is not None else 4)
 
 
 def field(text, units: int = FIELD_MAX) -> str:
-    """A literal free-text field: MARK neutralized, clipped to `units` with a
-    digest of its FULL value ("…·3f9a"), as long as this rendering needs for
-    all its clipped values to print distinct."""
-    return _field(text, units, _NAMES.digest if _NAMES is not None else 4)
+    """A literal free-text field as DISPLAYED: clipped (field_raw), then escaped (esc)."""
+    return esc(field_raw(text, units))
+
+
+_ESC = set("\\`*_[]()!|#<>~-")
+_LEAD_NUM_DOT = re.compile(r"^(\d+)\.")
+
+
+def _flat(text: str) -> str:
+    return "".join(" " if (ch == "\n" or unicodedata.category(ch) == "Cc") else ch
+                   for ch in text)
+
+
+def esc(text, plain: bool = False):
+    """THE escape (S7 §12): a dynamic field reaches a body only through here (inside
+    `field`). Control characters and newlines become spaces (§7.6: Casa's body check, and
+    a caption's one line); the dialect's markers are backslash-escaped unless `plain` (a
+    file caption is sent as plain text)."""
+    if not text:
+        return text
+    flat = _flat(text)
+    if plain:
+        return flat
+    out = "".join("\\" + ch if ch in _ESC else ch for ch in flat)
+    return _LEAD_NUM_DOT.sub(lambda m: m.group(1) + "\\.", out, count=1)
+
+
+_UNESC = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+
+def unesc(text: str) -> str:
+    """What the dialect displays for escaped text (a backslash before ASCII punctuation
+    is consumed): used to compare a quoted post with a stored rendering (§8)."""
+    return _UNESC.sub(r"\1", text)
+
+
+def deposit_safe(body: str) -> str:
+    """The last step on every body a posting tool deposits (S7 §7.6): any Cc character
+    other than newline and tab becomes a space — renderings stored before S7 included."""
+    return "".join(" " if (unicodedata.category(ch) == "Cc" and ch not in "\n\t") else ch
+                   for ch in body)
+
+
+def caption_safe(line: str) -> str:
+    """A file caption's one line, printable as Casa's _file_caption_ok judges it."""
+    return "".join(ch if ch.isprintable() else " " for ch in line)
 
 
 def _field(text, units, n) -> str:
@@ -277,11 +343,11 @@ def evidence(d: dict, cands=None) -> list:
         elif "kind-changed" in d["reasons"]:
             out.append(f"Its category changed since it was paired — still {name}?")
         labels = cur["labels"]
-        if "guessed" not in labels:
+        if "guessed" not in labels or cur["author"] == "operator":
             # a line that asks for a verdict names what it is asking about (round p7:
             # a no-ref line never named its invoice, yet "all good" confirmed it)
             out.insert(0, f"Paired with {ident(doc)}.")
-        if "guessed" in labels:
+        if "guessed" in labels and cur["author"] != "operator":
             rs = cur["runners_up"]
             others = "; ".join(field(x) for x in rs[:RUNNERS_MAX])
             if len(rs) > RUNNERS_MAX:
@@ -379,7 +445,10 @@ def _needs_check(d):
         return False
     if d["candidates"] or d["status"] == "proposed":
         return True
-    return d["status"] == "matched" and d["current"] is not None and d["current"]["labels"] != ["clean"]
+    # an operator-confirmed pairing is not a proposal (S7 §7.3), whatever its label row says:
+    # a confirmation appends an operator pair but leaves the match's "guessed" label
+    return (d["status"] == "matched" and d["current"] is not None
+            and d["current"]["author"] != "operator" and d["current"]["labels"] != ["clean"])
 
 
 def _missing_detail(d) -> list:
@@ -485,8 +554,7 @@ def _status_notes(conn) -> list:
                    + " checked again once classified.")
     asked = conn.execute("SELECT min(created_at) FROM work_requests WHERE state='queued'"
                          ).fetchone()[0]
-    drain = conn.execute("SELECT value FROM meta WHERE key='drain'").fetchone()
-    if asked is not None and (drain is None or drain[0] == "none"):
+    if asked is not None:
         out.append(f"A check is waiting to start, asked {passes.ago(asked)}.")
     return out
 
@@ -722,7 +790,12 @@ def _compose(conn, view, q, items, members, lead):
 
 
 def _text(lines) -> str:
-    return "\n".join(w for line in lines for w in (_wrap(line) if line else [""]))
+    """The lines, each wrapped to WIDTH — but while a rendering is composed (binding V2) its
+    first line is kept whole: the tag ends it, and a tag spliced into a wrapped headline
+    would split the identity it binds (_bindable)."""
+    return "\n".join(w for i, line in enumerate(lines)
+                     for w in ([line] if i == 0 and _TAG and line else
+                               _wrap(line) if line else [""]))
 
 
 def _emit(parts, picks, *, announce, more=None, cap=None, all_sections_empty_msgs=True):
@@ -772,8 +845,17 @@ def _capped(parts, cap):
 MORE_LINE = 'There is more — say "more".'
 
 
+def _day_ordinal(day) -> int:
+    """A block's date as an int for the paging cursor (S7 §7.6: a stored More button's
+    `after` holds only ints, never bank text); a missing or malformed date is 0."""
+    try:
+        return dates.parse_day(day).toordinal() if day else 0
+    except ValueError:
+        return 0
+
+
 def _key(i, blk) -> list:
-    return [i, blk.order[0], blk.order[1]]
+    return [i, _day_ordinal(blk.order[0]), blk.order[1]]
 
 
 def _page(parts, after, first):
@@ -783,8 +865,9 @@ def _page(parts, after, first):
     delivering an earlier page removed (residue) do not shift later pages.
     The continuation phrase is never the one that asked for the whole list
     (spec: "the rest stays one word away")."""
-    flat = [(i, blk) for i, sec in enumerate(parts["sections"])
-            for blk in sorted(sec.blocks, key=lambda b: b.order)]
+    # ordered by the cursor's own key, so the cursor and the page order always agree
+    flat = sorted(((i, blk) for i, sec in enumerate(parts["sections"]) for blk in sec.blocks),
+                  key=lambda e: _key(*e))
     if after is not None:
         flat = [e for e in flat if _key(*e) > list(after)]
 
@@ -796,7 +879,7 @@ def _page(parts, after, first):
                      all_sections_empty_msgs=first)
 
     def fits(page, last):
-        return utf16_len(_text(emit(page, last)[0])) <= TELEGRAM_LIMIT
+        return utf16_len(_text(emit(page, last)[0])) <= _limit()
 
     if not flat and not first:
         return list(parts["head"]) + ["", "That is everything."], [], None
@@ -834,11 +917,11 @@ def clip(text: str, units: int) -> str:
     return "".join(out) + CLIP_MARK
 
 
-def fit_lines(lines, closing=None, always_close=False) -> tuple:
+def fit_lines(lines, closing=None, always_close=False, tag="") -> tuple:
     """THE fit (fix wave D round 2, generalized after the same shape recurred in
     views, alerts and receipts): every operator-facing message is produced
     through here, and what it returns joins with "\n" to at most
-    TELEGRAM_LIMIT UTF-16 units — every separator and the closing line
+    BODY_LIMIT UTF-16 units — every separator and the closing line
     included, whatever the inputs.
 
     Returns (out_lines, whole): `whole` is how many leading input lines are
@@ -847,12 +930,17 @@ def fit_lines(lines, closing=None, always_close=False) -> tuple:
     lines while they fit beside the closing line; when not even the first line
     fits, it is clipped with CLIP_MARK so the message still says something (and
     `whole` is 0). The closing line is never cut away (it is clipped only if it
-    alone exceeds the limit)."""
+    alone exceeds the limit).
+
+    `tag` (binding V2) ends line 1 and is counted inside the fit; it is never cut: a line 1
+    that must be clipped is clipped before its tag."""
     lines = list(lines)
-    tail = [clip(closing, TELEGRAM_LIMIT)] if closing else []
-    if utf16_len("\n".join(lines + (tail if always_close else []))) <= TELEGRAM_LIMIT:
+    if tag:
+        lines = [(lines[0] if lines else "") + tag] + lines[1:]
+    tail = [clip(closing, BODY_LIMIT)] if closing else []
+    if utf16_len("\n".join(lines + (tail if always_close else []))) <= BODY_LIMIT:
         return lines + (tail if always_close else []), len(lines)
-    budget = TELEGRAM_LIMIT - (utf16_len(tail[0]) + 1 if tail else 0)
+    budget = BODY_LIMIT - (utf16_len(tail[0]) + 1 if tail else 0)
     kept, used = [], 0
     for ln in lines:
         need = utf16_len(ln) + (1 if kept else 0)
@@ -861,8 +949,9 @@ def fit_lines(lines, closing=None, always_close=False) -> tuple:
         kept.append(ln)
         used += need
     whole = len(kept)
-    if whole == 0 and lines and budget > utf16_len(CLIP_MARK):
-        kept = [clip(lines[0], budget)]
+    if whole == 0 and lines and budget > utf16_len(CLIP_MARK) + utf16_len(tag):
+        head = lines[0][:len(lines[0]) - len(tag)] if tag else lines[0]
+        kept = [clip(head, budget - utf16_len(tag)) + tag]
     if not kept and tail:
         return tail, 0
     return kept + tail, whole
@@ -914,46 +1003,75 @@ def _item_page(d, after):
     n = 1 if rest else 0
     while n < len(rest) and utf16_len(_text(_item_block(d, rest[:n + 1],
                                                          n + 1 < len(rest)).lines)) \
-            <= TELEGRAM_LIMIT:
+            <= _limit():
         n += 1
     more = n < len(rest)
     return _item_block(d, rest[:n], more), ([rest[n - 1]["match_id"]] if more else None)
 
 
-def build_review(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
+def build_review(conn, view="status", quarter=None, pid=None, page=None, after=None,
+                 prev=None) -> dict:
     """See _build_review. The per-rendering disambiguation (_NAMES) lives only
     for the duration of one call."""
-    global _NAMES
+    global _NAMES, _TAG
     try:
-        return _build_review(conn, view, quarter, pid, page, after)
+        return _build_review(conn, view, quarter, pid, page, after, prev)
     finally:
-        _NAMES = None
+        _NAMES, _TAG = None, ""
 
 
-def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
+def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=None,
+                  prev=None) -> dict:
     """review_in_tx under its own write transaction."""
     with db.tx(conn):
-        return review_in_tx(conn, view, quarter, pid, page, after)
+        return review_in_tx(conn, view, quarter, pid, page, after, prev=prev)
 
 
-def review_in_tx(conn, view="status", quarter=None, pid=None, page=None, after=None) -> dict:
+def review_in_tx(conn, view="status", quarter=None, pid=None, page=None, after=None,
+                 prev=None) -> dict:
     """The rendering, inside the caller's write transaction (S2 §6.4: job_report composes
     a result in its own one transaction). The per-rendering disambiguation (_NAMES) is
     reset after, as build_review does."""
-    global _NAMES
+    global _NAMES, _TAG
     assert conn.in_transaction, "a review is composed inside the write transaction"
     try:
-        return _review(conn, view, quarter, pid, page, after)
+        return _review(conn, view, quarter, pid, page, after, prev)
     finally:
-        _NAMES = None
+        _NAMES, _TAG = None, ""
 
 
-def _review(conn, view, quarter, pid, page, after) -> dict:
+_RENDER_ID = re.compile(r"^r\d{1,18}$")
+
+
+def _predecessor_mrevs(conn, prev, pid, page, after) -> dict:
+    """Binding V1: the candidates a continued item page (page >= 2) adds from its explicit
+    predecessor `prev` — that rendering's RECORDED match revisions for `pid` — only when it
+    is an item rendering of the same pid whose `next` is exactly this page's call and whose
+    projection revision is still current. Anything else adds nothing; a candidate changed
+    since then is refused at bind as stale. A posting attempt alone never adds them."""
+    r = conn.execute("SELECT kind, scope_json FROM renders WHERE render_id=?",
+                     (prev,)).fetchone()
+    if r is None or r["kind"] != "item":
+        return {}
+    scope = json.loads(r["scope_json"])
+    want = {"view": "item", "pid": pid, "page": page, "after": after, "prev": prev}
+    if scope.get("pid") != pid or scope.get("next") != want:
+        return {}
+    it = conn.execute("SELECT projection_revision, match_revisions_json FROM render_items"
+                      " WHERE render_id=? AND pid=?", (prev, pid)).fetchone()
+    cur = conn.execute("SELECT revision FROM projections WHERE pid=?", (pid,)).fetchone()
+    if it is None or cur is None or it["projection_revision"] != cur[0]:
+        return {}
+    return json.loads(it["match_revisions_json"])
+
+
+def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
     """`page` (1, 2, ...) renders the view uncapped, one message per page, and
     `after` is the cursor the previous page's `next` returned; the `all` view
     is the status view paged. The answer's `next` is the call that the phrase
-    the text ends with asks for (`all of them`, `more`), or None."""
-    global _NAMES
+    the text ends with asks for (`all of them`, `more`), or None; it names this
+    rendering as `prev` (binding V1)."""
+    global _NAMES, _TAG
     if view not in VIEWS:
         raise db.Refusal(f"view is one of {', '.join(VIEWS)}")
     if view == "item" and pid is None:
@@ -962,10 +1080,18 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
         raise db.Refusal("page is 1, 2, 3, ...")
     if view == "all" and page is None:
         page = 1
-    if after is not None and (page is None or page < 2 or not isinstance(after, list)):
+    if after is not None and (page is None or page < 2 or not isinstance(after, list)
+                              or not all(isinstance(x, int) and not isinstance(x, bool)
+                                         for x in after)):
         raise db.Refusal("after is the cursor a previous page's `next` returned")
+    if prev is not None and (not isinstance(prev, str) or not _RENDER_ID.fullmatch(prev)):
+        raise db.Refusal("prev is the render id the More button carried")
     q = quarter or dates.quarter_of(db.now()[:10])
     dates.parse_quarter(q)
+    # binding V2: the render id is minted before composing — its tag ends line 1, counted
+    # inside every page budget (_limit), and this page's `next` names it as `prev` (V1)
+    rid = f"r{db.next_seq(conn)}"
+    _TAG = tag_for(rid)
     lead = _lead(conn)                  # may record the pass's gate
     # Compose and persist under ONE write lock, so the revisions recorded are
     # exactly those of the facts the text shows (round p1, Astra S1: a write
@@ -975,7 +1101,8 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
     items = []
     if lead[0] is not None:
         notes = _status_notes(conn) if view in ("status", "all") else []
-        text = fit_message(_text(lead[0] + notes), FIT_CLOSING)
+        text = "\n".join(fit_lines(_text(lead[0] + notes).split("\n"), FIT_CLOSING,
+                                    tag=_TAG)[0])
         scope["stop"] = True
     else:
         members = membership(conn, view, q, pid)
@@ -988,25 +1115,26 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
             lines, chosen = blk.lines, [blk]
             text = _text(lines)
             if cursor is not None:
-                nxt = {"view": "item", "pid": pid, "page": (page or 1) + 1, "after": cursor}
+                nxt = {"view": "item", "pid": pid, "page": (page or 1) + 1, "after": cursor,
+                       "prev": rid}
             scope["page"], scope["after"] = page, after
-            # a later page adds to what the earlier pages of this item bound
-            scope["continues"] = bool(page and page > 1)
         elif page is not None:
             lines, chosen, cursor = _page(parts, after, page == 1)
             text = _text(lines)
             if cursor is not None:
-                nxt = {"view": view, "quarter": q, "page": page + 1, "after": cursor}
+                nxt = {"view": view, "quarter": q, "page": page + 1, "after": cursor,
+                       "prev": rid}
             scope["page"], scope["after"] = page, after
         else:
             for cap in range(CAP, -1, -1):
                 lines, chosen = _capped(parts, cap)
                 text = _text(lines)
-                if utf16_len(text) <= TELEGRAM_LIMIT:
+                if utf16_len(text) <= _limit():
                     break
             if any(len(s.blocks) > sum(1 for c in chosen if c in s.blocks)
                    for s in parts["sections"]):
-                nxt = {"view": "all" if view == "status" else view, "quarter": q, "page": 1}
+                nxt = {"view": "all" if view == "status" else view, "quarter": q, "page": 1,
+                       "prev": rid}
         # The final text goes through the one fit. If it cut anything, nothing it
         # prints is bound: the text may not show every block chosen. The closing
         # line carries the phrase `next` answers, so it is never cut.
@@ -1015,7 +1143,7 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
             closing = (MORE_LINE if "after" in nxt
                        else 'The rest did not fit — say "all of them".')
         body = text.split("\n")
-        out, whole = fit_lines(body, closing)
+        out, whole = fit_lines(body, closing, tag=_TAG)
         text, cut = "\n".join(out), whole < len(body)
         if cut:
             chosen = []
@@ -1028,6 +1156,25 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
             if page in (None, 1):
                 scope["residue_silent"] = parts["silent"]
     printed = _bindable(chosen, text)
+    # S7 §7.2: what the page's buttons act on, recorded with the rendering so a stored
+    # rendering rebuilds them. Its own map, defined on every branch: `by_pid` below exists
+    # only when names were composed, and a setup-stop page composes none (`items` is []).
+    # `printed` keeps the printed order (_bindable builds it from `chosen` in order).
+    described = {d["pid"]: d for d in items}
+    scope["proposed"] = [p for p in printed if p in described
+                         and _needs_check(described[p])
+                         and described[p]["current"] is not None
+                         and described[p]["current"]["match_id"] in printed[p]]
+    if view == "item" and items and items[0]["pid"] in printed:
+        # an item that is not bound (its text was cut, or ambiguous) records no state: a
+        # verdict on it would refuse, so its page offers none (buttons_for)
+        d0 = items[0]
+        scope["item_state"] = ("exempt" if d0["status"] == "exempt"
+                               else "proposed" if d0["pid"] in scope["proposed"]
+                               else "paired" if d0["current"] is not None
+                               and d0["current"]["match_id"] in printed[d0["pid"]]
+                               else "none")
+    scope["next"] = nxt
     if _NAMES is not None:
         # the generated refs this rendering printed on payments it binds: a reply's
         # "ref <hex>" is honoured only against these (round 6)
@@ -1042,22 +1189,88 @@ def _review(conn, view, quarter, pid, page, after) -> dict:
         # the payee name each bound payment was SHOWN as: a reply resolves names
         # against what the operator saw, as well as the stored names (round 7)
         by_pid = {d["pid"]: d for d in items}
-        seen = {str(p): field(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
+        seen = {str(p): field_raw(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
         if seen:
             scope["names"] = seen
-    rid = f"r{db.next_seq(conn)}"
+    # r5: every grammar-read field (FACT_FIELDS) is stored, an empty one explicitly — a
+    # field a rendering LACKS is one an earlier version never recorded (reply._Lacks)
+    for k, empty in (("names", {}), ("refs", {}), ("offers", []), ("walk", None)):
+        scope.setdefault(k, empty)
     conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                  " membership_json) VALUES (?,?,?,?,?,?)",
                  (rid, view, db.canonical(scope), db.now(), text, json.dumps(members)))
     for p, shown_ids in printed.items():
-        prev = conn.execute("SELECT revision FROM projections WHERE pid=?", (p,)).fetchone()[0]
+        prev_rev = conn.execute("SELECT revision FROM projections WHERE pid=?",
+                                (p,)).fetchone()[0]
         mrevs = {str(r[0]): r[1] for r in conn.execute(
             "SELECT match_id, revision FROM match_state WHERE pid=?", (p,))
             if r[0] in shown_ids}
+        if view == "item" and page and page > 1 and prev is not None:
+            # V1: a later page of one item adds its explicit predecessor's candidates, at
+            # the revisions that predecessor recorded (a stale one refuses at bind)
+            mrevs = {**_predecessor_mrevs(conn, prev, p, page, after), **mrevs}
         conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
                      " match_revisions_json) VALUES (?,?,?,?)",
-                     (rid, p, prev, db.canonical(mrevs)))
+                     (rid, p, prev_rev, db.canonical(mrevs)))
     return {"render_id": rid, "text": text, "printed": len(printed), "next": nxt}
+
+
+SHEET_VIEWS = ("check", "missing")
+
+
+def fits_proposal(text: str) -> bool:
+    """A stored rendering can be posted with buttons (S7 §7.1): its deposited body fits the
+    proposal budget, and Casa's proposal text bound."""
+    body = deposit_safe(text)
+    return utf16_len(body) <= BODY_LIMIT and len(body) <= 4000
+
+
+def buttons_for(conn, r, walk=None) -> list:
+    """S7 §7.2: the stored calls of a posted rendering `r` (a renders row), in order, at
+    most six, at least one, as (label, tool, args, key_spec). A writing button carries
+    key_spec=(action, pid); the caller mints and stores its key."""
+    scope = json.loads(r["scope_json"])
+    rid, kind = r["render_id"], r["kind"]
+    proposed, nxt = scope.get("proposed") or [], scope.get("next")
+    more = [("More", "show_view", dict(nxt), None)] if nxt else []
+    if more and kind == "item" and walk:
+        more[0][2]["walk"] = walk          # page 2 of a One by one item still offers Next
+    if kind in SHEET_VIEWS and proposed:
+        out = [("All good", "verdict", {"render_id": rid, "action": "all-good"},
+                ("all-good", None)),
+               ("One by one", "show_view", {"view": "item", "pid": proposed[0], "walk": rid},
+                None)] + more
+    elif kind == "item":
+        pid = scope.get("pid")
+        verdicts = {"proposed": ("right", "wrong", "no-invoice"),
+                    "paired": ("wrong", "no-invoice"),
+                    "none": ("no-invoice",)}.get(scope.get("item_state"), ())
+        words = {"right": "Right", "wrong": "Wrong", "no-invoice": "No invoice needed"}
+        out = [(words[a], "verdict", {"render_id": rid, "action": a, "pid": pid}, (a, pid))
+               for a in verdicts]
+        nxt_pid = _walk_next(conn, walk, pid)
+        if nxt_pid is not None:
+            out.append(("Next", "show_view", {"view": "item", "pid": nxt_pid, "walk": walk},
+                        None))
+        out += more
+    else:
+        out = more or [("What's missing", "show_view", {"view": "missing"}, None),
+                       ("Anything to check?", "show_view", {"view": "check"}, None)]
+    return (out or [("What's missing", "show_view", {"view": "missing"}, None)])[:6]
+
+
+def _walk_next(conn, walk, pid):
+    """The proposed pid after `pid` on the sheet rendering `walk` (One by one), or None."""
+    if not walk:
+        return None
+    w = conn.execute("SELECT kind, scope_json FROM renders WHERE render_id=?",
+                     (walk,)).fetchone()
+    if w is None or w["kind"] not in SHEET_VIEWS:
+        return None
+    proposed = json.loads(w["scope_json"]).get("proposed") or []
+    if pid in proposed and proposed.index(pid) + 1 < len(proposed):
+        return proposed[proposed.index(pid) + 1]
+    return None
 
 
 def _norm(s: str) -> str:
@@ -1093,6 +1306,124 @@ def _bindable(chosen, text) -> dict:
     return out
 
 
+_LABEL_LINE = "\U0001f4ca "        # Casa's "📊 <display name>" label, first line of a post
+QUOTE_CAP = 2000                   # Casa quotes a post's first 2,000 characters (§2)
+# binding V3: every scope field the grammar (reply.py) reads — "same binding facts" is
+# equality of these, the kind and the rendering's render_items rows. A new grammar read
+# joins this list (an AST pin holds reply.py to it)
+FACT_FIELDS = ("names", "refs", "proposed", "offers", "next", "walk", "quarter", "pid")
+AMBIGUOUS = "I sent more than one version of that list — reply to the newest one."
+UNMATCHED = "I can't find the message you replied to — here is the list as it is now."
+LACKS = ("that message is from an earlier version of me and lacks what this needs — here is "
+         "the list as it is now; nothing applied for it.")
+
+
+class QuoteRefusal(Exception):
+    """A quote that binds no one rendering (binding R1/R3): `line` is said, nothing is
+    applied, and `view` is the show_view arguments of the recovery."""
+
+    def __init__(self, line, view):
+        super().__init__(line)
+        self.line, self.view = line, view
+
+
+def _bnorm(s: str) -> str:
+    """A text as compared for binding: whitespace runs collapsed to one space, stripped.
+    A stored rendering's body is compared this way, whole — its first line is data (a
+    payee named "📊 Analytics" heads its item view), never Casa's label (r6)."""
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# What Casa does to a post before it reaches the desk as `quoted` — undone, exactly, by
+# _qnorm (r7, after r6's label; read at the Casa tree, bcebd66b):
+# - result_broker.py:147 POST_LABEL_GLYPH "📊", :363 post_label() -> "📊 <display name>",
+#   :372 compose_operator_message() -> f"{label}\n{body}": the label line heads the post;
+# - specialist_desk.py:48 DESK_QUOTE_CHARS = 2000, :52 CLIP = "[…]", :78-84 clip(): a text
+#   over the cap becomes text[:cap - len(CLIP)] + CLIP; :692 quotes the post through it.
+CASA_QUOTE_CHARS = 2000
+CASA_CLIP = "[\u2026]"
+
+
+def _qnorm(s: str) -> str:
+    """The incoming QUOTE as compared for binding: Casa's clip marker dropped when the quote
+    is exactly the clipped length (only then did Casa cut it), Casa's label line (which Casa
+    adds to the post, never to the stored body) dropped, then _bnorm. A shorter prefix
+    still binds by the whole-overlap rule."""
+    if len(s) == CASA_QUOTE_CHARS and s.endswith(CASA_CLIP):
+        s = s[:-len(CASA_CLIP)]
+    lines = s.split("\n")
+    if lines and lines[0].startswith(_LABEL_LINE):
+        lines = lines[1:]
+    return _bnorm("\n".join(lines))
+
+
+def binding_facts(conn, r) -> str:
+    """V3: what a reading bound to rendering `r` can read — its kind, its render_items rows
+    (pid, projection revision, match revisions) and every FACT_FIELDS value (a field the
+    rendering never stored is told apart from an explicit null) — canonically."""
+    scope = json.loads(r["scope_json"])
+    items = [[it["pid"], it["projection_revision"], json.loads(it["match_revisions_json"])]
+             for it in conn.execute("SELECT * FROM render_items WHERE render_id=? ORDER BY pid",
+                                    (r["render_id"],))]
+    return db.canonical({"kind": r["kind"], "items": items,
+                         "scope": {k: [k in scope, scope.get(k)] for k in FACT_FIELDS}})
+
+
+def _rid_order(rid: str):
+    return (0, int(rid[1:]), "") if _RENDER_ID.fullmatch(rid) else (1, 0, rid)
+
+
+def _common_view(rows) -> dict:
+    """The show_view arguments of the candidates' common view, else the status view."""
+    kinds = {r["kind"] for r in rows}
+    scopes = [json.loads(r["scope_json"]) for r in rows]
+    quarters = {sc.get("quarter") for sc in scopes}
+    pids = {sc.get("pid") for sc in scopes}
+    if len(kinds) == 1 and len(quarters) == 1 and len(pids) == 1:
+        kind, (q,), (pid,) = next(iter(kinds)), quarters, pids
+        if kind in VIEWS and (kind != "item" or pid is not None):
+            out = {"view": kind}
+            if q:
+                out["quarter"] = q
+            if kind == "item":
+                out["pid"] = pid
+            return out
+    return {"view": "status"}
+
+
+def bound_rendering(conn, quoted):
+    """S7 §8, binding R1/R3: THE one rendering a reading binds. Words with no quote bind
+    db.last_delivered. A quote's candidates are every SEEN rendering (db.seen_render:
+    delivered, or posted), db.UNQUOTABLE_KINDS excluded, with no row limit and
+    no ordering. A candidate matches when its normalised text and the normalised quote agree
+    over their whole overlap, capped at QUOTE_CAP (the shorter is a prefix of the other: a
+    post joins up to job.POST_MAX renderings, §5, and its quote binds the first). One match
+    binds. Several with the same binding facts (V3) bind the lowest render id — the choice
+    cannot change what commits. Several with differing facts raise QuoteRefusal (AMBIGUOUS:
+    possible only among pre-S7 renderings, V2 tags the rest); none raises it too
+    (UNMATCHED) — an explicit quote never falls back. Recency never picks."""
+    q = _qnorm(quoted)[:QUOTE_CAP] if isinstance(quoted, str) else ""
+    if not q:
+        return db.last_delivered(conn)
+    found = []
+    for r in conn.execute("SELECT * FROM renders WHERE (delivered_at IS NOT NULL OR posted_seq"
+                          " IS NOT NULL) AND kind NOT IN (%s)"
+                          % ",".join("?" * len(db.UNQUOTABLE_KINDS)),
+                          db.UNQUOTABLE_KINDS):
+        # the body as posted: deposit_safe is the last step of every deposit (§7.6), so a
+        # pre-S7 body's control characters are spaces in what the operator saw
+        t = _bnorm(unesc(deposit_safe(r["text"] or "")))[:QUOTE_CAP]
+        n = min(len(t), len(q))
+        if db.seen_render(r) and n and t[:n] == q[:n]:
+            found.append(r)
+    if not found:
+        raise QuoteRefusal(UNMATCHED, {"view": "status"})
+    found.sort(key=lambda r: _rid_order(r["render_id"]))
+    if len({binding_facts(conn, r) for r in found}) == 1:
+        return found[0]
+    raise QuoteRefusal(AMBIGUOUS, _common_view(found))
+
+
 def render_items(conn, render_id) -> list:
     return [r[0] for r in conn.execute("SELECT pid FROM render_items WHERE render_id=?",
                                        (render_id,))]
@@ -1110,29 +1441,17 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
         conn.execute("UPDATE renders SET delivered_at=?, delivered_seq=? WHERE render_id=?",
                      (now, db.next_seq(conn), render_id))
         scope = json.loads(r["scope_json"])
-        # a NON-binding rendering (handed out last by an operator turn's job_report:
-        # diff round 1, R5) is recorded delivered — db.last_delivered returns it, and a
-        # reply about its contents refuses there (R6) — but it never becomes any
-        # payment's shown revision (`shown`, which named replies and every operator
-        # write bind through)
-        binds = r["binding"] is None or r["binding"] == 1
-        for it in (conn.execute("SELECT * FROM render_items WHERE render_id=?",
-                                (render_id,)).fetchall() if binds else ()):
-            mrevs = it["match_revisions_json"]
-            if scope.get("continues"):
-                # a later page of one item view: the operator has now been shown the
-                # earlier pages' candidates too, at the same revision of the payment
-                prev = conn.execute("SELECT s.*, r.kind FROM shown s JOIN renders r ON"
-                                    " r.render_id=s.render_id WHERE s.pid=?",
-                                    (it["pid"],)).fetchone()
-                if prev is not None and prev["kind"] == "item" \
-                        and prev["projection_revision"] == it["projection_revision"]:
-                    merged = json.loads(prev["match_revisions_json"])
-                    merged.update(json.loads(mrevs))
-                    mrevs = db.canonical(merged)
+        # every delivered rendering's items become `shown` (S7 §9 retires renders.binding,
+        # the stamp job_report's hand-out wrote: it is ignored, whatever it holds)
+        # (binding §2 #13: a continued page's candidates are merged when it is composed,
+        # from its explicit predecessor only — never here; nothing outside views reads
+        # `shown`)
+        for it in conn.execute("SELECT * FROM render_items WHERE render_id=?",
+                               (render_id,)).fetchall():
             conn.execute("INSERT OR REPLACE INTO shown(pid, render_id, projection_revision,"
                          " match_revisions_json, delivered_at) VALUES (?,?,?,?,?)",
-                         (it["pid"], render_id, it["projection_revision"], mrevs, now))
+                         (it["pid"], render_id, it["projection_revision"],
+                          it["match_revisions_json"], now))
         for rid_ in scope.get("residue", []) + scope.get("residue_silent", []):
             conn.execute("UPDATE residue SET shown_render=? WHERE id=?", (render_id, rid_))
         if scope.get("announce_watermark"):

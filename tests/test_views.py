@@ -4,7 +4,7 @@ import re
 import unittest
 from unittest import mock
 
-from tests._base import StoreCase
+from tests._base import StoreCase, untag
 import db  # noqa: E402
 import kb  # noqa: E402
 import matches  # noqa: E402
@@ -122,7 +122,7 @@ class TestSheet(Base):
         self.assertLess(text.index("MISSING"), text.index("I GUESSED THESE"))
         self.assertIn("Adobe · EUR 100.00 · 14 Sep", text)
         self.assertIn("https://adobe.example/invoices", text)
-        self.assertIn("Picked invoice 8841 (17 Sep); 8712 (10 Sep) also fits.", text)
+        self.assertIn("Picked invoice 8841 (17 Sep); 8712 \\(10 Sep\\) also fits.", text)
         self.assertIn('"the Zapier one is wrong"', text)
 
     def test_a_long_list_caps_largest_first_and_counts_the_rest(self):
@@ -132,7 +132,7 @@ class TestSheet(Base):
         self.assertIn('+12 more — say "all of them"', text)
         self.assertIn("Vendor19", text)
         self.assertNotIn("Vendor00 ", text)
-        self.assertLessEqual(views.utf16_len(text), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(text), views.BODY_LIMIT)
         all_text = self.render("all")["text"]
         self.assertIn("Vendor00", all_text)
 
@@ -188,7 +188,7 @@ class TestSheet(Base):
         self.add(counterparty="New1", searched=False)
         self.add(counterparty="New2", searched=False)
         passes.record_probe(self.conn, self.token, "gmail", False, "auth failed")
-        text = self.render()["text"]
+        text = untag(self.render()["text"])
         self.assertTrue(text.startswith(
             "Review incomplete - Gmail unavailable.\n1 invoice already missing.\n"
             "2 new payments not searched.\nNo reply needed; I'll retry next pass.\n"), text)
@@ -196,7 +196,7 @@ class TestSheet(Base):
         self.assertNotIn("not checked yet", text)    # could not look is not "not reached"
         self.assertIn("3 transactions, 1 missing a document.", flat(text))
         self.end_with_counts(self.token, "interrupted", {"checked": 18, "total": 30})
-        text = self.render()["text"]
+        text = untag(self.render()["text"])
         self.assertIn("Review interrupted.\n18 of 30 new payments checked.\n12 not checked yet. Saved.",
                       text)
 
@@ -284,7 +284,7 @@ class TestSheet(Base):
                 ledger.end_lineage(self.conn, pid, "erased")
                 lineage.settle(self.conn, pid)
         r = self.render()
-        self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
         self.assertIn('+142 more — say "all of them"', r["text"])
         self.assertEqual(r["next"]["view"], "all")
         views.mark_rendering_delivered(self.conn, r["render_id"])
@@ -295,7 +295,7 @@ class TestSheet(Base):
         while True:
             r = views.build_review(self.conn, view="all", quarter="2026-Q3", page=page,
                                    after=after)
-            self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
             self.assertNotIn("all of them", r["text"])
             seen |= set(re.findall(r"Gone\d{3}", r["text"]))
             views.mark_rendering_delivered(self.conn, r["render_id"])
@@ -312,14 +312,15 @@ class TestSheet(Base):
             self.add(counterparty=f"Vend{i:03d}", amount_minor=1000 + i)
         capped = self.render("missing")
         self.assertIn('+192 more — say "all of them"', capped["text"])
-        self.assertEqual(capped["next"], {"view": "missing", "quarter": "2026-Q3", "page": 1})
+        self.assertEqual(capped["next"], {"view": "missing", "quarter": "2026-Q3", "page": 1,
+                                          "prev": capped["render_id"]})
         for view in ("all", "missing"):
             seen, page, after, n = set(), 1, None, 0
             while True:
                 r = views.build_review(self.conn, view=view, quarter="2026-Q3", page=page,
                                        after=after)
                 n += 1
-                self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+                self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
                 self.assertNotIn("all of them", r["text"])
                 self.assertIn("classification through", flat(r["text"]))
                 got = re.findall(r"Vend\d{3}", r["text"])
@@ -335,7 +336,7 @@ class TestSheet(Base):
             self.assertEqual(len(seen), 200, view)
         self.assertIn("That is everything.",
                       views.build_review(self.conn, view="all", quarter="2026-Q3",
-                                         page=99, after=[99, "", 0])["text"])
+                                         page=99, after=[99, 0, 0])["text"])
 
     def test_an_oversized_item_never_breaks_the_limit(self):
         kb.upsert_counterparty(self.conn, "Adobe", source="portal",
@@ -347,7 +348,7 @@ class TestSheet(Base):
         # fix wave D round 2: the unbounded link is clipped with its mark, so the
         # item prints whole and is bound (before, the whole text was cut and bound nothing)
         for r in (self.render(), self.render("item", pid=pid), self.render("all")):
-            self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
             self.assertIn("Adobe · EUR 100.00", r["text"])
             self.assertIn("https://adobe.example/xxx", r["text"])
             self.assertIn(views.CLIP_MARK, r["text"])
@@ -364,7 +365,7 @@ class TestSheet(Base):
         pid = self.add()
         with mock.patch.object(views, "LINK_MAX", 10 ** 6):
             for r in (self.render(), self.render("item", pid=pid), self.render("all")):
-                self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+                self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
                 self.assertEqual(r["printed"], 0)
 
     def test_unprintable_residue_is_marked_with_the_rendering(self):
@@ -381,7 +382,7 @@ class TestSheet(Base):
     def test_an_item_no_longer_chased_stays_missing_even_if_never_searched(self):
         self.add(counterparty="Found")
         self.add(counterparty="Dropped", searched=False)
-        work.stop_chasing(self.conn, "2026-Q3")
+        self.granted(work.stop_chasing_in_tx, "2026-Q3")
         text = self.render()["text"]
         self.assertIn("Dropped · EUR 100.00 · 14 Sep\nNo longer chased.", text)
         self.assertIn("2 transactions, 2 missing a document.", flat(text))
@@ -408,7 +409,7 @@ class TestSheet(Base):
         self.add(counterparty="Seen")
         self.add(counterparty="Unreached", searched=False)
         self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 2})
-        text = self.render()["text"]
+        text = untag(self.render()["text"])
         self.assertIn("Review interrupted.\n1 of 2 new payments checked.\n1 not checked yet. Saved.",
                       text)
         self.assertEqual(text.count("not checked yet"), 1)
@@ -422,8 +423,8 @@ class TestSheet(Base):
         for trigger in ("package", "handover"):
             tok = self.pass_(trigger=trigger)
             passes.end_pass(self.conn, tok, "complete", {})
-            self.assertIn("Review interrupted.\n1 of 2 new payments checked.", self.render()["text"],
-                          trigger)
+            self.assertIn("Review interrupted.\n1 of 2 new payments checked.",
+                          untag(self.render()["text"]), trigger)
         tok = self.pass_(trigger="cron")
         passes.end_pass(self.conn, tok, "complete", {})
         self.assertNotIn("Review interrupted.", self.render()["text"])
@@ -489,7 +490,7 @@ class TestSheet(Base):
         for i in range(10, 200):
             self.add(counterparty=f"Small{i}", amount_minor=200 + i)
         r = views.build_review(self.conn, view="missing", quarter="2026-Q3", page=1)
-        self.assertLessEqual(views.utf16_len(r["text"]), views.TELEGRAM_LIMIT)
+        self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
         self.assertIsNotNone(r["next"])
         self.assertTrue(r["text"].endswith('say "more".'), r["text"][-80:])
         r2 = views.build_review(self.conn, view="missing", quarter="2026-Q3", **{
@@ -517,7 +518,10 @@ class TestRenderLog(Base):
 
     def test_same_store_same_bytes(self):
         self.add()
-        self.assertEqual(self.render()["text"], self.render()["text"])
+        # binding V2: two renderings of one unchanged store differ only by their tag
+        a, b = self.render(), self.render()
+        self.assertNotEqual(a["text"], b["text"])
+        self.assertEqual(untag(a["text"]), untag(b["text"]))
 
     def test_composition_holds_the_write_lock(self):
         import sqlite3

@@ -264,7 +264,8 @@ class HolderChanges(StoreCase):
                                                " pass_id=?", (pid,)).fetchone()[0],
                              1 + job.ADOPTIONS_MAX + job.W_REFRESH_MAX)
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
+        # S7 §5: the job posted the result and its receipt was marked
+        self.assertEqual((r["state"], r["outcome"]), ("reported", "stopped"))
 
 
 class ReopenedForever(Tools):
@@ -314,8 +315,8 @@ class ReopenedForever(Tools):
 class UnboundedAsks(StoreCase):
     """Requests keep coming while the job runs. A live pass takes at most LATE_TAKES_MAX
     of them (design r1, Terra S1); one Casa job run begins at most MAX_PASSES_PER_JOB
-    passes, then completes, and job_report's standing retry starts the next job (design
-    r4, Terra S1; r5)."""
+    passes, then completes, and the next start takes the rest (design r4, Terra S1; r5;
+    S7 §4.2: nothing restarts a job)."""
 
     def setUp(self):
         super().setUp()
@@ -360,10 +361,7 @@ class UnboundedAsks(StoreCase):
         self.assertEqual(job.status(self.conn, A),
                          {"done": True, "text": "Accounting work finished."})
         self.assertFalse(job.status(self.conn, B)["done"])     # a fresh run has budget
-        # the completion notification's job_report: the standing retry
-        r = asks.job_report(self.conn, job_id=A, status="ok")
-        self.assertIsNotNone(r["start_job"])
-        # the next job takes what was queued
+        # S7 §4.2: nothing restarts; the next start takes what was queued
         t = job.claim(self.conn, B)
         u = job.next_unit(self.conn, t)
         self.assertEqual(u["unit"], "probes")
@@ -388,8 +386,13 @@ class UnboundedAsks(StoreCase):
         with db.tx(self.conn):
             self.conn.execute("UPDATE runs SET passes=? WHERE job_id=?",
                               (job.MAX_PASSES_PER_JOB, A))
-        self.assertTrue(job.status(self.conn, A)["done"])          # budget spent: done
+        self.assertFalse(job.status(self.conn, A)["done"])         # S7 §4.2: the left line
         t = job.claim(self.conn, A)
+        u = job.next_unit(self.conn, t)
+        self.assertEqual(u["unit"], "post")
+        import views
+        views.mark_rendering_delivered(self.conn, u["render_ids"][0])
+        self.assertTrue(job.status(self.conn, A)["done"])          # budget spent: done
         self.assertEqual(job.next_unit(self.conn, t)["unit"], "complete")
 
 
@@ -403,7 +406,7 @@ class ManyPasses(StoreCase):
         self.bind()
         drv = JobDriver(self, payments=0)
         for n in range(16):
-            asks.request_package(self.conn, f"{2023 + n // 4}-Q{n % 4 + 1}", "telegram")
+            asks.request_package(self.conn, f"{2023 + n // 4}-Q{n % 4 + 1}")
         runs, spanning = [], 0
         for k in range(8):
             job_id = f"{k + 1:08x}-{k + 1}"
@@ -419,8 +422,9 @@ class ManyPasses(StoreCase):
             if not self.conn.execute("SELECT 1 FROM package_requests WHERE state='queued'"
                                      ).fetchone():
                 break
+        # S7 §6.1: each is built and posted by the run that checked it
         self.assertEqual(self.conn.execute("SELECT count(*) FROM package_requests WHERE"
-                                           " state='snapshot-done'").fetchone()[0], 16)
+                                           " state='delivered'").fetchone()[0], 16)
         self.assertEqual(len(runs), 4)                  # four passes per run
 
 
@@ -443,7 +447,7 @@ class SweepLiveness(Tools):
         as fast as the sweep's fell: [F, F, F] while 50 → 120 → 190 rows settled."""
         self.rows = [{"row_id": i, "amount_minor": 10000 + i} for i in range(1, 401)]
         self.bank = {i: {"tags": [], "notes": [], "rev": 0} for i in range(1, 401)}
-        self.call("request_package", quarter="2026-Q3", channel="telegram")
+        self.call("request_package", quarter="2026-Q3")
         u = self.do(self.do(self.call("job_next", job_id=A)))      # probes, snapshot
         for b in self.bank.values():
             b["tags"], b["rev"] = ["software"], 1                   # classified meanwhile
@@ -476,8 +480,9 @@ class SweepLiveness(Tools):
         """Design r1 (Astra S1): one operator `stop_chasing` makes 400 rows due again
         under the same acquisition; the job's re-settlement earns, by the rows' new
         states."""
-        out = self.sweep_then_reopen(400, lambda t: self.call("stop_chasing",
-                                                             quarter="2026-Q3"))
+        import work         # S7 §8.1: the operator's tap, under its grant
+        out = self.sweep_then_reopen(400, lambda t: self.granted(work.stop_chasing_in_tx,
+                                                                 "2026-Q3"))
         for flag, units, settled in out:
             self.assertEqual(units, {"sweep"}, out)
             self.assertGreater(settled, 0, out)
@@ -567,18 +572,15 @@ class Credits(Tools):
     """What earns, and what never does."""
 
     def test_an_import_alone_earns_nothing_whatever_it_requeues(self):
-        """Diff r3 (R8): an import that revokes a staged first send puts its package ask
-        back in the queue; it earns nothing and loses nothing — there is no baseline."""
-        self.call("request_package", quarter="2026-Q3", channel="telegram")
-        self.until(self.call("job_next", job_id=A), "complete")
-        tok = self.call("job_report", job_id=A, status="ok")["continue"]["package_token"]
-        pkg = self.call("build_quarterly_package", quarter="2026-Q3", package_token=tok)
-        self.call("stage_for_delivery", channel="telegram", package_id=pkg["package_id"],
-                  package_token=tok)                    # staged, never sent
+        """Diff r3 (R8), on S7's units (§6.1): an import that revokes a staged first send
+        puts its package ask back in the queue; it earns nothing and loses nothing — there
+        is no baseline."""
+        self.call("request_package", quarter="2026-Q3")
+        u = self.until(self.call("job_next", job_id=A), "deliver")
+        self.call("stage_for_delivery", package_id=u["package_id"],
+                  package_token=u["package_token"])     # staged, never sent
         self.call("request_work", kind="check", trigger="cron")
-        u = self.call("job_next", job_id=A)
-        u = self.do(u)                                  # probes
-        self.assertEqual(u["unit"], "snapshot")
+        u = self.until(self.call("job_next", job_id=A), "snapshot")
         before = credits(self)
         queued = self.conn.execute("SELECT count(*) FROM package_requests WHERE"
                                    " state='queued'").fetchone()[0]
@@ -591,8 +593,9 @@ class Credits(Tools):
     def test_a_write_outside_the_job_earns_nothing(self):
         u = self.until(self.start(2), "gmail-probe")
         before = credits(self)
-        self.call("stop_chasing", quarter="2026-Q3")    # Ellen, for the operator
-        self.call("request_package", quarter="2026-Q2", channel="telegram")
+        import work
+        self.granted(work.stop_chasing_in_tx, "2026-Q3")    # the operator's tap (S7 §8.1)
+        self.call("request_package", quarter="2026-Q2")
         upsert(name="Adobe", source="portal")
         self.assertEqual(credits(self), before)
 
@@ -605,11 +608,15 @@ class Credits(Tools):
         self.assertEqual(bad, 0)
 
     def test_a_package_request_earns_at_its_job_side_end(self):
-        self.call("request_package", quarter="2026-Q3", channel="telegram")
+        self.call("request_package", quarter="2026-Q3")
         self.until(self.call("job_next", job_id=A), "complete")
         rid = self.conn.execute("SELECT request_id, state FROM package_requests").fetchone()
-        self.assertEqual(rid["state"], "snapshot-done")
-        self.assertEqual(credits(self, f"req:pkg:{rid['request_id']}"), 1)
+        # S7 §6.1: the job builds and posts it too, each earning its own credit
+        self.assertEqual(rid["state"], "delivered")
+        n = rid["request_id"]
+        self.assertEqual({r[0] for r in self.conn.execute(
+            "SELECT key FROM credits WHERE key LIKE 'req:pkg:%'")},
+            {f"req:pkg:{n}", f"req:pkg:{n}:built", f"req:pkg:{n}:delivered"})
 
 
 class BatchIdentity(StoreCase):

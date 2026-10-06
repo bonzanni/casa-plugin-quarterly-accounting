@@ -3,6 +3,7 @@
 wording, the classification and freshness notes, and a queued check made visible."""
 import datetime as _dt
 import json, pathlib, subprocess, sys
+import unittest
 from tests._base import StoreCase, ROOT
 
 A_JOB = "aaaaaaaa-1"
@@ -14,9 +15,10 @@ class Surface(StoreCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         import qa_server, tools  # noqa: F401
-        for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work"):
+        for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work",
+                     "job_report"):                     # S7 §9: the relay is deleted
             self.assertNotIn(gone, qa_server.TOOLS)
-        for new in ("job_next", "job_status", "job_report", "request_work",
+        for new in ("job_next", "job_status", "request_work",
                     "request_package", "record_filing"):
             self.assertIn(new, qa_server.TOOLS)
 
@@ -27,7 +29,7 @@ class Surface(StoreCase):
             "summary": "Checks the bank and Gmail, judges documents, prepares packages",
             "batches": "unlimited", "turnsPerBatch": 80, "session": "fresh",
             "host": "specialist"}])
-        self.assertEqual(m["version"], "0.9.0")
+        self.assertEqual(m["version"], "0.10.0")
         import job                  # the batch budget and the batch window's claim count
         self.assertEqual(job.TURNS_PER_BATCH, m["casa"]["jobs"][0]["turnsPerBatch"])
 
@@ -82,12 +84,6 @@ class SurfaceBound(StoreCase):
                       "classified.", text)
         self.assertIn("A check is waiting to start, asked 12 minutes ago.", text)
         self.assertLess(text.index("A check is waiting"), text.index("Accounting ·"))
-        # a job that is draining the queue is not "waiting to start"
-        with db.tx(self.conn):
-            self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES"
-                              " ('drain', 'job-00000001')")
-        self.assertNotIn("waiting to start",
-                         views.build_review(self.conn, view="status")["text"])
 
     def test_the_gmail_absent_alert_is_not_a_reauthorisation(self):
         import alerts, passes
@@ -142,7 +138,7 @@ class ToolLayer(StoreCase):
     def test_request_work_then_job_status_then_job_next(self):
         out = self.call("request_work", kind="check", trigger="operator")
         self.assertEqual(out["start_job"]["job"], "quarterly-accounting:work")
-        self.assertEqual(out["line"], "Checking the bank and your email — I'll send the "
+        self.assertEqual(out["line"], "Checking the bank and your email — I'll post the "
                                       "result here.")
         self.assertEqual(self.call("job_status", job_id="0123abcd-0000"),
                          {"done": False, "text": None})
@@ -151,21 +147,15 @@ class ToolLayer(StoreCase):
         self.assertEqual(first["unit"], "probes")
         self.assertTrue(self.call("job_next").startswith("refused: "))
 
-    def test_request_package_and_job_report(self):
-        out = self.call("request_package", quarter="Q3 2026", channel="telegram")
+    def test_request_package_returns_its_start(self):
+        out = self.call("request_package", quarter="Q3 2026")
         self.assertEqual(out["status"], "asked")
-        rep = self.call("job_report")
-        self.assertEqual(rep["start_job"]["job"], "quarterly-accounting:work")
-        self.assertFalse(rep["more"])
+        self.assertEqual(out["start_job"]["job"], "quarterly-accounting:work")
 
     def test_the_descriptions_carry_the_echo_and_the_call_again(self):
         import qa_server, tools  # noqa: F401
         nxt = " ".join(qa_server.TOOLS["job_next"]["description"].split())
         self.assertIn("echo the judge unit's `judgment` and `after`", nxt)
-        rep = " ".join(qa_server.TOOLS["job_report"]["description"].split())
-        self.assertIn("`more: true`", rep)
-        self.assertIn("call job_report again", rep)
-        self.assertIn("speak` first", rep)
         status = " ".join(qa_server.TOOLS["job_status"]["description"].split())
         self.assertIn("never a claim", status)
 
@@ -225,9 +215,10 @@ class RefusalsNameNoRemovedTool(StoreCase):
 
 class ReportOrder(StoreCase):
     """Carry (Task 10): the operator's reply binds to the LAST delivered rendering, so
-    job_report lists a status view after every handover and stop page."""
+    the job posts every handover and stop page before a status view (S7 §5: the status
+    sheet only when nothing else is owed)."""
     def test_status_views_come_last(self):
-        import asks, db, views
+        import asks, db, job, views
         with db.tx(self.conn):
             for kind, trigger, outcome in (("check", "operator", "complete"),
                                            ("handover", "operator", "complete"),
@@ -237,11 +228,21 @@ class ReportOrder(StoreCase):
                     " created_at, state, outcome) VALUES (?,?,?,?,?, 'done', ?)",
                     (kind, trigger, "[999]" if kind == "handover" else "[]",
                      db.next_seq(self.conn), db.now(), outcome))
-        rep = asks.job_report(self.conn)
+        tok = job.claim(self.conn, "aaaaaaaa-1")
+        units = []
+        for _ in range(4):
+            u = job.next_unit(self.conn, tok)
+            units.append(u)
+            if u["unit"] == "complete" or u["unit"] == "view":
+                break
+            for rid in u["render_ids"]:
+                views.mark_rendering_delivered(self.conn, rid)
+        handed = [r for u in units if u["unit"] == "post" for r in u["render_ids"]]
+        handed += [u["render_id"] for u in units if u["unit"] == "view"]
         kinds = [self.conn.execute("SELECT kind FROM renders WHERE render_id=?",
-                                   (t["render_id"],)).fetchone()[0] for t in rep["texts"]]
+                                   (r,)).fetchone()[0] for r in handed]
         self.assertEqual(kinds, ["handover", "job-stop", "status"])
-        self.assertIn(asks.NOT_FOUND, rep["texts"][0]["text"])
+        self.assertIn(asks.NOT_FOUND, self.render_text(handed[0]))
 
     def test_the_not_found_line_offers_no_resend(self):
         import asks, reply

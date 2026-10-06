@@ -89,10 +89,27 @@ def _with_clock(fn, args):
     return out
 
 
+def posted_first(name, args) -> None:
+    """r3 #2: record_delivery(delivered) is refused for a package send never posted. The
+    pre-S7 tests that drive record_delivery modelled the file as sent (send_media then);
+    in S7 the one way out is post_package, whose transaction marks the send posted before
+    its deposit — written here, exactly, before such a call. (A missing or unknown
+    delivery is left to record_delivery's own refusal.)"""
+    if name != "record_delivery" or args.get("outcome") != "delivered":
+        return
+    did = args.get("delivery_id")
+    if isinstance(did, int) and not isinstance(did, bool):
+        with db.tx(conn()):
+            conn().execute("UPDATE deliveries SET posted_at=coalesce(posted_at, ?) WHERE"
+                           " delivery_id=?", (db.now(), did))
+
+
 def handle(req: dict):
     """qa_server.handle, answering the five removed tools the way it answered them."""
     import qa_server
     params = req.get("params") or {}
+    if req.get("method") == "tools/call":
+        posted_first(params.get("name"), params.get("arguments") or {})
     fn = LEGACY.get(params.get("name")) if req.get("method") == "tools/call" else None
     if fn is None:
         return qa_server.handle(req)

@@ -1,15 +1,22 @@
 # tests/test_delivery.py
 import contextlib
-import importlib.util
 import os
 import pathlib
 import unittest
 import zipfile  # noqa: F401
 from unittest import mock
 
-from tests._base import ROOT, StoreCase
+from tests._base import StoreCase
 import db  # noqa: E402
 import delivery  # noqa: E402
+
+
+def _record(conn, **kw):
+    """record_delivery, after the post a delivered outcome needs (r3 #2): these tests stage
+    and record directly; in S7 the send between them is post_package, which marks it."""
+    from tests import legacy_tools
+    legacy_tools.posted_first("record_delivery", kw)
+    return delivery.record_delivery(conn, **kw)
 import ledger  # noqa: E402
 import package  # noqa: E402
 import reducer  # noqa: E402
@@ -31,13 +38,13 @@ class Base(StoreCase):
 class TestTelegram(Base):
     def test_staged_atomically_into_the_outbox_under_a_name_of_its_own(self):
         # issue #2: the staged file's name is random and never reused; the operator sees
-        # the package's name through send_media's filename argument
+        # the package's name through post_package's deposit `filename` (S7a)
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
         self.assertEqual(os.path.dirname(out["path"]), str(self.outbox))
         self.assertRegex(os.path.basename(out["path"]), r"^qa-[0-9a-f]{16}\.zip$")
         self.assertEqual(out["filename"], self.pkg["filename"])
-        self.assertIn("filename=<filename>", out["note"])
+        self.assertIn("post_package(delivery_id)", out["note"])
         self.assertEqual(pathlib.Path(out["path"]).read_bytes(),
                          pathlib.Path(self.pkg["path"]).read_bytes())
         self.assertFalse([f for f in os.listdir(self.outbox) if ".part" in f])
@@ -55,7 +62,7 @@ class TestTelegram(Base):
     def test_delivered_records_the_rows_the_accountant_now_holds(self):
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="delivered")
+        _record(self.conn, delivery_id=out["delivery_id"], outcome="delivered")
         rows = self.conn.execute("SELECT row_id, pid FROM delivered_rows").fetchall()
         self.assertEqual([tuple(r) for r in rows], [(1, self.pid)])
         self.assertEqual(self.conn.execute("SELECT package_name_announced FROM binding")
@@ -64,7 +71,7 @@ class TestTelegram(Base):
     def test_delivered_rows_carry_the_facts_the_delivered_check_compares(self):
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="delivered")
+        _record(self.conn, delivery_id=out["delivery_id"], outcome="delivered")
         bank = dict(self.conn.execute("SELECT * FROM bank_rows WHERE row_id=1").fetchone())
         fp, kind = self.conn.execute("SELECT facts_fp, kind FROM delivered_rows").fetchone()
         self.assertEqual(fp, db.canonical(reducer.facts_of(bank)))
@@ -79,10 +86,10 @@ class TestTelegram(Base):
     def test_uncertain_is_offered_in_words_and_never_resent_by_itself(self):
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
+        _record(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 1)
         text = views.build_review(self.conn, view="status", quarter="2026-Q3")["text"]
-        self.assertIn(self.pkg["filename"], text)
+        self.assertIn(views.field(self.pkg["filename"]), text)
         self.assertIn('say "send it again"', text)
         self.assertEqual(delivery.resendable(self.conn), self.pkg["package_id"])
         again = delivery.stage_for_delivery(self.conn, channel="telegram",
@@ -94,10 +101,10 @@ class TestTelegram(Base):
     def test_the_offer_goes_once_the_resend_is_delivered(self):
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
+        _record(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
         again = delivery.stage_for_delivery(self.conn, channel="telegram",
                                             package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=again["delivery_id"],
+        _record(self.conn, delivery_id=again["delivery_id"],
                                  outcome="delivered")
         text = views.build_review(self.conn, view="status", quarter="2026-Q3")["text"]
         self.assertNotIn("send it again", text)
@@ -105,29 +112,29 @@ class TestTelegram(Base):
     def test_the_offer_goes_through_the_view_machinery(self):
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
+        _record(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
         for view, page in (("status", None), ("all", 1)):
             text = views.build_review(self.conn, view=view, quarter="2026-Q3", page=page)["text"]
             self.assertIn('say "send it again"', text, view)
-            self.assertLessEqual(views.utf16_len(text), views.TELEGRAM_LIMIT)
+            self.assertLessEqual(views.utf16_len(text), views.BODY_LIMIT)
             for line in text.splitlines():
                 self.assertLessEqual(len(line), views.WIDTH, (view, line))
             for word in views.FORBIDDEN:
                 self.assertNotIn(word, text, (view, word))
         # a view that does not fit is cut by the final fit, never extended after it
-        with mock.patch.object(views, "TELEGRAM_LIMIT", 120):
+        with mock.patch.object(views, "BODY_LIMIT", 120):
             text = views.build_review(self.conn, view="status", quarter="2026-Q3")["text"]
             self.assertLessEqual(views.utf16_len(text), 120)
 
     def test_resend_follows_each_packages_latest_send(self):
         old = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
-        delivery.record_delivery(self.conn, delivery_id=old["delivery_id"], outcome="delivered")
+        _record(self.conn, delivery_id=old["delivery_id"], outcome="delivered")
         newer = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
         for outcome in ("uncertain", "failed"):
             d = delivery.stage_for_delivery(self.conn, channel="telegram",
                                             package_id=newer["package_id"])
-            delivery.record_delivery(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
+            _record(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
         # one predicate (resend_refusal): a package that arrived is never resent; the newer
         # one, whose latest send failed under the current snapshot, is the one owed
         self.assertEqual(delivery.resendable(self.conn), newer["package_id"])
@@ -151,13 +158,13 @@ class TestPassFence(Base):
         stale = self.token
         live = self.pass_()
         with self.assertRaises(db.Refusal):
-            delivery.record_delivery(self.conn, delivery_id=out["delivery_id"],
+            _record(self.conn, delivery_id=out["delivery_id"],
                                      outcome="delivered", pass_token=stale)
         self.assertEqual(self.conn.execute("SELECT status FROM deliveries").fetchone()[0],
                          "staged")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delivered_rows")
                          .fetchone()[0], 0)
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"],
+        _record(self.conn, delivery_id=out["delivery_id"],
                                  outcome="delivered", pass_token=live)
         self.assertEqual(self.conn.execute("SELECT status FROM deliveries").fetchone()[0],
                          "delivered")
@@ -193,66 +200,27 @@ class TestCustody(Base):
             package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
 
 
-class TestEmail(Base):
-    def test_published_to_the_handoff_with_a_request_id(self):
-        out = delivery.stage_for_delivery(self.conn, channel="email",
-                                          package_id=self.pkg["package_id"])
-        self.assertTrue(out["path"].startswith(str(self.handoff)))
-        self.assertTrue(out["request_id"])
-        self.assertIn("operator's own address", out["note"])
+class TestNoEmail(Base):
+    """S7 §6.2: packages come as a file on Telegram; the email staging path is deleted."""
 
-    def test_an_email_over_the_handoff_cap_is_refused(self):
-        with mock.patch.object(delivery, "GMAIL_ATTACHMENT_LIMIT", 10):
-            with self.assertRaises(db.Refusal) as cm:
-                delivery.stage_for_delivery(self.conn, channel="email",
-                                            package_id=self.pkg["package_id"])
-        self.assertIn("25 MB", str(cm.exception))
+    def test_email_is_refused_and_nothing_is_staged(self):
+        with self.assertRaises(db.Refusal) as cm:
+            delivery.stage_for_delivery(self.conn, channel="email",
+                                        package_id=self.pkg["package_id"])
+        self.assertEqual(str(cm.exception), delivery.EMAIL_GONE)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 0)
+        self.assertEqual(list(self.handoff.iterdir()), [])
 
-    def test_a_package_too_large_for_telegram_can_still_be_emailed(self):
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE packages SET oversize=1")
-        out = delivery.stage_for_delivery(self.conn, channel="email",
-                                          package_id=self.pkg["package_id"])
-        self.assertTrue(out["request_id"])
-
-    def test_email_is_delivered_only_with_a_message_id(self):
-        out = delivery.stage_for_delivery(self.conn, channel="email",
-                                          package_id=self.pkg["package_id"])
-        with self.assertRaises(db.Refusal):
-            delivery.record_delivery(self.conn, delivery_id=out["delivery_id"],
-                                     outcome="delivered")
-        delivery.record_delivery(self.conn, delivery_id=out["delivery_id"], outcome="delivered",
-                                 message_id="18c0f")
-
-    def test_a_retry_after_a_timeout_sends_twice_which_is_why_we_never_retry(self):
-        spec = importlib.util.spec_from_file_location(
-            "gmail_sent_log", ROOT / "tests/upstream/gmail-v0.9.0/sent_log.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        log = mod.SentLog(str(self.tmp / "sent_log.json"))
-        sends = []
-
-        def send_email(request_id, to, subject, fail_after_send):
-            # gmail 0.9.0's send path: check, send, THEN record (server.py 571-577)
-            if request_id and log.check(request_id, to, subject):
-                return "dedup"
-            sends.append(request_id)
-            if fail_after_send:
-                raise TimeoutError("transport timeout after the request was accepted")
-            log.record(request_id, "msg-%d" % len(sends), to, subject)
-            return "sent"
-
-        with self.assertRaises(TimeoutError):
-            send_email("qa-1", "me@example.org", "Q3", True)
-        send_email("qa-1", "me@example.org", "Q3", False)
-        self.assertEqual(len(sends), 2)
+    def test_channel_defaults_to_telegram(self):
+        out = delivery.stage_for_delivery(self.conn, package_id=self.pkg["package_id"])
+        self.assertEqual(out["channel"], "telegram")
+        self.assertIn("post_package(delivery_id)", out["note"])
 
     def test_a_single_invoice_can_be_staged(self):
         import documents
         path = self.publish("inv.pdf", b"%PDF-1.4\n%%EOF\n")
         doc_id = documents.ingest_document(self.conn, source_path=path, kind="invoice",
-                                           source="gmail", extraction_author="resident",
+                                           source="gmail", extraction_author="desk",
                                            counterparty="Adobe", amount_minor=100,
                                            document_date="2026-07-02")["doc_id"]
         out = delivery.stage_for_delivery(self.conn, channel="telegram", doc_id=doc_id)
@@ -263,7 +231,7 @@ class TestEmail(Base):
 class TestResendTarget(Base):
     def send(self, pkg_id, outcome):
         d = delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg_id)
-        delivery.record_delivery(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
+        _record(self.conn, delivery_id=d["delivery_id"], outcome=outcome)
         for f in os.listdir(self.outbox):          # Casa consumes the outbox copy on send
             os.unlink(self.outbox / f)
 
@@ -278,25 +246,36 @@ class TestResendTarget(Base):
         b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
         self.send(b["package_id"], "delivered")
         text = self.shown()
-        self.assertIn(a["filename"], text)
-        self.assertNotIn(b["filename"], text)
+        self.assertIn(views.field(a["filename"]), text)
+        self.assertNotIn(views.field(b["filename"]), text)
         self.assertEqual(delivery.resend_target(self.conn), a["package_id"])
         self.assertEqual(delivery.resendable(self.conn), a["package_id"])
 
     def test_the_offer_binds_to_the_rendering_delivered_last_within_one_second(self):
-        # fix wave D: sheet A offers nothing, sheet B offers the uncertain package;
-        # B then A delivered in one second — "send it again" answers A, which offered
-        # nothing, never B by creation order.
+        # fix wave D: sheet A offers package a, sheet B offers a and b; B then A delivered
+        # in one second — "send it again" answers A (a), never B by creation order (which
+        # would ask "which one"). Final fix wave I-2 (§6.3): a rendering that offers
+        # nothing no longer hides an earlier offer, so both sheets here offer something.
+        a = self.pkg
+        self.send(a["package_id"], "uncertain")
         sheet_a = views.build_review(self.conn, view="status", quarter="2026-Q3")
-        self.send(self.pkg["package_id"], "uncertain")
+        b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        self.send(b["package_id"], "uncertain")
         sheet_b = views.build_review(self.conn, view="status", quarter="2026-Q3")
-        self.assertIn("send it again", sheet_b["text"])
+        self.assertIn(views.field(b["filename"]), sheet_b["text"])
         with mock.patch.object(db, "now", lambda: "2026-09-27T10:00:00Z"):
             views.mark_rendering_delivered(self.conn, sheet_b["render_id"])
             views.mark_rendering_delivered(self.conn, sheet_a["render_id"])
-        with self.assertRaises(db.Refusal) as cm:
-            delivery.resend_target(self.conn)
-        self.assertIn("nothing is waiting to be sent again", str(cm.exception))
+        self.assertEqual(delivery.resend_target(self.conn), a["package_id"])
+
+    def test_a_later_rendering_without_offers_keeps_the_earlier_offer(self):
+        # final fix wave I-2 (§6.3): "last saw" is the latest delivered rendering that
+        # offers a package; a sheet delivered after it that offers nothing hides nothing
+        self.send(self.pkg["package_id"], "uncertain")
+        self.shown()
+        later = views.build_review(self.conn, view="missing", quarter="2026-Q3")
+        views.mark_rendering_delivered(self.conn, later["render_id"])
+        self.assertEqual(delivery.resend_target(self.conn), self.pkg["package_id"])
 
     def test_two_offered_asks_which_by_the_names(self):
         a = self.pkg
@@ -337,7 +316,7 @@ class TestOutboxNames(Base):
         import documents
         path = self.publish("inv.pdf", body)
         return documents.ingest_document(self.conn, source_path=path, kind="invoice",
-                                         source="gmail", extraction_author="resident",
+                                         source="gmail", extraction_author="desk",
                                          counterparty="Adobe", amount_minor=100,
                                          document_date="2026-07-02")["doc_id"]
 

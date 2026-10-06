@@ -4,36 +4,61 @@ A Casa plugin that prepares a B.V.'s quarterly accounting. It matches every tran
 business bank account (from bank-feed) to the document it needs, keeps `acct::` tags and
 accounting notes current in the bank ledger, answers from its own store when asked, and builds
 a quarter's zip (SnelStart-ready `invoices/`, `ledger.csv`, `ledger.xlsx`, `notes.md`) on
-request. The server registers 38 tools. Design: `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.md`.
+request. The server registers 39 tools. Design: `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.md`.
 
 The checking runs as one Casa job on the finance specialist, `quarterly-accounting:work`
 ("Accounting check", skill `skills/quarterly-job/SKILL.md`): the bank read, the ledger sweep,
 the Gmail searches and the judging of documents, one unit at a time from `job_next`, in fresh
-sessions of 80 turns per batch. Ellen only asks for work (`request_work`, `request_package`,
-then Casa's `start_job`), relays what the job returns (`job_report`), and builds and sends
-packages. `job_status` answers, read-only, whether the job may end; `record_filing` closes the
-job's filing step. The 0.8.0 pass tools (`begin_pass`, `end_pass`, `continue_pass`,
+sessions of 80 turns per batch. The job posts what it finds itself (`post_results`,
+`show_view`) and builds and posts each package as a file in Telegram (`post_package`); nothing
+is emailed. The finance specialist's desk (skill `skills/quarterly-accounting/SKILL.md`)
+answers the operator with posted views and their buttons, reads the operator's words into a
+reading to Apply (`propose_reading`), files the documents the operator sends, and asks for
+work (`request_work`, `request_package`, then Casa's `start_job`). `job_status` answers,
+read-only, whether the job may end; `record_filing` closes the job's filing step. The 0.8.0 pass tools (`begin_pass`, `end_pass`, `continue_pass`,
 `record_step`, `more_work`) are gone.
 
 ## Requirements
-- Casa **0.337.0** or newer: the job needs `"session": "fresh"` and the brief's `Job id:` line
-  (0.336.0) and `"host": "specialist"` (0.337.0). Below it the job would run on Ellen, without
-  bank-feed or Gmail — do not install this version on an older Casa.
+- Casa 0.344.0 or newer (S7a: the file's delivered name, `operator_file` `filename`; a
+  specialist starts its own job). An older Casa refuses the manifest — the plugin is not
+  loaded there. Live use also needs ha-casa-app#1220 fixed (buttons on a specialist whose
+  plugin tools are deferred) and ha-casa-app#1228 fixed (the main assistant delegates a
+  specialist's job instead of starting it).
+- The job's starter line (`Started by: operator` — a job the operator started with nothing
+  asked yet runs as the operator's check, not as a silent scheduled one) takes effect from
+  Casa 0.344.31. On an older Casa the job's brief has no such line, and such a job runs as a
+  scheduled check, as before.
 - bank-feed **0.20.0** or newer (casa-specialist-finance component 0.21.0) — unchanged —
   installed on the finance specialist with the business account linked, labelled `company`,
   and synced.
-- The gmail plugin (0.9.0 or newer) on Ellen (emailing a package) and on the finance
-  specialist (the job's searches). Without it on the finance specialist, checks still run and
-  say "Gmail isn't connected for the finance specialist — invoices aren't being searched."
+- The gmail plugin (0.9.0 or newer) on the finance specialist (the job's searches; read-only).
+  Without it, checks still run and say "Gmail isn't connected for the finance specialist —
+  invoices aren't being searched." Packages are never emailed: they arrive as a file in
+  Telegram.
 
 ## Install
-1. "Install the quarterly accounting plugin from `bonzanni/casa-plugin-quarterly-accounting`,
-   for Ellen and the finance specialist."
-2. The one trigger in `skills/quarterly-accounting/SKILL.md` ("Install"), on Ellen. Rewriting
-   the trigger later cancels nothing this plugin relies on (it asks no button questions).
+1. Update the plugin on finance first (it is already assigned there in S2).
+2. Assign the plugin to `specialist:finance` only. Unassign it from the main assistant; Casa's
+   configurator states the consequence once (the assistant no longer answers accounting
+   itself; it sends it to Finance).
+3. Replace the old cron (if present) with the job trigger:
+   `name: quarterly-check, type: cron, schedule: "0 9 * * 1", channel: telegram,`
+   `job: "quarterly-accounting:work", task: "Weekly accounting check."`
 
 Nothing is asked at install. The account binds itself when exactly one company account exists.
 The package name and the start quarter are defaulted and changeable by asking.
+
+## Upgrade notes
+- **0.9 → 0.10: remove the old prompt cron.** The weekly prompt trigger
+  `quarterly_accounting_pass` on the main assistant (the 0.9 install's
+  `name: quarterly_accounting_pass, type: cron, schedule: 0 9 * * 1, prompt: Run the
+  quarterly-accounting background pass…`) survives the plugin upgrade: Casa keeps a
+  role's triggers whatever plugin is updated. Left in place it keeps firing every Monday
+  at 09:00 and asks the main assistant to run the accounting, beside the new job trigger.
+  Ask Casa's configurator to remove it ("remove the trigger quarterly_accounting_pass from
+  the assistant"): it runs `config_trigger_delete(role="assistant",
+  name="quarterly_accounting_pass")` and reloads that role's triggers. Then check that only
+  `quarterly-check` (Install, step 3) remains.
 
 ## Uninstall
 The plugin declares `reset_store` as its Casa `eraseTool`. On Casa 0.329.0+, uninstalling asks
@@ -51,7 +76,7 @@ already written into bank-feed's ledger, nor Home Assistant backups.
   below-floor case) and gmail's sent log. Refresh with `scripts/vendor-bankfeed.sh <tag>`.
 - `git config core.hooksPath .githooks` — tool-list agreement and the identifier scan.
 - `scripts/check_tool_agreement.py` — the server's registry, `casa.provides_tools` and
-  `casa.resultContract.tools` must name exactly the same 38 tools.
+  `casa.resultContract.tools` must name exactly the same 39 tools.
 - `scripts/scan_identifiers.py .` — fails the build on an IBAN-shaped token anywhere outside
   `tests/upstream/`. No IBAN, company name, vendor list or operator identity belongs in this
   tree; when in doubt, run the script.
@@ -65,10 +90,11 @@ commit `v<version>`; a version that already has a tag is left alone. Tags are ne
 hand.
 
 ## Reset loop (debugging on production)
-Quiesce first (no accounting job running, `/new` on both agents), then: ask the finance specialist to
-restore the install backup that `list_backups` registers for `acct@<this version>` (`restore_backup`,
-one operator tap); call `reset_store()` (one operator tap; may refuse while another session
-holds the documents lock, or answer `incomplete` while one still reads the store — try again);
-then upgrade or just run the pass, whose first write mints the new install backup. Full steps,
-including what to do when more than one `acct@` version is registered: see
-`skills/quarterly-accounting/SKILL.md`, "Test install and reset".
+Quiesce first (no accounting job running, `/new` on the finance specialist), then, if the bank
+ledger must go back too, restore bank-feed's install backup for `acct@<this version>`
+(`list_backups`, then `restore_backup`, one operator tap — bank-feed's own tools). Then ask the
+finance specialist to erase the accounting store: `reset_store()` (one operator tap; may refuse
+while another session holds the documents lock, or answer `incomplete` while one still reads
+the store — try again). Then upgrade, or say "test install" on the finance desk
+(`skills/quarterly-accounting/SKILL.md`, "Test install": `check_setup`, then a check ask); the
+check's first write mints the new install backup.

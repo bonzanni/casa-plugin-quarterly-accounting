@@ -16,7 +16,7 @@ PDF = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
 
 
 def ingest(conn, path, **over):
-    kw = dict(source_path=path, kind="invoice", source="gmail", extraction_author="resident",
+    kw = dict(source_path=path, kind="invoice", source="gmail", extraction_author="desk",
               counterparty="Adobe", issuer="Adobe", document_number="A-1",
               amount_minor=5445, currency="EUR", document_date="2026-09-14")
     kw.update(over)

@@ -34,7 +34,7 @@ class Base(StoreCase):
     def file(self, **meta):
         self.k += 1
         args = dict(source_path=self.publish(f"d{self.k}.pdf", PDF + str(self.k).encode()),
-                    kind="invoice", source="gmail", extraction_author="resident",
+                    kind="invoice", source="gmail", extraction_author="desk",
                     counterparty="Adobe", issuer="Adobe", currency="EUR",
                     document_number=f"N{self.k}")
         args.update(meta)
@@ -185,7 +185,7 @@ class TestEndsE2E(Base):
         self.assertIsNone(lineage.projection(self.conn, old_pid)["ended"])
         self.assertEqual([t for r in self.active() for t in bf.tags(r["row_id"])
                           if t.startswith("acct::")], [])                     # nothing written
-        binding.acknowledge_ledger_reset(self.conn)
+        self.granted(binding.acknowledge_ledger_reset_in_tx)
         out = sim.run_pass(self.conn, bf)
         self.assertTrue(out["gate"]["allowed"])
         self.assertEqual(lineage.projection(self.conn, old_pid)["ended"], "erased")

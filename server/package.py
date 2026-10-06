@@ -357,19 +357,33 @@ def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, si
         out.append(f"Too large for Telegram ({size / 1e6:.1f} MB; the limit is 20 MB) — kept "
                    "here; notes.md names the largest files.")
     if not b["package_name_announced"]:
-        out.append(f'Files are named "{filename}" — say "call the zips <name>" to change that.')
+        import views
+        out.append(f'Files are named "{views.field(filename)}" — say "call the zips <name>" '
+                   'to change that.')
     return "\n".join(out)
 
 
-def _request_for_build(conn, quarter: str, package_token) -> int:
-    """The package request this build is for: the one holding `package_token`,
-    open and not yet staged, for this quarter. Refuses otherwise. Returns its id."""
+def _request_for_build(conn, quarter: str, package_token, request_id=None) -> int:
+    """The package request this build is for: `request_id` (the job's build unit names
+    it) when given, holding `package_token`, open and not yet staged, for this quarter.
+    Refuses otherwise. Returns its id. Ruling F8: every request one job claim hands out
+    holds the same token (the claim's gen), so the token alone names a request only when
+    one buildable request of the quarter holds it — more than one is refused."""
     import passes
     if package_token is None:
         raise db.Refusal("a package is built for a package request: pass the package_token "
-                         "job_report's `continue` gave you")
-    req = conn.execute("SELECT * FROM package_requests WHERE token=?",
-                       (int(package_token),)).fetchone()
+                         "and request_id the job's build unit gave you")
+    if request_id is None:
+        rows = conn.execute("SELECT * FROM package_requests WHERE token=? AND quarter=? AND"
+                            " state='snapshot-done'", (int(package_token), quarter)).fetchall()
+        if len(rows) > 1:
+            raise db.Refusal("pass the request_id the job's build unit gave you")
+        req = rows[0] if rows else conn.execute(
+            "SELECT * FROM package_requests WHERE token=? ORDER BY request_id DESC",
+            (int(package_token),)).fetchone()
+    else:
+        req = conn.execute("SELECT * FROM package_requests WHERE request_id=?",
+                           (int(request_id),)).fetchone()
     if req is None:
         raise db.Refusal("this package request has been taken over by a later turn — stop, "
                          "nothing was written")
@@ -386,7 +400,7 @@ def _request_for_build(conn, quarter: str, package_token) -> int:
 
 
 RECHECK = ("the bank was re-read since the check — the check runs again, and the package "
-           "follows it; call job_report")
+           "follows it; call job_next")
 
 
 def stale_check(conn, request_id, token) -> bool:
@@ -415,8 +429,9 @@ class _Recheck(Exception):
         self.request_id = request_id
 
 
-def build_quarterly_package(conn, quarter: str, package_token=None, *, bound=True) -> dict:
-    """Build the quarter's zip for the package request holding `package_token`.
+def build_quarterly_package(conn, quarter: str, package_token=None, *, request_id=None,
+                            bound=True) -> dict:
+    """Build the quarter's zip for package request `request_id`, holding `package_token`.
     The token is checked before the custody lock (an early refusal) and again in
     the transaction that registers the zip and links it to the request, so a
     holder rotated while it waited registers nothing and leaves no zip behind.
@@ -426,18 +441,19 @@ def build_quarterly_package(conn, quarter: str, package_token=None, *, bound=Tru
     if conn.in_transaction:
         raise RuntimeError("build_quarterly_package opens its own transactions")
     if bound:
-        rid = _request_for_build(conn, quarter, package_token)
-        if stale_check(conn, rid, package_token):
+        request_id = _request_for_build(conn, quarter, package_token, request_id)
+        if stale_check(conn, request_id, package_token):
             raise db.Refusal(RECHECK)
     # The custody lock over documents/ and packages/ (db.custody_lock): a build
     # reads held documents' bytes and writes into packages/, which reset_store
     # erases under that lock. Taken BEFORE the freeze transaction, never inside
     # one (lock order: custody, then SQLite).
     with db.custody_lock():
-        return _build(conn, quarter, package_token if bound else None, bound)
+        return _build(conn, quarter, package_token if bound else None, bound,
+                      request_id if bound else None)
 
 
-def _build(conn, quarter: str, package_token=None, bound=False) -> dict:
+def _build(conn, quarter: str, package_token=None, bound=False, bound_id=None) -> dict:
     stamp = db.now()
     today = stamp[:10]
     frozen = _freeze(conn, quarter)
@@ -452,9 +468,9 @@ def _build(conn, quarter: str, package_token=None, bound=False) -> dict:
             frozen, quarter, today, [f"{h}: {n / 1e6:.1f} MB" for n, h in sizes])
     b = frozen["binding"]
     check = None
-    if bound and package_token is not None:
-        row = conn.execute("SELECT check_json FROM package_requests WHERE token=?",
-                           (int(package_token),)).fetchone()
+    if bound and bound_id is not None:
+        row = conn.execute("SELECT check_json FROM package_requests WHERE request_id=?",
+                           (bound_id,)).fetchone()
         check = json.loads(row["check_json"]) if row is not None and row["check_json"] else None
     stem = f"{b['package_name']}-{quarter}{'-partial' if partial else ''}-{today}"
     fd, path = _reserve(stem, stamp)
@@ -467,7 +483,8 @@ def _build(conn, quarter: str, package_token=None, bound=False) -> dict:
     try:
         with db.tx(conn):
             # the binding check: in the transaction that registers and links the zip
-            request_id = _request_for_build(conn, quarter, package_token) if bound else None
+            request_id = (_request_for_build(conn, quarter, package_token, bound_id)
+                          if bound else None)
             if request_id is not None and conn.execute(
                     "SELECT checked_snapshot FROM package_requests WHERE request_id=?",
                     (request_id,)).fetchone()[0] != lineage.latest_import(conn):
@@ -487,6 +504,10 @@ def _build(conn, quarter: str, package_token=None, bound=False) -> dict:
             if request_id is not None:
                 conn.execute("UPDATE package_requests SET package_id=?, state='built',"
                              " updated_at=? WHERE request_id=?", (pkg_id, db.now(), request_id))
+                pass_id = conn.execute("SELECT pass_id FROM package_requests WHERE"
+                                       " request_id=?", (request_id,)).fetchone()[0]
+                import job
+                job.credit(conn, package_token, pass_id, f"req:pkg:{request_id}:built")
     except _Recheck as exc:
         path.unlink(missing_ok=True)
         if stale_check(conn, exc.request_id, package_token):
