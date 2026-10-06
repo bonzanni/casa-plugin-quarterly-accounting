@@ -169,8 +169,8 @@ class Schema12(StoreCase):
     def test_a_legacy_note_or_left_line_never_becomes_the_last_delivered(self):
         import db
         with db.tx(self.conn):
-            for rid, kind, seq in (("r-s", "status", 1), ("r-n", "package-note", 2),
-                                   ("r-l", "job-left", 3)):
+            for rid, kind, seq in (("r-s", "status", 1), ("r-n", "package-note", 2),  # removed-name: asserted absent
+                                   ("r-l", "job-left", 3)):  # removed-name: asserted absent
                 self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
                                   " delivered_at, text, membership_json, delivered_seq) VALUES"
                                   " (?, ?, '{}', 'x', 'x', 't', '[]', ?)", (rid, kind, seq))

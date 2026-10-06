@@ -217,7 +217,7 @@ class Floor(StoreCase):
         import tools  # noqa: F401 — registers the tools
         schema = {n: t["schema"]["properties"] for n, t in qa_server.TOOLS.items()}
         for name in ("record_match", "propose_match"):
-            self.assertNotIn("resolves", schema[name])
+            self.assertNotIn("resolves", schema[name])  # removed-name: asserted absent
         self.assertIn("alternatives", schema["propose_match"])
         self.assertNotIn("alternatives", schema["record_match"])
         a, b = self.doc(), self.doc()

@@ -129,7 +129,7 @@ class TestBothSkills(TempEnv):
 
     def test_no_removed_tool_is_named(self):
         for text in (SKILL, JOB):
-            for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work",
+            for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work",  # removed-name: asserted absent
                          "delegate_to_agent", "send_media", "send_message") + REMOVED_S7:
                 self.assertNotIn(gone, text, gone)
 
@@ -366,7 +366,7 @@ class TestJob(TempEnv):
                  "decide(", "### `mirror`", "record_mirror", "### `post`", "### `view`"]
         pos = [units.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
-        for gone in ("note_render_id", "### `build`", "### `deliver`", "propose_account",
+        for gone in ("note_render_id", "### `build`", "### `deliver`", "propose_account",  # removed-name: asserted absent
                      "list_quarter_state(triage"):
             self.assertNotIn(gone, JOB, gone)
 

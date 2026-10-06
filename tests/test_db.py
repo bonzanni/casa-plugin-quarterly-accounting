@@ -145,7 +145,7 @@ class TestSchema(TempEnv):
         # and a resend could reuse the outbox name of an earlier send of the same bytes
         from tests.schema_history import DDL_V3
         self.assertIn("class_observed_snapshot", DDL_V3)
-        self.assertNotIn("pass_steps", DDL_V3)
+        self.assertNotIn("pass_steps", DDL_V3)  # removed-name: schema history
         old = self._released_store(DDL_V3, 3)
         old.execute("UPDATE renders SET delivered_seq=0 WHERE render_id='r-old'")
         old.execute("UPDATE deliveries SET status='uncertain'")
@@ -183,8 +183,8 @@ class TestSchema(TempEnv):
     def test_a_v0_2_0_schema_4_store_migrates_to_current_keeping_its_data(self):
         # schema 4 as v0.2.0 shipped it (e79f77d): the import did not observe tags
         from tests.schema_history import DDL_V4
-        self.assertIn("pass_steps", DDL_V4)
-        self.assertNotIn("note_seen_seq", DDL_V4)
+        self.assertIn("pass_steps", DDL_V4)  # removed-name: schema history
+        self.assertNotIn("note_seen_seq", DDL_V4)  # removed-name: schema history
         old = self._released_store(DDL_V4, 4)
         old.execute("UPDATE renders SET delivered_seq=0 WHERE render_id='r-old'")
         old.close()
@@ -198,18 +198,18 @@ class TestSchema(TempEnv):
         # package like any other, whose first send needs the latest import (checked by
         # _assert_current_behaviour)
         from tests.schema_history import DDL_V5
-        self.assertIn("note_seen_seq", DDL_V5)
-        self.assertNotIn("note_issued_seq", DDL_V5)
+        self.assertIn("note_seen_seq", DDL_V5)  # removed-name: schema history
+        self.assertNotIn("note_issued_seq", DDL_V5)  # removed-name: schema history
         old = self._released_store(DDL_V5, 5)
         old.execute("UPDATE renders SET delivered_seq=0 WHERE render_id='r-old'")
         for rid, state, pkg, tok in ((1, "built", 1, 7), (2, "snapshot-done", None, 8),
                                      (3, "staged", None, 9), (4, "delivered", None, None),
                                      (5, "snapshot", None, None)):
-            old.execute("INSERT INTO package_requests(request_id, quarter, channel, pass_id,"
+            old.execute("INSERT INTO package_requests(request_id, quarter, channel, pass_id,"  # removed-name: schema history
                         " package_id, token, lease_at, state, created_at, updated_at) VALUES"
                         " (?, '2026-Q3', 'telegram', 'p', ?, ?, ?, ?, 'x', 'x')",
                         (rid, pkg, tok, "2026-09-03T00:00:00Z" if tok else None, state))
-        old.execute("INSERT INTO projections(dest_row_id, admitted_at, note_issued_at) VALUES"
+        old.execute("INSERT INTO projections(dest_row_id, admitted_at, note_issued_at) VALUES"  # removed-name: schema history
                     " (2, '2026-09-01T00:00:00Z', '2026-09-02T10:00:00Z')")
         old.close()
         c = db.open_store()

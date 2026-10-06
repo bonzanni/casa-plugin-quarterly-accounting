@@ -15,7 +15,7 @@ class Surface(StoreCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         import qa_server, tools  # noqa: F401
-        for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work",
+        for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work",  # removed-name: asserted absent
                      "job_report",                      # S7 §9: the relay is deleted
                      "request_package", "build_quarterly_package",  # removed-name: asserted absent
                      "list_projections", "record_observation"):     # removed-name: asserted absent
