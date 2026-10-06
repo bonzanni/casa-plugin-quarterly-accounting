@@ -235,9 +235,11 @@ def _vendor_answer(conn, rid, scope, action, grant):
     import kb
     listed = views.render_items(conn, rid)
     vendor = views.field(scope["vendor"])
-    if _changed(conn, rid, listed) or not listed:
+    if not listed:
         return None
     if action == "never":
+        if _changed(conn, rid, listed):          # Never binds every line it displayed
+            return None
         union = set(listed)
         for p in scope.get("prior") or []:
             union |= set(views.render_items(conn, p))
@@ -251,7 +253,7 @@ def _vendor_answer(conn, rid, scope, action, grant):
     # the page's missing lines only: a pending, proposed, matched or exempted line is
     # listed because Never would change it (d1 ruling), never to be exempted or left
     acts = [p for p in listed if p in set(scope.get("missing", listed))]
-    if not acts:
+    if not acts or _changed(conn, rid, acts):   # bound to the missing lines it acts on
         return None
     if action == "exempt-these":
         for p in acts:

@@ -81,6 +81,31 @@ class NeverIsRehearsed(_Tapping):
         self.assertEqual(self.status(missing)["status"], "exempt")
         self.assertEqual(self.status(pdng)["status"], "open")
 
+    def test_an_exemption_is_bound_only_to_the_missing_lines_it_acts_on(self):
+        """d1 re-review minor: a revision move on a matched line of the same page (listed
+        because Never would change it) does not refuse [No invoice needed for these] of the
+        page's unchanged missing line — Never on that page still refuses."""
+        import documents
+        missing = self.pay("Adobe", 100)
+        matched = self.pay("Adobe", 400)
+        doc = self.doc(amount_minor=400)
+        self.machine_match(matched, doc, self.token)
+        page = self.tap(self.end(), "Review 1")["next"]
+        self.assertEqual(self.page_of(page)[1], sorted([missing, matched]))
+        rev = self.rev(matched)
+        documents.update_document_metadata(self.conn, doc, document_number="RENUMBERED")
+        self.assertNotEqual(self.rev(matched), rev)              # the matched line moved
+        never = self.tap(page, "Never for Adobe")
+        self.assertIn("nothing applied", never["receipt"])
+        page = self.tap(self.end(), "Review 1")["next"]
+        rev = self.rev(matched)
+        documents.update_document_metadata(self.conn, doc, document_number="AGAIN")
+        self.assertNotEqual(self.rev(matched), rev)
+        out = self.tap(page, "No invoice needed for these")
+        self.assertEqual(out["receipt"], "No invoice needed for 1 Adobe payment.")
+        self.assertEqual(self.status(missing)["status"], "exempt")
+        self.assertEqual(self.status(matched)["status"], "matched")
+
     def _refuses(self, arrive):
         """A card composed before `arrive()` adds a payment the rule changes: Never commits
         nothing, and the next card is a fresh page 1 that lists the newcomer."""
@@ -156,6 +181,10 @@ class LateHandover(StoreCase):
             document_date="2026-07-05", document_number="COMPETITOR"))
         ask = self.drv._tool("request_work", dict(kind="handover", trigger="operator",
                                                   doc_ids=[doc["doc_id"]]))
+        import asks
+        said = asks.ask_state(self.conn, "work", ask["request_id"])   # Astra's window
+        self.assertEqual((said["state"], said["live_run"], said["line"]),
+                         ("queued", False, asks.BUSY_NO_RESULT))
         u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
         self.assertEqual(u["unit"], "view")                    # not the handover's vendor
         self.assertEqual(u["render_id"], composed)

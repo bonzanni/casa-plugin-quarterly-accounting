@@ -50,12 +50,16 @@ def request_work(conn, kind, trigger, doc_ids=None, quarter=None) -> dict:
 
 
 def _live_run(conn) -> bool:
-    """The latest claim's run is live: its job id has no runs.completed_at (S7 §4)."""
+    """The latest claim's run will still take a queued ask: its job id has no
+    runs.completed_at (S7 §4) and its end message is not yet composed — d1 (Astra S1): a
+    run whose runs.end_render_id is set ('' included) takes nothing more (loop.take), so an
+    ask queued then is answered BUSY_NO_RESULT, never the ask's own line."""
     top = conn.execute("SELECT job_id FROM claims ORDER BY gen DESC LIMIT 1").fetchone()
     if top is None:
         return False
-    done_ = conn.execute("SELECT completed_at FROM runs WHERE job_id=?", (top[0],)).fetchone()
-    return done_ is None or done_[0] is None
+    r = conn.execute("SELECT completed_at, end_render_id FROM runs WHERE job_id=?",
+                     (top[0],)).fetchone()
+    return r is None or (r[0] is None and r[1] is None)
 
 
 def ask_state(conn, kind, request_id) -> dict:
