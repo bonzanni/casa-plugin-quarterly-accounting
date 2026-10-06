@@ -329,18 +329,6 @@ class TestGrammar(Base):
         self.assertIsNone(self.author(v))
         self.assertEqual(self.author(z)[0], "auto")
 
-    def test_candidates_not_displayed_are_reshown_not_rejected(self):
-        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
-        for _ in range(2):
-            matches.record_match(self.conn, pid=pid, doc_id=self.doc(), author="auto",
-                                 expected_revision=self.rev(pid), token=self.token,
-                                 row_snapshot=self.snapshot(pid))
-        self.deliver(view="missing")
-        out = apply_now(self.conn, "the Adobe one is wrong")
-        self.assertEqual(out["reshow"], [pid])
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM match_state WHERE"
-                                           " state='rejected'").fetchone()[0], 0)
-
     def test_a_question_is_never_a_correction(self):
         z = self.item("Zapier", 9900, "2026-09-17")
         self.deliver()

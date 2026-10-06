@@ -90,36 +90,6 @@ class TestSettle(Base):
             "SELECT COUNT(*) FROM match_state WHERE doc_id=? AND state IN ('matched','proposed')",
             (d,)).fetchone()[0], 1)
 
-    def test_machine_kind_mismatch_is_retired_and_frees_the_document(self):
-        d = self.doc()
-        mid = self.machine_pair(self.pid, d)
-        self.classify(self.pid, {"internal-transfer"})
-        red = self.settle(self.pid)
-        self.assertEqual(self.state(mid), "rejected")
-        self.assertEqual(self.doc_status(d), "unmatched")
-        self.assertEqual(red.desired, frozenset({"acct::no-document-expected"}))
-        cause = self.conn.execute("SELECT cause FROM log WHERE kind='retire' AND match_id=?",
-                                  (mid,)).fetchone()[0]
-        self.assertEqual(cause, "kind-mismatch")
-
-    def test_vendor_set_to_none_retires_a_machine_pairing(self):   # plan §D8
-        d = self.doc()
-        mid = self.machine_pair(self.pid, d)
-        with db.tx(self.conn):
-            self.conn.execute("INSERT INTO counterparties(name, patterns_json, exp_kind,"
-                              " updated_at) VALUES ('Adobe', '[]', 'none', 'x')")
-        self.settle(self.pid)
-        self.assertEqual(self.state(mid), "rejected")
-
-    def test_operator_kind_mismatch_is_proposed_not_retired(self):
-        d = self.doc()
-        mid = self.operator_pair(self.pid, d)
-        self.classify(self.pid, {"income", "salary"})
-        red = self.settle(self.pid)
-        self.assertEqual(self.state(mid), "matched")
-        self.assertEqual(red.desired, frozenset({"acct::proposed"}))
-        self.assertIn("kind-mismatch", red.reasons)
-
     def test_unknown_keeps_the_machine_match_and_the_last_known_kind(self):
         d = self.doc()
         mid = self.machine_pair(self.pid, d)
@@ -229,20 +199,6 @@ class TestCarriedFindings(Base):
             (m1,))], [(act, "occupied")])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM residue WHERE pid=? AND"
                                            " reason='occupied'", (self.pid,)).fetchone()[0], 1)
-
-    def test_machine_proposal_of_another_kind_is_retired_before_the_reducer(self):
-        # reducer review: the reducer alone would show proposed/kind-mismatch
-        d = self.doc(kind="receipt")
-        mid = self.machine_pair(self.pid, d, kind="propose")
-        red = self.settle(self.pid)
-        self.assertEqual((self.state(mid), self.doc_status(d)), ("rejected", "unmatched"))
-        self.assertEqual((red.status, red.desired, red.current),
-                         ("open", frozenset({"acct::open"}), None))
-        self.assertNotIn("kind-mismatch", red.reasons)
-        self.assertEqual([r[0] for r in self.conn.execute(
-            "SELECT cause FROM log WHERE kind='retire' AND match_id=?", (mid,))],
-            ["kind-mismatch"])
-
 
 if __name__ == "__main__":
     unittest.main()

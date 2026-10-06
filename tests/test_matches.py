@@ -206,33 +206,6 @@ class TestOperatorWrites(Base):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE kind='lift'")
                          .fetchone()[0], 0)
 
-    def test_confirm_refuses_a_wrong_kind_until_the_kind_is_corrected_and_reshown(self):
-        # round-27/28: no confirmation cures a kind mismatch; correcting the
-        # document's kind moves the item, so the old shown revision is stale.
-        slip = self.doc(kind="payslip")
-        self.classify(self.pid, {"income", "salary"})
-        self.settle(self.pid)
-        rid = self.show(self.pid)
-        mid = self.operator_pair(pid=self.pid, doc_id=slip, expected_revision=self.rev(self.pid),
-                                 render_id=rid)["match_id"]
-        self.classify(self.pid, {"software"})              # the classifier now wants an invoice
-        self.assertEqual(self.settle(self.pid).status, "proposed")   # shown, not retired
-        rid = self.show(self.pid)
-        shown = self.rev(match_id=mid)
-        with self.assertRaises(db.Refusal) as caught:
-            self.granted(matches.confirm_in_tx, match_id=mid, expected_revision=shown,
-                         render_id=rid)
-        self.assertNotIsInstance(caught.exception, authorship.Stale)
-        self.assertIn("payslip", str(caught.exception))
-        documents.update_document_metadata(self.conn, slip, kind="invoice")
-        with self.assertRaises(authorship.Stale):
-            self.granted(matches.confirm_in_tx, match_id=mid, expected_revision=shown,
-                         render_id=rid)
-        rid = self.show(self.pid)
-        r = self.granted(matches.confirm_in_tx, match_id=mid,
-                         expected_revision=self.rev(match_id=mid), render_id=rid)
-        self.assertEqual(r["status"], "matched")
-
     def test_unpairing_a_conflicted_candidate_leaves_the_accepted_pairing(self):
         p_doc, q_doc = self.doc(), self.doc()
         rid = self.show(self.pid)

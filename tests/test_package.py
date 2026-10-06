@@ -133,48 +133,47 @@ class TestContents(Base):
         kb.upsert_counterparty(self.conn, "Adobe", document_link="https://adobe.example/invoices")
         out, z = self.build()
         st = {r["counterparty"]: r["status"] for r in self.ledger_rows(z)}
-        self.assertEqual(st, {"Adobe": "MISSING", "Mystery": "UNCLASSIFIED",
+        self.assertEqual(st, {"Adobe": "MISSING", "Mystery": "MISSING",
                               "Own account": "NO-DOCUMENT", "Payroll Co": "OPTIONAL-MISSING"})
         notes = z.read("notes.md").decode()
         self.assertLess(notes.index("## Missing"), notes.index("## Not yet classified"))
         self.assertLess(notes.index("## Not yet classified"), notes.index("## Nice to have"))
         self.assertIn("https://adobe.example/invoices", notes)
         self.assertTrue(notes.rstrip().splitlines()[-1].startswith("built "))
-        self.assertIn("1 still missing, 1 not yet classified", out["caption"])
+        self.assertIn("2 still missing", out["caption"])
+        self.assertNotIn("not yet classified", out["caption"])
         del kbline
 
-    def test_a_retained_pairing_on_an_unknown_expectation_is_reported_unclassified(self):
-        # fix wave D (Astra S1): the round-42 ruling retains the pairing when the
-        # classification is removed; the package must still report the row as not yet
-        # classified (spec ~2742-2744, ~3032) and ship its document in its folder.
+    def test_a_retained_pairing_on_an_unknown_expectation_is_matched(self):
+        # simple loop §2 table: no classification gate. A pairing kept while the
+        # classification is removed is MATCHED and ships its document in its folder;
+        # nothing is "not yet classified" any more.
         pid = self.line()
         self.pair(pid, self.file_doc())
         self.classify(pid, set())
         self.settle(pid)
         out, z = self.build()
         rows = self.ledger_rows(z)
-        self.assertEqual([r["status"] for r in rows], ["UNCLASSIFIED"])
+        self.assertEqual([r["status"] for r in rows], ["MATCHED"])
         self.assertEqual(rows[0]["document"], "invoices/2026-07-02_Adobe_100.00.pdf")
         self.assertIn("invoices/2026-07-02_Adobe_100.00.pdf", z.namelist())
         notes = z.read("notes.md").decode()
         section = notes.split("## Not yet classified")[1].split("##")[0]
-        self.assertEqual(section.strip().splitlines(),
-                         ["- Adobe · EUR 100.00 · 3 Jul — holds "
-                          "invoices/2026-07-02_Adobe_100.00.pdf"])
-        self.assertIn("1 not yet classified", out["caption"])
+        self.assertEqual(section.strip().splitlines(), ["- none"])
+        self.assertNotIn("not yet classified", out["caption"])
         self.assertIn("1 with documents", out["caption"])
 
-    def test_a_retained_unconfirmed_pairing_on_an_unknown_expectation_is_unclassified(self):
+    def test_a_retained_unconfirmed_pairing_on_an_unknown_expectation_is_unconfirmed(self):
         pid = self.line()
         self.pair(pid, self.file_doc(), how="propose")
         self.classify(pid, set())
         self.settle(pid)
         out, z = self.build()
         rows = self.ledger_rows(z)
-        self.assertEqual([r["status"] for r in rows], ["UNCLASSIFIED"])
+        self.assertEqual([r["status"] for r in rows], ["UNCONFIRMED"])
         self.assertEqual(rows[0]["document"], "")
         self.assertTrue(any(n.startswith("unresolved/") for n in z.namelist()))
-        self.assertIn("1 not yet classified", out["caption"])
+        self.assertNotIn("not yet classified", out["caption"])
 
     def test_xlsx_cells_equal_the_csv(self):
         pid = self.line()

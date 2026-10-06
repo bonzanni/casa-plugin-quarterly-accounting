@@ -6,9 +6,7 @@ KB or document edit. It:
   1. folds the lineage's log (fold.py) with the occupancy check;
   2. records every retirement the fold newly produced, and the store's own
      rules — an ended lineage retires every pairing `rejected` (cause
-     row-ended); a MACHINE pairing whose document kind differs from a known
-     expectation is retired `rejected` (cause kind-mismatch) — then folds
-     again, until nothing new is produced;
+     row-ended) — then folds again, until nothing new is produced;
   3. materializes match_state; the partial unique index on active documents
      is the backstop, and a violation becomes a recorded `conflicted`
      retirement for that later activation, never an error;
@@ -122,24 +120,12 @@ def fold_of(conn, pid: int) -> F.FoldState:
     return F.fold(entries(conn, pid), _occupied(conn, pid))
 
 
-def _doc_kinds(conn, doc_ids) -> dict:
-    if not doc_ids:
-        return {}
-    q = ",".join("?" * len(doc_ids))
-    return {r[0]: r[1] for r in conn.execute(
-        f"SELECT doc_id, kind FROM documents WHERE doc_id IN ({q})", tuple(doc_ids))}
-
-
-def _store_rules(proj, st: F.FoldState, exp: ex.Expectation, kinds: dict) -> list:
+def _store_rules(proj, st: F.FoldState) -> list:
     out = []
     if proj["ended"]:
         for c in st.cands.values():
             if c.state in F.ACTIVE + ("conflicted",):
                 out.append(F.Retirement(c.match_id, c.activation, "rejected", "row-ended"))
-    elif not exp.unknown:
-        for c in st.active():
-            if c.author == "auto" and kinds.get(c.doc_id) != exp.kind:
-                out.append(F.Retirement(c.match_id, c.activation, "rejected", "kind-mismatch"))
     return out
 
 
@@ -172,7 +158,7 @@ def _operator_rejections(conn, pid, proj, st, exp, row) -> list:
     never asked the same question again."""
     import documents
     import matches
-    if proj["ended"] or row is None or exp.unknown:
+    if proj["ended"] or row is None:
         return []
     out = []
     # a conflicted candidate too (C2, Astra S1): a merge's collision makes it one before
@@ -195,7 +181,7 @@ def _record_retirement(conn, pid, r: F.Retirement) -> None:
         other = conn.execute("SELECT pid FROM match_state WHERE doc_id=? AND pid<>? AND state IN"
                              " ('matched','proposed')", (doc[0], pid)).fetchone()
         add_residue(conn, pid, "occupied", f"document already on #{other[0] if other else '?'}")
-    elif r.cause in ("row-ended", "kind-mismatch"):
+    elif r.cause == "row-ended":
         add_residue(conn, pid, r.cause, f"match {r.match_id}")
 
 
@@ -255,13 +241,12 @@ def settle(conn, pid: int) -> R.Reduction:
     for _ in range(32):
         log = entries(conn, pid)
         st = F.fold(log, _occupied(conn, pid))
-        kinds = _doc_kinds(conn, {c.doc_id for c in st.cands.values()})
         exp = expectation_for(conn, proj, row, exempt=st.exemption is not None)
         recorded = {(e.match_id, e.retire_activation, e.retire_to) for e in log
                     if e.kind == "retire"}
         new, seen = [], set()
         produced = [r for r in st.produced if _holds(st, r)]
-        for r in produced + _store_rules(proj, st, exp, kinds) + _operator_rejections(
+        for r in produced + _store_rules(proj, st) + _operator_rejections(
                 conn, pid, proj, st, exp, row):
             key = (r.match_id, r.activation, r.to)
             if key in recorded or key in seen:
@@ -288,7 +273,7 @@ def settle(conn, pid: int) -> R.Reduction:
     cp = kb.counterparty_for(conn, row["counterparty"]) if row else None
     inp = R.Inputs(ended=proj["ended"], eligible=eligible(conn, row), fold=st,
                    facts=R.facts_of(row) if row else None, expectation=exp,
-                   last_known_kind=last_known, doc_kinds=kinds, portal=kb.is_portal(cp))
+                   last_known_kind=last_known, doc_kinds={}, portal=kb.is_portal(cp))
     red = R.reduce(inp)
 
     match_digests = {}
@@ -305,7 +290,6 @@ def settle(conn, pid: int) -> R.Reduction:
             "exp": [exp.kind, exp.tier] if live else None,
             "payee": kb.display_name(conn, row["counterparty"]) if (live and row) else None,
             "state": c.state, "author": c.author, "activation": c.activation, "fp": c.fp,
-            "verdict": R.kind_verdict(c, inp) if live else None,
             "row_ok": (json.loads(c.fp)["facts"] == inp.facts) if (live and c.fp) else None,
             "label": m["label"], "rationale": m["rationale"], "runners_up": m["runners_up_json"],
             "doc": _doc_digest(conn, c.doc_id)})

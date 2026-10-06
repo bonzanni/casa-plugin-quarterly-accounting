@@ -190,9 +190,11 @@ class TestAstraInterruptedCycle(ToolPass):
         self.assertEqual(self.sweep(token), 0)
         self.end(token, "complete")
         _, files, rows, _ = self.zip_of()
-        self.assertEqual(files, [])                                  # the invoice does not ship
+        # simple loop §2: no store-side kind gate — the pairing stays and ships; what the
+        # sweep re-read shows is the LIVE expectation (credit-note), not the stale one
+        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])
         self.assertEqual({r["counterparty"]: (r["status"], r["expectation_kind"]) for r in rows},
-                         {"Adobe": ("MISSING", "credit-note"), "Zapier": ("MISSING", "invoice")})
+                         {"Adobe": ("MATCHED", "credit-note"), "Zapier": ("MISSING", "invoice")})
 
 
 class TestTerraPartialSweepThenTriage(ToolPass):
@@ -321,9 +323,9 @@ class TestSnapshotBoundCommits(ToolPass):
         self.assertEqual(self.sweep(token), 0)                       # read again, under N+1
         self.end(token, "complete")
         _, files, rows, _ = self.zip_of()
-        self.assertEqual(files, [])
+        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])                # the pairing stays (§2: no kind gate)
         self.assertEqual({r["counterparty"]: (r["status"], r["expectation_kind"]) for r in rows},
-                         {"Adobe": ("MISSING", "credit-note"), "Zapier": ("MISSING", "invoice")})
+                         {"Adobe": ("MATCHED", "credit-note"), "Zapier": ("MISSING", "invoice")})
 
     def test_an_import_cannot_land_inside_a_build_in_flight(self):
         # round E6: the import takes the custody lock the build holds from its freeze
@@ -372,7 +374,7 @@ class TestSnapshotBoundCommits(ToolPass):
                            package_token=self.package_token))
         self.package_token = None
         _, files, rows, _ = self.zip_of()
-        self.assertEqual(files, [])
+        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])                # the pairing stays (§2: no kind gate)
         self.assertEqual({r["counterparty"]: r["expectation_kind"] for r in rows},
                          {"Adobe": "credit-note", "Zapier": "invoice"})
 
@@ -516,7 +518,7 @@ class TestFirstSendChecksTheBuildSnapshot(ToolPass):
         self.assertEqual(self.handoff_files(), handoff_before)
         # built again after the sweep, it ships the truth and stages
         pkg2, files, rows, _ = self.zip_of()
-        self.assertEqual(files, [])
+        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])                # the pairing stays (§2: no kind gate)
         staged = call("stage_for_delivery", channel="telegram", package_id=pkg2["package_id"],
                       package_token=pkg2["package_token"])
         self.assertEqual(self.outbox_files(), [os.path.basename(staged["path"])])
@@ -827,8 +829,8 @@ class TestFreshnessProperty(ToolPass):
                     self.assertEqual((r["status"], r["document"]), ("UNCLASSIFIED", ""))
                 else:
                     self.assertEqual(r["expectation_kind"], self.KIND[live[ref]], (trial, ref))
-                    if live[ref] == "refund":
-                        self.assertEqual(r["document"], "", (trial, ref))    # no invoice
+                    self.assertEqual(r["status"], "MATCHED" if r["document"] else "MISSING",
+                                     (trial, ref))        # §2: a kept pairing ships, whatever the kind
 
 
 if __name__ == "__main__":

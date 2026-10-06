@@ -103,7 +103,7 @@ class TestFixtureQuarter(Base):
         st = {r["counterparty"]: r["status"] for r in rows}
         self.assertEqual(st, {"Adobe": "MATCHED", "Zapier": "MISSING", "Client BV": "MATCHED",
                               "Own savings": "NO-DOCUMENT", "Payroll": "OPTIONAL-MISSING",
-                              "Mystery": "UNCLASSIFIED"})
+                              "Mystery": "MISSING"})
 
     def test_ambiguous_identical_pair_across_two_passes_stays_proposed(self):
         bf = self.bf
@@ -530,20 +530,20 @@ class TestPackagingSeesTheClassification(ToolFlow):
     def test_the_package_sees_the_new_classification(self):
         self.matched_then_reclassified()
         files, rows = self.package(sweep=True)
-        self.assertEqual(files, [])                               # the invoice does not ship
+        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])   # §2: no kind gate
         self.assertEqual([(r["status"], r["expectation_kind"]) for r in rows],
-                         [("MISSING", "credit-note")])
+                         [("MATCHED", "credit-note")])
 
     def test_without_the_sweep_the_import_alone_sees_the_new_classification(self):
         # the reproduction (round E1): Packaging without its sweep step shipped a stale
         # picture (MATCHED, invoices/). Since issue #1 the import reads the refund tag
-        # from the export: the invoice does not ship and the credit note is missing,
-        # with no read of the row at all.
+        # from the export, with no read of the row at all: the live expectation is the
+        # credit note (the pairing itself stays since simple loop §2 deleted the kind gate).
         self.matched_then_reclassified()
         files, rows = self.package(sweep=False)
-        self.assertEqual(files, [])
+        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])
         self.assertEqual([(r["status"], r["expectation_kind"]) for r in rows],
-                         [("MISSING", "credit-note")])
+                         [("MATCHED", "credit-note")])
 
 
 class TestWaveF(ToolFlow):

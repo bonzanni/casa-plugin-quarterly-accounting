@@ -147,15 +147,6 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         # compares against this, so a row shipped unread is not "categorised differently"
         # when its next read finds the kind it already had.
         known_kind = exp["kind"] or (d["last_known_kind"] if d else None)
-        # Classification is reported from the expectation alone (fix wave D, Astra S1):
-        # an unknown expectation is UNCLASSIFIED whether or not a pairing is retained
-        # (round-42 ruling keeps the pairing and its last known kind verdict; spec
-        # ~2742-2744: `UNCLASSIFIED` for a row whose expectation is not yet known). The
-        # retained document still ships in its folder and is named in `document`.
-        unknown = d is not None and exp["kind"] is None \
-            and d["status"] in ("open", "matched", "proposed")
-        if unknown:
-            status = "UNCLASSIFIED"
         # fix E2: a row not observed at the latest import ships no classification and
         # no document as its own — its kind may have changed (spec §Error handling:
         # packaging ships rather than blocking; the caption says how many)
@@ -175,8 +166,6 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 notes.append("confirmed by the operator")
             notes += _other_currency(doc, r)
         elif d is not None and ln["docs"]:
-            if unknown and d["status"] == "proposed":
-                notes.append("pairing not yet confirmed")
             for mid, doc in sorted(ln["docs"].items()):
                 notes += _other_currency(doc, r)
                 name = _place("unresolved", doc, used, named, dates.effective_date(r))

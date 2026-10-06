@@ -63,14 +63,14 @@ class TestDesiredSet(unittest.TestCase):
     def test_unknown_desires_open(self):
         r = R.reduce(inputs([], exp=UNKNOWN, last_known=None))
         self.assertEqual(r.desired, frozenset({"acct::open"}))
-        self.assertIn("unclassified", r.reasons)
+        self.assertNotIn("unclassified", r.reasons)       # the classification gate is gone
 
     def test_classification_conflict_reason(self):
         conflict = ex.derive("DBIT", {"internal-transfer", "refund"})
         self.assertTrue(conflict.unknown and conflict.conflict)
         r = R.reduce(inputs([], exp=conflict, last_known=None))
         self.assertEqual(r.desired, frozenset({"acct::open"}))
-        self.assertIn("classification-conflict", r.reasons)
+        self.assertNotIn("classification-conflict", r.reasons)
         self.assertNotIn("unclassified", r.reasons)
 
     def test_status_tags_are_exclusive(self):
@@ -112,66 +112,25 @@ class TestValidity(unittest.TestCase):
         r = R.reduce(inputs([auto(1, 1, "propose")], facts=dict(FACTS, amount_minor=10500)))
         self.assertEqual(r.desired, frozenset({"acct::proposed"}))
 
-    def test_operator_kind_mismatch_is_proposed_with_reason(self):
-        r = R.reduce(inputs([op_pair(1, 1)], exp=PAYSLIP, last_known="payslip"))
-        self.assertEqual(r.desired, frozenset({"acct::proposed"}))
-        self.assertIn("kind-mismatch", r.reasons)
-
-    def test_round42_trace_invoice_payslip_unknown(self):
-        entries = [op_pair(1, 1)]
-        seen = [R.reduce(inputs(entries, exp=INVOICE, last_known="invoice")).desired,
-                R.reduce(inputs(entries, exp=PAYSLIP, last_known="payslip")).desired,
-                R.reduce(inputs(entries, exp=UNKNOWN, last_known="payslip")).desired]
-        self.assertEqual(seen, [frozenset({"acct::matched"}), frozenset({"acct::proposed"}),
-                                frozenset({"acct::proposed"})])
-
-    def test_unknown_keeps_a_kind_valid_machine_match(self):
-        r = R.reduce(inputs([auto(1, 1)], exp=UNKNOWN, last_known="invoice"))
-        self.assertEqual(r.desired, frozenset({"acct::matched"}))
-        self.assertIn("unclassified", r.reasons)
-
     def test_tier_only_change_leaves_matched(self):
         optional_invoice = ex.Expectation("invoice", "optional", 11)
         self.assertEqual(R.reduce(inputs([auto(1, 1)], exp=optional_invoice)).desired,
                          frozenset({"acct::matched"}))
 
-    def test_conflicted_only_is_open(self):
+    def test_conflicted_only_is_a_proposal(self):
+        # D3: a joint machine set is one proposal awaiting the operator's pick
         r = R.reduce(inputs([auto(1, 1), auto(2, 2)]))
-        self.assertEqual(r.desired, frozenset({"acct::open"}))
+        self.assertEqual((r.desired, r.status), (frozenset({"acct::proposed"}), "proposed"))
         self.assertIn("conflicted", r.reasons)
-
-    def test_operator_pairing_kind_changed_needs_reconfirmation(self):
-        # Fingerprint recorded "invoice" while the pairing was made; the
-        # document's own kind now equals the (later) expectation "payslip".
-        # A stale kind verdict is not a mismatch — no confirmation cures a
-        # mismatch, but confirming against the new kind cures this one — so
-        # it must NOT be silently promoted to acct::matched (round-27/28).
-        r = R.reduce(inputs([op_pair(1, 1, f=fp(FACTS, "invoice"))],
-                            exp=PAYSLIP, last_known="payslip", doc_kinds={1: "payslip"}))
-        self.assertEqual(r.desired, frozenset({"acct::proposed"}))
-        self.assertIn("kind-changed", r.reasons)
-
-    def test_operator_confirmation_against_current_kind_restores_matched(self):
-        entries = [op_pair(1, 1, f=fp(FACTS, "invoice")),
-                   op_pair(2, 1, f=fp(FACTS, "payslip"))]
-        r = R.reduce(inputs(entries, exp=PAYSLIP, last_known="payslip", doc_kinds={1: "payslip"}))
-        self.assertEqual(r.desired, frozenset({"acct::matched"}))
-
-    def test_machine_pairing_kind_changed_stays_proposed(self):
-        r = R.reduce(inputs([auto(1, 1, f=fp(FACTS, "invoice"))],
-                            exp=PAYSLIP, last_known="payslip", doc_kinds={1: "payslip"}))
-        self.assertEqual(r.desired, frozenset({"acct::proposed"}))
 
     def test_machine_proposal_stays_proposed_when_unconfirmed(self):
         # S2 (Astra round on 61bcbaa): step 5's `ok` requires `m.state ==
         # "matched"`. An auto `propose` entry (never confirmed to a `pair`)
-        # is state "proposed" even with unchanged facts and a matching kind
-        # verdict; dropping this guard would emit acct::matched for it.
+        # is state "proposed" even with unchanged facts; dropping this guard would
+        # emit acct::matched for it.
         r = R.reduce(inputs([auto(1, 1, "propose")]))
         self.assertEqual(r.desired, frozenset({"acct::proposed"}))
         self.assertNotIn("facts-changed", r.reasons)
-        self.assertNotIn("kind-mismatch", r.reasons)
-        self.assertNotIn("kind-changed", r.reasons)
 
     def test_machine_pair_invalidated_by_facts_changing_after_pairing(self):
         # S2: step 5's `ok` also requires `row_ok`. A machine `pair`

@@ -336,12 +336,6 @@ def evidence(d: dict, cands=None) -> list:
         name = _docname(doc)
         if "facts-changed" in d["reasons"]:
             out.append("The bank changed this payment after it was paired — still right?")
-        if "kind-mismatch" in d["reasons"]:
-            need = KIND_WORD.get(d["expectation"]["kind"] or "", "different document")
-            out.append(f"Paired with {_a(KIND_WORD.get(doc['kind'], 'document'))}, but this "
-                       f"payment now needs {_a(need)}.")
-        elif "kind-changed" in d["reasons"]:
-            out.append(f"Its category changed since it was paired — still {name}?")
         labels = cur["labels"]
         if "guessed" not in labels or cur["author"] == "operator":
             # a line that asks for a verdict names what it is asking about (round p7:
@@ -408,7 +402,7 @@ def _tracked(d):
 
 
 def _open_required(d):
-    return _tracked(d) and d["status"] == "open" and d["expectation"]["kind"] is not None
+    return _tracked(d) and d["status"] == "open"
 
 
 def _searched(d):
@@ -432,8 +426,8 @@ def _is_unsearched(d):
 
 
 def _is_unclassified(d):
-    return (_tracked(d) and d["expectation"]["kind"] is None
-            and "classification-conflict" not in d["reasons"])
+    # §2 table: no payment is "not yet classified" any more
+    return False
 
 
 def _is_conflict(d):
@@ -972,6 +966,8 @@ def _item_sentence(d) -> str:
         return "It has left the bank ledger."
     if d["status"] == "matched":
         return f"{_docname(cur['document'])[0].upper() + _docname(cur['document'])[1:]} is filed with it."
+    if d["status"] == "proposed" and cur is None:
+        return "Several documents could fit, and none is picked."   # D3: a joint machine set
     if d["status"] == "proposed":
         return f"Paired with {_docname(cur['document'])}, not confirmed."
     if d["status"] in ("exempt", "no-document"):

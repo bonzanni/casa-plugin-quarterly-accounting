@@ -20,7 +20,8 @@ NAMESPACE_SEP = "::"
 # here (row 10), as the spec's rows 5 and 10 use it (plan §D7).
 FLOW = {"internal-transfer": 6, "cash-withdrawal": 6, "refund": 7, "reimbursement": 8}
 DBIT_PAYROLL = frozenset({"salary", "payroll"})              # row 9
-DBIT_STATEMENT = frozenset({"fees", "interest", "tax"})      # row 10
+DBIT_STATEMENT = frozenset({"fees", "interest", "tax", "taxes"})  # row 10; `taxes` is the
+# classifier's own tag (design rev 17 §2, PLAY Q3)
 CRDT_NO_DOCUMENT = frozenset({"interest", "dividend"})       # row 12
 
 # The shipped mapping (rows 6–13). Defaults err toward required.

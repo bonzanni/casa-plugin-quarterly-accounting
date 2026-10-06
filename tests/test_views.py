@@ -159,8 +159,8 @@ class TestSheet(Base):
         self.assertIn("MISSING\nSearched · ", text)
         self.assertNotIn("Unsearched", text)         # never looked for: not `missing`
         self.assertIn("3 transactions, 1 missing a document.", flat(text))
-        self.assertIn("1 new payment not checked yet", text)
-        self.assertIn("1 not yet classified", text)
+        self.assertIn("2 new payments not checked yet", text)   # an unclassified one is unsearched
+        self.assertNotIn("not yet classified", text)
 
     def test_a_week_spanning_the_boundary_is_one_view(self):
         a = self.add(counterparty="SeptCo", booking_date="2026-09-29")
@@ -235,17 +235,6 @@ class TestSheet(Base):
         text = self.render()["text"]
         self.assertNotIn("not yet classified", text)
         self.assertNotIn("OtherAcct", text)
-
-    def test_kind_mismatch_line_uses_the_right_article(self):
-        def d(doc_kind, need):
-            return {"current": {"document": {"kind": doc_kind, "number": "7", "date": "2026-09-01"},
-                                "labels": ["clean"], "runners_up": [], "match_id": 1},
-                    "reasons": ["kind-mismatch"], "expectation": {"kind": need},
-                    "status": "matched", "candidates": []}
-        lines = views.evidence(d("invoice", "payslip")) + views.evidence(d("payslip", "invoice"))
-        self.assertIn("Paired with an invoice, but this payment now needs a payslip.", lines)
-        self.assertIn("Paired with a payslip, but this payment now needs an invoice.", lines)
-        self.assertFalse(any("a invoice" in x for x in lines))
 
     def test_the_wrong_one_example_names_a_printed_guess(self):
         for i in range(12):
@@ -550,11 +539,10 @@ class TestRenderLog(Base):
             matches.record_match(self.conn, pid=pid, doc_id=self.doc(), author="auto",
                                  expected_revision=self.rev(pid), token=self.token,
                                  row_snapshot=self.snapshot(pid))
-        r = self.render("missing")
+        r = self.render("missing")         # D3: the joint set is a proposal, not "missing"
         views.mark_rendering_delivered(self.conn, r["render_id"])
-        shown = self.conn.execute("SELECT match_revisions_json FROM shown WHERE pid=?",
-                                  (pid,)).fetchone()[0]
-        self.assertEqual(json.loads(shown), {})
+        self.assertIsNone(self.conn.execute("SELECT match_revisions_json FROM shown WHERE pid=?",
+                                            (pid,)).fetchone())
         r = self.render("check")
         views.mark_rendering_delivered(self.conn, r["render_id"])
         shown = self.conn.execute("SELECT match_revisions_json FROM shown WHERE pid=?",

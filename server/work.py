@@ -277,10 +277,7 @@ def _needs_search(d: dict) -> bool:
         return False
     if d["search_state"] == "aged-out" and not rearmed(d["search"]):
         return False
-    cur = d["current"]
-    if cur is None:
-        return True
-    return cur["author"] == "operator" and "kind-mismatch" in d["reasons"]
+    return d["current"] is None
 
 
 def triage(conn) -> list:

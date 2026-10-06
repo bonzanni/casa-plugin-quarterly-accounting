@@ -114,7 +114,7 @@ class TestCuration(StoreCase):
         documents.update_document_metadata(self.conn, self.doc_id, kind="payslip")
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual(p["revision"], before + 1)
-        self.assertIn("kind-mismatch", p["reasons_json"])
+        self.assertNotIn("kind-mismatch", p["reasons_json"])
 
     def test_a_held_document_cannot_be_marked_irrelevant(self):
         with self.assertRaises(db.Refusal):

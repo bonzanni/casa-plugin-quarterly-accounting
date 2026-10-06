@@ -513,7 +513,7 @@ class TestEndsAndErasure(Base):
 
 
 class TestUnknownExpectation(Base):
-    def test_purge_erase_keeps_machine_matches_and_only_a_retagged_row_is_retired(self):
+    def test_purge_erase_keeps_machine_matches_even_for_a_retagged_row(self):
         rows = [self.bf.row("2026-07-%02d" % d, ref="R%d" % d, amount=1000 + d) for d in (5, 6, 7)]
         self.bf.fetch(rows)
         ids = [r["row_id"] for r in self.bf.rows(state="active")]
@@ -542,7 +542,7 @@ class TestUnknownExpectation(Base):
         self.cycle()
         states = [self.conn.execute("SELECT state FROM match_state WHERE match_id=?",
                                     (m,)).fetchone()[0] for m in mids]
-        self.assertEqual(states, ["rejected", "matched", "matched"])
+        self.assertEqual(states, ["matched", "matched", "matched"])   # §2: no kind gate
 
 
 class TestCursor(Base):

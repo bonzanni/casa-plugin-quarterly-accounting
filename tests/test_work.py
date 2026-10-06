@@ -205,14 +205,14 @@ class TestTriage(Base):
         self.granted(work.stop_chasing_in_tx, "2026-Q3")
         self.assertEqual([i["pid"] for i in work.triage(self.conn)], [optional])
 
-    def test_operator_pairing_of_the_wrong_kind_is_searched(self):
+    def test_operator_pairing_is_not_searched_when_the_kind_changes(self):
         rid = self.show(self.pid)
         self.operator_pair(pid=self.pid, doc_id=self.doc(), expected_revision=self.rev(self.pid),
                            render_id=rid)
         self.assertEqual(work.triage(self.conn), [])
         self.classify(self.pid, {"income", "salary"})
         self.settle(self.pid)
-        self.assertEqual([i["pid"] for i in work.triage(self.conn)], [self.pid])
+        self.assertEqual(work.triage(self.conn), [])      # §2: no kind gate; the pairing stands
 
     def test_describe_carries_what_a_line_prints(self):
         d = work.describe(self.conn, self.pid)
