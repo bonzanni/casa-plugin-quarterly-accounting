@@ -455,7 +455,6 @@ class _Scope:
     proposed = property(lambda self: self.get("proposed"))
     offers = property(lambda self: self.get("offers"))
     next = property(lambda self: self.get("next"))
-    walk = property(lambda self: self.get("walk"))
 
 
 class _Run:
@@ -925,8 +924,6 @@ def _apply(conn, run, verb, m, items):
             # answered with a fresh page 1 of its view (an explicit null is "nothing more")
             sc = run.scope
             nxt = sc.next
-            if nxt and sc.kind == "item" and sc.walk:
-                nxt = dict(nxt, walk=sc.walk)            # r3 #5: as the More button does
             if nxt:
                 run.instructions.append({"show_view": nxt})
             else:

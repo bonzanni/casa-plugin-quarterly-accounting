@@ -1227,7 +1227,7 @@ def fits_proposal(text: str) -> bool:
     return utf16_len(body) <= BODY_LIMIT and len(body) <= 4000
 
 
-def buttons_for(conn, r, walk=None) -> list:
+def buttons_for(conn, r) -> list:
     """S7 §7.2: the stored calls of a posted rendering `r` (a renders row), in order, at
     most six, at least one, as (label, tool, args, key_spec). A writing button carries
     key_spec=(action, pid, None); the caller mints and stores its key."""
@@ -1235,13 +1235,10 @@ def buttons_for(conn, r, walk=None) -> list:
     rid, kind = r["render_id"], r["kind"]
     proposed, nxt = scope.get("proposed") or [], scope.get("next")
     more = [("More", "show_view", dict(nxt), None)] if nxt else []
-    if more and kind == "item" and walk:
-        more[0][2]["walk"] = walk          # page 2 of a One by one item still offers Next
     if kind in SHEET_VIEWS and proposed:
         out = [("All good", "verdict", {"render_id": rid, "action": "all-good"},
                 ("all-good", None, None)),
-               ("One by one", "show_view", {"view": "item", "pid": proposed[0], "walk": rid},
-                None)] + more
+               ("One by one", "show_view", {"view": "item", "pid": proposed[0]}, None)] + more
     elif kind == "item":
         pid = scope.get("pid")
         verdicts = {"proposed": ("right", "wrong", "no-invoice"),
@@ -1251,29 +1248,11 @@ def buttons_for(conn, r, walk=None) -> list:
         out = [(words[a], "verdict", {"render_id": rid, "action": a, "pid": pid},
                 (a, pid, None))
                for a in verdicts]
-        nxt_pid = _walk_next(conn, walk, pid)
-        if nxt_pid is not None:
-            out.append(("Next", "show_view", {"view": "item", "pid": nxt_pid, "walk": walk},
-                        None))
-        out += more
+        out += more        # simple loop §4: the walk's [Next] is deleted (single-use keyboards)
     else:
         out = more or [("What's missing", "show_view", {"view": "missing"}, None),
                        ("Anything to check?", "show_view", {"view": "check"}, None)]
     return (out or [("What's missing", "show_view", {"view": "missing"}, None)])[:6]
-
-
-def _walk_next(conn, walk, pid):
-    """The proposed pid after `pid` on the sheet rendering `walk` (One by one), or None."""
-    if not walk:
-        return None
-    w = conn.execute("SELECT kind, scope_json FROM renders WHERE render_id=?",
-                     (walk,)).fetchone()
-    if w is None or w["kind"] not in SHEET_VIEWS:
-        return None
-    proposed = json.loads(w["scope_json"]).get("proposed") or []
-    if pid in proposed and proposed.index(pid) + 1 < len(proposed):
-        return proposed[proposed.index(pid) + 1]
-    return None
 
 
 def _norm(s: str) -> str:

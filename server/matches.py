@@ -395,12 +395,53 @@ def confirm_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="
     authorship.require_match(conn, pid, match_id, render_id, expected_revision, bind=bind)
     if s["state"] == "rejected":
         raise db.Refusal("that pairing was already removed")
-    if s["state"] == "conflicted":
-        other = conn.execute("SELECT pid FROM match_state WHERE doc_id=? AND pid<>? AND state"
-                             " IN ('matched','proposed')", (s["doc_id"], pid)).fetchone()
-        if other is not None:
-            raise db.Refusal(f"that document has since been paired with payment #{other[0]}")
-    return _operator_pair(conn, pid, s["doc_id"], render_id, match_id=match_id)
+    _require_unheld(conn, s["doc_id"], pid)
+    out = _operator_pair(conn, pid, s["doc_id"], render_id, match_id=match_id)
+    lineage.settle_doc_holders(conn, s["doc_id"])
+    return out
+
+
+def _require_unheld(conn, doc_id, pid) -> None:
+    """R5 at an operator pairing (Task 3 review carry): a document another payment holds —
+    its match, its proposal, a joint set, or an alternative of its live proposal
+    (`holders`, the one ownership function) — is never paired onto `pid` as well."""
+    other = next(((p, how) for p, how in holders(conn, doc_id) if p != pid), None)
+    if other is None:
+        return
+    if other[1] == "alternative":
+        raise db.Refusal(f"that document is a candidate on payment #{other[0]}'s proposal")
+    raise db.Refusal(f"that document has since been paired with payment #{other[0]}")
+
+
+def pick_in_tx(conn, *, grant, pid, doc_id, render_id, mrevs: dict,
+               alternatives_shown=()) -> dict:
+    """§1 named candidate: the operator pairs `doc_id`, which the card displayed (the chosen
+    document, an alternative, or one of a joint set). Every OTHER candidate the card
+    displayed — and only those (plan round 8: `mrevs` is what the card bound,
+    `alternatives_shown` the alternatives it printed) — is the operator's rejection (#34),
+    so it is never proposed again for this payment while neither side changes."""
+    authority.require(conn, grant)
+    pid = _operator_pid(conn, pid)
+    st = lineage.fold_of(conn, pid)
+    own = [c for c in _own_machine(st) if str(c.match_id) in mrevs]
+    for c in own:
+        now = _state(conn, c.match_id)["revision"]
+        if now != mrevs[str(c.match_id)]:
+            raise authorship.Stale(pid, "this pairing changed since the operator looked; "
+                                        "show the current facts")
+    shown_alts = [int(a) for a in alternatives_shown]
+    if doc_id not in {c.doc_id for c in own} | set(shown_alts):
+        raise db.Refusal("that candidate was not on the card the operator saw")
+    _require_unheld(conn, doc_id, pid)
+    for c in own:
+        if c.doc_id != doc_id:
+            _append_rejection(conn, pid, _state(conn, c.match_id), render_id)
+    _append_doc_rejections(conn, pid, [a for a in shown_alts if a != doc_id], render_id)
+    hit = next((c for c in own if c.doc_id == doc_id), None)
+    out = _operator_pair(conn, pid, doc_id, render_id,
+                         match_id=hit.match_id if hit is not None else None)
+    lineage.settle_doc_holders(conn, doc_id)
+    return out
 
 
 def reject_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="rendered") -> dict:
@@ -421,15 +462,40 @@ def reject_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="r
 def _append_rejection(conn, pid, s, render_id) -> None:
     """Issue #34 (G1, D1): the rejection is bound to the payment and the document as they
     are now — what the operator rejected — recorded on the rejection itself."""
-    doc = documents._doc(conn, s["doc_id"])
+    _append_unpair(conn, pid, s["match_id"], s["doc_id"], render_id)
+
+
+def _append_unpair(conn, pid, match_id, doc_id, render_id) -> None:
+    doc = documents._doc(conn, doc_id)
     proj = lineage.projection(conn, pid)
     row = lineage.live_row(conn, proj)
     snap = None
     if row is not None and not proj["ended"]:
         exp = lineage.expectation_for(conn, proj, row, exempt=False)
         snap = payment_snapshot(R.facts_of(row), exp.kind, row_fx(row))
-    lineage.append(conn, pid, "unpair", "operator", match_id=s["match_id"],
+    lineage.append(conn, pid, "unpair", "operator", match_id=match_id,
                    render_id=render_id, fp=snap, detail=documents.fingerprint(doc))
+
+
+def _append_doc_rejections(conn, pid, doc_ids, render_id) -> None:
+    """An alternative has no match_state row: its rejection is an operator `unpair` on the
+    lineage's `matches` row for that document, which is what rejected_by_operator reads.
+    The fold ignores an unpair of a match id it holds no candidate for, so this moves no
+    pairing state."""
+    for d in dict.fromkeys(doc_ids):
+        _append_unpair(conn, pid, _match_id_for(conn, pid, d), d, render_id)
+
+
+def reject_alternatives_in_tx(conn, *, grant, pid, doc_ids, render_id) -> None:
+    """D3 (plan round 2, Astra S1): the operator's rejection of the alternatives a card
+    displayed, bound as #34 binds any rejection — never proposed again for this payment
+    while neither side changes."""
+    authority.require(conn, grant)
+    pid = _operator_pid(conn, pid)
+    if not doc_ids:
+        return
+    _append_doc_rejections(conn, pid, doc_ids, render_id)
+    lineage.settle(conn, pid)
 
 
 def reject_all_in_tx(conn, pid, bound, *, grant) -> list:

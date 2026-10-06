@@ -679,8 +679,7 @@ def t_review(args):
           "quarter; page/after/prev from a previous `next`, unchanged. render_id: post that stored "
           "rendering again (the job's `view` unit). After Casa's receipt "
           "(casa_delivery.status delivered), call mark_rendering_delivered(render_id).",
-          obj({"view": S, "quarter": Q, "pid": I, "page": I, "walk": S, "render_id": S,
-               "prev": S,
+          obj({"view": S, "quarter": Q, "pid": I, "page": I, "render_id": S, "prev": S,
                "after": {"type": "array", "description": "the cursor from a `next`, unchanged"}}))
 @capability("view")
 def t_show_view(args):
@@ -690,20 +689,23 @@ def t_show_view(args):
         raise db.Refusal("after is the cursor a previous page's `next` returned")
     return posting.show_view(conn(), view=args.get("view"), quarter=_quarter(args),
                              pid=_int(args, "pid"), page=_int(args, "page"), after=after,
-                             walk=args.get("walk"), render_id=args.get("render_id"),
+                             render_id=args.get("render_id"),
                              prev=args.get("prev"))
 
 
 @register("verdict",
           "A button's call: only a tap on the operator's own button makes it. Never call it "
-          "yourself — it refuses without the button's key.",
-          obj({"render_id": S, "action": S, "pid": I, "key": S},
+          "yourself — it refuses without the button's key. Actions: all-good, right, wrong, "
+          "no-invoice (a sheet or item view); review, confirm-all, confirm, wrong, leave, "
+          "pick (with doc_id: a named candidate), exempt-these, leave-missing, never, "
+          "next-page (a card). A card's answer is the receipt and the next card.",
+          obj({"render_id": S, "action": S, "pid": I, "doc_id": I, "key": S},
               ("render_id", "action", "key")))
 @keyed
 def t_verdict(args):
     import taps
     return taps.verdict(conn(), args.get("render_id"), args.get("action"),
-                        _int(args, "pid"), args.get("key"))
+                        _int(args, "pid"), args.get("key"), doc_id=_int(args, "doc_id"))
 
 
 @register("propose_reading",

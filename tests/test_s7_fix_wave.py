@@ -1,8 +1,7 @@
 """S7 final fix wave: the behavioural pins of final-review.md and the Codex r2 finding —
 typed "more"/"all of them" carry the bound rendering's cursor (I-1); "send it again" binds
 to the newest delivered rendering that offers a package (I-2, §6.3); a staged send is
-posted at most once (Codex r2 S2); store refusals escape names (T3-a); an item page's More
-keeps the walk (T5-c); an import does not stale a typed verdict (T6-c, M-2); no document
+posted at most once (Codex r2 S2); store refusals escape names (T3-a); an import does not stale a typed verdict (T6-c, M-2); no document
 is staged from the surface (T11-a); a package that could not be posted says so (T11-d)."""
 import json
 from tests._base import StoreCase
@@ -147,23 +146,6 @@ class EscapedRefusals(StoreCase):
             kb.set_expectation(self.conn, scope_type="counterparty", scope="_Acme_",
                                kind="none", author="specialist")
         self.assertIn(f"what {views.field('_Acme_')} needs", str(cm.exception))
-
-
-class ItemMoreKeepsTheWalk(StoreCase):
-    """T5-c: an item page's More carries the walk, so page 2 still offers Next."""
-
-    def test_more_on_an_item_page_carries_walk(self):
-        import views
-        r = {"render_id": "r9", "kind": "item",
-             "scope_json": json.dumps({"pid": 1, "item_state": "none",
-                                       "next": {"view": "item", "pid": 1, "page": 2,
-                                                "after": [3]}})}
-        more = next(b for b in views.buttons_for(self.conn, r, walk="r4") if b[0] == "More")
-        self.assertEqual(more[2], {"view": "item", "pid": 1, "page": 2, "after": [3],
-                                   "walk": "r4"})
-        self.assertIsNone(arguments_ok(more[2]))
-        plain = next(b for b in views.buttons_for(self.conn, r) if b[0] == "More")
-        self.assertNotIn("walk", plain[2])
 
 
 class ImportDoesNotStaleAReading(_Q3):
@@ -345,7 +327,7 @@ class R3LegacyMore(_Q3):
 
 
 class R3Minors(_Q3):
-    """r3 #5: plain refusal words; typed "more" on an item page keeps the walk."""
+    """r3 #5: plain refusal words."""
 
     def test_already_posted_and_refused_words_name_no_tool_and_no_code(self):
         import posting
@@ -353,20 +335,6 @@ class R3Minors(_Q3):
                          "That package was already sent once — nothing was posted again.")
         self.assertNotIn("{code}", posting.PKG_REFUSED)
         self.assertNotIn("record_delivery", posting.PKG_REFUSED)
-
-    def test_typed_more_on_an_item_page_keeps_the_walk(self):
-        import db
-        fx = self.sheet_fixture()
-        out = self.show(view="item", pid=fx["pid"], walk=fx["render_id"])
-        nxt = {"view": "item", "pid": fx["pid"], "page": 2, "after": [1]}
-        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
-                                             " render_id=?", (out["render_id"],)).fetchone()[0])
-        scope["next"] = nxt
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
-                              (db.canonical(scope), out["render_id"]))
-        r, _ = self.propose("more")
-        self.assertEqual(r["instructions"], [{"show_view": dict(nxt, walk=fx["render_id"])}])
 
 
 class R3QuoteBindsAPostedPage(_Q3):

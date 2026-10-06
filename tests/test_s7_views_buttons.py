@@ -195,15 +195,14 @@ class Verdict(_Q3):
         fx = self.sheet_fixture(guesses=2)
         prop = self.sheet()
         walk = prop["buttons"][1]["call"]["arguments"]
+        self.assertEqual(walk, {"view": "item", "pid": fx["pids"][0]})   # no walk to carry
         with FakeBroker() as b:
             posting.show_view(self.conn, **walk)
         item = b.proposal()
         self.assertEqual([x["label"] for x in item["buttons"]],
-                         ["Right", "Wrong", "No invoice needed", "Next"])
+                         ["Right", "Wrong", "No invoice needed"])       # §4: no walk Next
         out = self.tap(item, "Wrong")
         self.assertIn("Unpaired", out["receipt"])
-        nxt = next(x for x in item["buttons"] if x["label"] == "Next")["call"]["arguments"]
-        self.assertEqual(nxt["pid"], fx["pids"][1])
 
     def test_after_right_the_item_is_paired_not_proposed(self):
         """T5b / spec 7.3: a verdict acts on PROPOSED pairings; an operator-confirmed pairing

@@ -15,6 +15,14 @@ import views
 import work
 
 ACTIONS = ("all-good", "right", "wrong", "no-invoice")
+# simple loop §1: the cards' taps (cards.buttons), each valid on its own kind of card only
+CARD_ACTIONS = ("review", "confirm-all", "confirm", "wrong", "leave", "pick",
+                "exempt-these", "leave-missing", "never", "next-page")
+_ON_KIND = {"end": ("review", "confirm-all"), "open-items": ("review", "confirm-all"),
+            "review": ("confirm", "wrong", "leave", "pick"),
+            "vendor-page": ("exempt-these", "leave-missing", "never", "next-page")}
+CARD_CHANGED = "That changed since it was shown — nothing applied. Here it is as it is now."
+LIST_CHANGED = "That list changed since it was shown — nothing applied. Here it is as it is now."
 
 
 def _stale(n) -> str:
@@ -83,17 +91,27 @@ def _apply_one(conn, grant, render_id, action, d) -> tuple:
                  + ("; dropped its pairing." if dropped else "."))
 
 
-def verdict(conn, render_id, action, pid, key) -> dict:
+def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
     """§7.3: the only button that writes. After the key check (§7.5) and in ONE transaction:
     every affected payment must stand exactly as the tapped rendering recorded it, or
-    nothing commits; `all-good` confirms exactly the pairings that rendering proposed."""
-    if action not in ACTIONS or (action == "all-good") != (pid is None):
+    nothing commits; `all-good` confirms exactly the pairings that rendering proposed.
+    Simple loop §1 (#1302): a tap on a cards rendering (cards.KINDS) answers
+    {"receipt", "next"} — the next card, composed in the tap's own transaction. The key
+    binds (render, action, pid, doc_id); a key, rendering or action that does not hold is
+    a refusal — {"receipt"} only, no card."""
+    import cards
+    if action not in ACTIONS + CARD_ACTIONS:
         raise db.Refusal(keys.NO_LONGER)
     with db.tx(conn):
-        keys.spend_render(conn, key, render_id, action, pid)
+        keys.spend_render(conn, key, render_id, action, pid, doc_id)
         grant = authority.OperatorGrant("verdict", key)
         r = conn.execute("SELECT * FROM renders WHERE render_id=?", (render_id,)).fetchone()
-        if r is None or r["kind"] not in views.SHEET_VIEWS + ("item",):
+        if r is not None and r["kind"] in cards.KINDS:
+            if action not in _ON_KIND.get(r["kind"], ()):
+                raise db.Refusal(keys.NO_LONGER)
+            return _card_tap(conn, r, action, pid, doc_id, grant)
+        if (r is None or r["kind"] not in views.SHEET_VIEWS + ("item",)
+                or action not in ACTIONS or (action == "all-good") != (pid is None)):
             raise db.Refusal(keys.NO_LONGER)
         scope = json.loads(r["scope_json"])
         affected = (scope.get("proposed") or []) if action == "all-good" else [pid]
@@ -112,6 +130,160 @@ def verdict(conn, render_id, action, pid, key) -> dict:
                 quarters.add(d["quarter"])
         lines += reply.package_lines(conn, quarters)
     return {"receipt": views.fit_message(lines), "applied": applied}
+
+
+def _answer(conn, receipt, next_rid) -> dict:
+    """#1302: the receipt (a non-blank sentence), then the card Casa posts after it."""
+    import cards
+    assert receipt.strip() and next_rid is not None
+    return {"receipt": views.fit_message(receipt), "next": cards.deposit_of(conn, next_rid)}
+
+
+def _plural(n, word) -> str:
+    return f"{n} {word}{'s' if n != 1 else ''}"
+
+
+def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
+    import cards
+    scope = json.loads(r["scope_json"])
+    rid, review_of, pos = r["render_id"], scope["review_of"], scope.get("pos", -1)
+    page, pages = scope.get("page", 1), scope.get("pages") or []
+
+    def onward():
+        """The next page of this vendor, else the next item (cards.card is None when a
+        later page has nothing left: Task 7 carry)."""
+        if pages and page < len(pages):
+            nxt = cards.card(conn, review_of, pos, page + 1)
+            if nxt is not None:
+                return nxt
+        return cards.next_after(conn, review_of, pos)
+
+    def fresh():
+        """The same item as it is now (a fresh first page for a vendor, r10/r11), else the
+        next item when it is no longer open."""
+        return cards.card(conn, review_of, pos, 1) or cards.next_after(conn, review_of, pos)
+
+    if action == "review":
+        return _answer(conn, f"Reviewing {_plural(len(scope.get('order') or []), 'item')}.",
+                       cards.next_after(conn, rid, -1))
+    if action == "confirm-all":
+        return _confirm_all(conn, r, scope, grant)
+    if action == "next-page":
+        nxt = cards.card(conn, review_of, pos, page + 1)
+        if nxt is not None:
+            return _answer(conn, f"Page {page + 1} of {len(pages)}.", nxt)
+        return _answer(conn, f"Nothing is left on page {page + 1}: answered meanwhile.",
+                       cards.next_after(conn, review_of, pos))
+    if action == "leave":
+        return _answer(conn, f"Left for now: {views.headline(work.describe(conn, pid))}.",
+                       cards.next_after(conn, review_of, pos))
+    # the decision in a savepoint: a refusal (or a changed binding) commits nothing of it,
+    # and the answer is still a receipt plus the item as it is now (§1: every answer's
+    # `next` re-offers what is still open); the next card is composed after it
+    then = "next"
+    try:
+        with db.savepoint(conn, "card_answer"):
+            if action in ("exempt-these", "leave-missing", "never"):
+                out = _vendor_answer(conn, rid, scope, action, grant)
+                receipt, then = out if out is not None else (LIST_CHANGED, "fresh")
+            elif _changed(conn, rid, [pid]):
+                receipt, then = CARD_CHANGED, "fresh"
+            else:
+                receipt = _proposal_answer(conn, rid, scope, action, pid, doc_id, grant)
+    except db.Refusal as exc:
+        receipt, then = f"Nothing was applied: {str(exc).rstrip('.')}.", "fresh"
+    nxt = {"fresh": fresh, "onward": onward,
+           "next": lambda: cards.next_after(conn, review_of, pos)}[then]()
+    return _answer(conn, receipt, nxt)
+
+
+def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:
+    """confirm | wrong | pick on one proposal card, bound to what it displayed."""
+    d = work.describe(conn, pid)
+    shown_alts = scope.get("alternatives") or []
+    if action == "pick":
+        mrevs = json.loads(_item(conn, rid, pid)["match_revisions_json"])
+        matches.pick_in_tx(conn, grant=grant, pid=pid, doc_id=doc_id, render_id=rid,
+                           mrevs=mrevs, alternatives_shown=shown_alts)
+        return f"Paired {views.headline(d)}."
+    if action == "confirm":
+        return _apply_one(conn, grant, rid, "right", d)[1]
+    # D3 / plan round 2 (Astra S1): Wrong answers every candidate the card displayed — the
+    # chosen document and its displayed alternatives, or a set's displayed members — and
+    # nothing it did not display (plan round 8)
+    _, line = _apply_one(conn, grant, rid, "wrong", d)
+    matches.reject_alternatives_in_tx(conn, grant=grant, pid=pid, doc_ids=shown_alts,
+                                      render_id=rid)
+    if shown_alts:
+        line = (f"Unpaired {views.headline(d)} and set aside its "
+                f"{_plural(len(shown_alts), 'other candidate')}.")
+    return line
+
+
+def _vendor_answer(conn, rid, scope, action, grant):
+    """A vendor page's writing buttons. [No invoice needed for these] and [Leave missing]
+    bind only this page's own payments (plan round 2, Astra S2); [Never for X] binds the
+    union of the pages, which must still be the vendor's whole set now (r10/r11). Returns
+    (receipt, "onward" | "next"), or None when the binding changed (nothing written)."""
+    import cards
+    import kb
+    listed = views.render_items(conn, rid)
+    vendor = views.field(scope["vendor"])
+    if _changed(conn, rid, listed) or not listed:
+        return None
+    if action == "never":
+        prior = scope.get("prior") or []
+        union = set(listed)
+        for p in prior:
+            theirs = views.render_items(conn, p)
+            if _changed(conn, p, theirs):
+                return None
+            union |= set(theirs)
+        if sorted(union) != cards.never_set(conn, scope["vendor"]):
+            return None
+        kb.set_expectation_in_tx(conn, scope_type="counterparty", scope=scope["vendor"],
+                                 kind="none", author="operator", render_id=rid, grant=grant)
+        return (f"{vendor} never needs an invoice: {_plural(len(union), 'payment')} "
+                "changed.", "next")
+    if action == "exempt-these":
+        for p in listed:
+            matches.set_exemption_in_tx(conn, grant=grant, pid=p, exempt=True,
+                                        expected_revision=_item(conn, rid, p)["projection_revision"],
+                                        render_id=rid, bind="rendered")
+        return f"No invoice needed for {_plural(len(listed), vendor + ' payment')}.", "onward"
+    work.leave_missing_in_tx(conn, listed, grant=grant)
+    return f"Left missing: {_plural(len(listed), vendor + ' payment')}.", "onward"
+
+
+def _confirm_all(conn, r, scope, grant) -> dict:
+    """§1 (S7 §7.3 extended): over the proposals the message listed, in order — one the
+    operator answered after this rendering (Review, or an applied reading: an operator log
+    entry past its seq) is skipped; one changed by anything else gets a refusal line and
+    commits nothing; the rest are confirmed, each in its own savepoint."""
+    import cards
+    rid, since = r["render_id"], int(r["render_id"][1:])
+    listed = scope.get("proposed") or []
+    lines, done, skipped = [], 0, 0
+    for pid in listed:
+        if conn.execute("SELECT 1 FROM log WHERE pid=? AND author='operator' AND seq>?",
+                        (pid, since)).fetchone():
+            skipped += 1
+            continue
+        d = work.describe(conn, pid)
+        if _changed(conn, rid, [pid]):
+            lines.append(f"{views.headline(d)}: changed since it was shown — nothing applied.")
+            continue
+        try:
+            with db.savepoint(conn, "confirm_one"):
+                _apply_one(conn, grant, rid, "right", d)
+        except db.Refusal as exc:
+            lines.append(f"{views.headline(d)}: nothing applied — {str(exc).rstrip('.')}.")
+            continue
+        done += 1
+    head = [f"Confirmed {done} of {len(listed)}."]
+    if skipped:
+        head.append(f"{_plural(skipped, 'proposal')} already answered — left as answered.")
+    return _answer(conn, "\n".join(head + lines), cards.compose_open(conn, scope["quarter"]))
 
 
 CHANGED = ("Something changed since I read your message — nothing was applied. Say it again.")

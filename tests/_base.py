@@ -745,3 +745,38 @@ def close_chunk(conn):
                 carry["chunk"]["open"] = False
                 conn.execute("UPDATE pass_steps SET carry_json=? WHERE pass_id=? AND step=?",
                              (db.canonical(carry), m["pass_id"], r["step"]))
+
+
+class LoopCase(StoreCase):
+    """A simple-loop store (design rev 17 §1): bound, a run claimed (self.token,
+    self.job_id), and one classified, settled payment per pay(). The one fixture the cards
+    and taps tests share (P12: no copied pay/propose helpers)."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        self.token = self.run_claim()
+        self.n = 0
+
+    def pay(self, who="Adobe", amount=10000, day="2026-09-02"):
+        self.n += 1
+        self.row(self.n, counterparty=who, amount_minor=amount, booking_date=day,
+                 value_date=day)
+        pid = self.lineage_for(self.n)
+        self.classify(pid, {"software"})
+        self.settle(pid)
+        return pid
+
+    def stored_date(self, doc_id):
+        return self.conn.execute("SELECT document_date FROM documents WHERE doc_id=?",
+                                 (doc_id,)).fetchone()[0]
+
+    def propose(self, pid, alternatives=(), **doc):
+        """The document's own stored date is the date read (plan round 3, Astra S1: a fixed
+        date rewrote INV-88's 2 Aug, and a retry under another date is changed evidence)."""
+        import matches
+        d = self.doc(**doc)
+        matches.propose_match(self.conn, pid=pid, doc_id=d, expected_revision=self.rev(pid),
+                              token=self.token, document_date=self.stored_date(d),
+                              alternatives=list(alternatives))
+        return d

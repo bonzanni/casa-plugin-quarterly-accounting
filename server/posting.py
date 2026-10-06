@@ -4,14 +4,11 @@ returns the reference. Nothing here ever returns a key."""
 from __future__ import annotations
 
 import json
-import re
 
 import casa_broker
 import db
 import keys
 import views
-
-RENDER_ID = re.compile(r"^r\d{1,18}$")
 
 
 def _proposal(text, buttons, revision) -> str:
@@ -38,7 +35,7 @@ def _keyed(conn, render_id, specs) -> list:
     return out
 
 
-def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None, walk=None,
+def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
               render_id=None, prev=None) -> dict:
     """§7.1: render exactly as build_review does (or, with render_id, re-post that stored
     rendering — the job's `view` unit, §5) and deposit it as a proposal: text = the page,
@@ -47,8 +44,6 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
     (cards.KINDS) re-posts with its own keyboard (cards.buttons) and the revision of its
     walk; view="open" composes and posts a fresh open-items card (§1 Recovery)."""
     import cards
-    if walk is not None and (not isinstance(walk, str) or not RENDER_ID.fullmatch(walk)):
-        raise db.Refusal("walk is the render id the One by one button carried")
     with db.tx(conn):
         if render_id is not None:
             if any(v is not None for v in (view, quarter, pid, page, after, prev)):
@@ -61,7 +56,7 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
                 raise db.Refusal("that rendering is too long for buttons: post it with "
                                  "post_results(render_ids=[…]) instead")
         elif view == "open":
-            if any(v is not None for v in (pid, page, after, prev, walk)):
+            if any(v is not None for v in (pid, page, after, prev)):
                 raise db.Refusal("the open items are one card: name at most its quarter")
             rid = cards.compose_open(conn, quarter or cards.main_quarter(conn))
             r = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
@@ -75,12 +70,7 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
             # keys minted and posted_seq stamped by deposit_of, as for a tap's `next`
             value = json.dumps(cards.deposit_of(conn, r["render_id"]), ensure_ascii=False)
         else:
-            if walk is not None and r["kind"] == "item" and scope.get("walk") != walk:
-                # r3 #5: a typed "more" on this page carries the walk, as its More button does
-                scope["walk"] = walk
-                conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
-                             (db.canonical(scope), r["render_id"]))
-            buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r, walk))
+            buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r))
             revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
             value = _proposal(r["text"], buttons, revision)
             # r3 #3: stamped posted before the deposit (which stays last) — a view posted by

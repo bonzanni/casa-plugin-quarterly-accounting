@@ -4,36 +4,12 @@ fewer than 25), the Review order (proposals, then one item per vendor), paged ve
 ([Never for X] only on the last page, never on a scheduled walk), the open-items card, the
 ready notice, and the scheduled run's new-state rule."""
 import json
-from tests._base import StoreCase
+from tests._base import LoopCase, StoreCase
 import db                     # server/ is on sys.path once tests._base is imported
 
 
 
-class Cards(StoreCase):
-    def setUp(self):
-        super().setUp()
-        self.bind()
-        self.token = self.run_claim()
-        self.n = 0
-
-    def pay(self, who="Adobe", amount=10000, day="2026-09-02"):
-        self.n += 1
-        self.row(self.n, counterparty=who, amount_minor=amount, booking_date=day,
-                 value_date=day)
-        pid = self.lineage_for(self.n)
-        self.classify(pid, {"software"})
-        self.settle(pid)
-        return pid
-
-    def propose(self, pid, **doc):
-        import matches
-        d = self.doc(**doc)
-        date = self.conn.execute("SELECT document_date FROM documents WHERE doc_id=?",
-                                 (d,)).fetchone()[0]            # the stored date, unchanged
-        matches.propose_match(self.conn, pid=pid, doc_id=d, expected_revision=self.rev(pid),
-                              token=self.token, document_date=date)
-        return d
-
+class Cards(LoopCase):
     def c(self, fn, *a, **k):
         """Every cards composer runs inside the caller's transaction."""
         with db.tx(self.conn):
@@ -620,7 +596,7 @@ class Cards(StoreCase):
         self.assertIsNotNone(self.conn.execute("SELECT posted_seq FROM renders WHERE"
                                                " render_id=?", (end,)).fetchone()[0])
         with self.assertRaises(db.Refusal):
-            posting.show_view(self.conn, view="open", walk=end)
+            posting.show_view(self.conn, view="open", page=2)    # the open items: one card
 
     def test_store_refuses_to_bind_a_line_that_does_not_fit(self):
         import cards
