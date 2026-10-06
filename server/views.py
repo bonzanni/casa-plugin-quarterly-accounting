@@ -1357,12 +1357,15 @@ def _rid_order(rid: str):
 
 def _common_view(rows) -> dict:
     """The show_view arguments of the candidates' common view, else the status view."""
+    import cards
     kinds = {r["kind"] for r in rows}
     scopes = [json.loads(r["scope_json"]) for r in rows]
     quarters = {sc.get("quarter") for sc in scopes}
     pids = {sc.get("pid") for sc in scopes}
     if len(kinds) == 1 and len(quarters) == 1 and len(pids) == 1:
         kind, (q,), (pid,) = next(iter(kinds)), quarters, pids
+        if kind in cards.KINDS:          # simple loop §1: a card recovers as open items
+            return {"view": "open", **({"quarter": q} if q else {})}
         if kind in VIEWS and (kind != "item" or pid is not None):
             out = {"view": kind}
             if q:

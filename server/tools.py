@@ -617,9 +617,11 @@ def t_review(args):
 @register("show_view",
           "Post a view to the operator, with its buttons (Casa posts it, labelled; never "
           "retell it). view: status, missing, check, rest, older, all, item (with pid), "
-          "quarter; page/after/prev from a previous `next`, unchanged. render_id: post that stored "
-          "rendering again (the job's `view` unit). After Casa's receipt "
-          "(casa_delivery.status delivered), call mark_rendering_delivered(render_id).",
+          "quarter, open (the card of what is still open, with its buttons: \"what's "
+          "open\", \"review\"; at most a quarter); page/after/prev from a previous "
+          "`next`, unchanged. render_id: post that stored rendering again (the job's "
+          "`view` unit). After Casa's receipt (casa_delivery.status delivered), call "
+          "mark_rendering_delivered(render_id).",
           obj({"view": S, "quarter": Q, "pid": I, "page": I, "render_id": S, "prev": S,
                "after": {"type": "array", "description": "the cursor from a `next`, unchanged"}}))
 @capability("view")

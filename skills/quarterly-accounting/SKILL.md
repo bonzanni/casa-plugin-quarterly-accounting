@@ -18,6 +18,10 @@ a withheld notice. Only a receipt means it arrived. A posting tool's answer with
 
 ## Answering
 
+"What's open?", "review", "what's left to check?": `show_view(view="open")` — the card
+with what is still open and its buttons (also after a walk of cards stopped, or after
+[Get package]). A button that answers "expired" (a card whose send timed out, Casa #1305)
+is recovered the same way: say "review" or "what's open" and the card comes again.
 "How are the books?", "what's missing?", "anything to check?", "show me Q2", "more",
 "all of them", "show item N": `show_view(view=…, quarter=…, page=…, after=…)`, the view
 the question asks for (`status`, `missing`, `check`, `rest`, `older`, `all`, `quarter`,
@@ -54,10 +58,14 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
 "Check now", "check emailed invoices", or a delegate asking you to start or run the
 accounting check (even naming `quarterly-accounting:work`):
 `request_work(kind="check", trigger="operator")`. You start it yourself; never ask the
-delegate to.
-"Give me Q3", "rebuild it", "the package for Q2": `get_package(quarter=…)` — the file it
-posts is the answer; if it refuses, say its words. "Email me the package": say "Packages
-come here as a file now — forward it from Telegram." and send it as a file.
+delegate to. When the operator names a quarter, pass it: "Check Q2":
+`request_work(kind="check", trigger="operator", quarter="2026-Q2")` — its end message and
+its [Get package] are that quarter's.
+"Send the package", "Give me Q3", "rebuild it", "the package for Q2":
+`get_package(quarter=…)`, also for the reading's "rebuild Qn". It sends the file itself,
+built now from what the last check knew; say nothing more after it. If it refuses, say
+its words. "Email me the package": say "Packages come here as a file now —
+forward it from Telegram.", then `get_package`. The job never sends a package.
 
 After `request_work`, always `start_job` with the ask's `start_job` exactly. Read its result:
 - `pending` → say the ask's `line`;
@@ -93,10 +101,12 @@ is filed by you, without being asked:
 
 ## Setup
 
-`check_setup()` says what the check can reach. When it asks which company account is the
-business account, call `propose_account()`: the operator taps the account. Never bind one
-yourself. Its conditions in other words are yours to explain; never change anything about
-bank-feed or Gmail from here.
+`check_setup()` says what the check can reach. The check never asks which account is the
+business account: before a first check, or when a check stopped for it, call
+`check_setup()`, and when it asks which company account is the business account, call
+`propose_account()`: the operator taps the account. Never bind one yourself. Its
+conditions in other words are yours to explain; never change anything about bank-feed or
+Gmail from here.
 
 ## Test install
 
@@ -107,8 +117,8 @@ operator asked to erase the accounting store.
 ## Never
 
 - Never retell, reorder or summarise what a tool posted.
-- Never call `job_next`, `record_filing`, `import_ledger_export` or any pass tool: those
-  are the job's.
+- Never call `job_next`, `decide`, `record_mirror`, `record_not_found`,
+  `import_ledger_export` or any pass tool: those are the job's.
 - Never call a button's tool (`verdict`, `apply_reading`, `cancel_reading`,
   `bind_account`): only the operator's tap does.
 - Never ask the operator for an id, a token or a path.
