@@ -123,9 +123,13 @@ def _freeze(conn, quarter: str) -> dict:
                             docs[-alt] = dict(row)
             lines.append({"row": r, "d": d, "docs": docs})
         history = [r for r in in_q if r["state"] != "active"]
+        # e4 (Astra S2, rev 18.4 §R18.3): a document is listed under the quarter of its own
+        # date — a Q3 invoice filed in October is Q3's unmatched one — else its filing's
         unmatched = [dict(x) for x in conn.execute(
             "SELECT d.* FROM documents d JOIN document_status s ON s.doc_id=d.doc_id"
-            " WHERE s.status='unmatched' AND d.ingest_quarter=? ORDER BY d.doc_id", (quarter,))]
+            " WHERE s.status='unmatched' ORDER BY d.doc_id")
+            if (dates.quarter_of(x["document_date"][:10]) if x["document_date"]
+                else x["ingest_quarter"]) == quarter]
         snap = conn.execute("SELECT bank_through, imported_at FROM snapshots ORDER BY"
                             " snapshot_id DESC LIMIT 1").fetchone()
         # the import every line's freshness was judged against (round E3, Terra S1)

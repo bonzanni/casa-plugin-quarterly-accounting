@@ -719,6 +719,10 @@ def _choose(conn, token, job_id, calls_made, logs) -> dict:
     return {"unit": "complete", "text": job.run_end(conn, job_id)[0]}
 
 
+WORK_UNITS = ("erasures", "filing", "payment", "mirror")   # BRAIN: a payment, a file, an
+#                                                          erase check, a mirror call
+
+
 def _close(conn, token, out, calls_made) -> dict:
     """§2.2: every answer carries the pass_token. Progress is reported at a batch's end
     (`end-batch`, `complete`) and — d3 (Astra S1) — on the FIRST answer after the batch
@@ -729,17 +733,19 @@ def _close(conn, token, out, calls_made) -> dict:
     c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
     ending = out["unit"] in ("end-batch", "complete")
     conn.execute("UPDATE claims SET closed=? WHERE gen=?", (int(ending or c["closed"]), token))
-    # rev 18.4 §R18.5 (d7 Astra S1b): progress is progress.made, the ONE definition. e3
-    # (Astra S1): what was persisted since the run last REPORTED (runs.reported_seq) — a
-    # batch Casa cut before its next job_next never answered, so its work is reported by
-    # the next answer that can carry it, a re-claim's included; at most once per claim
-    run = _run(conn, c["job_id"])
-    progressed = progress.made(conn, c["job_id"], run["reported_seq"] or 0)
+    # progress/budget #3 under rev 18 (e4, Astra S1) — generalized by SIMPLIFYING (BRAIN's
+    # pre-agreement, the operator's "no limits that complicate more than they benefit"):
+    # this claim progressed iff it handed out a work unit or something was closed or
+    # persisted since it began (progress.made). Casa reads a batch's LAST report: it is
+    # said once as soon as it holds, and again at the batch's end, never overwritten by a
+    # false; a stuck model is bounded by the per-payment caps and `"batches": 20`
+    if out["unit"] in WORK_UNITS:
+        conn.execute("UPDATE claims SET handed=1 WHERE gen=?", (token,))
+    progressed = bool(c["handed"]) or out["unit"] in WORK_UNITS or (
+        c["seq"] is not None and progress.made(conn, c["job_id"], c["seq"]))
     report = ending or (progressed and not c["said"])
     if report and progressed:
         conn.execute("UPDATE claims SET said=1 WHERE gen=?", (token,))
-        conn.execute("UPDATE runs SET reported_seq=? WHERE job_id=?",
-                     (db.next_seq(conn), c["job_id"]))
     summary = (job.run_end(conn, c["job_id"])[1] if out["unit"] == "complete"
                else WORDS[out["unit"]])
     if not ending:

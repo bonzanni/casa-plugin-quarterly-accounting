@@ -38,7 +38,10 @@ class Run(StoreCase):
         tok = job.claim(self.conn, "aaaaaaaa-2")
         u = job.next_unit(self.conn, tok, 0)
         self.assertEqual(u["unit"], "payment")
-        self.assertFalse(u["report"])
+        # e4 (progress/budget #3, simplified): handing out a work unit is progress — said
+        # once per claim, as soon as it holds, and again at the batch's end
+        self.assertTrue(u["report"])
+        self.assertFalse(job.next_unit(self.conn, tok, 1)["report"])
 
     def test_a_scheduled_run_lists_only_new_state_items_and_omits_never(self):
         self.drv.run_job("aaaaaaaa-3", started_by="operator")       # the 3 shown once

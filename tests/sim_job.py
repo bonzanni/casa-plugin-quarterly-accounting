@@ -553,7 +553,8 @@ class JobDriver:
                 self.units.append(u)
                 self.last = u
                 assert u.get("pass_token") == self.token, u
-                reported = reported or (u["report"] and u["progress"]["progressed"])
+                if u["report"]:                 # Casa keeps a batch's LAST report (e4)
+                    reported = bool(u["progress"]["progressed"])
                 if u["unit"] == "complete":
                     batch_end()
                     return units
