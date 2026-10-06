@@ -213,6 +213,15 @@ D18. **Pending rows** (plan round 1, Terra S2). The reducer is unchanged: it sti
      `MISSING`, and counts it as not documented ("open") in the caption, whose ruled format
      stays. The end message counts it as "pending".
 
+D19. **One message per run, the completion first** (plan round 2, Astra S1 + Terra S1). Owed
+     notices are selected before the end message is composed.
+     - A run with nothing to list (operator: nothing open anywhere; scheduled: nothing new)
+       and a notice owed posts the completion as its one message, failure lines included.
+     - A run that still has items to list carries each owed completion as one line of its
+       end message. This can happen only when another quarter is open. It never posts a
+       second message.
+     - A notice counts as given only once its rendering is delivered.
+
 ## Unimplementable or underspecified in the design (flagged; no task invents beyond D1–D17)
 
 - §6.6, "no note backlog" after a restart mid-mirror, cannot be exact: bank-feed's `add_note`
@@ -515,6 +524,18 @@ def build_v11_store(path, with_rows=False):
   - Set `SCHEMA_VERSION = 12`, add `SCHEMA_DATA_STEPS`, and change the `migrate` loop as in
     Interfaces.
   - In `binding._TABLES_TO_WIPE`, add `"run_work", "run_mirror", "quarter_notices"`.
+  - **Every retained INSERT into a table this schema changes names its columns** (plan
+    round 2, Astra S1: `render_items` gains a column, so a column-less INSERT fails with
+    "has 5 columns but 4 values were supplied"). A grep at 26b68ee finds two, both in tests,
+    and nothing in `server/`:
+    - `tests/_base.py:574` (`StoreCase.show`) becomes `INSERT INTO render_items(render_id,
+      pid, projection_revision, match_revisions_json) VALUES (?,?,?,?)`. The next line
+      (L576, `shown`, unchanged by this schema) is given its column list too: `shown(pid,
+      render_id, projection_revision, match_revisions_json, delivered_at)`.
+    - `tests/test_s7_binding.py:704` gets the same render_items column list.
+
+    The gate, run at the end of this step and again in Task 11, must print nothing:
+    `grep -rnE "INSERT (OR [A-Z]+ )?INTO [a-z_]+ VALUES" server tests scripts`.
 
 - [ ] **Step 5: Run the tests**
 
@@ -766,8 +787,8 @@ different currency only proposed (FX screen kept, #35); taken counts proposals a
 live proposal's alternatives; a payment's own machine pairing is not taken against its own
 re-decision, which replaces it; a re-decision with the same outcome and document writes
 nothing; an operator rejection refuses both writes; an operator pairing is never reopened."""
-import db
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 
 
 class Floor(StoreCase):
@@ -1185,8 +1206,8 @@ def note_progress(conn, token) -> None      # UPDATE claims SET progressed=1 WHE
 refused entry is reported and the others apply; a document an earlier entry took is taken
 for the later ones; no `not-needed` outcome; record_missing; the run's outcome and the
 batch's progress (§2.2 `progressed`)."""
-import db
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 
 
 class Decide(StoreCase):
@@ -1543,6 +1564,7 @@ The note texts (§2.4; amounts per D12):
 |---|---|
 | matched | `Accounting: matched — invoice Adobe INV-88 · 2 Sep 2026 · EUR 100.00 (quarterly check)` |
 | proposed, one chosen | `Accounting: proposed — invoice OpenRouter ABC-123 · 18 Sep 2026 · USD 22.00, awaiting confirmation (quarterly check)` |
+| proposed, chosen + alternatives (D3) | `Accounting: proposed — invoice AWS INV-88 · 2 Aug 2026 · EUR 41.20 (or 1 other invoice), awaiting confirmation (quarterly check)` |
 | proposed, a set (D3) | `Accounting: proposed — 2 invoices fit, awaiting confirmation (quarterly check)` |
 | open | `Accounting: invoice missing (quarterly check)` |
 | exempt, no-document, optional | `Accounting: no invoice needed (quarterly check)` |
@@ -1561,8 +1583,8 @@ own export tags, the note against mirror_note — grouped into calls of up to 10
 identical tag lists and identical note texts; distinct invoice notes one call each; no
 read-backs; an immediate rerun owes nothing."""
 import json
-import db
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 
 
 class Mirror(StoreCase):
@@ -1732,8 +1754,12 @@ def note_text(conn, pid):
     if status == "matched" and p["current_match"]:
         text = f"Accounting: matched — {_doc_words(conn, p['current_match'])}{SUFFIX}"
     elif status == "proposed" and p["current_match"]:
-        text = (f"Accounting: proposed — {_doc_words(conn, p['current_match'])}, awaiting "
-                f"confirmation{SUFFIX}")
+        alts = json.loads(conn.execute("SELECT alternatives_json FROM matches WHERE match_id=?",
+                                       (p["current_match"],)).fetchone()[0])
+        more = (f" (or {len(alts)} other invoice{'s' if len(alts) != 1 else ''})"
+                if alts else "")                  # a joint proposal names its alternatives
+        text = (f"Accounting: proposed — {_doc_words(conn, p['current_match'])}{more}, "
+                f"awaiting confirmation{SUFFIX}")
     elif status == "proposed":
         n = conn.execute("SELECT count(*) FROM match_state WHERE pid=? AND state="
                          "'conflicted'", (pid,)).fetchone()[0]
@@ -1957,8 +1983,8 @@ payment expecting no document, never an operator-confirmed pairing, never one th
 operator left missing), ordered by vendor then date; the vendor unit's candidates and
 exact fit."""
 import json
-import db
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 
 JOB = "jjjjjjjj-0001"
 
@@ -2385,12 +2411,13 @@ def state(conn) -> dict
 def item_state(d) -> str          # "missing" | "proposed:<doc_id>" | "proposed:joint:<a,b>"
 def seen_state(conn, pid, st) -> bool
     # §1 rule: a SEEN rendering (delivered, or posted_seq) recorded (pid, st)
-def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=()) -> str | None
+def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), ready=())
+    -> str | None
     # the run's one end message (kind 'end'), or None when a scheduled run has nothing new
     # and no extra line (rev 17: "only if it holds an item in a state no delivered
     # message showed"); `extra` = failure lines, mirror failures, partial line
 def compose_open(conn, quarter, *, scheduled=False) -> str      # 'open-items' (or "all answered")
-def compose_ready(conn, quarter, *, updated: bool) -> str       # 'ready'
+def compose_ready(conn, quarters: list, extra=()) -> str        # 'ready' (D19)
 def card(conn, review_of, pos, page=1) -> str | None            # 'review' / 'vendor-page'
 def next_after(conn, review_of, pos) -> str                     # §1: the next card, else open-items
 def buttons(conn, r) -> list                                    # (label, tool, args, key_spec)
@@ -2474,8 +2501,23 @@ composes its `next` in the tap's own transaction.
   unanswered missing payments only: [Leave missing] is an answer (§1 "complete"). It carries the same
   numbered proposal lines, the same buttons, and its own order. With nothing open it reads
   `"{Qn} · all answered"`, with [Get package] only.
-- **Ready notice** (§1): `"{Qn} complete · {n} of {n} accounted for · package ready"`. When
-  `updated`, it reads `"{Qn} complete · updated · package ready"`. It has [Get package] only.
+- **Ready notice** (§1, D19): `"{Qn} complete · {n} of {n} accounted for · package ready"`,
+  or `"{Qn} complete · updated · package ready"` when that quarter's `quarter_notices.times
+  > 0`. `quarters` is every quarter whose notice is owed; the latest gets the header and
+  [Get package] (its only button), each earlier one a line `"{Qn} complete · package ready —
+  say \"send the {Qn} package\""`; then the `extra` lines. Its scope records
+  `ready_quarters`.
+- **Owed notices as lines of an end message** (D19): when `compose_end` is given
+  `ready=[quarters]` and still has items to list, each owed quarter adds one line `"{Qn}
+  complete · package ready — say \"send the {Qn} package\""`, and its scope records
+  `ready_quarters`. When it has nothing to list (operator: nothing open anywhere;
+  scheduled: nothing new), it returns `compose_ready(ready, extra)` instead: the run's one
+  message is the completion.
+- **Delivery records the notice** (shape d): `views.mark_rendering_delivered` gains, next to
+  its `alerts` loop (L1457–1459), `for q in scope.get("ready_quarters", [])`: `INSERT OR
+  IGNORE INTO quarter_notices(quarter) VALUES (q)`, then `UPDATE quarter_notices SET
+  notified=1, times=times+1, render_id=? WHERE quarter=?`. A notice composed and never
+  delivered stays owed.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2487,8 +2529,8 @@ fewer than 25), the Review order (proposals, then one item per vendor), paged ve
 ([Never for X] only on the last page, never on a scheduled walk), the open-items card, the
 ready notice, and the scheduled run's new-state rule."""
 import json
-import db
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 
 JOB = "jjjjjjjj-0007"
 
@@ -2600,6 +2642,14 @@ class Cards(StoreCase):
         self.assertNotIn("Never for Adobe", self.labels(page))                 # rev 17
         self.assertNotEqual(old, new)
 
+    def test_an_end_message_posted_but_never_delivered_is_not_seen(self):
+        import cards
+        self.pay("Adobe")
+        end = self.c(cards.compose_end, JOB, scheduled=False)
+        with db.tx(self.conn):
+            cards.deposit_of(self.conn, end)              # posted_seq stamped, no receipt
+        self.assertIsNotNone(self.c(cards.compose_end, JOB, scheduled=True))
+
     def test_item_states_are_recorded_with_the_rendering(self):
         import cards
         p = self.pay()
@@ -2611,7 +2661,10 @@ class Cards(StoreCase):
 
     def test_the_ready_notice_and_the_all_answered_card(self):
         import cards
-        rid = self.c(cards.compose_ready, "2026-Q3", updated=True)
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO quarter_notices(quarter, notified, times) VALUES"
+                              " ('2026-Q3', 0, 1)")              # completed once before
+        rid = self.c(cards.compose_ready, ["2026-Q3"])
         self.assertIn("Q3 complete · updated · package ready", self.rendering(rid)[0]["text"])
         self.assertEqual(self.labels(rid), ["Get package"])
         o = self.c(cards.compose_open, "2026-Q3")
@@ -2635,11 +2688,20 @@ def item_state(d) -> str:
     return "missing"
 
 
+TAP_CARDS = ("review", "vendor-page")
+
+
 def seen_state(conn, pid, st) -> bool:
+    """§1: shown by a delivered message. A run's own messages (`end`, `open-items`, `ready`)
+    count only once delivered (plan round 2, Astra S2: show_view stamps posted_seq BEFORE the
+    deposit, so a cut before the receipt left an end message "seen" that never arrived). A
+    tap's card has no delivery callback (#1302 posts it after the tap's receipt), so a posted
+    one counts."""
     return conn.execute(
         "SELECT 1 FROM render_items i JOIN renders r ON r.render_id=i.render_id WHERE"
-        " i.pid=? AND i.item_state=? AND (r.delivered_at IS NOT NULL OR r.posted_seq IS NOT"
-        " NULL) LIMIT 1", (pid, st)).fetchone() is not None
+        " i.pid=? AND i.item_state=? AND (r.delivered_at IS NOT NULL OR (r.kind IN"
+        " ('review', 'vendor-page') AND r.posted_seq IS NOT NULL)) LIMIT 1",
+        (pid, st)).fetchone() is not None
 
 
 def never_set(conn, vendor) -> list:
@@ -2755,7 +2817,9 @@ git add server/cards.py tests/test_cards.py && git commit -am "feat(loop): the o
   - `server/keys.py:21–35`: `store_render` / `spend_render` bind `doc_id`;
   - `server/matches.py`: add `pick_in_tx`;
   - `server/work.py`: add `leave_missing_in_tx`;
-  - `server/posting.py:24–35` (`_keyed`): a 3-tuple `key_spec`;
+  - `server/posting.py:24–35` (`_keyed`): a 3-tuple `key_spec` `(action, pid, doc_id)`.
+    Its other caller, `views.buttons_for` (posting.py:68; views.py:1239, 1245–1250), emits
+    `(action, pid, None)`;
   - `server/tools.py:639–648` (`verdict`): `doc_id`, and the new actions in the description;
   - `server/views.py:1251–1273`: delete the walk's [Next] and `_walk_next` (§4).
 - Tests:
@@ -2822,8 +2886,8 @@ card; single-use keyboards (nothing relies on an earlier message); Confirm all s
 was answered, refuses only what changed otherwise, commits the rest; [Never for X] binds the
 union of the vendor's pages and refuses a changed set with a fresh first page."""
 import json
-import db
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 
 JOB = "jjjjjjjj-0008"
 
@@ -2926,6 +2990,32 @@ class Taps(StoreCase):
         self.assertEqual(rows.get(chosen), "proposed")
         self.assertNotEqual(rows.get(alt), "matched")
 
+    def test_wrong_on_a_joint_proposal_rejects_its_alternatives_too(self):
+        import matches
+        p = self.pay()
+        alt = self.doc(document_number="INV-91")
+        self.propose(p, alternatives=[alt], document_number="INV-88")
+        card = self.tap(self.end(), "Review 1")["next"]
+        self.tap(card, "Wrong")
+        with self.assertRaisesRegex(db.Refusal, "operator rejected"):
+            matches.propose_match(self.conn, pid=p, doc_id=alt, expected_revision=self.rev(p),
+                                  token=self.token, document_date="2026-09-01")
+
+    def test_exempting_page_one_leaves_page_two_answerable(self):
+        for i in range(30):
+            self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1))
+        page1 = self.tap(self.end(), "Review 1")["next"]
+        page2 = self.tap(page1, "Next page")["next"]       # page 2 posted before page 1's answer
+        # plugin keys are per button: page 1's other button is still its own (Casa clears
+        # the keyboard; the test calls the stored call directly)
+        self.assertIn("No invoice needed for", self.tap(page1, "No invoice needed for these")
+                      ["receipt"])
+        out = self.tap(page2, "No invoice needed for these")
+        self.assertIn("No invoice needed for", out["receipt"])
+        open_ = self.conn.execute("SELECT count(*) FROM projections WHERE status='open'"
+                                  ).fetchone()[0]
+        self.assertEqual(open_, 0)
+
     def test_a_pick_key_is_bound_to_its_document(self):
         import keys, qa_server, tools  # noqa: F401
         p = self.pay()
@@ -3017,11 +3107,15 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
         listed = views.render_items(conn, rid)
         bound = listed + [p for prior in scope.get("prior", [])
                           for p in views.render_items(conn, prior)]
-        changed = _changed(conn, rid, listed) or [
-            p for prior in scope.get("prior", []) for p in _changed(
+        changed = _changed(conn, rid, listed)       # a page answers for its own payments
+        if action == "never":
+            # only Never binds the union of the pages (r11): an answer on an earlier page
+            # changes the set, so Never refuses; [No invoice needed for these] and [Leave
+            # missing] never look at the other pages (plan round 2, Astra S2)
+            changed = changed or [p for prior in scope.get("prior", []) for p in _changed(
                 conn, prior, views.render_items(conn, prior))]
-        if action == "never" and sorted(set(bound)) != cards.never_set(conn, scope["vendor"]):
-            changed = changed or ["set"]
+            if sorted(set(bound)) != cards.never_set(conn, scope["vendor"]):
+                changed = changed or ["set"]
         if changed:
             return _answer(conn, "That list changed since it was shown — nothing applied. "
                                  "Here it is as it is now.",
@@ -3057,8 +3151,18 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
         matches.pick_in_tx(conn, grant=grant, pid=pid, doc_id=doc_id, render_id=rid,
                            mrevs=mrevs)
         line = f"Paired {views.headline(d)}."
+    elif action == "wrong":
+        # D3 / plan round 2 (Astra S1): Wrong answers every candidate the card showed — the
+        # chosen document, its alternatives, a set's members — so none is proposed again
+        _apply_one(conn, grant, rid, "wrong", d)
+        matches.reject_alternatives_in_tx(conn, grant=grant, pid=pid,
+                                          doc_ids=scope.get("alternatives") or [],
+                                          render_id=rid)
+        n = 1 + len(scope.get("alternatives") or [])
+        line = (f"Unpaired {views.headline(d)}" + (f" and set aside its {n - 1} other "
+                f"candidate{'s' if n > 2 else ''}." if n > 1 else "."))
     else:
-        _, line = _apply_one(conn, grant, rid, "right" if action == "confirm" else "wrong", d)
+        _, line = _apply_one(conn, grant, rid, "right", d)
     return _answer(conn, line, cards.next_after(conn, review_of, pos))
 
 
@@ -3107,10 +3211,56 @@ def pick_in_tx(conn, *, grant, pid, doc_id, render_id, mrevs) -> dict:
     for c in own:
         if c.doc_id != doc_id:
             _append_rejection(conn, pid, _state(conn, c.match_id), render_id)
+    reject_alternatives_in_tx(conn, grant=grant, pid=pid, render_id=render_id,
+                              doc_ids=[a for a in shown if a != doc_id
+                                       and a not in {c.doc_id for c in own}])
     hit = next((c for c in own if c.doc_id == doc_id), None)
     return _operator_pair(conn, pid, doc_id, render_id,
                           match_id=hit.match_id if hit is not None else None)
 ```
+
+  `matches.reject_alternatives_in_tx`: an alternative has no `match_state` row, so its
+  rejection is recorded the way `rejected_by_operator` (matches.py:94–110) reads one — an
+  operator `unpair` log entry on the lineage's `matches` row for that document, carrying the
+  payment snapshot and the document fingerprint:
+
+```python
+def reject_alternatives_in_tx(conn, *, grant, pid, doc_ids, render_id) -> None:
+    """D3 (plan round 2, Astra S1): the operator's rejection of the alternatives a card
+    showed, bound as #34 binds any rejection — never proposed again for this payment while
+    neither side changes. The fold ignores an unpair of a match id it holds no candidate
+    for (fold.py:128–131), so this moves no state; the floor and candidates() read it."""
+    authority.require(conn, grant)
+    proj = lineage.projection(conn, pid)
+    row = lineage.live_row(conn, proj)
+    if row is None:
+        return
+    exp = lineage.expectation_for(conn, proj, row, exempt=False)
+    snap = payment_snapshot(R.facts_of(row), exp.kind, row_fx(row))
+    for d in doc_ids:
+        doc = documents._doc(conn, d)
+        lineage.append(conn, pid, "unpair", "operator", match_id=_match_id_for(conn, pid, d),
+                       render_id=render_id, fp=snap, detail=documents.fingerprint(doc))
+    lineage.settle(conn, pid)
+```
+
+  The proposal card's scope records `"alternatives"`: the doc ids the card showed besides
+  the current one (its alternatives, or for a set the other members). The members of a set
+  each have a `match_state` row, so `_apply_one("wrong")` already rejects them
+  (`reject_all_in_tx`, taps.py:68–78); `alternatives` is then `[]`.
+
+  **Alternatives are treated like the chosen document everywhere** (plan round 2, shape c):
+
+  | where | rule | task |
+  |---|---|---|
+  | taken | a live proposal's alternatives are taken (`TAKEN_SQL`) | 3 |
+  | revisions | the match digest covers the alternatives' facts; `settle_doc_holders` reaches them | 3 |
+  | floor | each alternative passes `_floor_doc` (rejection, FX screen, taken) | 3 |
+  | candidates / exact fit | a rejected alternative is never a candidate | 6 |
+  | Wrong / pick | every displayed alternative not chosen is rejected | 8 |
+  | Confirm / Confirm all | the operator pairs the chosen one; the alternatives are freed (the match is no longer `proposed`, so `TAKEN_SQL` lets them go) | 8 |
+  | mirror note | "(or k other invoice(s))" | 5 |
+  | package | the alternatives' files ship set aside under `unresolved/` with the chosen one | 9 |
 
   `work.leave_missing_in_tx(conn, pids, *, grant)` does `authority.require`, then
   `UPDATE projections SET search_state='accepted-missing'` and `lineage.settle` per pid
@@ -3189,8 +3339,8 @@ The manifest entry, verbatim:
 built from the store's latest state; ONE message: the file with ONE caption line naming the
 latest check's date; the details live in the zip; a tap after a confirmation rebuilds;
 nothing is sent unrequested (only this tool and the desk's typed asks send)."""
-import db
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 from tests.fakebroker import FakeBroker
 
 
@@ -3283,7 +3433,11 @@ Run: `python3 -m unittest tests.test_get_package -v`
 Expected: FAIL (no `get_package`).
 
 - [ ] **Step 3: Implement.**
-  - `package._freeze` adds `"as_of": <imported_at of the latest snapshot or None>`.
+  - `package._freeze` adds `"as_of": <imported_at of the latest snapshot or None>`, and
+    for a proposed line also loads the current match's alternatives (D3, shape c) into
+    `ln["docs"]` under negative keys `-doc_id` (ints, so `sorted(ln["docs"].items())` at
+    package.py:186 still sorts). `_render`'s proposed branch (L182–197) then ships them set
+    aside under `unresolved/` with the chosen document.
   - `_render` marks a line whose bank row is not BOOK as `PENDING` (a new `STATUS` value,
     set before the MISSING test, so a pending row is never MISSING: §2.1, plan round 1
     Terra S2), lists those rows under a new notes.md section "## Pending at the bank", and
@@ -3319,13 +3473,14 @@ def get_package(conn, quarter) -> dict:
         raise RuntimeError("get_package opens its own transactions")
     if conn.execute("SELECT 1 FROM snapshots").fetchone() is None:
         raise db.Refusal(NO_CHECK)
-    built = package.build_quarterly_package(conn, quarter, bound=False)
+    built = package.build_quarterly_package(conn, quarter, bound=False)   # Task 11: no `bound`
     if built["oversize"]:
         raise db.Refusal(f"the {dates.quarter_label(quarter)} package is "
                          f"{built['size'] / 1e6:.1f} MB, over Telegram's 20 MB limit; it is "
                          "kept here, and notes.md names the largest files")
     with db.custody_lock():
         st = delivery._stage(conn, built["package_id"], None, None, None, None)
+        # Task 11: delivery._stage(conn, package_id, None, None)
     d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?",
                      (st["delivery_id"],)).fetchone()
     pk = conn.execute("SELECT * FROM packages WHERE package_id=?",
@@ -3420,7 +3575,8 @@ def next_unit(conn, token, calls_made: int) -> dict   # the cursor (§2)
 def record_filing(conn, token) -> dict                # runs.filed_at; progress
 def covered(conn, quarter) -> bool                    # §1 "the ledger covers it"
 def complete(conn, quarter) -> bool                   # §1 "Complete" (all of it)
-def ready_notices(conn) -> list                       # compose the owed ready notices (once per completion)
+def owed_notices(conn) -> list                        # D19: complete quarters, notice not delivered
+def run_message(conn, job_id, run) -> str | None      # the run's ONE message (D19)
 def end_pass(conn, token, outcome, report=None)       # the one pass ends; requests settled
 ```
 
@@ -3468,19 +3624,29 @@ transaction that writes. In order:
    and, on its receipt, `mark_rendering_delivered`). An alerts-only message is `{"unit":
    "post", "render_ids"}`. Each post is offered at most `OFFER_MAX = 2` times (S7 §5,
    `post_offers`). In order:
-   - **(a)** The end message, composed once into `runs.end_render_id` by
-     `cards.compose_end(scheduled=started_by != 'operator', handover_docs, extra)`, where
-     `extra` is:
-     - the pending alert lines (failure lines, D10; they are marked sent through the
-       rendering's `scope["alerts"]`, as views.mark_rendering_delivered does at L1457–1459);
-     - `mirror.failed_lines`;
-     - when partial, `"{k} payment(s) · search incomplete — the next check continues."`.
+   - **(a) The run's one message** (§1: ONE message per run; plan round 2, Astra S1 +
+     Terra S1: an operator run that completed a quarter posted the end message AND the ready
+     notice). Composed once into `runs.end_render_id`, owed notices selected FIRST (D19):
 
-     An operator-started run always has one. A scheduled run has one only when
-     `compose_end` returns a render id.
-   - **(b)** The ready notices, `loop.ready_notices()`.
-   - **(c)** The alerts rendering alone (`alerts.pending_in_tx`) when (a) was not composed
+```python
+def run_message(conn, job_id, run) -> str | None:
+    owed = owed_notices(conn)                 # complete quarters whose notice was not delivered
+    extra = (alerts.pending_lines(conn) + mirror.failed_lines(conn, job_id)
+             + partial_lines(conn, job_id))
+    return cards.compose_end(conn, job_id, scheduled=run["started_by"] != "operator",
+                             handover_docs=run_handover_docs(conn, job_id), extra=extra,
+                             ready=owed)
+```
+
+     `compose_end` returns the ready rendering when it has nothing to list and a notice is
+     owed, the end message (with one line per owed notice) when it has items, and `None`
+     when a scheduled run has neither. Failure lines are in whichever message is selected
+     (they are marked sent through its `scope["alerts"]`, as views.mark_rendering_delivered
+     does at L1457–1459).
+   - **(b)** The alerts rendering alone (`alerts.pending_in_tx`) when (a) returned `None`
      and an alert is pending (§1: "the line … is otherwise the run's one message").
+
+     There is no third post: the run posts (a) or (b) or nothing.
 8. **`complete`**:
    - `end_pass(outcome = "stopped" | "interrupted" (partial) | "complete")`;
    - `runs.completed_at`;
@@ -3541,24 +3707,19 @@ def complete(conn, quarter) -> bool:
     return seen
 
 
-def ready_notices(conn) -> list:
-    """§1 "Once per completion": a quarter that is complete and not notified gets one
-    notice; one that reopened loses its mark, so its next completion says "updated"."""
+def owed_notices(conn) -> list:
+    """§1 "Once per completion": the quarters complete now whose completion was not yet
+    DELIVERED (shape d: views.mark_rendering_delivered sets `notified`). A quarter that
+    reopened loses its mark, so its next completion says "updated" (`times` > 0)."""
     out = []
     quarters = sorted({dates.quarter_of(dates.effective_date(r)) for _, _, r in in_scope(conn)})
-    with db.tx(conn):
-        for q in quarters:
-            n = conn.execute("SELECT * FROM quarter_notices WHERE quarter=?", (q,)).fetchone()
-            if complete(conn, q):
-                if n is None or not n["notified"]:
-                    rid = cards.compose_ready(conn, q, updated=n is not None and n["times"] > 0)
-                    conn.execute("INSERT INTO quarter_notices(quarter, notified, times,"
-                                 " render_id) VALUES (?, 1, 1, ?) ON CONFLICT(quarter) DO"
-                                 " UPDATE SET notified=1, times=times+1, render_id=excluded."
-                                 "render_id", (q, rid))
-                    out.append(rid)
-            elif n is not None and n["notified"]:
-                conn.execute("UPDATE quarter_notices SET notified=0 WHERE quarter=?", (q,))
+    for q in quarters:
+        n = conn.execute("SELECT * FROM quarter_notices WHERE quarter=?", (q,)).fetchone()
+        if complete(conn, q):
+            if n is None or not n["notified"]:
+                out.append(q)
+        elif n is not None and n["notified"]:
+            conn.execute("UPDATE quarter_notices SET notified=0 WHERE quarter=?", (q,))
     return out
 ```
 
@@ -3607,8 +3768,8 @@ handed out while calls_made < 65, then end-batch; progress is reported only at a
 end; an operator-started run ends with ONE end message; a scheduled run is silent unless an
 item is in a new state, and then lists only those (rev 17); the mirror leaves a rerun with
 nothing to write."""
-import db
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 from tests.sim_job import JobDriver
 
 
@@ -3684,9 +3845,10 @@ class Run(StoreCase):
 """Simple loop §1 "Complete": the quarter ended; the ledger covers it (a row booked after
 its last day, or a successful sync after it); nothing pending; nothing proposed; every
 payment matched, needing no invoice, optional, or left missing by the operator. The ready
-notice posts once per completion, and "updated" after a reopening."""
-import db
+notice is owed until delivered, once per completion, "updated" after a reopening; a run
+that completes a quarter posts exactly one message, the completion (D19)."""
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 
 
 class Completion(StoreCase):
@@ -3727,24 +3889,58 @@ class Completion(StoreCase):
             self.assertFalse(loop.complete(self.conn, "2026-Q3"))
 
     def test_the_ready_notice_is_once_per_completion_and_updated_after_a_reopening(self):
-        import loop
+        import cards, loop, views
         self.snap("2026-10-03")
         self.granted(lambda c, grant: __import__("work").leave_missing_in_tx(
             c, [self.pid], grant=grant))
+
+        def owed():
+            with db.tx(self.conn):
+                return loop.owed_notices(self.conn)
+
+        def notice():
+            with db.tx(self.conn):
+                return cards.compose_ready(self.conn, ["2026-Q3"])
         with self.patch_clock(_dt("2026-10-06")):
-            (first,) = loop.ready_notices(self.conn)
-            self.assertEqual(loop.ready_notices(self.conn), [])                # once
+            self.assertEqual(owed(), ["2026-Q3"])
+            first = notice()
+            self.assertEqual(owed(), ["2026-Q3"])          # composed, not delivered: owed
+            views.mark_rendering_delivered(self.conn, first)
+            self.assertEqual(owed(), [])                   # once
             self.row(5, booking_date="2026-09-20", value_date="2026-09-20")   # reopens Q3
             p5 = self.lineage_for(5)
             self.classify(p5, {"software"})
             self.settle(p5)
-            self.assertEqual(loop.ready_notices(self.conn), [])
+            self.assertEqual(owed(), [])
             self.granted(lambda c, grant: __import__("work").leave_missing_in_tx(
                 c, [p5], grant=grant))
-            (again,) = loop.ready_notices(self.conn)
+            self.assertEqual(owed(), ["2026-Q3"])
+            again = notice()
         text = self.conn.execute("SELECT text FROM renders WHERE render_id=?",
                                  (again,)).fetchone()[0]
         self.assertIn("Q3 complete · updated · package ready", text)
+
+    def test_an_operator_run_that_completes_the_quarter_posts_one_message(self):
+        import json
+        from tests.sim_job import JobDriver
+        drv = JobDriver(self, payments=0)
+        drv.add_payments(["2026-09-10"])                 # one Q3 payment
+        drv.add_payments(["2026-10-02"])                 # booked after Q3: coverage
+        with self.patch_clock(_dt("2026-10-06")):
+            drv.run_job("cccccccc-1", started_by="operator")
+            for pid, in self.conn.execute("SELECT pid FROM projections WHERE status='open'"
+                                          ).fetchall():
+                self.granted(lambda c, grant, p=pid: __import__("work").leave_missing_in_tx(
+                    c, [p], grant=grant))
+            units = drv.run_job("cccccccc-2", started_by="operator")
+        posts = [u for u in units if u["unit"] in ("view", "post")]
+        self.assertEqual(len(posts), 1)
+        r = self.conn.execute("SELECT text, scope_json FROM renders WHERE render_id=?",
+                              (posts[0]["render_id"],)).fetchone()
+        self.assertTrue(r[0].startswith("Q3 complete · "), r[0])
+        self.assertEqual(json.loads(r[1])["ready_quarters"], ["2026-Q3"])
+        self.assertEqual(self.conn.execute("SELECT notified FROM quarter_notices WHERE"
+                                           " quarter='2026-Q3'").fetchone()[0], 1)
 
 
 def _dt(day):
@@ -3847,6 +4043,41 @@ git add tests/test_loop_run.py tests/test_loop_completion.py && git commit -am "
 - After this task, `grep -rn "steps\.\|sweep\.\|package_requests\|package_token\|credit(\|judge\|MAX_PASSES\|W_REFRESH\|require_fresh\|list_projections\|record_observation\|request_package\|set_epoch\|note_seq" server/`
   prints nothing.
 
+**Changed signatures and every caller** (plan round 2, shape a: removing `bound` broke
+`get_package`). Every caller below is updated in the same step:
+
+| signature after this task | callers to update (26b68ee) |
+|---|---|
+| `package.build_quarterly_package(conn, quarter)` (no `package_token`, `request_id`, `bound`) | `posting.get_package` (Task 9 wrote `bound=False`: drop it); `tests/_procs.py:177, 223`; `tests/test_delivery.py:35, 133, 200, 246, 262, 282`; `tests/test_package.py:56, 377`; `tests/test_wave_f.py:126, 127`; `tests/test_freshness.py:414, 565` (moved to `test_ledger.py`); `tests/test_get_package.py` (Task 9's pending-row test); `tools.t_build` is deleted with the tool |
+| `delivery._stage(conn, package_id, doc_id, pass_token, resend=False, as_built=False)` (no `request_id`, `package_token`) | `delivery.stage_for_delivery` (L135, L165); `posting.get_package` (`_stage(conn, package_id, None, None)`) |
+| `delivery.stage_for_delivery(conn, *, channel, package_id, doc_id, pass_token, resend, last_built, quarter)` (no `package_token`) | `tools.py:784–806`; `tests/test_db.py:236`; `tests/gen_casa_shapes.py:508, 520`; `tests/test_delivery.py:42–87` |
+| `posting.post_package(conn, delivery_id)`; `delivery.record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=None)` | `tools.py:740–823`; the desk skill (Task 12); `tests/gen_casa_shapes.py:477–526`; `tests/test_delivery.py`, `test_issues_43_44.py` |
+| `job.next_unit(conn, token, calls_made)`; `job.claim(conn, job_id, started_by=None)` | `tools.t_job_next`; `tests/sim_job.py` (Task 10); `tests/test_s7_posts.py:65–171` (kept tests pass `0`) |
+| `asks.take_queued(conn, pass_id)` (no `late`) | `loop` (Task 10); the job.py callers go with job.py |
+| `asks.ask_state(conn, kind, request_id)`, kind `work` only | `tools.t_ask_state`; `tests/test_s7_asks.py` |
+| `work.list_quarter_state(…)` without `unread_dates` | `tools.t_state` (the `dates_unread` argument goes); `tests/test_judgment_and_dates.py` (kept tests) |
+| `passes.start_pass(conn, trigger, reply, *, token)` (job only) | `loop.start_pass`; `tests/_base.py` (`pass_`) |
+| `matches.record_match` / `propose_match` (no `resolves`) | Task 3 |
+
+The gate after Step 3 (outside `tests/schema_history.py` and `server/db.py`'s
+`MIGRATIONS`) must print nothing:
+
+```bash
+grep -rnE "package_token|bound=False|judged=|resolves=|request_package|late=True" server tests scripts \
+  | grep -v "schema_history.py" | grep -v "assertNotIn"
+```
+
+**Retained tests whose SQL names a dropped column** (shape b; grep at 26b68ee over the
+files this plan keeps). Each assertion or INSERT is edited or removed in Step 4:
+- `test_s2_schema.py`: its column asserts (`read_seq`, `swept_at`, `readback_owed`,
+  `late_takes`, `judge_after`, `w_refreshes`, `adoptions`, `adopters_json`, `verdicts_json`,
+  `spent`, `reported`) are replaced by "not in the schema" asserts;
+- `test_s2_fresh.py` (`Acquisition`): reads of `read_seq`, `swept_at`, `w_refreshes`;
+- `test_export_classification.py` (the 5 kept): `readback_owed`, `note_seq`, `note_body`,
+  `observed_revision`;
+- `test_db.py`: `observed_revision`, `claimed_step` in the old-store migration asserts;
+- `test_s2_report.py`: `verdicts_json`.
+
 **What goes, line by line** (26b68ee numbering):
 
 | file | delete | keep |
@@ -3858,7 +4089,7 @@ git add tests/test_loop_run.py tests/test_loop_completion.py && git commit -am "
 | `asks.py` | `request_package` L46–66; the `package` kind of `ask_state`; `requeue_taken`, `record_verdicts`, `handover_covered` L142–198; the result machinery L201–397 (`mark_reported`, `_undelivered`, `_result_class`, `_result_tx`, `_sibling_ids`, `_render_result`, `_insert`, `_pages`, `_stop_line`, `_case_lines`, `_case`, `_doc_label`, `_amount`) — the end message is the result (Task 7) | `request_work`, `_live_run`, `ask_state` (work), `take_queued`, `settle_taken` |
 | `work.py` | `TRIAGE_LIMIT`.. chunk sizing L293–321; `searched_since`, `handled_since`, `hand_order`, `searched_for`, `check_work`, `grow_owed`, `check_report`, `package_work`, `judge_due*`, `_fx_fits`, `work_list`, `cut`, `dates_unread`, `judge_whole`, `package_check`, `work_item` (L398–722 except `list_quarter_state` without `unread_dates`) | `record_search*`, age-out, `quarter_pids`, `stop_chasing_in_tx`, `set_watermark_in_tx`, `describe`, `triage`, `filed_refs`, `listed`, `_paged`, `list_quarter_state`, `leave_missing_in_tx` |
 | `delivery.py` | `request_of_package`; the `package_token` half of `_check_pass`; `stage_for_delivery`'s request paths (L139–174); `_staged_again`; `record_delivery`'s request and credit lines (L478–481, L486–497); `_package_note` L538–553 | staging, resend, last_built, recovery, `settle_delivered`, offers |
-| `package.py` | `_request_for_build`, `RECHECK`, `stale_check`, `_Recheck` L366–429; `bound`, `request_id` and `check` in `build_quarterly_package` / `_build` | `_freeze`, `_render`, `caption_line`, `_build(conn, quarter)` |
+| `package.py` | `_request_for_build`, `RECHECK`, `stale_check`, `_Recheck` L366–429; `bound`, `request_id` and `check` in `build_quarterly_package` / `_build` | `_freeze`, `_render`, `caption_line`, `build_quarterly_package(conn, quarter)` (custody lock, then `_build(conn, quarter)`) |
 | `posting.py` | `post_package`'s `package_token` and request settlement (L133–136, L174–180) | `_deposit_package`, `get_package` |
 | `lineage.py` | `STATUS_PHRASE`, `_note_body`, `note_text` L228–246; the `note_seq` / `note_body` writes in `settle` L330–341 | everything else |
 | `ledger.py` | `merge`'s note-issue lines L116–129; the sweep owed-write step 6 L483–491 (`sweep.owed_write`, `note_confirmed`, `observed_revision`) | the import, `confirm_erased` |
@@ -4021,8 +4252,8 @@ command lists every file deleted across Tasks 10–11.)
 broken walk, or after [Get package]); a typed "confirm all 3" on the end message commits on
 Apply as Confirm all does; the desk skill names get_package for every package ask."""
 import json
-import db
 from tests._base import StoreCase, apply_now
+import db                     # server/ is on sys.path once tests._base is imported
 from tests.fakebroker import FakeBroker
 
 JOB = "jjjjjjjj-0012"
@@ -4402,8 +4633,8 @@ backup first, as its reset recipe does (`tools.py:543–548`).
 # tests/test_reset_keep_kb.py
 """Simple loop §6.8: a second run on a fresh store that keeps the KB — the store is reset,
 the KB tables (learned hints included) and the binding and watermark come back."""
-import db
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 
 
 class ResetKeepKB(StoreCase):
@@ -4472,8 +4703,8 @@ messages:
 """Simple loop §6 as code: a whole quarter through the real tools (qa_server.TOOLS) and the
 real bank-feed (tests/bankfeed.py, vendored component v0.21.0)."""
 import json
-import db
 from tests._base import StoreCase
+import db                     # server/ is on sys.path once tests._base is imported
 from tests.sim_job import JobDriver
 
 
@@ -4824,4 +5055,24 @@ FIXES (1 S2). All were accepted and folded. BRAIN ruled 0.11.0 approved; the CHA
 | Astra S2: `vendor_unit` drops a handover entry that ordinary `why_work` would skip | Task 6: `still_work` keeps a `handover` entry's own eligibility (`_handover_fits` against the run's handed documents, operator-settled payments excluded). Pinned: `test_a_handover_entry_is_handed_out_though_ordinary_work_would_skip_it`. |
 | Astra S2: the no-op shortcut blocks re-deciding a pairing after the payment's facts changed | Task 3: the no-op applies only when the effective status equals the outcome and the pairing's fingerprint facts equal the payment's now. Otherwise the decision is written, which re-fingerprints it. Pinned: `test_a_redecision_after_the_payment_changed_is_written`. |
 | Terra S2: a PDNG payment is mirrored as missing with `acct::open` | D18. Task 5: no accounting tag and no note for a non-BOOK row. Task 9: `PENDING` in the zip. Task 7: "k pending" on the counts line. Task 16: `test_the_pending_row_is_pending_until_booked_then_missing` against the real bank-feed. |
+
+## Plan round 2 dispositions
+
+Astra `gpt-6-astra` medium: DO NOT SHIP (4 S1, 2 S2). Terra `gpt-5.6-terra` medium: SHIP WITH
+FIXES (1 S1, the same double message). All were accepted and folded. As asked, each fix was
+also applied one level wider, to the same shape of miss:
+- (a) every caller of a changed signature;
+- (b) every retained raw INSERT into a changed table;
+- (c) alternatives treated like the chosen document;
+- (d) "seen" meaning delivered.
+
+| finding | disposition |
+|---|---|
+| Astra S1: removing `bound` breaks `get_package` | Task 11: a table of every changed signature and every caller (`build_quarterly_package`, `_stage`, `stage_for_delivery`, `post_package`, `record_delivery`, `next_unit`, `claim`, `take_queued`, `ask_state`, `list_quarter_state`, `start_pass`), each updated in the step. A grep gate covers the removed arguments. Task 9's `get_package` notes its Task 11 form. Shape (a) also covered `posting._keyed`'s 3-tuple and its `views.buttons_for` caller (Task 8). |
+| Astra S1: Wrong leaves the alternatives proposable | Task 8: `matches.reject_alternatives_in_tx` records an operator rejection per displayed alternative; Wrong uses it, and pick uses it for the alternatives it did not pick. Pinned: `test_wrong_on_a_joint_proposal_rejects_its_alternatives_too`. The mechanism was checked in a disposable worktree at 26b68ee: an operator `unpair` on a document with no `match_state` row is read by `rejected_by_operator` and leaves the payment `open`. Shape (c): a table in Task 8 places alternatives in taken, revisions, floor, candidates, Wrong/pick, Confirm, mirror note (Task 5: "(or k other invoices)") and package (Task 9: set aside under `unresolved/`). |
+| Astra S1 + Terra S1: an operator run that completes a quarter posts two messages | D19. Task 10: `run_message` selects owed notices first, and the run posts one message. Task 7: `compose_end(ready=…)` returns the completion when there is nothing to list. Pinned: `test_an_operator_run_that_completes_the_quarter_posts_one_message`. |
+| Astra S1: `StoreCase.show`'s column-less `render_items` INSERT | Task 1: both column-less INSERTs (`tests/_base.py:574`, `tests/test_s7_binding.py:704`; `shown` at L576 too) name their columns; a grep gate rejects any column-less INSERT. Reproduced in a disposable worktree: "has 5 columns but 4 values"; the named form works. Shape (b): Task 11 lists the retained tests whose SQL names a dropped column. |
+| Astra S2: answering page 1 invalidates page 2 | Task 8: [No invoice needed for these] and [Leave missing] check only their own page; only Never checks the prior pages and the union. Pinned: `test_exempting_page_one_leaves_page_two_answerable`. |
+| Astra S2: an undelivered end message counts as seen | Task 7: `seen_state` counts the run's own messages only once delivered; posted-only counts only for tap cards (`review`, `vendor-page`). Pinned: `test_an_end_message_posted_but_never_delivered_is_not_seen`. Shape (d): a ready notice is recorded at delivery, not at composition (`mark_rendering_delivered` → `quarter_notices`; Task 10's `owed_notices` and its test). |
+| (found while verifying) a plan test module importing `db` before `tests._base` fails on its own ("No module named 'db'"; reproduced) | All 12 plan test snippets import `db` after `tests._base`. |
 
