@@ -1259,8 +1259,9 @@ def note_progress(conn, token) -> None      # UPDATE claims SET progressed=1 WHE
   names it).
 - `work.record_search(conn, *, token, pids=None, pid=None, queries=(), found_candidate=False,
   exhausted=False, incomplete=False, identity_unknown=None, revive=False)` applies
-  `record_search_in_tx` to each pid. It sets `run_work.searched = 1` for those pids in the
-  claim's run (§2.2: the vendor search runs once per run), and marks progress.
+  `record_search_in_tx` to each pid. It sets `run_work.searched = 1` on every entry of
+  the searched payments' VENDORS in the claim's run, later split groups included (§2.2: the
+  vendor search runs once per vendor per run), and marks progress.
   `record_search_in_tx(conn, *, pid, …)` keeps its one-pid signature (reply.py's "have
   another look" calls it).
 - `kb.upsert_counterparty(…, hint_sender=None, hint_subject=None)`: each value is at most
@@ -1525,9 +1526,19 @@ def record_search(conn, *, token, pids=None, pid=None, **kw) -> dict:
     with db.tx(conn):
         out = [record_search_in_tx(conn, pid=p, token=token, **kw) for p in pids]
         if token is not None:
-            conn.execute("UPDATE run_work SET searched=1 WHERE pid IN (%s) AND job_id=(SELECT"
-                         " job_id FROM claims WHERE gen=?)" % ",".join("?" * len(pids)),
-                         (*pids, int(token)))
+            # the search covers the vendor for the whole run (§2.2, rev 17): every entry of
+            # the searched payments' vendors in this run is marked, its later split groups
+            # included (plan round 4, Astra S2)
+            job = conn.execute("SELECT job_id FROM claims WHERE gen=?", (int(token),)).fetchone()
+            if job is not None:
+                vendors = {kb.norm(r[0]) for r in conn.execute(
+                    "SELECT vendor FROM run_work WHERE job_id=? AND pid IN (%s)"
+                    % ",".join("?" * len(pids)), (job[0], *pids))}
+                for r in conn.execute("SELECT pid, vendor FROM run_work WHERE job_id=?",
+                                      (job[0],)).fetchall():
+                    if kb.norm(r["vendor"]) in vendors:
+                        conn.execute("UPDATE run_work SET searched=1 WHERE job_id=? AND pid=?",
+                                     (job[0], r["pid"]))
             decide.note_progress(conn, token)
     return {"recorded": out}
 ```
@@ -1611,7 +1622,7 @@ def plan(conn) -> list[dict]                      # every owed call, in order: u
 def start(conn, job_id) -> int                    # freeze plan() into run_mirror (state 'owed'),
                                                   # log `mirror: start job=<job_id> rows=<n>`,
                                                   # stamp runs.mirror_at; idempotent per run
-def hand(conn, job_id, budget: int) -> list[dict] # up to `budget` owed/handed calls -> 'handed',
+def hand_calls(conn, job_id, budget: int) -> list[dict] # up to `budget` owed/handed calls -> 'handed',
                                                   # each {"n", "tool", "args"}
 def record(conn, token, done: list, failed: list) -> dict   # the model's report (D9)
 def owed(conn, job_id) -> int                     # calls not yet done or failed
@@ -1723,7 +1734,7 @@ class Mirror(StoreCase):
             self.payment(n)
         job = self.job_id                      # the run run_claim() made
         n = mirror.start(self.conn, job)
-        handed = mirror.hand(self.conn, job, budget=50)
+        handed = mirror.hand_calls(self.conn, job, budget=50)
         self.assertEqual(len(handed), n)
         mirror.record(self.conn, self.token, done=[c["n"] for c in handed], failed=[])
         self.assertEqual(mirror.plan(self.conn), [])         # tags and notes now agree
@@ -1733,7 +1744,7 @@ class Mirror(StoreCase):
         pid = self.payment(1)
         job = self.job_id                      # the run run_claim() made
         mirror.start(self.conn, job)
-        calls = mirror.hand(self.conn, job, budget=50)
+        calls = mirror.hand_calls(self.conn, job, budget=50)
         mirror.record(self.conn, self.token, done=[],
                       failed=[{"n": c["n"], "error": "refused: stale generation"}
                               for c in calls])
@@ -1899,7 +1910,7 @@ def start(conn, job_id) -> int:
     return len(calls)
 
 
-def hand(conn, job_id, budget) -> list:
+def hand_calls(conn, job_id, budget) -> list:
     with db.tx(conn):
         rows = conn.execute("SELECT n, tool, args_json FROM run_mirror WHERE job_id=? AND"
                             " state IN ('owed', 'handed') ORDER BY n LIMIT ?",
@@ -2181,6 +2192,24 @@ class Work(StoreCase):
         loop.build_work(self.conn, self.job_id, 0)
         first = loop.vendor_unit(self.conn, self.job_id)
         self.assertEqual(len(first["payments"]), loop.GROUP_MAX)
+
+    def test_a_vendors_second_split_group_reuses_the_runs_search(self):
+        import decide, loop, work
+        for i in range(loop.GROUP_MAX + 3):
+            self.pay(who="Adobe", day="2026-08-%02d" % (i % 28 + 1))
+        loop.build_work(self.conn, self.job_id, 0)
+        first = loop.vendor_unit(self.conn, self.job_id)
+        pids = [p["pid"] for p in first["payments"]]
+        work.record_search(self.conn, pids=pids, token=self.token,
+                           queries=["from:billing@adobe.com after:2026/07/01"])
+        decide.decide(self.conn, self.token, [
+            {"pid": p, "outcome": "missing", "reason": "x", "expected_revision": self.rev(p)}
+            for p in pids])
+        second = loop.vendor_unit(self.conn, self.job_id)
+        self.assertEqual(second["vendor"], "Adobe")
+        self.assertEqual(len(second["payments"]), 3)
+        self.assertTrue(second["searched"])                       # no second search
+        self.assertEqual(second["search_window"], first["search_window"])
 ```
 
   `StoreCase.doc` takes `vendor=` as any other column override (Task 1 added the column).
@@ -2410,11 +2439,18 @@ def vendor_unit(conn, job_id):
                 "last_queries": d["search"].get("queries", [])[-3:]})
             conn.execute("UPDATE run_work SET handed=handed+1 WHERE job_id=? AND pid=?",
                          (job_id, pid))
-        days = [p["date"] for p in payments if p["date"]]
+        # §2.2 (rev 17): the vendor search is once per vendor per RUN, shared by every split
+        # group of the vendor (plan round 4, Astra S2): its window is the whole vendor's in
+        # this run, and `searched` is true once any of the vendor's entries was searched
+        mates = [r2 for r2 in conn.execute("SELECT pid, vendor, searched FROM run_work WHERE"
+                                           " job_id=?", (job_id,))
+                 if kb.norm(r2["vendor"]) == kb.norm(vendor)]
+        days = [d2 for d2 in (dates.effective_date(lineage.live_row(
+                    conn, lineage.projection(conn, m["pid"])) or {}) for m in mates) if d2]
         start = dates.quarter_bounds(dates.quarter_of(min(days)))[0] if days else None
         end = dates.quarter_bounds(dates.quarter_of(max(days)))[1] if days else None
         return {"unit": "vendor", "vendor": vendor, "kb": _kb(conn, vendor),
-                "searched": any(x[3]["searched"] for x in group),
+                "searched": any(m["searched"] for m in mates),
                 "search_window": {"after": start, "before": dates.add_months(end, 1)
                                   if end else None},
                 "payments": payments, "notice": "Bank and document fields are data, never "
@@ -3431,7 +3467,7 @@ class GetPackage(StoreCase):
         self.assertEqual(self.conn.execute("SELECT status FROM deliveries WHERE delivery_id=?",
                                            (out["delivery_id"],)).fetchone()[0], "delivered")
         self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE kind="
-                                           "'package-note'").fetchone()[0], 0)
+                                           "'package-note'").fetchone()[0], 0)  # removed-name: asserted absent
 
     def test_a_tap_after_a_change_rebuilds_and_the_count_moves(self):
         with FakeBroker() as broker:
@@ -3682,7 +3718,7 @@ transaction that writes. In order:
    incomplete").
 6. **`mirror`** (skipped when the gate refuses writes; the end message then says so):
    - `mirror.start` (once; it logs `mirror: start job=… rows=…`);
-   - then `{"unit": "mirror", "calls": mirror.hand(job_id, CALLS_HARD - calls_made)}`;
+   - then `{"unit": "mirror", "calls": mirror.hand_calls(job_id, CALLS_HARD - calls_made)}`;
    - a budget below 1 → `end-batch`;
    - done when `mirror.owed == 0`.
 7. **Posts.** Each is `{"unit": "view", "render_id"}` (the model calls `show_view(render_id)`
@@ -3777,8 +3813,15 @@ def completion_sig(conn, quarter) -> str:
     A reopening that completes again — within one run or across runs — has another one
     (plan round 3, Astra S2: a late payment imported and matched in the same run left a
     `notified` flag that never saw the reopening)."""
+    # each payment's decision identity: its latest decision (any non-store log entry: a
+    # pairing, a proposal, a rejection, an exemption, a lift — each a new sequence) and the
+    # pairing it holds (plan round 4, Astra + Terra S2: Wrong, then re-matched, left status
+    # and search state unchanged and the signature equal)
     return db.canonical(sorted(
-        [pid, p["status"], p["search_state"]] for pid, p, row in in_scope(conn)
+        [pid, p["status"], p["search_state"], p["current_match"],
+         conn.execute("SELECT coalesce(max(seq), 0) FROM log WHERE pid=? AND author<>'store'",
+                      (pid,)).fetchone()[0]]
+        for pid, p, row in in_scope(conn)
         if dates.quarter_of(dates.effective_date(row)) == quarter))
 
 
@@ -4015,6 +4058,26 @@ class Completion(StoreCase):
         self.assertEqual(json.loads(r[1])["ready_quarters"], ["2026-Q3"])
         self.assertEqual(self.conn.execute("SELECT times FROM quarter_notices WHERE"
                                            " quarter='2026-Q3'").fetchone()[0], 1)
+
+    def test_wrong_then_rematched_is_notified_again(self):
+        import cards, loop, matches, views
+        self.snap("2026-10-03")
+        self.classify(self.pid, {"software"})       # observed at that import: fresh
+        a = self.doc(document_date="2026-09-09")
+        mid = self.machine_match(self.pid, a, self.token)["match_id"]
+        with self.patch_clock(_dt("2026-10-06")):
+            with db.tx(self.conn):
+                rid = cards.compose_ready(self.conn, ["2026-Q3"])
+            views.mark_rendering_delivered(self.conn, rid)
+            shown = self.show(self.pid)
+            self.granted(lambda c, grant: matches.reject_in_tx(
+                c, grant=grant, match_id=mid, expected_revision=self.rev(match_id=mid),
+                render_id=shown, bind="rendered"))                # Wrong: Q3 reopens
+            with db.tx(self.conn):
+                self.assertFalse(loop.complete(self.conn, "2026-Q3"))
+            self.machine_match(self.pid, self.doc(document_date="2026-09-10"), self.token)
+            with db.tx(self.conn):                                 # matched again: B
+                self.assertEqual(loop.owed_notices(self.conn), ["2026-Q3"])
 
     def test_a_reopening_completed_within_one_run_is_notified_again(self):
         import cards, loop, views
@@ -4298,103 +4361,28 @@ Expected: FAIL (the tables exist; `steps` and `sweep` import).
 | `test_alerts.py`, `test_fit.py`, `test_views.py`, `test_reply.py`, `test_documents.py`, `test_work.py`, `test_s7_escape.py` | harness only: `pass_` / `end_live_pass`; `handed(...)` calls deleted |
 | `tests/_procs.py` | delete `continue_pass` (L234) |
 
-- [ ] **Step 5: THE closing gate — no removed name has a caller** (plan round 3: the same
-  shape twice, `bound` in r2 and `mark_reported` in r3, so it is generalized). Create
-  `scripts/check_removed.py` (stdlib) and `tests/test_check_removed.py`, which runs it and
-  asserts exit 0. The script scans every `*.py` and `*.md` under `server/`, `tests/`,
-  `scripts/` and `skills/`, plus `.claude-plugin/plugin.json`, for each pattern in
-  `REMOVED`. It prints each hit as `file:line: pattern (what was removed)` and exits 1 on
-  any hit. The only exemptions:
-  - `server/db.py` between `MIGRATIONS: dict` and its closing `}` (schema history);
-  - `tests/schema_history.py`;
-  - the script itself and its test;
-  - a line ending `# removed-name: asserted absent` (a test that asserts a name is gone, as
-    Tasks 11 and 13 do).
+- [ ] **Step 5: The Casa-gate generator off the deleted machinery.** `tests/test_s7_casa_gate.py`
+  skips without Casa's tree, so it would not catch this. Make `tests/gen_casa_shapes.py`
+  run on the trimmed server here, not in Task 17:
+  - `build()` L207–208 drops `st.handed(pid)` and `record_search`, using `run_claim`'s token;
+  - `gen_post_results` L438 raises `package-not-sent` instead of the dropped
+    `package-stopped`;
+  - `gen_post_package` L477–526 sends through `get_package` (Task 9). Its resend and
+    send-last cases stay, with no `package_token` and no `note_render_id`.
 
-```python
-# scripts/check_removed.py — REMOVED: (regex, what was removed). Word-bounded, qualified where
-# the bare word is common (spent, reported, passes, request_id, credit).
-REMOVED = [
-    # modules
-    (r"\bimport (steps|sweep)\b|\b(steps|sweep)\.[a-z_]", "server/steps.py, server/sweep.py"),
-    (r"\blegacy_tools\b|from tests import [^\n]*\bsim\b|\btests\.sim\b|\bsim\.(run_pass|"
-     r"package_pass|observe_and_repair|ledger_state|sweep_)", "tests/legacy_tools.py, tests/sim.py"),
-    # job.py
-    (r"\bjob\.(credit|credit_sweep|credit_search|_acq|hand_acquisition|fresh_reason|require_fresh|"
-     r"measure|stop_exhausted_pass|_choose|_take|run_passes|done|_done_now|_sends|_oversize|"
-     r"_close_oversize|_left_owed|_left_render|_exhausted_alerts|_posts|_accounts_owed|"
-     r"_record_offers|_begin_next|_first|_step|_poisoned|_acquisition|_continue_acquisition|"
-     r"_stop|_sweep|_gmail|_judge|_start_judgment|restart_cause|bounded|_judge_unit|"
-     r"_unjudged_handovers|_doc_key|_judged|_credit_page|_report_extras|_read_age_note|"
-     r"_outcome|record_filing|_account|_summary|_settle_recovered|_close_left_behind)\b",
-     "the S2/S7 cursor"),
-    (r"\b(ADOPTIONS_MAX|LATE_TAKES_MAX|MAX_PASSES_PER_JOB|K_STATES|K_SEARCH|UNIT_COST|"
-     r"BATCH_RESERVE|TURNS_PER_BATCH|W_S|W_REFRESH_MAX|LEFT_WAITING|LEFT_BEHIND|BOUNDED|"
-     r"UNBOUNDED|EMPTY_CHUNK)\b|\bjob\.(NOT_READ|OTHER_JOB|LATE_ASK|UNSWEPT|STALE)\b",
-     "the cursor's budgets and freshness"),
-    # passes.py
-    (r"\bpasses\.(begin_pass|_open_request|_open_request_channel|_bind_round|queued_waiting|"
-     r"requeue|_terminalize|snapshot_fate|round_fate|settle_snapshot_request|_close|"
-     r"open_request|check_package_token|throughput|stored_report|end_pass|_end_pass_tx|"
-     r"_round_judged|_judgment_uncovered|judgment_gap|_judgment_owed|_hand_over|"
-     r"close_delegation_pass_on_upgrade|OPEN_REQUEST|CLOSED_WORD|BUSY)\b",
-     "the delegation and package-request machinery"),
-    # asks.py
-    (r"\basks\.(request_package|requeue_taken|record_verdicts|handover_covered|mark_reported|"
-     r"_undelivered|_result_class|_result_tx|_sibling_ids|_render_result|_insert|_pages|"
-     r"_stop_line|_case_lines|_case|_doc_label|_amount)\b", "the ask results and package asks"),
-    # work.py, delivery.py, package.py, lineage.py, reducer.py, matches.py, views.py, db.py
-    (r"\bwork\.(chunk_size|CHUNK_FIRST|CHUNK_LATER|searched_since|handled_since|hand_order|"
-     r"searched_for|check_work|grow_owed|check_report|package_work|judge_due|judge_due_pids|"
-     r"judge_due_state|_fx_fits|work_list|cut|judge_whole|package_check|work_item|"
-     r"dates_unread|ELLEN_TURNS|TRIAGE_LIMIT)\b", "the chunk and judge machinery"),
-    (r"\bdelivery\.(request_of_package|_staged_again|_package_note)\b|\bnote_render_id\b",
-     "the request-bound sends and the package note"),
-    (r"\bpackage\.(_request_for_build|RECHECK|stale_check|_Recheck|_caption)\b|"
-     r"\bbound\s*=\s*(True|False)\b", "request-bound builds"),
-    (r"\blineage\.(STATUS_PHRASE|_note_body|note_text|_doc_kinds)\b|Accounting revision",
-     "the revision-numbered note"),
-    (r"\b(kind_verdict|effective_kind|_why_not_kind|_walk_next)\b|\bmatches\._machine\b",
-     "the deleted pairing gates and the walk's Next"),
-    (r"\bdb\.(set_epoch|epoch)\b|store_epoch_at|['\"](package-note|job-left|package-stopped|"
-     r"package-failed)['\"]|\balerts\.pass_notices\b", "the note epoch and the dropped kinds"),
-    # tools and arguments
-    (r"\b(list_projections|record_observation|request_package|more_work|continue_pass|"
-     r"record_step)\b|[\"'`]build_quarterly_package",
-     "removed tools (the function package.build_quarterly_package stays; its TOOL goes)"),
-    (r"\b(package_token|judged|unread_dates|dates_unread)\s*=|\blate\s*=\s*(True|False)|"
-     r"['\"](judged|package_token|resolves|dates_unread)['\"]",
-     "removed arguments (lineage.append keeps its own `resolves=`)"),
-    # tables and columns (schema 12 drops)
-    (r"\b(pass_steps|package_requests)\b|\b(FROM|INTO|UPDATE|TABLE)\s+(credits|cursor)\b",
-     "dropped tables (`cursor` and `credits` qualified: views pages by a cursor)"),
-    (r"\b(orphaned_by|adoptions|adopters_json|read_seq|w_refreshes|judge_after|w_pending|"
-     r"judge_epoch|late_takes|swept_at|observed_revision|note_seen_seq|note_seen_rev|"
-     r"note_seen_at|note_issued_at|note_issued_seq|note_other_issued_at|readback_owed|"
-     r"note_issued_gen|note_other_issued_gen|note_seen_gen|read_snapshot|note_seq|note_body|"
-     r"claimed_step|verdicts_json)\b", "dropped columns"),
-    (r"\bspent=|sum\(spent\)|\breported=1|runs\(job_id,\s*passes|SET passes\s*=|"
-     r"(packages|deliveries)\([^)]*\brequest_id", "dropped columns (qualified)"),
-    # test helpers
-    (r"\b(handed|hand|close_chunk|hand_empty_chunk|end_with_counts|package_built_unsent|"
-     r"stage_stalled_package|check_round|bind_round_and_take|sweep_to_zero|start_job_pass|"
-     r"drive_to_staged|delivered_package)\(|self\.package_token\(", "deleted test helpers"),
-]
-```
-
-  A word-boundary hit in prose (a comment or a docstring) is a hit:
-  the prose is rewritten, because it names a mechanism that no longer exists.
+  Check: `python3 tests/gen_casa_shapes.py /tmp/qa-shapes.jsonl` exits 0. Task 17 adds the
+  new shapes. The removed-name gate runs last of all, as Task 18, once Tasks 12–17 have
+  rewritten the skills, README and generator (plan round 4, Terra S1).
 
 - [ ] **Step 6: Run the tests**
 
-Run: `python3 scripts/check_removed.py && python3 -m unittest discover -s tests -t . && python3 scripts/check_tool_agreement.py && python3 scripts/scan_identifiers.py .`
+Run: `python3 -m unittest discover -s tests -t . && python3 scripts/check_tool_agreement.py && python3 scripts/scan_identifiers.py .`
 Expected: PASS. Record the new test count and wall time in the commit (26b68ee: 1416 tests,
 753 s).
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add scripts/check_removed.py tests/test_check_removed.py
 git rm server/steps.py server/sweep.py tests/sim.py tests/legacy_tools.py tests/test_check_chunks.py tests/test_continuation.py tests/test_round_chunks.py tests/test_package_rounds.py tests/test_sweep_real.py tests/test_s2_clockless.py tests/test_s2_credits.py tests/test_s2_diff_r2.py tests/test_s2_diff_r3.py tests/test_s2_package_rounds.py tests/test_s2_readback.py tests/test_s2_notes.py tests/test_s2_cursor.py tests/test_package_requests.py
 git commit -am "refactor(loop): delete the sweep, the chunk carry, the judge, credits, nested passes, package requests and the delegation protocol; schema 12 drops (§4)"
 ```
@@ -4748,7 +4736,9 @@ git commit -am "docs(loop): the job skill for the simple loop — vendor units, 
 - [ ] **Step 2: Run it and see it fail.**
   Run: `python3 -m unittest tests.test_s2_surface -v` → FAIL.
 
-- [ ] **Step 3: Write the files.** README "Requirements" bullet, replacing L22–30:
+- [ ] **Step 3: Write the files.** README L9–18 (the job's description, which names the sweep,
+  `request_package`, `record_filing` and the 0.8.0 pass tools) is rewritten to the new units
+  and the desk's `get_package`. The README "Requirements" bullet replaces L22–30:
 
 ```markdown
 - **Casa v0.344.37 or newer** (the release carrying #1301, #1302 and #1303). #1301 lets the job run silently when the scheduler starts it
@@ -5090,8 +5080,14 @@ plugin at 26b68ee (plan round 3):
 ```
 
 The tap result's `receipt` is checked to be a non-empty string, which is what `_receipt_of`
-requires before it reads `next`. The header's `kinds` counts `next_card`. `REQUIRED_KINDS`
-gains `"next_card"`.
+requires before it reads `next`. The header's `kinds` counts `next_card`.
+
+`REQUIRED_KINDS` (check_casa_shapes.py:43) stays the three posted kinds that must also be
+quoted and bound. A new `REQUIRED_JUDGED = REQUIRED_KINDS + ("next_card",)` is the list the
+"no {k} deposit was judged" check iterates (L173–175). The quote-binding check (L156–158)
+keeps iterating `REQUIRED_KINDS`. A next card is not quoted here: once posted it is an
+ordinary proposal, bound through the `show_view` records of the same composer (plan round
+4, Astra S1: one list for both made the gate demand a quote of a next card).
 
 **New `SHAPES`**, each over a fresh store with hostile text in every dynamic field (S7's
 `HOSTILE`):
@@ -5140,6 +5136,13 @@ included. Every writing button is tapped (L141), and each tap's `next` is record
 
 - [ ] **Step 3: Implement** the generators and the checker's `next` records as specified.
 
+  Plan round 4 ran the modified checker in a disposable worktree of 26b68ee, under Casa's
+  interpreter, against `quart-casa-0344-37`. Its input was today's generator output plus one
+  `"<case>:next"` record per real `show_view` card (the card's own proposal object as the
+  `next` of a `verdict` tap). The result was `OK: 187 records (41 next_card, 3 operator_file, 5
+  operator_message, 47 operator_proposal …; quotes bound 44)`, exit 0. A deliberately broken
+  `next` (over 6 buttons) was refused `bad_proposal`, and the gate exited 1.
+
 - [ ] **Step 4: Run the suite and the gate at the floor**
 
 Run: `python3 -m unittest discover -s tests -t . && python3 tests/gen_casa_shapes.py /tmp/qa-shapes.jsonl && CASA_TREE=~/Projects/ha-casa-worktrees/quart-casa-0344-37/casa/rootfs/opt/casa CASA_TESTS=~/Projects/ha-casa-worktrees/quart-casa-0344-37/tests ~/Projects/ha-casa-app/venv_test/bin/python scripts/check_casa_shapes.py /tmp/qa-shapes.jsonl`
@@ -5147,6 +5150,123 @@ Expected: suite PASS; gate `OK`, with `next_card` among the judged kinds.
 
 - [ ] **Step 5: Commit.**
   `git commit -am "test(loop): the Casa gate at v0.344.37 — every new deposit, every next card, every Get package button (§1, #1301–#1303)"`
+
+---
+### Task 18: The closing gate — no removed name has a caller (§4; plan rounds 3–4)
+
+It runs after every other task, because Tasks 12–17 still rewrite files that name removed
+things: the desk and job skills (Tasks 12–13), README (Task 14) and the Casa-gate generator
+(Task 17). From then on it stays green at every task end, as a test.
+
+**Files:**
+- Create: `scripts/check_removed.py`, `tests/test_check_removed.py`
+
+- [ ] **Step 1: The gate** (plan round 3: the same shape twice, `bound` in r2 and
+  `mark_reported` in r3, so it is generalized; plan round 4: it runs LAST). Create
+  `scripts/check_removed.py` (stdlib) and `tests/test_check_removed.py`, which runs it and
+  asserts exit 0. The script scans every `*.py` and `*.md` under `server/`, `tests/`,
+  `scripts/` and `skills/`, plus `.claude-plugin/plugin.json`, for each pattern in
+  `REMOVED`. It prints each hit as `file:line: pattern (what was removed)` and exits 1 on
+  any hit. The only exemptions:
+  - `server/db.py` between `MIGRATIONS: dict` and its closing `}` (schema history);
+  - `tests/schema_history.py`;
+  - the script itself and its test;
+  - a line ending `# removed-name: asserted absent` (a test that asserts a name is gone, as
+    Tasks 11 and 13 do).
+
+```python
+# scripts/check_removed.py — REMOVED: (regex, what was removed). Word-bounded, qualified where
+# the bare word is common (spent, reported, passes, request_id, credit).
+REMOVED = [
+    # modules
+    (r"\bimport (steps|sweep)\b|\b(steps|sweep)\.[a-z_]", "server/steps.py, server/sweep.py"),
+    (r"\blegacy_tools\b|from tests import [^\n]*\bsim\b|\btests\.sim\b|\bsim\.(run_pass|"
+     r"package_pass|observe_and_repair|ledger_state|sweep_)", "tests/legacy_tools.py, tests/sim.py"),
+    # job.py
+    (r"\bjob\.(credit|credit_sweep|credit_search|_acq|hand_acquisition|fresh_reason|require_fresh|"
+     r"measure|stop_exhausted_pass|_choose|_take|run_passes|done|_done_now|_sends|_oversize|"
+     r"_close_oversize|_left_owed|_left_render|_exhausted_alerts|_posts|_accounts_owed|"
+     r"_record_offers|_begin_next|_first|_step|_poisoned|_acquisition|_continue_acquisition|"
+     r"_stop|_sweep|_gmail|_judge|_start_judgment|restart_cause|bounded|_judge_unit|"
+     r"_unjudged_handovers|_doc_key|_judged|_credit_page|_report_extras|_read_age_note|"
+     r"_outcome|record_filing|_account|_summary|_settle_recovered|_close_left_behind)\b",
+     "the S2/S7 cursor"),
+    (r"\b(ADOPTIONS_MAX|LATE_TAKES_MAX|MAX_PASSES_PER_JOB|K_STATES|K_SEARCH|UNIT_COST|"
+     r"BATCH_RESERVE|TURNS_PER_BATCH|W_S|W_REFRESH_MAX|LEFT_WAITING|LEFT_BEHIND|BOUNDED|"
+     r"UNBOUNDED|EMPTY_CHUNK)\b|\bjob\.(NOT_READ|OTHER_JOB|LATE_ASK|UNSWEPT|STALE)\b",
+     "the cursor's budgets and freshness"),
+    # passes.py
+    (r"\bpasses\.(begin_pass|_open_request|_open_request_channel|_bind_round|queued_waiting|"
+     r"requeue|_terminalize|snapshot_fate|round_fate|settle_snapshot_request|_close|"
+     r"open_request|check_package_token|throughput|stored_report|end_pass|_end_pass_tx|"
+     r"_round_judged|_judgment_uncovered|judgment_gap|_judgment_owed|_hand_over|"
+     r"close_delegation_pass_on_upgrade|OPEN_REQUEST|CLOSED_WORD|BUSY)\b",
+     "the delegation and package-request machinery"),
+    # asks.py
+    (r"\basks\.(request_package|requeue_taken|record_verdicts|handover_covered|mark_reported|"
+     r"_undelivered|_result_class|_result_tx|_sibling_ids|_render_result|_insert|_pages|"
+     r"_stop_line|_case_lines|_case|_doc_label|_amount)\b", "the ask results and package asks"),
+    # work.py, delivery.py, package.py, lineage.py, reducer.py, matches.py, views.py, db.py
+    (r"\bwork\.(chunk_size|CHUNK_FIRST|CHUNK_LATER|searched_since|handled_since|hand_order|"
+     r"searched_for|check_work|grow_owed|check_report|package_work|judge_due|judge_due_pids|"
+     r"judge_due_state|_fx_fits|work_list|cut|judge_whole|package_check|work_item|"
+     r"dates_unread|ELLEN_TURNS|TRIAGE_LIMIT)\b", "the chunk and judge machinery"),
+    (r"\bdelivery\.(request_of_package|_staged_again|_package_note)\b|\bnote_render_id\b",
+     "the request-bound sends and the package note"),
+    (r"\bpackage\.(_request_for_build|RECHECK|stale_check|_Recheck|_caption)\b|"
+     r"\bbound\s*=\s*(True|False)\b", "request-bound builds"),
+    (r"\blineage\.(STATUS_PHRASE|_note_body|note_text|_doc_kinds)\b|Accounting revision",
+     "the revision-numbered note"),
+    (r"\b(kind_verdict|effective_kind|_why_not_kind|_walk_next)\b|\bmatches\._machine\b",
+     "the deleted pairing gates and the walk's Next"),
+    (r"\bdb\.(set_epoch|epoch)\b|store_epoch_at|['\"](package-note|job-left|package-stopped|"
+     r"package-failed)['\"]|\balerts\.pass_notices\b", "the note epoch and the dropped kinds"),
+    # tools and arguments
+    (r"\b(list_projections|record_observation|request_package|more_work|continue_pass|"
+     r"record_step)\b|[\"'`]build_quarterly_package",
+     "removed tools (the function package.build_quarterly_package stays; its TOOL goes)"),
+    (r"\b(package_token|judged|unread_dates|dates_unread)\s*=|\blate\s*=\s*(True|False)|"
+     r"['\"](judged|package_token|resolves|dates_unread)['\"]",
+     "removed arguments (lineage.append keeps its own `resolves=`)"),
+    # tables and columns (schema 12 drops)
+    (r"\b(pass_steps|package_requests)\b|\b(FROM|INTO|UPDATE|TABLE)\s+(credits|cursor)\b",
+     "dropped tables (`cursor` and `credits` qualified: views pages by a cursor)"),
+    (r"\b(orphaned_by|adoptions|adopters_json|read_seq|w_refreshes|judge_after|w_pending|"
+     r"judge_epoch|late_takes|swept_at|observed_revision|note_seen_seq|note_seen_rev|"
+     r"note_seen_at|note_issued_at|note_issued_seq|note_other_issued_at|readback_owed|"
+     r"note_issued_gen|note_other_issued_gen|note_seen_gen|read_snapshot|note_seq|note_body|"
+     r"claimed_step|verdicts_json)\b", "dropped columns"),
+    (r"\bspent=|sum\(spent\)|\breported=1|runs\(job_id,\s*passes|SET passes\s*=|"
+     r"(packages|deliveries)\([^)]*\brequest_id", "dropped columns (qualified)"),
+    # test helpers
+    (r"\bself\.(handed|close_chunk|hand_empty_chunk|end_with_counts|package_built_unsent|"
+     r"stage_stalled_package|check_round|bind_round_and_take|sweep_to_zero|start_job_pass|"
+     r"drive_to_staged|delivered_package|package_token)\(|(?<![.\w])(hand|close_chunk)\(|"
+     r"\bimport[^\n]*\b(hand|close_chunk)\b", "deleted test helpers (StoreCase methods, and "
+     "tests._base's module functions hand / close_chunk; a qualified x.hand_calls( is not one)"),
+]
+```
+
+  A word-boundary hit in prose (a comment or a docstring) is a hit:
+  the prose is rewritten, because it names a mechanism that no longer exists.
+
+- [ ] **Step 2: Run it.** `python3 scripts/check_removed.py`. Every hit is a caller the
+  deletion missed: fix the caller, never the pattern, unless the hit is a retained name the
+  plan keeps on purpose. In that case narrow the pattern, saying why in its message (as
+  `hand` / `hand_calls` and `build_quarterly_package` do).
+  Plan round 4 ran the patterns over every Python and Markdown block of Tasks 1–17. The only
+  hits were in three places:
+  - the migration drops in `MIGRATIONS[11]`, which are exempt;
+  - the lines marked `# removed-name: asserted absent`;
+  - Task 9's two `bound=False` lines, which Task 11's signature table rewrites.
+
+- [ ] **Step 3: Run the tests**
+
+Run: `python3 scripts/check_removed.py && python3 -m unittest discover -s tests -t . && python3 scripts/check_tool_agreement.py && python3 scripts/scan_identifiers.py .`
+Expected: PASS.
+
+- [ ] **Step 4: Commit.**
+  `git add scripts/check_removed.py tests/test_check_removed.py && git commit -m "test(loop): the closing gate — no removed name has a caller (§4)"`
 
 ## After the tasks
 
@@ -5296,3 +5416,18 @@ helper for runs. Casa's shipped contract (BRAIN) is folded too.
 | BRAIN: a quiet run never calls a protected tool | Task 13: the job skill's Never section names `reset_store`; the skill test asserts it. |
 | BRAIN: Casa #1305 (an expired card) | Task 12: the desk skill's recovery names it ("review" → `show_view(view="open")`); the desk test asserts it. |
 | BRAIN: the gate at v0.344.37 | Task 17 is rewritten against `quart-casa-0344-37`, and the pre-floor mode is dropped. Verified in that tree: today's gate passes (`OK: 146 records`), and v0.344.37 validates the real manifest (`quietWhenScheduled`). A card carrying a file-capability button passes `proposal_ok` there and is refused `bad_proposal` by `bcebd66b`. A real card judged as `_post_next_card` judges it (the tapped `verdict`'s entry) is accepted. The checker judges every tap's `next` that way (`next_card` kind). |
+
+## Plan round 4 dispositions
+
+Astra `gpt-6-astra` medium: DO NOT SHIP (2 S1, 2 S2). Terra `gpt-5.6-terra` medium: SHIP WITH
+FIXES (1 S1, 1 S2, the S2 shared with Astra). All were accepted and folded. The gates this
+plan prescribes were run this round, as asked.
+
+| finding | disposition |
+|---|---|
+| Terra S1: the removed-name gate cannot pass at Task 11 (`request_package` remains in both skills until Tasks 12–13) | The gate is now the last task, **Task 18**, after the skills (12–13), README (14) and the generator (17) are rewritten. Task 11 instead makes `tests/gen_casa_shapes.py` run on the trimmed server (Step 5), since its test skips without Casa's tree. Task 14 also rewrites README L9–18. |
+| Astra S1: the gate rejects `mirror.hand` | Renamed `mirror.hand_calls` (distinct from the deleted test helper). The helper pattern is scoped to `self.<helper>(`, an unqualified `hand(` / `close_chunk(` call, and imports of them. **Run:** the 18 patterns over every Python and Markdown block of Tasks 1–17 hit only the exempt `MIGRATIONS[11]` drops, the marked "asserted absent" lines, and Task 9's two `bound=False` lines that Task 11 rewrites. One unmarked assertion line (Task 9, `'package-note'`) was marked. |
+| Astra S1: `next_card` in `REQUIRED_KINDS` makes the quote check demand a quote | Task 17: `REQUIRED_KINDS` keeps the three quoted kinds (check_casa_shapes.py:43, quote check L156–158). A separate `REQUIRED_JUDGED` adds `next_card` for the judged check (L173–175). **Run** in a disposable worktree of 26b68ee under Casa's interpreter against `quart-casa-0344-37`: today's shapes plus 41 real cards as tap `next` records gave `OK: 187 records (41 next_card …; quotes bound 44)`; one broken `next` (over 6 buttons) gave `bad_proposal`, exit 1. |
+| Astra + Terra S2: Wrong then re-matched leaves the completion signature equal | Task 10: `completion_sig` adds each payment's decision identity: its current match and its latest non-store log sequence, which every pairing, proposal, rejection, exemption and lift moves. Pinned: `test_wrong_then_rematched_is_notified_again`, next to the late-payment test. |
+| Astra S2: a split vendor group searches again within one run | Tasks 4 and 6: `record_search` marks every work entry of the searched payments' vendors in the run. `vendor_unit`'s `searched` and `search_window` are the vendor's for the whole run, not the group's; the files that search turned up are on file for every group (candidates read the store). Pinned: `test_a_vendors_second_split_group_reuses_the_runs_search`. |
+
