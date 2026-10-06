@@ -74,12 +74,11 @@ class _Q3(StoreCase):
         tok = token or self._fixture_token
         args = dict(pid=pid, doc_id=doc, author="auto", expected_revision=d["revision"],
                     row_digest=d["row_digest"], document_date=w["date"], labels=["guessed"],
-                    resolves=d["candidate_ids"], pass_token=tok)
+                    pass_token=tok)
         out = call("record_match", **args)
         d = call("list_quarter_state", pid=pid)["item"]
         if d["candidate_ids"]:
-            args.update(expected_revision=d["revision"], row_digest=d["row_digest"],
-                        resolves=d["candidate_ids"])
+            args.update(expected_revision=d["revision"], row_digest=d["row_digest"])
             out = call("record_match", **args)
         assert desc is not None
         return out
@@ -359,7 +358,6 @@ class ContinuedPages(StoreCase):
         self.addCleanup(cm.__exit__, None, None, None)
         import views
         self.patch(views, "BODY_LIMIT", 200)
-        import matches
         import work
         self.row(1, counterparty="Adobe", amount_minor=5445, booking_date="2026-09-14",
                  value_date="2026-09-14")
@@ -373,9 +371,7 @@ class ContinuedPages(StoreCase):
             did = self.doc(counterparty="Adobe", issuer="Adobe", document_number="CANDIDATE%02d"
                            % i + "X" * 40, document_date="2026-09-14", amount_minor=5445)
             self.docs.append(did)
-            matches.record_match(self.conn, pid=self.pid, doc_id=did, author="auto",
-                                 expected_revision=self.rev(self.pid), token=self.token,
-                                 row_snapshot=self.snapshot(self.pid))
+            self.machine_entry(self.pid, did)      # a joint machine set: two candidates
         self.assertEqual(len(work.describe(self.conn, self.pid)["candidates"]), 2)
 
     def propose(self, text, quoted=None):

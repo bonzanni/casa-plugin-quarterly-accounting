@@ -665,7 +665,7 @@ class TestAmounts(StoreCase):
             with self.assertRaises(db.Refusal) as cm:
                 fn(self.conn, pid=pid, doc_id=doc, expected_revision=self.rev(pid),
                    row_snapshot=self.snapshot(pid), token=token, **extra)
-            self.assertIn("amount was never read", str(cm.exception))
+            self.assertIn("amount and currency were never read", str(cm.exception))
 
 
 if __name__ == "__main__":

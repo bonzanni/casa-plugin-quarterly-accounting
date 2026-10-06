@@ -345,7 +345,9 @@ class TestMachineWritesNeedAPass(ToolCase):
                     and n != "job_next"]
         self.assertEqual(len(optional), 10, optional)       # + list_quarter_state (the clock); S7: - bind_account
         for n in optional:
-            self.assertIn("During a pass, pass the pass_token.",
+            # record_match's description (design rev 17 §2) names it in its own sentence
+            self.assertIn("and the pass_token." if n == "record_match"
+                          else "During a pass, pass the pass_token.",
                           qa_server.TOOLS[n]["description"], n)
 
 
@@ -380,11 +382,12 @@ class TestRowSnapshotFromTheListing(ToolCase):
             out = _text("record_match", pid=self.pid, doc_id=self.doc(), author="auto",
                         expected_revision=item["revision"], row_digest=bad,
                         pass_token=self.token, document_date="2026-07-01")
-            self.assertTrue(out.startswith("refused: the row changed"), out)
-        out = _text("record_match", pid=self.pid, doc_id=self.doc(), author="auto",
+            self.assertTrue(out.startswith("refused: the payment's facts changed"), out)
+        # design rev 17 (D5): row_digest is optional; without it the revision binds
+        out = _json("record_match", pid=self.pid, doc_id=self.doc(), author="auto",
                     expected_revision=item["revision"], pass_token=self.token,
                     document_date="2026-07-01")
-        self.assertEqual(out, "refused: pass the item's row_digest from list_quarter_state")
+        self.assertEqual(out["state"], "matched")
 
     def test_the_quarter_listing_and_the_one_item_carry_it_too(self):
         items = _json("list_quarter_state", quarter="2026-Q3")["items"]

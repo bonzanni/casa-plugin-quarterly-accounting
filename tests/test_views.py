@@ -535,10 +535,8 @@ class TestRenderLog(Base):
 
     def test_a_view_binds_only_the_pairings_it_displays(self):
         pid = self.add()
-        for _ in range(2):                                   # two candidates collide
-            matches.record_match(self.conn, pid=pid, doc_id=self.doc(), author="auto",
-                                 expected_revision=self.rev(pid), token=self.token,
-                                 row_snapshot=self.snapshot(pid))
+        for _ in range(2):                                   # a joint machine set
+            self.machine_entry(pid, self.doc())
         r = self.render("missing")         # D3: the joint set is a proposal, not "missing"
         views.mark_rendering_delivered(self.conn, r["render_id"])
         self.assertIsNone(self.conn.execute("SELECT match_revisions_json FROM shown WHERE pid=?",

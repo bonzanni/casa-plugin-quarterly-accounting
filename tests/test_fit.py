@@ -360,7 +360,7 @@ class TestIdentityProperty(Base):
             if shape == "guessed":
                 d = self.doc(counterparty=payee, issuer="I%d" % i,
                              document_number=prefix + "G%d" % i,
-                             document_date="2026-09-02")
+                             document_date="2026-09-02", amount_minor=amount)
                 matches.record_match(
                     self.conn, pid=pid, doc_id=d, author="auto", expected_revision=self.rev(pid),
                     row_snapshot=self.snapshot(pid), token=self.token, labels=("guessed",),
@@ -383,7 +383,7 @@ class TestIdentityProperty(Base):
                 self.candidates(pid, [n for n, _ in specs[:k]], [i for _, i in specs[:k]])
             elif shape == "forced":
                 d = self.doc(counterparty=payee, issuer="Adobe", document_number=forced[i % 6],
-                             document_date="2026-09-02")
+                             document_date="2026-09-02", amount_minor=amount)
                 matches.record_match(
                     self.conn, pid=pid, doc_id=d, author="auto", expected_revision=self.rev(pid),
                     row_snapshot=self.snapshot(pid), token=self.token, labels=("guessed",))

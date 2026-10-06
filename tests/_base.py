@@ -3,6 +3,7 @@ fresh data dir, handoff folder and outbox, and os.environ restored after."""
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import pathlib
 import sys
@@ -599,6 +600,26 @@ class StoreCase(TempEnv):
                                     expected_revision=item["revision"],
                                     row_digest=item["row_digest"], document_date=date,
                                     token=token)
+
+    def machine_entry(self, pid, doc_id, kind="pair", labels=("clean",), runners_up=()):
+        """A machine pairing laid down in the log directly, bypassing the floor: what a
+        store from before the floor (design rev 17 §2) or a merge of two lineages that each
+        paired the document holds — a joint machine set, or a document held twice. The floor
+        refuses both at the write. Returns the match id."""
+        import lineage
+        import matches
+        import reducer as R
+        with db.tx(self.conn):
+            mid = matches._match_id_for(self.conn, pid, doc_id)
+            self.conn.execute("UPDATE matches SET label=?, runners_up_json=? WHERE match_id=?",
+                              (matches._labels(labels), json.dumps(list(runners_up)), mid))
+            proj = lineage.projection(self.conn, pid)
+            row = lineage.live_row(self.conn, proj)
+            exp = lineage.expectation_for(self.conn, proj, row, exempt=False)
+            lineage.append(self.conn, pid, kind, "auto", match_id=mid, doc_id=doc_id,
+                           fp=R.fingerprint(R.facts_of(row), exp.kind))
+            lineage.settle(self.conn, pid)
+        return mid
 
     def show(self, *pids):
         """What build_review + a successful send + mark_rendering_delivered

@@ -278,9 +278,10 @@ def settle(conn, pid: int) -> R.Reduction:
 
     match_digests = {}
     for c in st.cands.values():
-        m = conn.execute("SELECT label, rationale, runners_up_json FROM matches WHERE match_id=?",
-                         (c.match_id,)).fetchone()
+        m = conn.execute("SELECT label, rationale, runners_up_json, alternatives_json FROM"
+                         " matches WHERE match_id=?", (c.match_id,)).fetchone()
         live = c.state in F.ACTIVE + ("conflicted",)
+        alts = json.loads(m["alternatives_json"]) if live else []
         digest = db.canonical({
             # the live facts and expectation under the pairing, not only whether they
             # still agree with its fingerprint (round p2, Astra S1: €100 -> €90 -> €80
@@ -292,7 +293,11 @@ def settle(conn, pid: int) -> R.Reduction:
             "state": c.state, "author": c.author, "activation": c.activation, "fp": c.fp,
             "row_ok": (json.loads(c.fp)["facts"] == inp.facts) if (live and c.fp) else None,
             "label": m["label"], "rationale": m["rationale"], "runners_up": m["runners_up_json"],
-            "doc": _doc_digest(conn, c.doc_id)})
+            "doc": _doc_digest(conn, c.doc_id),
+            # a live proposal's alternatives are part of what its card binds (plan round 1,
+            # Astra S1: an alternative edited after display was committed by a tap); absent
+            # when there are none, so a pairing without alternatives keeps its revision
+            **({"alts": [_doc_digest(conn, a) for a in alts]} if alts else {})})
         old = conn.execute("SELECT digest, revision FROM match_state WHERE match_id=?",
                            (c.match_id,)).fetchone()
         conn.execute("UPDATE match_state SET digest=?, revision=? WHERE match_id=?",
@@ -354,6 +359,12 @@ def settle_all(conn, pids=None) -> None:
 
 
 def settle_doc_holders(conn, doc_id: int) -> None:
-    pids = sorted({r[0] for r in conn.execute("SELECT pid FROM match_state WHERE doc_id=?",
-                                                (doc_id,))})
-    settle_all(conn, pids)
+    """Every payment that pairs `doc_id`, or whose live machine pairing lists it as an
+    alternative (its card binds the alternative's facts)."""
+    pids = {r[0] for r in conn.execute("SELECT pid FROM match_state WHERE doc_id=?",
+                                       (doc_id,))}
+    pids |= {r[0] for r in conn.execute(
+        "SELECT s.pid FROM match_state s JOIN matches m ON m.match_id=s.match_id,"
+        " json_each(m.alternatives_json) j WHERE s.state IN ('matched', 'proposed',"
+        " 'conflicted') AND j.value=?", (doc_id,))}
+    settle_all(conn, sorted(pids))

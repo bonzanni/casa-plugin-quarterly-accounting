@@ -2,18 +2,19 @@
 given (the projection's for lineage-level writes, the match's for writes
 naming a pairing); every decision is ONE log entry (two for lift-then-pair),
 appended under the write lock, then lineage.settle() in the same
-transaction. Occupancy and row cardinality are the fold's, never a write-time
-error (plan §D15); the write-time preconditions are the ones the spec names."""
+transaction. A machine write meets the floor (design rev 17 §2 "The floor",
+machine_in_tx): same currency and exact amount for a match, a document no other
+payment holds (`holders`, R5); row cardinality stays the fold's."""
 from __future__ import annotations
 
 import json
 
+import amounts
 import authority
 import authorship
 import db
 import documents
 import fx
-import kb
 import lineage
 import reducer as R
 
@@ -110,145 +111,194 @@ def rejected_by_operator(conn, pid, doc, facts, kind, fx_pair):
     return None
 
 
-def _why_not_kind(conn, proj, row, exp, doc) -> str:
-    if exp.row == 2:
-        cp = kb.counterparty_for(conn, row["counterparty"])
-        return (f"{cp['name']} is set to need "
-                f"{'no document' if exp.kind == 'none' else exp.kind}, and this is a {doc['kind']}")
-    if exp.kind == "none":
-        return f"this payment needs no document, and this is a {doc['kind']}"
-    return f"this payment needs a {exp.kind}, and this is a {doc['kind']}"
+HOLDERS_SQL = (
+    "SELECT s.pid, s.state AS how FROM match_state s JOIN projections p ON p.pid=s.pid"
+    " WHERE s.doc_id=:d AND (s.state IN ('matched','proposed') OR (s.state='conflicted'"
+    " AND p.status='proposed' AND p.current_match IS NULL))"
+    " UNION ALL SELECT s.pid, 'alternative' FROM match_state s JOIN matches m ON"
+    " m.match_id=s.match_id, json_each(m.alternatives_json) j WHERE s.state='proposed'"
+    " AND j.value=:d")
+ALTERNATIVES_MAX = 3      # §1: up to four named candidates on a card, the chosen one included
 
 
-def _machine(conn, kind, pid, doc_id, expected_revision, labels, rationale, runners_up,
-             resolves, row_snapshot, token, row_digest=None, document_date=None):
-    import job
-    import passes
-    if token is None:
-        raise db.Refusal("a machine pairing is written during a pass: pass the pass_token")
+def holders(conn, doc_id) -> list:
+    """THE ownership of a document (R5), the one function the floor, the candidates and the
+    exact fit all read (plan round 3, Astra + Terra S2: a second query advertised a live
+    proposal's alternative as unheld): every (pid, how) holding it — `matched`, `proposed`,
+    `conflicted` (a joint set, D3) or `alternative` (a live proposal's, D3)."""
+    return [(r["pid"], r["how"]) for r in conn.execute(HOLDERS_SQL, {"d": doc_id})]
+
+
+def taken_elsewhere(conn, doc_id, pid) -> bool:
+    """R5: held by ANOTHER payment. What `pid` itself holds is never taken against `pid`
+    (§2.2 reopening)."""
+    return any(p != pid for p, _ in holders(conn, doc_id))
+
+
+def _own_machine(st) -> list:
+    """What the payment holds by the machine: a match, a proposal, or a joint set's members
+    (§2.2 reopening: replaced by its own re-decision, never taken against it)."""
+    return [c for c in st.cands.values()
+            if c.author == "auto" and c.state in ("matched", "proposed", "conflicted")]
+
+
+def _alternatives(conn, match_id) -> list:
+    return json.loads(conn.execute("SELECT alternatives_json FROM matches WHERE match_id=?",
+                                   (match_id,)).fetchone()[0])
+
+
+def _relevant_doc(conn, doc_id):
+    """A real document not marked irrelevant (checked BEFORE the exemption branch too, so an
+    exempt payment's residue names only a real, relevant document: fix round 1)."""
+    doc = documents._doc(conn, doc_id)
+    if doc["irrelevant"]:
+        raise db.Refusal(f"document #{doc_id} was marked irrelevant")
+    return doc
+
+
+def _floor_doc(conn, kind, pid, row, exp, doc_id, document_date):
+    """The document side of the floor, for the chosen document and each alternative."""
+    doc = _relevant_doc(conn, doc_id)
+    if doc["amount_minor"] is None or not doc["currency"]:
+        # issue #32: the floor compares amounts — read them on the document first
+        raise db.Refusal(f"document #{doc_id}'s amount and currency were never read: read "
+                         "them on the document, update_document_metadata(doc_id, "
+                         "amount_minor=…, currency=…, pass_token=…), then decide again")
+    if taken_elsewhere(conn, doc_id, pid):
+        raise db.Refusal(f"document #{doc_id} is taken: another payment's match or proposal "
+                         "holds it")
+    if kind == "pair" and doc["currency"] != row["currency"]:
+        raise db.Refusal(f"document #{doc_id} is in {doc['currency']} and the payment in "
+                         f"{row['currency']}: a different currency is only ever proposed")
+    if kind == "pair" and doc["amount_minor"] != row["amount_minor"]:
+        raise db.Refusal(f"the amounts differ (document #{doc_id}: "
+                         f"{amounts.fmt(doc['amount_minor'], doc['currency'])}, payment: "
+                         f"{amounts.fmt(row['amount_minor'], row['currency'])}): propose it "
+                         "if it may still be the one")
+    if doc["currency"] != row["currency"]:
+        why = fx.screen(row_fx(row), row["amount_minor"], row["currency"],
+                        doc["amount_minor"], doc["currency"])           # #35, kept
+        if why is not None:
+            raise db.Refusal(why + " — not proposed")
+    # C1 (Terra S1, Astra S1): the document as this write leaves it — a date read on it in
+    # this call is a corrected fact, and may lift a rejection
+    effective = dict(doc, document_date=document_date) if document_date else doc
+    rejected = rejected_by_operator(conn, pid, effective, R.facts_of(row), exp.kind,
+                                    row_fx(row))
+    if rejected is not None:
+        raise db.Refusal(f"the operator rejected document #{doc_id} for this payment "
+                         f"({rejected[:10]}); it is not proposed again unless the payment "
+                         "or the document changes — leave it")
+    return doc
+
+
+def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=(),
+                  labels=("clean",), rationale="", runners_up=(), document_date=None,
+                  row_digest=None, row_snapshot=None) -> dict:
+    """THE floor (design rev 17 §2 "The floor", R5), at the write, inside the caller's
+    transaction, its token already checked. Every floor refusal raises (db.Refusal or
+    authorship.Stale), so the caller's transaction rolls back whole; an exempt payment
+    returns {"applied": False, "refused": …} and records residue."""
+    assert conn.in_transaction
+    if kind not in ("pair", "propose"):
+        raise ValueError(kind)
     if document_date is not None:
         documents._validate({"document_date": document_date})
-    with db.tx(conn):
-        passes.check_token(conn, token)
-        job.require_fresh(conn)          # INV-J10: F, decided in this write's transaction
-        pid = lineage.resolve_pid(conn, pid)
-        proj = lineage.projection(conn, pid)
-        if proj["revision"] != expected_revision:
-            raise authorship.Stale(pid, "this payment changed since list_projections; re-read it")
-        st = lineage.fold_of(conn, pid)
-        row = lineage.live_row(conn, proj)
-        if proj["ended"] or not lineage.eligible(conn, row):
-            raise db.Refusal("this payment is not managed any more (ended or ineligible)")
-        if not lineage.is_fresh(conn, proj):
-            # fix E2; issue #1: the kind it wants is known only from an observation at
-            # the latest import (the export's tags, or a read since); an older one may
-            # name a kind the payment no longer wants. Reachable for a row the latest
-            # export did not carry.
-            raise db.Refusal("this payment was not in the latest bank import, so its category "
-                             "is not known now: observe it first (read the row and "
-                             "record_observation), then judge it")
-        # The document is validated BEFORE the exemption branch, so an exempt
-        # lineage's residue names only a real, relevant document of the kind the
-        # payment would need (fix round 1: nonexistent/irrelevant/wrong-kind
-        # documents left residue lines, one more every pass).
-        exp = lineage.expectation_for(conn, proj, row, exempt=False)
-        if exp.unknown:
-            raise db.Refusal("not yet classified: nothing is matched to it until it is")
-        if not exp.seeks_document:
-            raise db.Refusal("no document is expected for this payment")
-        doc = documents._doc(conn, doc_id)
-        if doc["irrelevant"]:
-            raise db.Refusal("that document was marked irrelevant")
-        if doc["kind"] != exp.kind:
-            raise db.Refusal(_why_not_kind(conn, proj, row, exp, doc))
-        if st.exemption is not None:
-            detail = f"document #{doc_id}"
-            if conn.execute("SELECT 1 FROM residue WHERE pid=? AND reason='exempt-doc' AND"
-                            " detail=?", (pid, detail)).fetchone() is None:
-                lineage.add_residue(conn, pid, "exempt-doc", detail)
-            return {"applied": False, "refused": "the operator exempted this payment; a document "
-                                                 "that turned up for it is shown as residue"}
-        if doc["amount_minor"] is None:
-            # issue #32: the bar compares amounts, so a document whose amount was never
-            # read cannot be shown to meet it (and its package file would carry none)
-            raise db.Refusal("this document's amount was never read: read its amount and "
-                             "currency on the document, update_document_metadata(doc_id, "
-                             "amount_minor=…, currency=…, pass_token=…), then pair it")
-        if row["status"] != "BOOK":
-            raise db.Refusal("a pending payment is not matched automatically")
-        if (row_snapshot is None) == (row_digest is None):
-            raise db.Refusal("pass the item's row_digest from list_quarter_state")
-        if row_digest is not None:
-            same = row_digest == R.digest(R.facts_of(row))
-        else:
-            same = (R.facts_of(row_snapshot) == R.facts_of(row)
-                    and (row_snapshot.get("state") or "active") == "active")
-        if not same:
-            raise db.Refusal("the row changed since this pass's snapshot (or row_digest is not the item's value "
-                             "from list_quarter_state): re-read the item with list_quarter_state(pid=…) and "
-                             "pass its row_digest, or re-import before matching")
-        if doc["currency"] and doc["currency"] != row["currency"]:
-            # issue #35 (R3): the bank's own rate rules out an amount it cannot give
-            why = fx.screen({"rate": row["fx_rate"], "unit": row["fx_unit"]}
-                            if row.get("fx_rate") else None, row["amount_minor"],
-                            row["currency"], doc["amount_minor"], doc["currency"])
-            if why is not None:
-                raise db.Refusal(why + " — not paired")
-        # C1 (Terra S1, Astra S1): the document as this write leaves it — a date read on it
-        # in this call is a corrected fact, and may lift a rejection
-        effective = dict(doc, document_date=document_date) if document_date else doc
-        rejected = rejected_by_operator(conn, pid, effective, R.facts_of(row), exp.kind,
-                                        row_fx(row))
-        if rejected is not None:
-            raise db.Refusal(f"the operator rejected this pairing ({rejected[:10]}); it is not "
-                             "proposed again unless the payment or the document changes — "
-                             "leave it")
-        if kind == "pair" and documents.collisions(conn, doc_id):
-            raise db.Refusal("another document carries the same issuer and number: propose it "
-                             "instead, or resolve the duplicate first")
-        op = st.operator_current()
-        if op is not None and op.doc_id == doc_id:
-            raise db.Refusal("the operator already paired this document with this payment; a "
-                             "machine write never touches that pairing")
-        conflicted = st.conflicted_ids()
-        if set(resolves or ()) != conflicted:
-            raise db.Refusal("this payment has unresolved candidates "
-                             f"{sorted(conflicted)}; name exactly those in resolves")
-        if document_date and document_date != doc["document_date"]:
-            # issue #19: the date read from the document names its file in the package
-            # (package.doc_filename) and replaces the filed, provisional reading
-            conn.execute("UPDATE documents SET document_date=? WHERE doc_id=?",
-                         (document_date, doc_id))
-            lineage.settle_doc_holders(conn, doc_id)
-        if document_date:
-            # issue #22: the date was read on the document, whether or not it changed
-            conn.execute("UPDATE documents SET date_read_at=? WHERE doc_id=?",
-                         (db.now(), doc_id))
-        before = _states(conn, pid)
-        mid = _match_id_for(conn, pid, doc_id)
-        conn.execute("UPDATE matches SET label=?, rationale=?, runners_up_json=? WHERE match_id=?",
-                     (_labels(labels), rationale or "", json.dumps(list(runners_up or ())), mid))
-        lineage.append(conn, pid, kind, "auto", match_id=mid, doc_id=doc_id,
-                       fp=R.fingerprint(R.facts_of(row), exp.kind), resolves=tuple(resolves or ()))
-        red = lineage.settle(conn, pid)
-        return _result(conn, pid, red, mid, _effects(before, _states(conn, pid)))
+    pid = lineage.resolve_pid(conn, pid)
+    proj = lineage.projection(conn, pid)
+    if proj["revision"] != expected_revision:
+        raise authorship.Stale(pid, "this payment changed since it was handed out; decide "
+                                    "it again with the revision job_next gives now")
+    row = lineage.live_row(conn, proj)
+    if proj["ended"] or not lineage.eligible(conn, row):
+        raise db.Refusal("this payment is not managed any more (ended or ineligible)")
+    if not lineage.is_fresh(conn, proj):
+        raise db.Refusal("this payment was not in the latest bank import: it is decided at "
+                         "the next run")
+    exp = lineage.expectation_for(conn, proj, row, exempt=False)
+    if exp.kind == "none":
+        raise db.Refusal("no document is expected for this payment")
+    if row["status"] != "BOOK":
+        raise db.Refusal("a pending payment is decided once the bank books it")
+    if row_digest is not None and row_digest != R.digest(R.facts_of(row)):
+        raise db.Refusal("the payment's facts changed since it was handed out: decide it "
+                         "again with what job_next gives now")
+    if row_snapshot is not None and (R.facts_of(row_snapshot) != R.facts_of(row) or
+                                     (row_snapshot.get("state") or "active") != "active"):
+        raise db.Refusal("the payment's facts changed since it was handed out (its "
+                         "row_snapshot is not the live row)")
+    alts = list(dict.fromkeys(int(a) for a in (alternatives or ())))
+    if alts and kind == "pair":
+        raise db.Refusal("alternatives go with a proposal, never with a match")
+    if doc_id in alts or len(alts) > ALTERNATIVES_MAX:
+        raise db.Refusal(f"alternatives are up to {ALTERNATIVES_MAX} other documents")
+    st = lineage.fold_of(conn, pid)
+    if st.exemption is not None:
+        _relevant_doc(conn, doc_id)
+        detail = f"document #{doc_id}"
+        if conn.execute("SELECT 1 FROM residue WHERE pid=? AND reason='exempt-doc' AND"
+                        " detail=?", (pid, detail)).fetchone() is None:
+            lineage.add_residue(conn, pid, "exempt-doc", detail)
+        return {"applied": False, "refused": "the operator exempted this payment; a document "
+                                             "that turned up for it is shown as residue"}
+    if st.operator_current() is not None:
+        raise db.Refusal("the operator confirmed this payment's pairing; it is never reopened")
+    for d in [doc_id, *alts]:
+        _floor_doc(conn, kind, pid, row, exp, d, document_date if d == doc_id else None)
+    own = _own_machine(st)
+    want = "matched" if kind == "pair" else "proposed"
+    current = (len(own) == 1 and own[0].fp is not None
+               and json.loads(own[0].fp)["facts"] == R.facts_of(row))
+    filed_date = documents._doc(conn, doc_id)["document_date"]
+    if (current and own[0].state == want and own[0].doc_id == doc_id
+            and proj["status"] == want and document_date in (None, filed_date)
+            and (kind == "pair" or _alternatives(conn, own[0].match_id) == alts)):
+        # §2.2: the same EFFECTIVE outcome and the same document, made against the payment
+        # as it is now, writes nothing — no revision moves, so a delivered card's buttons
+        # stay valid. A pairing whose payment changed since (its fingerprint's facts differ:
+        # the reducer shows it proposed, `facts-changed`) is written again, which
+        # re-fingerprints it (plan round 1, Astra S2). A date read that corrects the filed
+        # one (issue #19) is a changed document, so it is written too
+        return {"applied": True, "wrote": False, "pid": pid, "status": proj["status"],
+                "revision": proj["revision"], "match_id": own[0].match_id, "state": want,
+                "effects": []}
+    if document_date and document_date != filed_date:
+        # issue #19: the date read from the document names its file in the package
+        # (package.doc_filename) and replaces the filed, provisional reading
+        conn.execute("UPDATE documents SET document_date=? WHERE doc_id=?",
+                     (document_date, doc_id))
+        lineage.settle_doc_holders(conn, doc_id)
+    if document_date:
+        # issue #22: the date was read on the document, whether or not it changed
+        conn.execute("UPDATE documents SET date_read_at=? WHERE doc_id=?",
+                     (db.now(), doc_id))
+    before = _states(conn, pid)
+    mid = _match_id_for(conn, pid, doc_id)
+    conn.execute("UPDATE matches SET label=?, rationale=?, runners_up_json=?,"
+                 " alternatives_json=? WHERE match_id=?",
+                 (_labels(labels), rationale or "", json.dumps(list(runners_up or ())),
+                  json.dumps(alts), mid))
+    # §2.2 reopening: what this payment holds by the machine — a match or a proposal — is
+    # replaced by this decision, never counted as taken against it (fold `resolves`)
+    replaced = tuple(c.match_id for c in own if c.match_id != mid)
+    lineage.append(conn, pid, kind, "auto", match_id=mid, doc_id=doc_id,
+                   fp=R.fingerprint(R.facts_of(row), exp.kind), resolves=replaced)
+    red = lineage.settle(conn, pid)
+    return {**_result(conn, pid, red, mid, _effects(before, _states(conn, pid))),
+            "wrote": True}
 
 
 def _operator_pair(conn, pid, doc_id, render_id, *, match_id=None):
-    """Inside the transaction: lift (if an exemption stands) then pair, the
-    kind guard evaluated against the expectation AFTER the lift. A refusal
-    raises before anything is appended, so the transaction rolls back whole."""
+    """Inside the transaction: lift (if an exemption stands) then pair. The operator pairs
+    whatever kind of document they were shown (design rev 17 §2: the kind and
+    classification gates are deleted); the pairing is fingerprinted against the
+    expectation as it is now."""
     proj = lineage.projection(conn, pid)
     row = lineage.live_row(conn, proj)
     if row is None or proj["ended"]:
         raise db.Refusal("that payment has left the bank ledger")
     st = lineage.fold_of(conn, pid)
     exp = lineage.expectation_for(conn, proj, row, exempt=False)
-    doc = documents._doc(conn, doc_id)
-    if exp.unknown:
-        raise db.Refusal("not yet classified: nothing can be paired with it until it is")
-    if doc["kind"] != exp.kind:
-        raise db.Refusal(_why_not_kind(conn, proj, row, exp, doc))
     before = _states(conn, pid)
     if st.exemption is not None:
         lineage.append(conn, pid, "lift", "operator", render_id=render_id)
@@ -270,23 +320,32 @@ def _operator_pid(conn, pid) -> int:
     return pid
 
 
-def record_match(conn, *, pid, doc_id, author, expected_revision, render_id=None,
-                 labels=("clean",), rationale="", runners_up=(), resolves=(), row_snapshot=None,
-                 token=None, row_digest=None, document_date=None) -> dict:
+def record_match(conn, *, pid, doc_id, author, expected_revision, token, render_id=None,
+                 **kw) -> dict:
+    """A machine match (G1: certain), the floor applied at the write (machine_in_tx)."""
+    import passes
     if author == "operator":
         # S7 §8.1: an operator pairing is a tap's (matches.confirm_in_tx under a grant)
         raise db.Refusal(authority.TAP_ONLY)
     if author != "auto":
         raise db.Refusal("author is 'auto'")
-    return _machine(conn, "pair", pid, doc_id, expected_revision, labels, rationale,
-                    runners_up, resolves, row_snapshot, token, row_digest, document_date)
+    if token is None:
+        raise db.Refusal("a machine pairing is written during a run: pass the pass_token")
+    with db.tx(conn):
+        passes.check_token(conn, token)
+        return machine_in_tx(conn, "pair", pid, doc_id, expected_revision=expected_revision,
+                             **kw)
 
 
-def propose_match(conn, *, pid, doc_id, expected_revision, labels=("clean",), rationale="",
-                  runners_up=(), resolves=(), row_snapshot=None, token=None,
-                  row_digest=None, document_date=None) -> dict:
-    return _machine(conn, "propose", pid, doc_id, expected_revision, labels, rationale,
-                    runners_up, resolves, row_snapshot, token, row_digest, document_date)
+def propose_match(conn, *, pid, doc_id, expected_revision, token, **kw) -> dict:
+    """A machine proposal for the operator to confirm, the floor applied at the write."""
+    import passes
+    if token is None:
+        raise db.Refusal("a machine pairing is written during a run: pass the pass_token")
+    with db.tx(conn):
+        passes.check_token(conn, token)
+        return machine_in_tx(conn, "propose", pid, doc_id,
+                             expected_revision=expected_revision, **kw)
 
 
 def confirm_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="rendered") -> dict:
@@ -373,13 +432,11 @@ def set_exemption_in_tx(conn, *, grant, pid, exempt, expected_revision, render_i
 
 
 def relabel_match(conn, *, match_id, labels, rationale=None, runners_up=None, token) -> dict:
-    import job
     import passes
     if token is None:
         raise db.Refusal("relabelling is a pass's work: pass the pass_token")
     with db.tx(conn):
         passes.check_token(conn, token)
-        job.require_fresh(conn)          # INV-J10
         s = _state(conn, match_id)
         if s["state"] not in ("matched", "proposed"):
             # spec §Tool surface: relabel_match "re-labels an accepted match". A

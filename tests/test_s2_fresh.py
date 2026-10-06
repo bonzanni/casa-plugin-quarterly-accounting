@@ -210,17 +210,6 @@ class FreshnessF(Acquisition):
                                   (job.W_REFRESH_MAX, self.pid))
             self.assertIsNone(self.reason())           # waived after two W refreshes
 
-    def test_machine_pairing_refuses_while_f_fails(self):
-        import db, job
-        self.imported()
-        self.sweep_to_zero()
-        self.tok = job.claim(self.conn, "bbbbbbbb-2")    # condition 1 now fails
-        pid = self.only_pid()
-        doc = self.doc()
-        with self.assertRaises(db.Refusal) as cm:
-            self.machine_match(pid, doc, self.tok)
-        self.assertIn("call job_next", str(cm.exception))
-
     def test_not_read_before_the_pass_imports(self):
         self.assertIn("not read", self.reason())
 
@@ -259,23 +248,6 @@ class FreshnessF(Acquisition):
         self.assertTrue(sweep._due(self.conn))        # the other quarter's row is still due
         sweep.list_projections(self.conn, token=self.tok, quarter="2026-Q3")
         self.assertIsNone(self.reason())
-
-    def test_proposal_and_relabel_refuse_while_f_fails(self):
-        import db, job, matches, work
-        self.imported()
-        self.sweep_to_zero()
-        self.tok = job.claim(self.conn, "bbbbbbbb-2")    # condition 1 now fails
-        pid = self.only_pid()
-        item = work.list_quarter_state(self.conn, pid=pid)["item"]
-        with self.assertRaises(db.Refusal) as cm:
-            matches.propose_match(self.conn, pid=pid, doc_id=self.doc(),
-                                  expected_revision=item["revision"],
-                                  row_digest=item["row_digest"], token=self.tok)
-        self.assertIn("call job_next", str(cm.exception))
-        with self.assertRaises(db.Refusal) as cm:
-            matches.relabel_match(self.conn, match_id=1, labels=["clean"], token=self.tok)
-        self.assertIn("call job_next", str(cm.exception))
-
 
     def test_a_pairing_and_a_proposal_commit_while_f_holds(self):
         """FW-I3 (M17): the positive half of INV-J10 — while F holds, a job pass's

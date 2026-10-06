@@ -48,7 +48,8 @@ class TestARejectionSticks(Base):
         for kind in ("propose", "record"):
             with self.assertRaises(db.Refusal) as cm:
                 self.machine(doc, kind)
-            self.assertIn("the operator rejected this pairing", str(cm.exception))
+            self.assertIn(f"the operator rejected document #{doc} for this payment",
+                          str(cm.exception))
 
     def test_a_change_to_the_payment_lifts_it(self):
         doc = self.doc()
@@ -167,7 +168,9 @@ class TestARejectionSticks(Base):
         twin = self.lineage_for(2)
         self.classify(twin, {"software"})
         self.settle(twin)
-        second = self.machine(doc, pid=twin)["match_id"]       # occupied: conflicted
+        # two lineages that each paired `doc` (what a merge brings together): the floor
+        # refuses the second write ("taken"), so it is laid down directly
+        second = self.machine_entry(twin, doc, kind="propose")     # occupied: conflicted
         with db.tx(self.conn):
             ledger.merge(self.conn, self.pid, twin)
             st = lineage.fold_of(self.conn, self.pid)

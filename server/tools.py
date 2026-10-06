@@ -304,12 +304,12 @@ def _date_read(args) -> None:
     if args.get("document_date") in (None, ""):
         raise db.Refusal("pass document_date: " + DATE_READ)
 @register("record_match",
-          "Pair a payment (pid) with a document. author='auto' (the specialist, during a pass: "
-          "pass_token, row_digest: the item's value from list_quarter_state, labels, resolves naming exactly "
-          "the payment's unresolved candidates — its candidate_ids, and document_date: " + DATE_READ + "). "
-          "expected_revision is the payment's revision. During a pass, pass the pass_token.",
+          "Commit a pair you judged certain, having read both sides (G1): same currency, exactly "
+          "the payment's amount, a document no other payment holds. The floor refuses "
+          "otherwise; propose when in doubt. Pass expected_revision and document_date from the "
+          "document you opened, and the pass_token.",
           obj({"pid": I, "doc_id": I, "author": S, "expected_revision": I, "render_id": S,
-               "labels": A, "rationale": S, "runners_up": A, "resolves": AI, "row_snapshot": O,
+               "labels": A, "rationale": S, "runners_up": A, "row_snapshot": O,
                "row_digest": S, "document_date": S, "pass_token": TOKEN},
               ("pid", "doc_id", "author", "expected_revision")))
 def t_record(args):
@@ -318,19 +318,17 @@ def t_record(args):
     if args["author"] == "auto":
         _date_read(args)
     return matches.record_match(
-        conn(), pid=pid, doc_id=doc_id, author=args["author"], expected_revision=rev, render_id=args.get("render_id"),
-        labels=tuple(args.get("labels") or ("clean",)), rationale=args.get("rationale", ""),
-        runners_up=tuple(args.get("runners_up") or ()), resolves=tuple(args.get("resolves") or ()),
-        row_snapshot=args.get("row_snapshot"), row_digest=args.get("row_digest"),
-        token=_int(args, "pass_token"), document_date=args.get("document_date"))
+        conn(), pid=pid, doc_id=doc_id, author=args["author"], expected_revision=rev,
+        render_id=args.get("render_id"), token=_int(args, "pass_token"),
+        **_machine_args(args))
 
 
 @register("propose_match",
-          "Pair a payment with a document without accepting it — only when candidates cannot be "
-          "told apart. Specialist only, during a pass; same arguments as record_match(auto), "
-          "document_date included: " + DATE_READ + ".",
-          obj({"pid": I, "doc_id": I, "expected_revision": I, "labels": A, "rationale": S,
-               "runners_up": A, "resolves": AI, "row_snapshot": O, "row_digest": S,
+          "Propose a pairing for the operator to confirm: any doubt, another currency, or "
+          "several documents that fit (the chosen one plus alternatives, up to 3). Same "
+          "arguments as record_match.",
+          obj({"pid": I, "doc_id": I, "expected_revision": I, "alternatives": AI, "labels": A,
+               "rationale": S, "runners_up": A, "row_snapshot": O, "row_digest": S,
                "document_date": S, "pass_token": TOKEN},
               ("pid", "doc_id", "expected_revision", "document_date", "pass_token")))
 def t_propose(args):
@@ -338,11 +336,17 @@ def t_propose(args):
     pid, doc_id, rev = _int(args, "pid"), _int(args, "doc_id"), _int(args, "expected_revision")
     _date_read(args)
     return matches.propose_match(
-        conn(), pid=pid, doc_id=doc_id, expected_revision=rev,
-        labels=tuple(args.get("labels") or ("clean",)), rationale=args.get("rationale", ""),
-        runners_up=tuple(args.get("runners_up") or ()), resolves=tuple(args.get("resolves") or ()),
-        row_snapshot=args.get("row_snapshot"), row_digest=args.get("row_digest"),
-        token=_int(args, "pass_token"), document_date=args.get("document_date"))
+        conn(), pid=pid, doc_id=doc_id, expected_revision=rev, token=_int(args, "pass_token"),
+        alternatives=tuple(args.get("alternatives") or ()), **_machine_args(args))
+
+
+def _machine_args(args) -> dict:
+    """The arguments record_match and propose_match share (machine_in_tx's)."""
+    return dict(labels=tuple(args.get("labels") or ("clean",)),
+                rationale=args.get("rationale", ""),
+                runners_up=tuple(args.get("runners_up") or ()),
+                row_snapshot=args.get("row_snapshot"), row_digest=args.get("row_digest"),
+                document_date=args.get("document_date"))
 
 
 @register("relabel_match",

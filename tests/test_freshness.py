@@ -7,6 +7,7 @@ never act on a non-fresh one. Against the REAL bank-feed, through
 qa_server.handle and the rendered get_transaction text where the skill is
 exercised."""
 import contextlib
+import json
 import csv
 import io
 import multiprocessing
@@ -219,17 +220,15 @@ class TestTerraPartialSweepThenTriage(ToolPass):
         cur = tri[self.pid_of(ids["A1"])]
         self.assertTrue(cur["fresh"])
         self.assertEqual(cur["expectation"]["kind"], "credit-note")
-        for tool in ("record_match", "propose_match"):
-            args = dict(pid=cur["pid"], doc_id=doc, expected_revision=cur["revision"],
-                        row_digest=cur["row_digest"], pass_token=token,
-                        document_date="2026-07-01")
-            if tool == "record_match":
-                args["author"] = "auto"
-            out = _raw(tool, **args)
-            self.assertTrue(out.startswith("refused: "), out)
-            self.assertIn("credit-note", out)                        # refused by kind
-        self.assertIsNone(self.conn.execute("SELECT current_match FROM projections WHERE pid=?",
-                                            (cur["pid"],)).fetchone()[0])
+        # design rev 17 §2: the kind gate is deleted — the invoice is paired, and the
+        # pairing is fingerprinted against the live kind the import made known
+        out = json.loads(_raw("record_match", pid=cur["pid"], doc_id=doc, author="auto",
+                              expected_revision=cur["revision"], row_digest=cur["row_digest"],
+                              pass_token=token, document_date="2026-07-01"))
+        self.assertEqual(out["state"], "matched")
+        fp = self.conn.execute("SELECT fp FROM log WHERE match_id=? AND kind='pair'",
+                               (out["match_id"],)).fetchone()[0]
+        self.assertEqual(json.loads(fp)["kind"], "credit-note")
 
     def test_the_machine_write_still_refuses_a_lineage_not_observed_at_the_import(self):
         # defense in depth: the guard stays for a lineage the latest import did not
@@ -820,7 +819,9 @@ class TestFreshnessProperty(ToolPass):
                     ok = True
                 except db.Refusal:
                     ok = False
-                self.assertEqual(ok, live[ref] == "software", (trial, ref))   # an invoice fits
+                # design rev 17 §2: no kind gate — a fresh open payment takes its invoice
+                # whatever its live kind (the kind assertion above is the freshness proof)
+                self.assertTrue(ok, (trial, ref))
             self.end(token, "interrupted")
             _, files, rows, _ = self.zip_of()
             for r in rows:
