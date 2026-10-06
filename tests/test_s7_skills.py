@@ -1,7 +1,7 @@
 # tests/test_s7_skills.py
 """S7 §3: closes #41 — no skill or tool description assigns filing, asking or answering
 to Ellen or a resident; the desk skill fits a fresh session; every flow of §4–§11 is in
-it; the job skill names the four new units."""
+it; the job skill names the simple loop's units."""
 import re
 from tests._base import ROOT
 
@@ -41,11 +41,14 @@ class Skills(unittest.TestCase):
         for t in ("verdict", "apply_reading", "cancel_reading", "bind_account"):
             self.assertIsNone(re.search(rf"`{t}\(", DESK), t)
 
-    def test_the_job_skill_has_the_posting_units_and_no_relay(self):
-        for s in ("### `post`", "### `view`", "post_results", "show_view"):
+    def test_the_job_skill_has_the_simple_loops_units_and_no_relay(self):
+        for unit in ("probes", "snapshot", "filing", "vendor", "mirror", "post", "view"):
+            self.assertIn(f"### `{unit}`", JOB, unit)
+        for s in ("post_results", "show_view", "decide(", "record_mirror"):
             self.assertIn(s, JOB, s)
-        # simple loop §1: the job never builds or sends a package
-        for s in ("### `build`", "### `deliver`", "post_package", "build_quarterly_package",  # removed-name: asserted absent
+        # simple loop §1/§2: the job never builds or sends a package; the S2 units are gone
+        for s in ("### `build`", "### `deliver`", "### `item`", "### `judge`",
+                  "### `gmail-probe`", "post_package", "build_quarterly_package",  # removed-name: asserted absent
                   "stage_for_delivery"):
             self.assertNotIn(s, JOB, s)
         self.assertNotIn("job_report", JOB)

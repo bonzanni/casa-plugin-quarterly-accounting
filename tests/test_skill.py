@@ -30,7 +30,7 @@ OPERATOR_LINES = (
     "Packages come here as a file now — forward it from Telegram.",
     "I couldn't start the check (<Casa's message>). Ask again in a minute.",
 )
-JOB_OPERATOR_LINES = ("Reply in the main chat on the list, or tap its buttons.",)
+JOB_OPERATOR_LINES = ("Reply in the main chat on the message, or tap its buttons.",)
 NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_digest",
              "resolves", "candidate_ids", "not_found", "write_error", "observed_tags",
              "observed_notes", "instructions", "speak", "reshow", "true", "false", "filed_refs",
@@ -41,7 +41,9 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              "documents_first", "page_next", "triage_remaining", "start_job", "end_batch",
              "delivery_id", "job_busy",
              # S7: the desk's and the units' answer fields
-             "render_ids", "casa_delivery", "package_id"}
+             "render_ids", "casa_delivery", "package_id",
+             # the simple loop's vendor unit fields (§2.2)
+             "exact_fit", "search_window", "vendor_queries"}
 # §15: tools that left the surface in S7 (their functions stay server-side).
 REMOVED_S7 = ("job_report", "apply_reply", "confirm_match", "reject_match", "set_exemption",
               "stop_chasing", "set_watermark", "set_package_name")
@@ -306,9 +308,9 @@ class TestJob(TempEnv):
         topic = self.topic()
         self.assertIn("**Never call `job_next` in a topic message.**", topic)
         self.assertNotIn("`job_next(", topic)
-        self.assertIn("Reply in the main chat on the list, or tap its buttons.", topic)
+        self.assertIn("Reply in the main chat on the message, or tap its buttons.", topic)
         self.assertIn("never call `mark_rendering_delivered` in the topic", topic)
-        self.assertIn("Never post a view there: `show_view` posts to the operator's main chat.",
+        self.assertIn("Never post a view there: `show_view` posts to the operator's main chat",
                       topic)
         self.assertNotIn("build_review", topic)
 
@@ -323,17 +325,37 @@ class TestJob(TempEnv):
     def test_a_done_job_status_completes_without_reporting_progress_again(self):
         """PLAY T7 F3: the batch that answered `complete` already reported; a second
         report_job_progress would show Casa's batch line twice."""
-        rule = flat(section(JOB, "- Last, always: `job_status(", "**The completion turn**"))
+        rule = flat(section(JOB, "- Last, always: `job_status(", "## Units"))
         self.assertIn('`emit_completion(status="ok", text=<its text>)`', rule)
         self.assertNotIn("report_job_progress", rule)
 
-    def test_the_specialist_order_matches_the_design(self):
+    def test_the_job_skill_names_exactly_the_new_units_and_rules(self):
+        text = (ROOT / "skills/quarterly-job/SKILL.md").read_text()
+        for unit in ("probes", "snapshot", "filing", "vendor", "mirror", "view", "post",
+                     "end-batch", "complete"):
+            self.assertIn(f"`{unit}`", text)
+        for gone in ("sweep", "gmail-probe", "`item`", "`judge`", "build_quarterly_package",  # removed-name: asserted absent
+                     "list_projections", "record_observation", "judged", "resolves",  # removed-name: asserted absent
+                     "set_expectation(", "window (default 10 days)"):
+            self.assertNotIn(gone, text)
+        for rule in ("calls_made", "decide(", "exact_fit", "hint_sender", "once per run",
+                     'search="hinted"', 'search="plain"', "searches.plain",
+                     "plain vendor-and-dates search", "record_mirror", "record_not_found",
+                     "certain", "reset_store"):
+            self.assertIn(rule, text)
+        self.assertLessEqual(len(text), 9_000)
+
+    def test_the_units_come_in_the_loops_order(self):
+        """Simple loop §2: probes, snapshot, filing, vendor, mirror, the run's one post."""
         units = section(JOB, "## Units", "## Never")
         order = ["### `probes`", "record_probe", "sync", "### `snapshot`",
-                 "import_ledger_export", "not_found", "### `gmail-probe`", "### `filing`",
-                 "### `item`", "### `judge`", "list_quarter_state"]
+                 "import_ledger_export", "record_not_found", "### `filing`", "### `vendor`",
+                 "decide(", "### `mirror`", "record_mirror", "### `post`", "### `view`"]
         pos = [units.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
+        for gone in ("note_render_id", "### `build`", "### `deliver`", "propose_account",
+                     "list_quarter_state(triage"):
+            self.assertNotIn(gone, JOB, gone)
 
     def test_the_probes_carry_the_acquisition_the_queue_and_missing(self):
         probes = self.units("probes", "### `snapshot`")
@@ -342,108 +364,91 @@ class TestJob(TempEnv):
         self.assertIn("`Queue:` line", probes)
         self.assertIn('"missing": [<each workflow it marks FILE MISSING>]', probes)
         self.assertIn("never wait for it", probes)
-        snap = self.units("snapshot", "### `gmail-probe`")
+        self.assertIn('"(FILE MISSING — this workflow\'s next write mints a new restore '
+                      'point)"', probes)
+        self.assertNotIn("for a package", probes)
+        snap = self.units("snapshot", "### `filing`")
         self.assertIn("`import_ledger_export(path, pass_token, ledger_instance=<the reply's "
                       "\"Ledger instance:\" id>, acq=<the unit's acq>)`", snap)
         self.assertIn("the export you made in THIS unit", snap)
+        self.assertIn("If the import is refused, the unit stops there", snap)
 
     def test_every_observation_names_the_import_it_was_read_under(self):
         units = flat(section(JOB, "## Units", "## Never"))
         self.assertIn("`record_not_found(pass_token, pid, snapshot_id=<the import's "
                       "snapshot>)`", units)
 
-    def test_a_refused_import_stops_the_unit_including_a_failed_withdrawal(self):
-        snap = self.units("snapshot", "### `gmail-probe`")
-        self.assertIn("If the import is refused, the unit stops there", snap)
-        self.assertIn("could not withdraw a staged package — nothing was imported", snap)
-
-    def test_the_gmail_probe_is_always_made(self):
-        g = self.units("gmail-probe", "### `filing`")
-        self.assertIn("Always make it", g)
-        self.assertNotIn("skip it when", g)
-        self.assertIn('`record_probe(pass_token, kind="gmail", ok=false, absent=true)`', g)
-
-    def test_the_filing_is_capped_and_skips_what_is_filed(self):
-        f = self.units("filing", "### `item`")
-        for phrase in ("Skip every file whose ref is in the unit's `filed_refs`",
-                       "the filing uses at most 24 calls",
-                       "failed ones too — so at most 8 files, newest first, each once",
-                       "`<message id>:<attachment_id>`", "its own `source_ref`",
+    def test_the_filing_records_gmail_skips_what_is_filed_and_names_no_vendor(self):
+        """The gmail probe is the filing's own search (simple loop §2); own mail is no
+        vendor's."""
+        f = self.units("filing", "### `vendor`")
+        for phrase in ('`record_probe(pass_token, kind="gmail", ok=false, absent=true)`',
+                       "Skip every file whose ref is in `filed_refs`",
+                       "File each other attachment once, newest first",
+                       "source_ref=<message id>:<attachment id>",
+                       'source="manual-email", extraction_author="specialist"',
+                       "no `vendor`: your own mail is no vendor's",
                        "`record_filing(pass_token)`"):
             self.assertIn(phrase, f, phrase)
+        self.assertLess(f.index('kind="gmail"'), f.index("`record_filing("))
 
-    def test_an_item_is_worked_within_its_limits(self):
-        it = self.units("item", "### `judge`")
-        for phrase in ("ONE payment", "or after 4 queries",
-                       "Then at most 2 tries: a try is the message's `list_attachments` (when "
-                       "you need it)",
-                       "a listing that shows nothing plausible, or a failed listing or "
-                       "download, uses a try",
-                       "`incomplete=true` when you stopped at the 4 queries",
-                       "search it all the same", "`record_search(pid, pass_token, queries=[…]",
-                       "`queries` are exactly the queries you ran with `search_emails` for "
-                       "this item in this turn",
-                       "Search and record only the item you were handed",
-                       "`search_hint`", "`window_days`", "`has:attachment`", "search Sent",
-                       'extraction_author="specialist"'):
-            self.assertIn(phrase, it, phrase)
-        self.assertNotIn("record_search(pid, pass_token, incomplete=true)", JOB)
-        self.assertNotIn("work order", JOB)
+    def vendor(self):
+        return self.units("vendor", "### `mirror`")
 
-    def judge(self):
-        return self.units("judge", "### `post`")
+    def test_the_vendor_searches_once_with_the_plain_fallback(self):
+        """§2.2 rev 17: filed documents first; the vendor search once per run, led by the
+        hint; the plain search whenever the hinted one leaves any payment uncovered; then
+        per payment only for what is still uncovered."""
+        v = self.vendor()
+        order = ["**Filed documents first.**", "`exact_fit` you accept",
+                 "**Search the vendor's mail once per run**", "`searches.hinted` false",
+                 "When it leaves ANY of the vendor's payments uncovered and `searches.plain` "
+                 "is false: the plain vendor-and-dates search once",
+                 "Then per-payment searches only for what is still uncovered",
+                 '`record_search(pids=[the payments it was for], search="hinted"',
+                 'search="plain"', 'search="payment"', "**File** every plausible invoice",
+                 "vendor=<the unit's vendor>", "**Decide the vendor's payments in ONE call:**",
+                 "**Save what worked:**"]
+        pos = [v.index(k) for k in order]
+        self.assertEqual(pos, sorted(pos))
+        self.assertIn("`upsert_counterparty(name=<vendor>, hint_sender=<the sender address>, "
+                      "hint_subject=<a subject pattern>, pass_token)`", v)
+        self.assertIn("`held: other` is another payment's — never yours to take", v)
 
-    def test_only_payments_read_since_the_import_are_judged(self):
-        j = self.judge()
-        self.assertIn("Only the items that say `fresh: true`", j)
-        self.assertIn("Triage does not wait for the sweep", j)
+    def test_the_vendor_decides_certain_matches_and_proposes_on_doubt(self):
+        """R5/G1: commit only when certain having read both sides; any doubt or another
+        currency proposes; no not-needed; the printed issue date (Task 3 carry)."""
+        v = self.vendor()
+        for phrase in ("`decide(pass_token, entries=[…])`",
+                       "only when you are **certain**, having read both sides",
+                       '`"propose"` on any doubt, and always for another currency',
+                       '`"missing"` with a `reason` when nothing fits',
+                       'Never "no invoice needed": that is the operator\'s',
+                       "`document_date` is the date printed on the document you opened: its "
+                       "issue date, not a due, delivery or email date",
+                       "Decide again only the entries the reply refused",
+                       "no date window"):
+            self.assertIn(phrase, v, phrase)
+        self.assertNotIn("not-needed", v)
+        self.assertNotIn("record_match", JOB)
+        self.assertNotIn("propose_match", JOB)
 
-    def test_row_digest_comes_from_the_listing(self):
-        j = self.judge()
-        self.assertIn("`row_digest` from `list_quarter_state` as `row_digest`", j)
-        self.assertIn("re-read that payment with `list_quarter_state(pid=…, pass_token=…)`", j)
-        self.assertIn("pass all its `candidate_ids` in `resolves`", j)
-        self.assertNotIn("row_snapshot", JOB)
+    def test_the_mirror_runs_its_calls_in_order_and_reports_once(self):
+        m = self.units("mirror", "### `post`")
+        self.assertIn("IN THE ORDER HANDED, exactly as given", m)
+        self.assertIn("Then ONE `record_mirror(pass_token, done=[the n of each call that "
+                      "succeeded], failed=[{n, error: <bank-feed's reply>}])`", m)
+        self.assertIn("No read-backs.", m)
 
-    def test_the_specialist_states_the_date_it_read(self):
-        j = self.judge()
-        self.assertIn("passes it as `document_date`", j)
-        self.assertIn("its issue date, not a due, delivery or email date", j)
-
-    def test_a_foreign_currency_invoice_is_proposed_and_amounts_are_read(self):
-        j = self.judge()
-        self.assertIn("prints the payment's exact amount in the payment's currency", j)
-        self.assertIn("prints no amount in the payment's currency: `propose_match`", j)
-        self.assertIn("A pairing needs the document's amount", j)
-
-    def test_the_judge_keeps_the_three_judgment_rules(self):
-        """Fix round 1 (Task 12 review, M2): restored from the old specialist section."""
-        j = self.judge()
-        self.assertIn("`recipient?` (the document does not name the business in the right "
-                      "role: the recipient of a purchase invoice or a vendor credit note; the "
-                      "issuer of a sales invoice or the business's own credit note)", j)
-        self.assertIn("Where several fit, the closest date, the others as `runners_up` with "
-                      "`guessed`.", j)
-        self.assertIn("Never leave such a document unpaired: the package would list its "
-                      "payment as missing", j)
-
-    def test_the_units_post_and_package(self):
+    def test_the_units_post_and_view(self):
         """S7 §5: the two posting units (simple loop §1: the job never builds or sends a
         package)."""
-        turn = self.every_turn()
-        self.assertIn("- `post`, `view` → the units below.", turn)
         post = self.units("post", "### `view`")
         self.assertIn("`post_results(render_ids=<the unit's render_ids>)`", post)
         self.assertIn("Withheld, or `results` null: mark nothing.", post)
         view = self.units("view", "## Never")
         self.assertIn("`show_view(render_id=<the unit's render_id>)`", view)
-        self.assertIn("`propose_account()` instead (nothing to mark)", view)
-        units = section(JOB, "## Units", "## Never")
-        order = ["### `judge`", "### `post`", "### `view`"]
-        self.assertNotIn("### `build`", units)
-        self.assertNotIn("### `deliver`", units)
-        pos = [units.index(k) for k in order]
-        self.assertEqual(pos, sorted(pos))
+        self.assertIn("`mark_rendering_delivered(render_id)`", view)
 
     def test_a_refusal_in_a_topic_message_is_answered_not_followed_by_job_next(self):
         """Fix round 1 (Task 12 review, M3): the call-job_next-after-a-refusal rule is a
@@ -454,24 +459,21 @@ class TestJob(TempEnv):
                       "`job_next`.", r)
         self.assertEqual(r.count("`job_next("), 1)
 
-    def test_the_specialist_never_binds_and_sets_only_a_vendor_kind(self):
+    def test_the_job_never_speaks_binds_packages_or_calls_a_protected_tool(self):
         never = flat(section(JOB, "## Never"))
-        # S7 §3/§6.1: binding is the operator's tap; the job packages; the asks are the desk's
-        self.assertIn("are the operator's, by their tap: never call `set_expectation` except "
-                      "in the judge unit", never)
+        self.assertIn("You never speak to the operator", never)
         # T16: a misrouted desk turn must not conclude the desk is someone else
         self.assertIn("Never call `request_work` or `start_job`: those asks are made at your "
                       "desk (skill quarterly-accounting), not by the job.", never)
         self.assertNotIn("get_package", JOB)            # R6: never in the job
-        self.assertNotIn("the asks are the desk's", never)
-        self.assertIn("never speak to the operator", never)
-        self.assertNotIn("packaging", never)
-        self.assertIn("anything the operator says is theirs, by their tap", self.judge())
-        j = self.judge()
-        self.assertIn('set_expectation(scope_type="counterparty"', j)
-        self.assertIn('author="specialist", pass_token=…)', j)
-        self.assertIn("a kind the mapping did not predict", j)
-        self.assertIn("`upsert_counterparty(name, search_hint=…, pass_token=…)`", j)
+        self.assertIn("Never fetch or send a package.", never)
+        for t in ("set_expectation", "verdict", "apply_reading", "cancel_reading",
+                  "bind_account"):
+            self.assertIn(f"`{t}`", never, t)
+            self.assertIsNone(re.search(rf"`{t}\(", JOB), t)
+        self.assertIn("are the operator's, by their tap", never)
+        self.assertIn("Never call a protected tool (`reset_store`): a scheduled run is quiet "
+                      "and has no one to confirm it.", never)
 
 
 if __name__ == "__main__":
