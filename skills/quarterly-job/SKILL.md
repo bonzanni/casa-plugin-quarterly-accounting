@@ -34,7 +34,7 @@ answer of `job_next` carries `unit`, `progress` and `report`:
 - `end-batch` → end the turn: the next batch carries on.
 - `complete` → `report_job_progress` with its `progress`, then
   `emit_completion(status="ok", text=<its text>)`.
-- `post`, `view`, `build`, `deliver` → the units below.
+- `post`, `view` → the units below.
 - A refusal that this job turn is no longer the current one, or that the pass is no longer
   the current one → call `job_next(job_id=…)` once more; if that is refused too, end the turn.
 
@@ -92,43 +92,7 @@ older path. If the import is refused, the unit stops there: call `job_next`. Tha
 could not be taken back, so the bank is not re-read until it can be.
 
 Then the ends: for each `erase_candidates` row, `get_transaction(row_id)`. If it answers
-`no transaction #N`, `record_observation(pid, pass_token, snapshot_id=<the import's snapshot>, not_found=true)`.
-
-### `sweep`
-
-One page: `list_projections(pass_token, quarter=<the unit's quarter>, limit=10)` (no
-quarter when the unit names none). It lists the payments that owe the bank ledger a write or
-a check — a tag or note to put right, a note to confirm, a row the export no longer carries.
-Every `record_observation` passes the `snapshot_id` that `list_projections` returned. For
-each item, read the row with `get_transaction(row_id)`. If it answers `no transaction #N`,
-record `not_found=true` and go on. Otherwise
-`record_observation(pid, pass_token, snapshot_id, observed_tags=<every tag>, observed_notes=<every note shown>, observed_first_seen=<the row's first seen>, observed_tag_revision=<the tag revision>)`,
-all four every time, read from this read: the tags are every tag on the `Tags:` line and on
-the `Other workflows' tags` line; the notes are each note line shown, oldest first, as shown;
-first seen is the timestamp on the row's `first seen …, last seen …` line; the tag revision
-is the number on its `Tag revision:` line.
-If it refuses because the bank ledger changed during this pass, stop the unit at once. If it
-refuses because the bank was re-read meanwhile, nothing was recorded: list again and read the
-payment again with its new `snapshot_id`.
-
-If `bank_writes` is not allowed, make no bank-feed write and report its reason. Otherwise
-make the ONE write the returned `instructions` name, exactly:
-- `untag_transaction(row_ids=[row_id], tags=untag, workflow=…, expected_generation=…, expected_ledger=…)`, or
-- `tag_transaction(row_ids=[row_id], tags=tag, workflow=…, expected_generation=…, expected_ledger=…)`, or
-- `add_note(row_ids=[row_id], note=add_note, author="agent", workflow=…, expected_generation=…, expected_ledger=…)`
-
-Pass `workflow`, `expected_generation` and `expected_ledger` exactly as returned. If
-bank-feed refuses a write because the ledger was restored or is another ledger instance,
-make no more writes: call `job_next`. Then read the row again with `get_transaction`. If the
-write did not take (a tag it removed is still there, a tag it added is missing, the note is
-not among the notes), `record_observation(pid, pass_token, snapshot_id, write_error=<bank-feed's reply>)`
-and go on: it is reported, never retried. If the row is gone, record `not_found=true`.
-Otherwise record it again with what that read shows; repeat until nothing is returned (at
-most an untag, a tag and a note). Never make two writes without a read between them.
-
-Work in batches: read several of the page's rows at once where your tools allow it, record
-their observations, then make the returned writes — one write per row, then that row read
-again.
+`no transaction #N`, `record_not_found(pass_token, pid, snapshot_id=<the import's snapshot>)`.
 
 ### `gmail-probe`
 
@@ -242,12 +206,6 @@ document_link=…, link_note="found <where>, <date>", pass_token=…)`. A search
 ("their invoices come from billing@") goes into
 `upsert_counterparty(name, search_hint=…, pass_token=…)`.
 
-For a package (the unit names a quarter), when the page's `next` is null: confirm up to 5
-dates the package's files will be named by:
-`list_quarter_state(quarter=<the unit's quarter>, dates_unread=true, limit=5, pass_token=…)`;
-for each, `read_document(doc_id)` of its `current.document`, read the printed issue date, and
-`update_document_metadata(doc_id, document_date=<that date>, pass_token=…)` — the same date when the filed one was right.
-
 Finish with `job_next(pass_token=…, calls_made=…)`.
 
 ### `post`
@@ -262,30 +220,12 @@ The unit carries `render_id`, or `accounts: true`. `show_view(render_id=<the uni
 render_id>)`; on its receipt, `mark_rendering_delivered(render_id)`. With `accounts`,
 `propose_account()` instead (nothing to mark). Then `job_next`.
 
-### `build`
-
-The unit carries `quarter`, `package_token` and `request_id`.
-`build_quarterly_package(quarter=<the unit's quarter>, package_token=<its token>, request_id=<its request_id>)`. A refusal
-that the bank was re-read changed nothing. Then `job_next`.
-
-### `deliver`
-
-The unit carries `package_id` and `package_token`. Each of the three calls below takes the
-unit's `package_token`: the check's pass has ended, so that token is what admits them.
-1. `stage_for_delivery(package_id=…, package_token=…)`.
-2. `post_package(delivery_id=<the staged delivery_id>, package_token=…)`.
-3. On its receipt, `record_delivery(delivery_id, outcome="delivered", package_token=…)`.
-   Withheld or no receipt: `record_delivery(delivery_id, outcome="uncertain",
-   package_token=…)`. Never post a package twice.
-
-Then `job_next`: it posts any notice or detail line itself.
-
 ## Never
 
 You never speak to the operator, except to answer an operator message in the job's topic.
 Binding the account, the start date, the package name, "stop chasing" and every
 expectation the operator states are the operator's, by their tap: never call
-`set_expectation` except in the judge unit. Never call `request_work`,
-`request_package` or `start_job`: those asks are made at your desk (skill
+`set_expectation` except in the judge unit. Never call `request_work`
+or `start_job`: those asks are made at your desk (skill
 quarterly-accounting), not by the job. Your one expectation write is
 in the judge unit.

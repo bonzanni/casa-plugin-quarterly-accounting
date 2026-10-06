@@ -26,16 +26,6 @@ import fold as F
 import kb
 import reducer as R
 
-STATUS_PHRASE = {
-    "matched": "document matched",
-    "proposed": "document paired, awaiting review",
-    "open": "required document missing",
-    "no-document": "no document expected",
-    "exempt": "no document expected (operator)",
-    "optional": "optional document not found",
-}
-
-
 def projection(conn, pid: int):
     row = conn.execute("SELECT * FROM projections WHERE pid=?", (pid,)).fetchone()
     if row is None:
@@ -211,27 +201,6 @@ def _bump(old_digest, digest, revision) -> int:
     return revision + (1 if old_digest != digest else 0)
 
 
-def _note_body(conn, red: R.Reduction) -> str | None:
-    if red.status in ("ended", "ineligible"):
-        return None
-    body = STATUS_PHRASE[red.status]
-    if red.current is not None:
-        d = conn.execute("SELECT d.kind, d.issuer, d.counterparty, d.document_number, d.sha256"
-                         " FROM matches m JOIN documents d ON d.doc_id=m.doc_id"
-                         " WHERE m.match_id=?", (red.current,)).fetchone()
-        who = d["issuer"] or d["counterparty"] or ""
-        num = f" {d['document_number']}" if d["document_number"] else ""
-        body += f"; document: {d['kind']} {who}{num} [{d['sha256'][:8]}]"
-    return body + ". Supersedes earlier accounting notes."
-
-
-def note_text(conn, pid) -> str | None:
-    p = projection(conn, pid)
-    if p["note_body"] is None:
-        return None
-    return f"Accounting revision {p['note_seq']}: {p['note_body']}"
-
-
 def settle(conn, pid: int) -> R.Reduction:
     assert conn.in_transaction, "settle runs inside the write transaction"
     proj = projection(conn, pid)
@@ -316,17 +285,13 @@ def settle(conn, pid: int) -> R.Reduction:
         "payee": kb.display_name(conn, row["counterparty"]) if row else None,
         "link": cp["document_link"] if cp is not None else None,
         "portal": kb.is_portal(cp)})
-    body = _note_body(conn, red)
-    note_seq = proj["note_seq"]
-    if body != proj["note_body"]:
-        note_seq = db.next_seq(conn) if body is not None else None
     conn.execute(
         "UPDATE projections SET digest=?, revision=?, status=?, desired_json=?, current_match=?,"
-        " reasons_json=?, exp_kind=?, exp_tier=?, exp_row=?, last_known_kind=?, note_seq=?,"
-        " note_body=?, last_facts_json=coalesce(?, last_facts_json) WHERE pid=?",
+        " reasons_json=?, exp_kind=?, exp_tier=?, exp_row=?, last_known_kind=?,"
+        " last_facts_json=coalesce(?, last_facts_json) WHERE pid=?",
         (pdigest, _bump(proj["digest"], pdigest, proj["revision"]), red.status,
          json.dumps(sorted(red.desired)), red.current, json.dumps(list(red.reasons)),
-         exp.kind, exp.tier, exp.row, last_known, note_seq, body,
+         exp.kind, exp.tier, exp.row, last_known,
          db.canonical(row) if row else None, pid))
     return red
 
@@ -340,9 +305,8 @@ def latest_import(conn) -> int:
 def is_fresh(conn, proj) -> bool:
     """A lineage's classification is FRESH iff it was observed at the latest
     successful import (fix E2; issue #1): the import itself observes every row
-    the export carries (bank-feed 0.20.0 exports each row's tags), and the
-    sweep's read (sweep.record_observation) observes one row. A row absent from
-    the latest export stays unobserved until a read. Compared by snapshot id,
+    the export carries (bank-feed 0.20.0 exports each row's tags). A row absent
+    from the latest export stays unobserved until a later import observes it. Compared by snapshot id,
     never by timestamp (a one-second clock cannot order an import and a read)."""
     seen = proj["class_observed_snapshot"]
     return seen is not None and seen >= latest_import(conn)

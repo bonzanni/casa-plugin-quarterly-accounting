@@ -30,9 +30,6 @@
         "bind_account": {
           "result": "safe"
         },
-        "build_quarterly_package": {
-          "result": "safe"
-        },
         "build_review": {
           "result": "safe"
         },
@@ -68,9 +65,6 @@
           "result": "safe"
         },
         "job_status": {
-          "result": "safe"
-        },
-        "list_projections": {
           "result": "safe"
         },
         "list_quarter_state": {
@@ -146,9 +140,6 @@
         "record_not_found": {
           "result": "safe"
         },
-        "record_observation": {
-          "result": "safe"
-        },
         "record_probe": {
           "result": "safe"
         },
@@ -156,9 +147,6 @@
           "result": "safe"
         },
         "relabel_match": {
-          "result": "safe"
-        },
-        "request_package": {
           "result": "safe"
         },
         "request_work": {
@@ -197,7 +185,6 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__apply_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__ask_state",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__bind_account",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__build_quarterly_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_review",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__cancel_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__check_setup",
@@ -208,7 +195,6 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__ingest_document",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_next",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_status",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__list_projections",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_quarter_state",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_unmatched_documents",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__mark_irrelevant",
@@ -225,11 +211,9 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_missing",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_mirror",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_not_found",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__record_observation",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_probe",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_search",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__relabel_match",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__request_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__request_work",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__reset_store",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__set_expectation",

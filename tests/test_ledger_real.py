@@ -21,7 +21,8 @@ class Base(StoreCase):
                        instance=self.bf.instance())
         path = self.bf.export()
         return ledger.import_ledger_export(self.conn, path=path, token=t,
-                                           ledger_instance=self.bf.last_export_instance)
+                                           ledger_instance=self.bf.last_export_instance,
+                                           acq=self.acq)
 
 
     def live(self):

@@ -53,7 +53,6 @@ class Base(StoreCase):
             # searched", not "missing", and a status/missing sheet counts it
             # without printing it (Task 16, spec §Weekly pass "four states stay
             # distinct"). These fixtures mean a MISSING line the operator saw.
-            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=self.token, queries=[cp])
         if paired:
             d = self.doc(counterparty=cp, issuer=cp, amount_minor=amount, document_date=day)
@@ -1054,7 +1053,7 @@ class TestIdentity(Base):
         if between == "alert":
             t = self.pass_()
             passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
-            speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+            speak = self.end_and_speak()
             views.mark_rendering_delivered(self.conn, speak["render_id"])
             self.token = self.pass_()
         else:

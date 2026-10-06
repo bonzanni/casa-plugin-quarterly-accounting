@@ -53,7 +53,7 @@ class Base(StoreCase):
                   row_snapshot=self.snapshot(pid), token=self.token, **kw)
 
     def build(self, q="2026-Q3"):
-        out = package.build_quarterly_package(self.conn, q, bound=False)
+        out = package.build_quarterly_package(self.conn, q)
         z = zipfile.ZipFile(out["path"])
         self.addCleanup(z.close)
         return out, z
@@ -354,7 +354,7 @@ def _build(path, data_dir, q):
     conn = _db.open_store(path)
     try:
         with mock.patch.object(_db, "now", lambda: "2026-10-14T14:12:10Z"):
-            q.put(_p.build_quarterly_package(conn, "2026-Q3", bound=False))
+            q.put(_p.build_quarterly_package(conn, "2026-Q3"))
     finally:
         conn.close()
 

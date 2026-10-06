@@ -1449,6 +1449,4 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
                          " quarter=?", (sig, render_id, q))
         if scope.get("announce_package_name"):
             conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
-        import asks
-        asks.mark_reported(conn, render_id)     # S2 §6.4: consumed only once shown
         return {"render_id": render_id, "delivered_at": now}

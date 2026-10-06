@@ -24,7 +24,7 @@ class TestAlerts(StoreCase):
         self.bind()
 
     def finish(self, token):
-        return passes.end_pass(self.conn, token, "complete", {})["speak"]
+        return self.end_and_speak()
 
     def test_a_quiet_pass_says_nothing(self):
         self.assertIsNone(self.finish(self.pass_()))
@@ -127,7 +127,7 @@ class TestAlertBatching(StoreCase):
                                               "change": "corrected"})))
 
     def finish(self):
-        return passes.end_pass(self.conn, self.pass_(), "complete", {})["speak"]
+        return self.end_and_speak()
 
     def test_every_rendering_fits_and_every_occurrence_is_said_once(self):
         said, renders = {}, 0
@@ -164,7 +164,7 @@ class TestAlertBatching(StoreCase):
         rest = self.finish()
         t = self.pass_()
         gmail_failed(self, t, "invalid_grant")
-        joined = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        joined = self.end_and_speak()
         self.assertNotEqual(joined["render_id"], rest["render_id"])
         self.assertIn("Gmail", joined["text"])
         self.assertLessEqual(views.utf16_len(joined["text"]), views.BODY_LIMIT)
@@ -181,7 +181,7 @@ class TestUnboundedDetail(StoreCase):
     def check(self, detail):
         t = self.pass_()
         gmail_failed(self, t, detail)
-        speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        speak = self.end_and_speak()
         self.assertLessEqual(views.utf16_len(speak["text"]), views.BODY_LIMIT)
         flat = speak["text"].replace("\n", " ")
         self.assertTrue(flat.startswith("Gmail stopped letting me in ("), flat[:80])
@@ -211,13 +211,13 @@ class TestOversizedParkedRendering(StoreCase):
     def test_an_oversized_parked_rendering_is_recomposed(self):
         t = self.pass_()
         gmail_failed(self, t, "invalid_grant")
-        first = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        first = self.end_and_speak()
         with db.tx(self.conn):                  # what pre-fix code could have saved
             self.conn.execute("UPDATE renders SET text=? WHERE render_id=?",
                               ("x" * 5000, first["render_id"]))
         t = self.pass_()
         gmail_failed(self, t, "invalid_grant")
-        again = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        again = self.end_and_speak()
         self.assertNotEqual(again["render_id"], first["render_id"])
         self.assertLessEqual(views.utf16_len(again["text"]), views.BODY_LIMIT)
         self.assertIn("Gmail", again["text"])

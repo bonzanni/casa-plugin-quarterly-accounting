@@ -114,35 +114,42 @@ class StoreCase(TempEnv):
             drv.do(u, drv.token)
         raise AssertionError(f"no {stop_before} unit: {[u['unit'] for u in units]}")
 
-    def staged_package(self, quarter="2026-Q3"):
-        """A package request's package built and its first send staged under the request's
-        package_token, nothing posted (what drive_to_staged left, without the job: simple
-        loop Task 10). Returns (delivery_id, package_token)."""
+    def staged_package(self, quarter="2026-Q3", lapsed=False):
+        """A package built from the store as it is (a bare import first, when none was made)
+        and its first send staged, nothing posted; `lapsed`: its lease older than
+        passes.LEASE_S, as a turn that died between staging and its record leaves it (the
+        stalled send any claim recovers, S7 §6.1). Returns the delivery_id."""
         import delivery
         import package
+        import passes
         if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
             self.bind()
-        token = self.package_token(quarter)
-        pk = package.build_quarterly_package(self.conn, quarter, token)
+        if self.conn.execute("SELECT 1 FROM snapshots").fetchone() is None:
+            self.import_again()
+        pk = package.build_quarterly_package(self.conn, quarter)
         d = delivery.stage_for_delivery(self.conn, channel="telegram",
-                                        package_id=pk["package_id"], package_token=token)
-        return d["delivery_id"], token
+                                        package_id=pk["package_id"])
+        if lapsed:
+            import datetime as _dt
+            at = (db._clock() - _dt.timedelta(seconds=passes.LEASE_S + 60)
+                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with db.tx(self.conn):
+                self.conn.execute("UPDATE deliveries SET lease_at=?, created_at=? WHERE"
+                                  " delivery_id=?", (at, at, d["delivery_id"]))
+        return d["delivery_id"]
 
     def sent_package(self, first_outcome="delivered", quarter="2026-Q3"):
         """A package built for a request and posted as a file, its first send recorded
         `first_outcome` (`uncertain`: the receipt was withheld; its notice is then delivered,
-        as a run's post would deliver it). Without the job (simple
-        loop Task 10: the job no longer builds or sends packages) — the request's own
-        build, stage, post_package and record_delivery. Returns the package_id."""
+        as a run's post would deliver it): build, stage, post_package and record_delivery.
+        Returns the package_id."""
         import delivery
         import posting
         from tests.fakebroker import FakeBroker
-        did, token = self.staged_package(quarter)
-        d = {"delivery_id": did}
+        did = self.staged_package(quarter)
         with FakeBroker():
-            posting.post_package(self.conn, d["delivery_id"], token)
-        delivery.record_delivery(self.conn, delivery_id=d["delivery_id"],
-                                 outcome=first_outcome, package_token=token)
+            posting.post_package(self.conn, did)
+        delivery.record_delivery(self.conn, delivery_id=did, outcome=first_outcome)
         if first_outcome != "delivered":           # its notice is posted and delivered
             import alerts
             import views
@@ -152,8 +159,8 @@ class StoreCase(TempEnv):
                                  (did,)).fetchone()[0]
 
     def import_again(self):
-        """A newer import lands (a bare snapshots row): every check done before it no
-        longer describes the bank (issue #15, D2)."""
+        """A newer import lands (a bare snapshots row): a package built before it is no
+        longer the bank's latest (fix E4)."""
         import db
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
@@ -269,39 +276,35 @@ class StoreCase(TempEnv):
         finally:
             db._clock = real
 
-    def handed(self, *pids):
-        """Put payments in the live pass's open Gmail chunk (issue #26, A4: a search is
-        recorded only for handed work), as a continuation's hand-out would."""
-        hand(self.conn, pids)
-
-    def pass_(self, trigger="test", generation=0, registered=None, accounts=None,
+    def pass_(self, trigger="operator", generation=0, registered=None, accounts=None,
               instance=None):
-        """End any live pass, begin a new one, record the probes a real pass
-        records first (the ledger probe carries list_backups' instance id).
-        Returns the new pass token."""
-        import passes
+        """run_claim's alias for the tests written before the simple loop: end any live pass
+        (end_live_pass), claim a new run (`trigger` "cron" starts it scheduled) with its
+        four probes, and hand its pass an acquisition with the bank_sync probe recorded for
+        it (self.acq), so an import under the token is the run's own read. Returns the
+        token."""
+        import loop
         self.end_live_pass()
-        kw = {"quarter": "2026-Q3", "channel": "telegram"} if trigger == "package" else {}
-        token = passes.begin_pass(self.conn, trigger, **kw)["pass_token"]
-        b = self.conn.execute("SELECT account_id FROM binding").fetchone()
-        accts = accounts if accounts is not None else (
-            [{"account_id": b[0], "category": "company", "label": "Zakelijk"}] if b else [])
-        passes.record_probe(self.conn, token, "bank_tools", True)
-        passes.record_probe(self.conn, token, "bank_sync", True)
-        passes.record_probe(self.conn, token, "bank_accounts", True, data={"accounts": accts})
-        passes.record_probe(self.conn, token, "ledger", True,
-                            data={"generation": generation, "registered": registered or {},
-                                  "instance": instance or self.LEDGER})
+        token = self.run_claim(started_by="scheduled" if trigger == "cron" else "operator",
+                               instance=instance, generation=generation,
+                               registered=registered, accounts=accounts)
+        with db.tx(self.conn):
+            self.acq = loop.hand_acquisition(self.conn, token, self.pass_id)
+        import passes
+        passes.record_probe(self.conn, token, "bank_sync", True, acq=self.acq)
         return token
 
     _runs = 0
 
-    def run_claim(self, started_by="operator", instance=None, generation=0, job_id=None):
+    def run_claim(self, started_by="operator", instance=None, generation=0, job_id=None,
+                  registered=None, accounts=None):
         """A job run as the real cursor makes one: job.claim's claim, the run's pass under
         the claim's token, its runs row, and the four probes a run records first (the
         ledger probe carries `instance`). Sets self.job_id, self.token, self.pass_id and
         returns the token. Every new test of this plan starts its run here; none inserts
-        into claims, runs or run_work itself (work_rows below is the one exception)."""
+        into claims, runs or run_work itself (work_rows below is the one exception).
+        `registered` and `accounts`: the ledger probe's registrations and the accounts the
+        bank_accounts probe lists (default: the bound account)."""
         import job, passes
         StoreCase._runs += 1
         job_id = job_id or "%08x-0000-4000-8000-%012x" % (StoreCase._runs, id(self) % 10**12)
@@ -311,12 +314,13 @@ class StoreCase(TempEnv):
         # job.claim makes the run and starts its one pass (simple loop §2)
         assert run is not None and m["live"] and run["pass_id"] == m["pass_id"], (run, m)
         b = self.conn.execute("SELECT account_id FROM binding").fetchone()
-        accts = [{"account_id": b[0], "category": "company", "label": "Zakelijk"}] if b else []
+        accts = accounts if accounts is not None else (
+            [{"account_id": b[0], "category": "company", "label": "Zakelijk"}] if b else [])
         passes.record_probe(self.conn, token, "bank_tools", True)
         passes.record_probe(self.conn, token, "bank_sync", True)
         passes.record_probe(self.conn, token, "bank_accounts", True, data={"accounts": accts})
         passes.record_probe(self.conn, token, "ledger", True,
-                            data={"generation": generation, "registered": {},
+                            data={"generation": generation, "registered": registered or {},
                                   "instance": instance or self.LEDGER})
         self.job_id, self.token = job_id, token
         self.pass_id = self.conn.execute("SELECT pass_id FROM pass_marker WHERE id=1"
@@ -337,131 +341,22 @@ class StoreCase(TempEnv):
         self.pass_("operator", accounts=accounts)
         self.end_live_pass()
 
-    def start_job_pass(self, token, trigger="operator"):
-        """A job pass started under claim `token` (S2 §3), held by that claim's job id —
-        as the job cursor's _begin_next starts one. Returns its pass_id."""
-        import db
-        import json
-        import passes
-        with db.tx(self.conn):
-            _, pass_id = passes.start_pass(self.conn, trigger,
-                                           "silent" if trigger == "cron" else "telegram",
-                                           protocol="job", token=token)
-            job_id = self.conn.execute("SELECT job_id FROM claims WHERE gen=?",
-                                       (token,)).fetchone()[0]
-            self.conn.execute("UPDATE passes SET holder_job=?, adopters_json=? WHERE pass_id=?",
-                              (job_id, json.dumps([job_id]), pass_id))
-        return pass_id
-
-    def bind_round_and_take(self, pass_id):
-        """The queued package request's round runs in `pass_id` (passes._bind_round), and
-        the pass takes what it may (asks.take_queued) — as the job cursor starts a round."""
-        import asks
-        import db
-        import passes
-        with db.tx(self.conn):
-            rid = self.conn.execute("SELECT request_id FROM package_requests WHERE"
-                                    " state='queued' ORDER BY request_id").fetchone()[0]
-            passes._bind_round(self.conn, rid, pass_id)
-            return asks.take_queued(self.conn, pass_id)
-
-    def hand_empty_chunk(self):
-        """The live pass's continuation hands out an empty Gmail chunk (nothing to search)."""
-        hand(self.conn, [])
-
-    def end_live_pass(self):
-        """End the live pass, if any, with its current token (the marker's: a claim
-        rotates it past the pass's own generation)."""
-        import passes
+    def end_live_pass(self, outcome="complete", report=None):
+        """End the live pass, if any, `outcome` (with `report` stored as its report) under the
+        marker's token (the run's latest claim), as the cursor ends a run's pass
+        (loop.end_pass)."""
+        import loop
         m = self.conn.execute("SELECT generation, live FROM pass_marker").fetchone()
         if m is not None and m["live"]:
-            close_chunk(self.conn)
-            passes.end_pass(self.conn, m["generation"], "complete", {})
+            with db.tx(self.conn):
+                loop.end_pass(self.conn, m["generation"], outcome, report)
 
-    def end_with_counts(self, token, outcome, counts):
-        """End the live pass and store `counts` as its report, as the server computes them
-        for a check (issue #29: end_pass never stores the caller's) — for a view test that
-        needs an interrupted check's counts without running its Gmail round."""
-        import passes
-        close_chunk(self.conn)
-        out = passes.end_pass(self.conn, token, outcome, {})
-        import db
-        import json
-        with db.tx(self.conn):
-            row = self.conn.execute("SELECT report_json FROM passes WHERE pass_id=?",
-                                    (out["ended"],)).fetchone()
-            rep = {**json.loads(row[0] or "{}"), **counts}
-            self.conn.execute("UPDATE passes SET report_json=? WHERE pass_id=?",
-                              (db.canonical(rep), out["ended"]))
-        return out
-
-    def package_token(self, quarter="2026-Q3", channel="telegram"):
-        """A package request as the skill makes one — begin_pass(package, quarter,
-        channel), the snapshot step with this pass's own import (a bare snapshots row
-        here), the Gmail round's probe, a whole judge step, end_pass (issue #15). Returns
-        the package_token end_pass hands over."""
-        import passes
+    def end_and_speak(self):
+        """End the live pass (end_live_pass) and compose what the alerts owe the operator,
+        as a run's post does: the pending alerts rendering, or None."""
+        import alerts
         self.end_live_pass()
-        token = passes.begin_pass(self.conn, "package", quarter=quarter,
-                                  channel=channel)["pass_token"]
-        import db
-        import steps
-        steps.start(self.conn, token, "snapshot", {})
-        with db.tx(self.conn):          # this pass's own import: what makes a request buildable
-            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
-                              " VALUES ((SELECT pass_id FROM pass_marker), ?, 0, 0)",
-                              (db.now(),))
-        steps.finish(self.conn, token, "snapshot", counts={})
-        self.check_round(token)
-        return passes.end_pass(self.conn, token, "complete", {})["package_token"]
-
-    def package_built_unsent(self, quarter="2026-Q3", channel="telegram"):
-        """A package request whose package was built and never staged, its holder gone:
-        package_token(), build_quarterly_package under it (state `built`), then the
-        request's lease set to a lapsed time, so a sends claim may take it (S2 §6.4)."""
-        import datetime as _dt
-        import db
-        import package
-        import steps
-        if self.conn.execute("SELECT 1 FROM binding").fetchone() is None:
-            self.bind()                     # a build needs the bound account
-        token = self.package_token(quarter, channel)
-        package.build_quarterly_package(self.conn, quarter, token)
-        lapsed = steps._stamp(db._clock() - _dt.timedelta(seconds=steps.LEASE_S + 60))
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE package_requests SET lease_at=? WHERE state='built'",
-                              (lapsed,))
-        return token
-
-    def stage_stalled_package(self, quarter="2026-Q3"):
-        """A package's first send staged and never settled, its holder gone: package_built_
-        unsent(), staged under its package_token, then the delivery's lease set to a lapsed
-        time — the stalled send any claim recovers (S7 §6.1; S2's job_report recovery case,
-        moved here). Returns its delivery_id."""
-        import datetime as _dt
-        import db
-        import delivery
-        import steps
-        token = self.package_built_unsent(quarter)
-        pkg = self.conn.execute("SELECT package_id FROM package_requests WHERE state='built'"
-                                ).fetchone()[0]
-        d = delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg,
-                                        package_token=token)
-        lapsed = steps._stamp(db._clock() - _dt.timedelta(seconds=steps.LEASE_S + 60))
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE deliveries SET lease_at=?, created_at=? WHERE"
-                              " delivery_id=?", (lapsed, lapsed, d["delivery_id"]))
-        return d["delivery_id"]
-
-    def check_round(self, token, gmail_ok=True, triage_remaining=0):
-        """The rest of a package round (issue #15): Ellen's Gmail round (its probe) and
-        the judge step, finished whole."""
-        import passes
-        import steps
-        hand(self.conn, [])         # the continuation's hand-out (here, nothing to search)
-        passes.record_probe(self.conn, token, "gmail", gmail_ok)
-        steps.start(self.conn, token, "judge", {})
-        steps.finish(self.conn, token, "judge", counts={"triage_remaining": triage_remaining})
+        return alerts.pending_rendering(self.conn)
 
     _doc_n = 0
 
@@ -497,7 +392,6 @@ class StoreCase(TempEnv):
                 self.conn.execute("UPDATE projections SET class_observed_at=? WHERE pid=?",
                                   ("2026-09-20T10:00:00Z", pid))
             self.settle(pid)
-            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=token, queries=["x"])
             pids.append(pid)
         return pids
@@ -575,27 +469,6 @@ class StoreCase(TempEnv):
             w.writerow({k: ("" if full.get(k) is None else full.get(k, "")) for k in self.EXPORT_COLS})
         return casa_handoff.publish("bank-feed", "ledger-export-test.csv",
                                     data=buf.getvalue().encode())["path"]
-
-    def sweep_to_zero(self):
-        """List and observe the live pass's sweep until nothing is due, each read showing
-        the row's desired tags and its note (no write owed). The last listing finds
-        nothing due, so the cycle is complete and the import's sweep is stamped."""
-        import sweep
-        token = self.conn.execute("SELECT generation FROM pass_marker").fetchone()[0]
-        for _ in range(50):
-            page = sweep.list_projections(self.conn, token=token)
-            if not page["projections"] and page["remaining_in_cycle"] == 0:
-                return
-            for item in page["projections"]:
-                first_seen = self.conn.execute("SELECT first_seen FROM aliases WHERE row_id=?",
-                                               (item["row_id"],)).fetchone()[0]
-                out = sweep.record_observation(
-                    self.conn, pid=item["pid"], token=token, snapshot_id=page["snapshot_id"],
-                    observed_tags=item["desired"],
-                    observed_notes=[item["note"]] if item["note"] else [],
-                    observed_first_seen=first_seen, observed_tag_revision=0)
-                assert not out.get("instructions"), out
-        raise AssertionError("the sweep did not reach zero")
 
     def only_pid(self):
         """The single live lineage's pid."""
@@ -714,52 +587,6 @@ def apply_now(conn, text, quoted=None) -> dict:
     if row["state"] == "applied":
         res["applied"] = json.loads(row["plan_json"])
     return res
-
-
-def hand(conn, pids):
-    """The open Gmail chunk of the live pass, holding `pids` too (see StoreCase.handed).
-    A pass with no first step gets a finished sweep step to carry it."""
-    import json
-    import db
-    import passes
-    m = passes._marker(conn)
-    first = "snapshot" if conn.execute(
-        "SELECT 1 FROM package_requests WHERE pass_id=? AND state='snapshot'",
-        (m["pass_id"],)).fetchone() else "sweep"
-    with db.tx(conn):
-        row = conn.execute("SELECT carry_json FROM pass_steps WHERE pass_id=? AND step=?",
-                           (m["pass_id"], first)).fetchone()
-        carry = json.loads(row[0] or "{}") if row is not None else {}
-        old = carry.get("chunk") or {}
-        keep = old.get("pids", []) if old.get("open") else []
-        carry["chunk"] = {"pids": sorted(set(keep) | set(pids)), "recorded": [],
-                          "open": True, "calls": None, "more": 0}
-        if row is None:
-            conn.execute("INSERT INTO pass_steps(pass_id, step, started_at, finished_at,"
-                         " finished_by, finish_json, carry_json) VALUES (?,?,?,?,?,?,?)",
-                         (m["pass_id"], first, db.now(), db.now(), "specialist", "{}",
-                          db.canonical(carry)))
-        else:
-            conn.execute("UPDATE pass_steps SET carry_json=? WHERE pass_id=? AND step=?",
-                         (db.canonical(carry), m["pass_id"], first))
-
-
-def close_chunk(conn):
-    """Close the live pass's open Gmail chunk, as a judge start does (test setup only)."""
-    import json
-    import db
-    import passes
-    m = passes._marker(conn)
-    if m is None or not m["live"]:
-        return
-    with db.tx(conn):
-        for r in conn.execute("SELECT step, carry_json FROM pass_steps WHERE pass_id=?"
-                              " AND step IN ('sweep', 'snapshot')", (m["pass_id"],)).fetchall():
-            carry = json.loads(r["carry_json"] or "{}")
-            if carry.get("chunk", {}).get("open"):
-                carry["chunk"]["open"] = False
-                conn.execute("UPDATE pass_steps SET carry_json=? WHERE pass_id=? AND step=?",
-                             (db.canonical(carry), m["pass_id"], r["step"]))
 
 
 class LoopCase(StoreCase):

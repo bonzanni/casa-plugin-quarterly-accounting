@@ -430,3 +430,19 @@ class ReviewRound1(StoreCase):
                                             (pass_d,)).fetchone()[0])
         a = job.claim(self.conn, "ffffffff-d")                      # it carries on
         self.assertEqual(job.next_unit(self.conn, a, 0)["unit"], "probes")
+
+
+class TaskElevenCarries(StoreCase):
+    """Task 11: what the deleted delegation end_pass did at a pass's end, the run's end does."""
+
+    def test_a_completed_run_reaps_an_orphaned_document_file(self):
+        import os, time
+        d = self.data / "documents" / "ab"
+        d.mkdir(parents=True)
+        orphan = d / ("ab" * 32 + ".pdf")               # bytes no index row claims
+        orphan.write_bytes(b"%PDF-1.4\n")
+        old = time.time() - 7200
+        os.utime(orphan, (old, old))
+        units = self.run_job_to_complete("abcdef01-0000-4000-8000-000000000011")
+        self.assertEqual(units[-1]["unit"], "complete")
+        self.assertFalse(orphan.exists())

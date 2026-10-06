@@ -206,8 +206,7 @@ class TestCustodyUnderConcurrency(StoreCase):
         # round B2 (Astra S2): the ingest captured its bytes, waited behind reset's
         # custody lock, then installed them BEFORE its token (fenced by the reset)
         # was refused — reset said "complete" and the bytes were back on disk
-        import passes
-        token = passes.begin_pass(self.conn, "cron")["pass_token"]
+        token = self.pass_("cron")
         path = self.publish("a.pdf", PDF)
 
         def stale_ingest(c):

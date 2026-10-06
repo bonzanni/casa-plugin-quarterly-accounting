@@ -18,15 +18,17 @@ EXPECTED = {
     "ingest_document", "update_document_metadata", "mark_irrelevant", "list_unmatched_documents",
     "get_counterparty", "upsert_counterparty", "get_package", "set_expectation",
     "record_match", "propose_match", "relabel_match",
-    "import_ledger_export", "list_projections", "record_observation",
+    "import_ledger_export",
     "record_probe", "check_setup", "reset_store",
     "record_search",
     "list_quarter_state", "build_review", "mark_rendering_delivered",
-    "build_quarterly_package", "stage_for_delivery", "record_delivery", "read_document",
+    "stage_for_delivery", "record_delivery", "read_document",
     # S2 (spec §8, §13): the job's tools replace begin_pass, end_pass, continue_pass,
     # record_step and more_work
-    "job_next", "job_status", "request_work", "request_package",
+    "job_next", "job_status", "request_work",
     "record_filing",
+    # simple loop Task 11 (§4): the sweep's two tools, the package ask and the request-bound
+    # build left the surface (get_package builds; no sweep, no package requests)
     # S7 Task 8 (§4): will the running job take this ask?
     "ask_state",
     # S7 Task 9 (§9): job_report left the surface (the job posts its own results)
@@ -79,9 +81,8 @@ def _fresh_conn(case):
 
 
 def _tool(name, **args):
-    from tests import legacy_tools
-    out = legacy_tools.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                               "params": {"name": name, "arguments": args}})
+    out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": name, "arguments": args}})
     return out["result"]
 
 
@@ -105,19 +106,20 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 44)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
+        self.assertEqual(len(EXPECTED), 40)     # S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
                                                 # Task 7: + 2; T8: + ask_state; T9: - job_report (§9);
                                                 # T10: + post_results (§5); T11: + post_package (§6.1);
                                                 # simple loop T4: + decide, record_missing (§2.2);
                                                 # T5: + record_mirror (§2.4); T9: + get_package (§1);
-                                                # T10: + record_not_found (§2.4)
+                                                # T10: + record_not_found (§2.4); T11: - the
+                                                # sweep's two, the package ask, the build (§4)
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 44)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 40)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
@@ -198,24 +200,6 @@ class ToolCase(StoreCase):
 
 
 class TestPassTokens(ToolCase):
-    def test_end_pass_requires_the_token(self):
-        # D10 gap: end_pass(None) would end whichever pass is live, or crash with none.
-        # S2: end_pass is no longer a tool (job_next ends passes); its function still is
-        import passes
-        self.bind()
-        token = self.pass_()
-        with self.assertRaisesRegex(db.Refusal, "ending a pass needs its pass_token"):
-            passes.end_pass(self.conn, None, "complete", {})
-        self.assertIsNotNone(passes.current_pass(self.conn))       # the live pass still runs
-        self.assertEqual(passes.end_pass(self.conn, token, "complete", {})["outcome"],
-                         "complete")
-        self.assertIsNone(passes.current_pass(self.conn))
-
-    def test_end_pass_with_no_pass_running_is_a_refusal(self):
-        import passes
-        with self.assertRaises(db.Refusal):
-            passes.end_pass(self.conn, 5, "complete", {})
-
     def test_a_stale_token_is_refused_at_the_delivery_log(self):
         import package
         self.bind()
@@ -224,7 +208,7 @@ class TestPassTokens(ToolCase):
         pid = self.lineage_for(1)
         self.classify(pid, {"software"})
         self.settle(pid)
-        pkg = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        pkg = package.build_quarterly_package(self.conn, "2026-Q3")
         self.pass_()                                          # a newer pass reclaims the marker
         self.assertTrue(_text("stage_for_delivery", channel="telegram",
                               package_id=pkg["package_id"], pass_token=token)
@@ -248,12 +232,15 @@ class TestResend(ToolCase):
         pid = self.lineage_for(1)
         self.classify(pid, {"software"})
         self.settle(pid)
-        self.a = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
-        self.b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        self.a = package.build_quarterly_package(self.conn, "2026-Q3")
+        self.b = package.build_quarterly_package(self.conn, "2026-Q3")
         self.assertNotEqual(self.a["filename"], self.b["filename"])
 
     def send(self, pkg_id, outcome):
+        from tests.fakebroker import FakeBroker
         d = _json("stage_for_delivery", channel="telegram", package_id=pkg_id)
+        with FakeBroker():                         # r3 #2: posted, then its outcome recorded
+            _json("post_package", delivery_id=d["delivery_id"])
         _json("record_delivery", delivery_id=d["delivery_id"], outcome=outcome)
         for f in os.listdir(self.outbox):          # Casa consumes the outbox copy on send
             os.unlink(self.outbox / f)
@@ -306,7 +293,6 @@ class TestPaging(ToolCase):
                 self.conn.execute("UPDATE projections SET class_observed_at=? WHERE pid=?",
                                   ("2026-09-20T10:00:00Z", pid))
             self.settle(pid)
-            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=token, queries=["x"])
         r = _json("build_review", view="missing", quarter="2026-Q3")
         self.assertIn('say "all of them"', r["text"])
@@ -412,8 +398,9 @@ class TestArgumentTypes(ToolCase):
                  for k, v in t["schema"]["properties"].items() if v.get("type") == "boolean"]
         # fix wave F: + fresh_only; + failed; #10: + stopped_by_refusal, out_of_time; #15: +
         # last_built; #22: + dates_unread; S2: - record_step's three, + record_probe's absent;
-        # S7 Task 4: - set_exemption's exempt
-        self.assertEqual(len(bools), 14, bools)
+        # S7 Task 4: - set_exemption's exempt; simple loop Task 11: - the unread-dates
+        # listing's flag, - the sweep's not-found flag
+        self.assertEqual(len(bools), 12, bools)
         for n, k in bools:
             res = _tool(n, **{k: "false"})
             text = res["content"][0]["text"]
@@ -447,15 +434,6 @@ class TestArgumentTypes(ToolCase):
         self.assertEqual(tuple(before), tuple(self.conn.execute(
             "SELECT passes_without_candidate, search_state FROM projections WHERE pid=?",
             (pid,)).fetchone()))
-
-    def test_limit_is_one_or_more(self):
-        self.bind()
-        token = self.pass_()
-        for bad in (0, -1):
-            self.assertEqual(_text("list_unmatched_documents", limit=bad),
-                             "refused: limit is 1 or more")
-            self.assertEqual(_text("list_projections", pass_token=token, limit=bad),
-                             "refused: limit is 1 or more")
 
     def test_import_names_every_missing_argument(self):
         self.assertEqual(_text("import_ledger_export"),

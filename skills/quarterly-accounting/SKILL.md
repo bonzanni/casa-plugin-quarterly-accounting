@@ -55,11 +55,11 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
 accounting check (even naming `quarterly-accounting:work`):
 `request_work(kind="check", trigger="operator")`. You start it yourself; never ask the
 delegate to.
-"Give me Q3", "rebuild it", "the package for Q2": `request_package(quarter=…)`. "Email me
-the package": say "Packages come here as a file now — forward it from Telegram." and ask
-for it as a file.
+"Give me Q3", "rebuild it", "the package for Q2": `get_package(quarter=…)` — the file it
+posts is the answer; if it refuses, say its words. "Email me the package": say "Packages
+come here as a file now — forward it from Telegram." and send it as a file.
 
-Then always `start_job` with the ask's `start_job` exactly. Read its result:
+After `request_work`, always `start_job` with the ask's `start_job` exactly. Read its result:
 - `pending` → say the ask's `line`;
 - `job_busy` → `ask_state(kind=<the ask's kind>, request_id=<its request_id>)`, and say its
   `line`;
@@ -88,9 +88,8 @@ is filed by you, without being asked:
   the refusal (after a send that arrived it says so; that is right).
 - "Send me the last package you built (for Qn)": `stage_for_delivery(last_built=true,
   quarter=…)`, then the same.
-- `record_delivery` may return `speak` (a notice) or `note_render_id` (the package's
-  details): `post_results(render_ids=[…])` — `render_ids=[speak.render_id]` or
-  `render_ids=[note_render_id]` — then `mark_rendering_delivered` on its receipt.
+- `record_delivery` may return `speak` (a notice): `post_results(render_ids=[speak.render_id])`,
+  then `mark_rendering_delivered` on its receipt.
 
 ## Setup
 

@@ -29,22 +29,25 @@ class Skills(unittest.TestCase):
 
     def test_the_desk_flows(self):
         for s in ("show_view", "propose_reading", "post_results", "post_package",
-                  "record_delivery", "ask_state", "request_package", "propose_account",
+                  "record_delivery", "ask_state", "get_package", "propose_account",
                   "mark_rendering_delivered", "<silent/>", "forward it from Telegram",
                   "I couldn't start the check"):
             self.assertIn(s, DESK, s)
-        for gone in ("job_report", "apply_reply", "build_review(", "send_media", "email it"):
+        for gone in ("job_report", "apply_reply", "build_review(", "send_media", "email it",
+                     "request_package"):  # removed-name: asserted absent
             self.assertNotIn(gone, DESK, gone)
 
     def test_the_desk_never_calls_a_buttons_tool(self):
         for t in ("verdict", "apply_reading", "cancel_reading", "bind_account"):
             self.assertIsNone(re.search(rf"`{t}\(", DESK), t)
 
-    def test_the_job_skill_has_the_four_units_and_no_relay(self):
-        for s in ("### `post`", "### `view`", "### `build`", "### `deliver`",
-                  "post_results", "show_view", "post_package", "record_delivery",
-                  "build_quarterly_package", "stage_for_delivery"):
+    def test_the_job_skill_has_the_posting_units_and_no_relay(self):
+        for s in ("### `post`", "### `view`", "post_results", "show_view"):
             self.assertIn(s, JOB, s)
+        # simple loop §1: the job never builds or sends a package
+        for s in ("### `build`", "### `deliver`", "post_package", "build_quarterly_package",  # removed-name: asserted absent
+                  "stage_for_delivery"):
+            self.assertNotIn(s, JOB, s)
         self.assertNotIn("job_report", JOB)
         self.assertNotIn("asking for work and relaying it", JOB.lower())
 

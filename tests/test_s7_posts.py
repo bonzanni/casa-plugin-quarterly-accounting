@@ -65,7 +65,7 @@ class Posts(StoreCase):
         import alerts, db, views
         with db.tx(self.conn):
             for i in range(40):
-                alerts.raise_package(self.conn, "package-stopped", f"t:{i}",
+                alerts.raise_package(self.conn, "package-not-sent", f"t:{i}",
                                      quarter="2026-Q3", reason="x" * 250, pass_id="")
         said = []
         for n in range(12):
@@ -91,7 +91,7 @@ class Posts(StoreCase):
         """§6.1: the claim recovers a stalled staged send as uncertain; its notice is in the
         run's one message (Task 10: alert lines join it, bound by scope['alerts'])."""
         import json
-        self.stage_stalled_package()
+        self.staged_package(lapsed=True)
         units = self.drive(A, deliver=True)
         (msg,) = [u for u in units if u["unit"] in ("view", "post")]
         rid = msg.get("render_id") or msg["render_ids"][0]
@@ -108,7 +108,7 @@ class Posts(StoreCase):
         composed again."""
         import alerts, db, views
         with db.tx(self.conn):
-            alerts.raise_package(self.conn, "package-stopped", "t:1", quarter="2026-Q3",
+            alerts.raise_package(self.conn, "package-not-sent", "t:1", quarter="2026-Q3",
                                  reason="x", pass_id="")
             first = alerts.pending_in_tx(self.conn)["render_id"]
             self.assertEqual(alerts.pending_in_tx(self.conn)["render_id"], first)   # reused
@@ -117,20 +117,6 @@ class Posts(StoreCase):
             again = alerts.pending_in_tx(self.conn)
         self.assertNotEqual(again["render_id"], first)
         self.assertLessEqual(views.utf16_len(again["text"]), views.BODY_LIMIT)
-
-    def test_the_accounts_question_is_handed_out_once_a_run(self):
-        """§11: an unbound store whose bank lists two company accounts."""
-        import db, job
-        with db.tx(self.conn):
-            self.conn.execute("INSERT OR REPLACE INTO probes(kind, ok, data_json, observed_at)"
-                              " VALUES ('bank_accounts', 1, ?, ?)", (json.dumps({"accounts": [
-                                  {"account_id": "acc-1", "category": "company"},
-                                  {"account_id": "acc-2", "category": "company"}]}),
-                                  db.now()))
-            self.assertTrue(job._accounts_owed(self.conn, A))
-            job._offer(self.conn, "accounts", A)
-            self.assertFalse(job._accounts_owed(self.conn, A))
-            self.assertTrue(job._accounts_owed(self.conn, B))
 
     def test_post_results_refuses_a_malformed_list_and_an_unknown_id(self):
         import db, job, posting

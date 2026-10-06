@@ -17,16 +17,14 @@ class SendItAgainOnThePackage(StoreCase):
     label line, then the body (the note, as displayed) or the caption (plain)."""
 
     def _send_last(self, outcome):
-        """A send-last of the delivered package, posted, settled `outcome`; its note (on
-        `delivered`) posted and marked. Returns (the file's caption, the note's render id)."""
-        import delivery, posting, views
+        """A send-last of the delivered package, posted, settled `outcome`. Returns the
+        file's caption (simple loop §1: no package note follows the file)."""
+        import delivery, posting
         st = delivery.stage_for_delivery(self.conn, last_built=True)
         with FakeBroker() as b:
             posting.post_package(self.conn, st["delivery_id"])
-        out = delivery.record_delivery(self.conn, delivery_id=st["delivery_id"], outcome=outcome)
-        if out.get("note_render_id"):
-            views.mark_rendering_delivered(self.conn, out["note_render_id"])
-        return b.deposits[0]["caption"], out.get("note_render_id")
+        delivery.record_delivery(self.conn, delivery_id=st["delivery_id"], outcome=outcome)
+        return b.deposits[0]["caption"]
 
     def deliveries(self):
         return self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]
@@ -42,7 +40,7 @@ class SendItAgainOnThePackage(StoreCase):
     def test_a_quote_of_the_file_after_delivered_says_it_did_arrive(self):
         import db
         self.sent_package()
-        cap, _ = self._send_last("delivered")
+        cap = self._send_last("delivered")
         n = self.deliveries()
         with self.assertRaises(db.Refusal) as cm:
             self.resend("send it again", LABEL + "\n" + cap)
@@ -71,7 +69,7 @@ class SendItAgainOnThePackage(StoreCase):
         self.assertIsNotNone(r["posted_seq"])
         # simple loop §1: the caption is the whole message — no package note follows
         self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE"
-                                           " kind='package-note'").fetchone()[0], 0)
+                                           " kind='package-note'").fetchone()[0], 0)  # removed-name: asserted absent
 
 
 class PoliteDirectives(StoreCase):

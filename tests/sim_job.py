@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 
 import binding
 import job
@@ -34,7 +35,24 @@ import ledger
 import passes
 import version
 
-from tests import bankfeed, sim
+from tests import bankfeed
+
+
+def ledger_state(listing: str) -> dict:
+    """The ledger probe's data from ONE list_backups answer (spec: generation,
+    registrations and instance are captured together, under bank-feed's locks),
+    each value read by its label — bank-feed may prepend sentences."""
+    gen = re.search(r"^Restore generation: (\d+)$", listing, re.M)
+    inst = re.search(r"^Ledger instance: ([0-9a-f]{32})$", listing, re.M)
+    registered = {}
+    if "Registered workflows:" in listing:
+        block = listing.split("Registered workflows:", 1)[1].split("Restores:", 1)[0]
+        for line in block.splitlines():
+            m = re.match(r"\s+(\S+) -> (\S+)", line)
+            if m:
+                registered[m.group(1)] = m.group(2)
+    return {"generation": int(gen.group(1)) if gen else None, "registered": registered,
+            "instance": inst.group(1) if inst else None}
 
 MAX_UNITS = 600         # a cursor that never finishes is a failure, never a hang
 
@@ -83,13 +101,19 @@ class Gmail:
 class JobDriver:
     DATES = ("2026-07-05", "2026-08-05", "2026-09-05")
 
-    def __init__(self, test, payments=2):
+    def __init__(self, test, payments=2, bf=None):
+        """`bf`: a bank-feed the test made and fills itself (no payments are added); else
+        a JobLedger of the driver's own with `payments` payments."""
         self.test, self.conn = test, test.conn
-        n = getattr(test, "_job_ledgers", 0) + 1
-        test._job_ledgers = n
-        self.bankfeed = self.bf = JobLedger(test.tmp / f"bankfeed-job{n}")
-        test.addCleanup(self.bf.close)
-        self.bf.account()
+        if bf is None:
+            n = getattr(test, "_job_ledgers", 0) + 1
+            test._job_ledgers = n
+            bf = JobLedger(test.tmp / f"bankfeed-job{n}")
+            test.addCleanup(bf.close)
+            bf.account()
+        else:
+            payments = 0
+        self.bankfeed = self.bf = bf
         self.gmail = Gmail(test)
         self._sync_fail = None
         self._no_tools = False
@@ -97,6 +121,8 @@ class JobDriver:
         self.token = None
         self.calls = 0
         self.units = []
+        self.imports = []               # every import_ledger_export answer, in order
+        self.refusals = None            # a list: a unit's refusal is kept there, not raised
         self.deliver = True             # Casa's receipt arrives for every post
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
 
@@ -158,7 +184,14 @@ class JobDriver:
                     self.token = job.claim(self.conn, job_id)
                     self.calls = 1
                     continue
-                self.do(u, self.token)
+                if self.refusals is None:
+                    self.do(u, self.token)
+                    continue
+                import db
+                try:
+                    self.do(u, self.token)
+                except db.Refusal as exc:   # the model reads `refused:` and calls job_next
+                    self.refusals.append(str(exc))
         raise AssertionError(f"the cursor handed out {MAX_UNITS} units without finishing: "
                              f"{[x['unit'] for x in units[-20:]]}")
 
@@ -218,7 +251,7 @@ class JobDriver:
                                     "detail": detail, "acq": u["acq"]})
         self.calls += 1                                   # list_backups
         self._tool("record_probe", {"pass_token": token, "kind": "ledger", "ok": True,
-                                    "data": sim.ledger_state(bf.listing())})
+                                    "data": ledger_state(bf.listing())})
         self.calls += 1
         binding.check_setup(conn)
         return None
@@ -228,6 +261,7 @@ class JobDriver:
         self.calls += 2                                   # export_history, the import
         imp = ledger.import_ledger_export(conn, path=bf.export(), token=token,
                                           ledger_instance=bf.last_export_instance, acq=u["acq"])
+        self.imports.append(imp)
         for c in imp["erase_candidates"]:
             if self._bank("get_transaction", row_id=c["row_id"]).startswith("no transaction #"):
                 self._tool("record_not_found", {"pass_token": token, "pid": c["pid"],

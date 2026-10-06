@@ -7,7 +7,7 @@ erase candidates and the delivered-row bank check all work from it.
 An end is judged here on positive evidence only: `vanished` from the row's
 own state; an absent destination is only a CANDIDATE, confirmed per row by
 the specialist's get_transaction ("no transaction #N") through
-record_observation in the same pass (spec §Match records, "An ended lineage
+record_not_found in the same pass (spec §Match records, "An ended lineage
 is judged ended only on positive evidence"). A surviving row whose
 superseded_by names an absent id is a broken floor, never an end.
 
@@ -97,8 +97,8 @@ def _tags_of(r: dict) -> tuple:
 
 
 def end_lineage(conn, pid: int, how: str, snapshot_id=None) -> None:
-    cur = conn.execute("UPDATE projections SET ended=?, ended_at=?, ended_snapshot=?,"
-                       " readback_owed=0 WHERE pid=? AND ended IS NULL",
+    cur = conn.execute("UPDATE projections SET ended=?, ended_at=?, ended_snapshot=?"
+                       " WHERE pid=? AND ended IS NULL",
                        (how, db.now(), snapshot_id, pid))
     if cur.rowcount == 1:          # a lineage ends once; a second call records nothing
         lineage.add_residue(conn, pid, "ended", how)
@@ -115,20 +115,6 @@ def merge(conn, survivor: int, loser: int) -> None:
                      " last_known_kind=coalesce(?, last_known_kind) WHERE pid=?",
                      (lo["class_tags_json"], lo["class_observed_at"],
                       lo["class_observed_snapshot"], lo["last_known_kind"], survivor))
-    # the loser's handed-out note writes now target the survivor's row, and none carries
-    # the survivor's note text (note_seq is store-unique): they are "other" issues (#14)
-    others = [t for t in (s["note_other_issued_at"], lo["note_issued_at"],
-                          lo["note_other_issued_at"]) if t is not None]
-    if others:
-        conn.execute("UPDATE projections SET note_other_issued_at=? WHERE pid=?",
-                     (max(others), survivor))
-    # and so do their claims (INV-J11): a read under the loser's issuing claim must not
-    # confirm the survivor's note
-    gens = [g for g in (s["note_other_issued_gen"], lo["note_issued_gen"],
-                        lo["note_other_issued_gen"]) if g is not None]
-    if gens:
-        conn.execute("UPDATE projections SET note_other_issued_gen=? WHERE pid=?",
-                     (max(gens), survivor))
     if lo["search_state"] == "accepted-missing":
         conn.execute("UPDATE projections SET search_state='accepted-missing' WHERE pid=?",
                      (survivor,))
@@ -318,7 +304,7 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         max_id = max((r["row_id"] for r in rows), default=0)
         # The identity checks come BEFORE any write in this transaction: each one
         # proves the ledger changed under this pass, so it poisons the pass's bank
-        # writes (as record_observation does). poison ROLLS BACK this transaction,
+        # writes. poison ROLLS BACK this transaction,
         # commits the verdict in its own, and re-opens BEGIN IMMEDIATE so the
         # enclosing tx() unwinds cleanly on the Refusal raised right after.
         probe = conn.execute("SELECT data_json FROM probes WHERE kind='ledger'").fetchone()
@@ -369,11 +355,10 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
                         and sync["pass_id"] == cur_pass["pass_id"]
                         else (prev["bank_through"] if prev else None))
         sid = conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
-                           " bank_through, job_id, read_seq, acq, export_ref)"
-                           " VALUES (?,?,?,?,?,?,?,?,?)",
+                           " bank_through, job_id, acq, export_ref)"
+                           " VALUES (?,?,?,?,?,?,?,?)",
                            (cur_pass["pass_id"], db.now(), len(mine), max_id, bank_through,
                             cur_pass["holder_job"] if job_pass else None,
-                            cur_pass["read_seq"] if job_pass else None,
                             acq if job_pass else None,
                             export_ref if job_pass else None)).lastrowid
         conn.execute("DELETE FROM bank_rows")
@@ -462,8 +447,6 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         # 4. the export's tags are this snapshot's classification observation (issue #1):
         # every live lineage whose row is in it is observed at this import; one whose row
         # is absent (an erase candidate) stays unobserved, so it is not fresh
-        import sweep
-        stamped = []
         for pid in lineage.live_pids(conn):
             p = lineage.projection(conn, pid)
             r = by_id.get(p["dest_row_id"])
@@ -474,25 +457,14 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
                          " export_tag_revision=? WHERE pid=?",
                          (json.dumps([t for t in r["tags"] if t not in R.OWNED]), db.now(),
                           sid, json.dumps(r["tags"]), db.now(), r["tag_revision"], pid))
-            stamped.append((pid, r))
 
         # 5. every live lineage re-reduced against this snapshot (fingerprints, eligibility,
         # the classification just observed)
         lineage.settle_all(conn)
-        # 6. a stamped lineage that owes bank-feed no write is settled for this cycle; one
-        # that owes a tag or note write, or whose note is not known visible, is due a read
-        epoch = db.epoch(conn)
-        for pid, r in stamped:
-            p = lineage.projection(conn, pid)
-            owed = sweep.owed_write(conn, pid, r["tags"],
-                                    sweep.note_confirmed(p, r["tag_revision"], epoch=epoch,
-                                                      conn=conn))
-            conn.execute("UPDATE projections SET observed_revision=? WHERE pid=?",
-                         (p["revision"] if owed is None else None, pid))
         passes.remember_ledger(conn, cur_pass["pass_id"])   # identity proved above
         out["delivered_changes"] = check_delivered_bank_half(conn, by_id)
         out["delivered_changes"] += len(_kind_changes(conn, _latest_delivered(conn)))
-        # 7. an unsent first send staged under an earlier snapshot is revoked in this
+        # 6. an unsent first send staged under an earlier snapshot is revoked in this
         # same commit (round E5, Terra S1): the plugin cannot hold a lock across the
         # external send, so the import takes the send away instead. Its bytes are
         # withdrawn BEFORE the commit, under the custody lock (round E6): no moment has
@@ -530,8 +502,8 @@ def confirm_erased(conn, pid: int) -> dict:
         raise db.Refusal(f"row #{p['dest_row_id']} is in this pass's snapshot; it has not left "
                          "the ledger")
     if p["ended"]:
-        conn.execute("UPDATE projections SET class_observed_snapshot=?, observed_revision=?"
-                     " WHERE pid=?", (lineage.latest_import(conn), p["revision"], pid))
+        conn.execute("UPDATE projections SET class_observed_snapshot=? WHERE pid=?",
+                     (lineage.latest_import(conn), pid))
         return {"pid": pid, "ended": p["ended"], "status": p["status"]}
     end_lineage(conn, pid, "erased", cur["snapshot_id"])
     red = lineage.settle(conn, pid)

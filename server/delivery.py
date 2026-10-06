@@ -9,9 +9,7 @@ Staging reads bytes out of packages/ or documents/, so it holds the custody
 lock (db.custody_lock) from the read through the delivery-log row, taken
 BEFORE any transaction (lock order: custody, then SQLite). Every write into
 the delivery log checks the pass token: a stale pass is refused there too
-(spec §"Running the pass on demand"). A package built for a package request
-also needs that request's package_token, checked in the transaction that
-commits the write (a check before a lock wait is only an early refusal).
+(spec §"Running the pass on demand").
 
 Every delivery gets a staged path of its own, never reused: a Telegram copy is
 `qa-<16 hex>.<ext>`, drawn again on a collision and guarded by the UNIQUE
@@ -93,34 +91,12 @@ def _remove_staged(path: pathlib.Path) -> None:
         pass
 
 
-def request_of_package(conn, package_id):
-    """The package request that built this package, if any (the newest)."""
-    return conn.execute("SELECT * FROM package_requests WHERE package_id=? ORDER BY"
-                        " request_id DESC LIMIT 1", (package_id,)).fetchone()
-
-
-def _check_pass(conn, pass_token, package_token) -> None:
-    """#43: the pass fence of a package send. A request-bound send (pass `package_token`
-    only then) whose pass_token is its package_token skips passes.check_token: the job's
-    deliver unit runs after its package pass ended (S7 §6.1), and the claim gen it carries
-    as both tokens is fenced by passes.check_package_token (the newest claim's, the
-    request's own), which every caller runs in the same transaction. Any other send keeps
-    the pass fence, unchanged."""
-    if package_token is not None and pass_token is not None \
-            and int(pass_token) == int(package_token):
-        return
-    passes.check_token(conn, pass_token)
-
-
 def stage_for_delivery(conn, *, channel="telegram", package_id=None, doc_id=None,
-                       pass_token=None, package_token=None, resend=False, last_built=False,
-                       quarter=None) -> dict:
-    """Stage one package or one document. A package's FIRST send is request-bound: its
-    request must still own it (issue #15, D3) and hold the package_token, checked early
-    and again in the transaction that records the delivery; staging it twice returns
-    the same delivery. A resend ("send it again"), the last build asked for by name
-    (`last_built`, issue #15) and a single document are token-free. Telegram only
-    (S7 §6.2): email is refused with EMAIL_GONE."""
+                       pass_token=None, resend=False, last_built=False, quarter=None) -> dict:
+    """Stage one package or one document: a package's first send (it must carry the latest
+    import), a resend ("send it again"), the last build asked for by name (`last_built`,
+    issue #15) or a single document. Telegram only (S7 §6.2): email is refused with
+    EMAIL_GONE."""
     if channel == "email":
         raise db.Refusal(EMAIL_GONE)
     if channel != "telegram":
@@ -132,45 +108,20 @@ def stage_for_delivery(conn, *, channel="telegram", package_id=None, doc_id=None
         package_id = last_built_package(conn, quarter)
         passes.check_token(conn, pass_token)
         with db.custody_lock():
-            return _stage(conn, package_id, None, pass_token, None, None, as_built=True)
+            return _stage(conn, package_id, None, pass_token, as_built=True)
     if quarter is not None:
         raise db.Refusal("quarter goes with last_built")
     if (package_id is None) == (doc_id is None):
         raise db.Refusal("stage one package or one document")
     if conn.in_transaction:
         raise RuntimeError("stage_for_delivery takes the custody lock before its own transaction")
-    req = None if resend or package_id is None else request_of_package(conn, package_id)
-    _check_pass(conn, pass_token, package_token if req is not None else None)   # early only
+    passes.check_token(conn, pass_token)                     # early only
     if resend and package_id is not None:
         why = resend_refusal(conn, package_id)               # THE predicate, as offered
         if why is not None:
             raise db.Refusal(why)
-    if req is not None:
-        passes.check_package_token(conn, req["request_id"], package_token)
-    built_for = None if package_id is None else conn.execute(
-        "SELECT request_id FROM packages WHERE package_id=?", (package_id,)).fetchone()
-    if not resend and built_for is not None and built_for[0] is not None and (
-            req is None or req["request_id"] != built_for[0]
-            or req["state"] not in ("built", "staged")):
-        # issue #15 (D3): a package built for a request is first sent only through that
-        # request while it still owns it — never once the request went back to its check
-        raise db.Refusal("this package is no longer the one its request will send — the "
-                         "package you asked for follows its check")
-    if req is not None and req["state"] == "built":
-        import package as _package
-        if _package.stale_check(conn, req["request_id"], package_token):   # before an import
-            raise db.Refusal(_package.RECHECK)
-    try:
-        with db.custody_lock():
-            return _stage(conn, package_id, doc_id, pass_token,
-                          req["request_id"] if req is not None else None, package_token,
-                          resend)
-    except db.Refusal:
-        if req is not None and req["state"] == "built":
-            import package as _package
-            if _package.stale_check(conn, req["request_id"], package_token):   # meanwhile
-                raise db.Refusal(_package.RECHECK)
-        raise
+    with db.custody_lock():
+        return _stage(conn, package_id, doc_id, pass_token, resend)
 
 
 def last_built_package(conn, quarter=None) -> int:
@@ -188,12 +139,7 @@ def last_built_package(conn, quarter=None) -> int:
     return row[0]
 
 
-def _stage(conn, package_id, doc_id, pass_token, request_id, package_token,
-           resend=False, as_built=False) -> dict:
-    if request_id is not None:
-        again = _staged_again(conn, request_id, package_token, pass_token)
-        if again is not None:
-            return again
+def _stage(conn, package_id, doc_id, pass_token, resend=False, as_built=False) -> dict:
     if package_id is not None:
         pk = conn.execute("SELECT * FROM packages WHERE package_id=?", (package_id,)).fetchone()
         if pk is None:
@@ -218,9 +164,7 @@ def _stage(conn, package_id, doc_id, pass_token, request_id, package_token,
         # until the commit below, so any failure removes it before it can be sent
         try:
             with db.tx(conn):
-                _check_pass(conn, pass_token, package_token if request_id is not None else None)
-                if request_id is not None:
-                    passes.check_package_token(conn, request_id, package_token)
+                passes.check_token(conn, pass_token)
                 if package_id is not None and as_built:
                     # the exact file asked for by name, whatever was imported since
                     if conn.execute("SELECT 1 FROM deliveries WHERE package_id=? AND"
@@ -235,13 +179,10 @@ def _stage(conn, package_id, doc_id, pass_token, request_id, package_token,
                     _require_current_snapshot(conn, package_id)
                 did = conn.execute(
                     "INSERT INTO deliveries(package_id, doc_id, channel, staged_path,"
-                    " request_id, status, created_at, lease_at, as_built)"
-                    " VALUES (?,?,?,?,?, 'staged', ?, ?, ?)",
-                    (package_id, doc_id, "telegram", str(path), None, db.now(),
+                    " status, created_at, lease_at, as_built)"
+                    " VALUES (?,?,?,?, 'staged', ?, ?, ?)",
+                    (package_id, doc_id, "telegram", str(path), db.now(),
                      db.now(), int(as_built))).lastrowid
-                if request_id is not None:
-                    conn.execute("UPDATE package_requests SET delivery_id=?, state='staged',"
-                                 " updated_at=? WHERE request_id=?", (did, db.now(), request_id))
         except sqlite3.IntegrityError as exc:
             _remove_staged(path)
             if "staged_path" not in str(exc):
@@ -254,25 +195,6 @@ def _stage(conn, package_id, doc_id, pass_token, request_id, package_token,
                 "filename": name, "note": note}
     raise db.Refusal("could not find a free name to stage the file under — nothing was "
                      "staged; ask again")
-
-
-def _staged_again(conn, request_id, package_token, pass_token):
-    """Staging a request that already staged its send returns that send (same
-    delivery, path and request id): at most one staged send per request."""
-    with db.tx(conn):
-        _check_pass(conn, pass_token, package_token)
-        req = passes.check_package_token(conn, request_id, package_token)
-        if req["state"] != "staged":
-            return None
-        d = conn.execute("SELECT d.*, p.filename FROM deliveries d JOIN packages p ON"
-                         " p.package_id=d.package_id WHERE d.delivery_id=?",
-                         (req["delivery_id"],)).fetchone()
-        conn.execute("UPDATE deliveries SET lease_at=? WHERE delivery_id=?",
-                     (db.now(), req["delivery_id"]))
-    return {"delivery_id": d["delivery_id"], "channel": d["channel"],
-            "path": d["staged_path"], "filename": d["filename"], "already": True,
-            "note": "already staged: post this one with post_package(delivery_id), then "
-                    "record_delivery"}
 
 
 def _require_current_snapshot(conn, package_id) -> None:
@@ -300,8 +222,7 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
     is revoked — marked failed with revoked_at, so record_delivery refuses it.
     (A send that already failed is not revoked: resend_refusal simply offers no
     resend of it once the bank changed.)
-    Its package request, if any, becomes `revoked`, with its package notice
-    raised in the same transaction. Returns the revoked rows; their staged bytes
+    Its package notice is raised in the same transaction. Returns the revoked rows; their staged bytes
     are withdrawn before the same commit (withdraw_revoked). A resend of a file
     already sent is never revoked."""
     import alerts
@@ -319,18 +240,10 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
     for r in rows:
         conn.execute("UPDATE deliveries SET status='failed', settled_at=coalesce(settled_at, ?),"
                      " revoked_at=? WHERE delivery_id=?", (now, now, r["delivery_id"]))
-        req = conn.execute("SELECT request_id FROM package_requests WHERE delivery_id=? AND"
-                           " state='staged'", (r["delivery_id"],)).fetchone()
         close_offers(conn, r["package_id"])
-        if req is not None:
-            # issue #15 (D2): the operator asked for this package, and it still follows —
-            # its request goes back to `queued`, its check runs again on the new import
-            passes.requeue(conn, req[0])
-            continue
         if r["delivery_id"] > latest.get(r["package_id"], {"delivery_id": 0})["delivery_id"]:
             latest[r["package_id"]] = r
-    # every revoked send is told, linked to a request or not (a resend has none): once
-    # per package, keyed on its latest revoked delivery
+    # every revoked send is told: once per package, keyed on its latest revoked delivery
     for r in latest.values():
         alerts.raise_package(conn, "package-revoked", f"delivery:{r['delivery_id']}:revoked",
                              quarter=r["quarter"], package_id=r["package_id"])
@@ -373,14 +286,12 @@ def withdraw_revoked(conn) -> None:
 
 def stalled_sends(conn, lease_s: float) -> list:
     """Staged package sends nobody settled within their lease (a turn that died
-    between staging and record_delivery) — keyed on the DELIVERY, whether or not a
-    package request is linked (a resend has none)."""
-    import steps
+    between staging and record_delivery) — keyed on the DELIVERY."""
     return [r for r in conn.execute(
         "SELECT d.*, p.quarter FROM deliveries d JOIN packages p ON p.package_id=d.package_id"
         " WHERE d.status='staged' AND d.revoked_at IS NULL AND d.withdrawn_at IS NULL"
         " ORDER BY d.delivery_id").fetchall()
-        if steps._age(r["lease_at"] or r["created_at"]) >= lease_s]
+        if passes._age_s(r["lease_at"] or r["created_at"]) >= lease_s]
 
 
 NEVER_POSTED = ("this package was never posted, so it cannot have arrived — nothing was "
@@ -446,67 +357,41 @@ def recover_staged(conn, d):
                                 quarter=quarter, package_id=d["package_id"])
 
 
-def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=None,
-                    package_token=None) -> dict:
-    """Settle a send. A request-bound delivery needs its request's package_token,
-    checked in this one transaction, which also closes the request. A package send
-    recorded uncertain or failed raises its package notice here and returns the
-    rendering that says it as `speak` — always including that notice, and the
-    package in its scope's `offers`, so "send it again" binds to it (D3). A package
-    recorded delivered returns the caption's remaining lines as `note_render_id`
-    (S7 §6.1: the file's own caption is one line). A request-bound send earns
-    req:pkg:<id>:delivered for the job, whatever its outcome."""
+def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=None) -> dict:
+    """Settle a send. A package send recorded uncertain or failed raises its package notice
+    here and returns the rendering that says it as `speak` — always including that notice,
+    and the package in its scope's `offers`, so "send it again" binds to it (D3)."""
     import alerts
     if outcome not in ("delivered", "uncertain", "failed"):
         raise db.Refusal("outcome is 'delivered', 'uncertain' or 'failed'")
     with db.tx(conn):
-        note = None
         d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?", (delivery_id,)).fetchone()
-        bound = conn.execute("SELECT 1 FROM package_requests WHERE delivery_id=?",
-                             (delivery_id,)).fetchone() is not None
-        _check_pass(conn, pass_token, package_token if bound else None)
+        passes.check_token(conn, pass_token)
         if d is None:
             raise db.Refusal(f"there is no delivery #{delivery_id}")
         if d["revoked_at"] is not None:
-            raise db.Refusal("the bank was re-read before this was sent — nothing was recorded "
-                             "(a package you asked for follows its check)")
+            raise db.Refusal("the bank was re-read before this was sent — nothing was recorded")
         if d["status"] == "delivered":
             return {"delivery_id": delivery_id, "status": "delivered", "already": True}
         if (outcome == "delivered" and d["package_id"] is not None
                 and d["channel"] == "telegram" and d["posted_at"] is None):
-            # r3 #2 (Terra S1): a package never posted did not arrive — its ask stays open
+            # r3 #2 (Terra S1): a package never posted did not arrive
             raise db.Refusal(NEVER_POSTED)
-        req = conn.execute("SELECT * FROM package_requests WHERE delivery_id=?",
-                           (delivery_id,)).fetchone()
         # Evidence wins over the recovery's guess: a send recovery settled `uncertain`
         # (withdrawn) that is reported delivered was delivered — Casa had taken the
-        # bytes. Only that upgrade is accepted for a recovered send, by its evidence
-        # alone (the recovery rotated the request's token).
+        # bytes. Only that upgrade is accepted for a recovered send, by its evidence alone.
         upgrade = d["withdrawn_at"] is not None and outcome == "delivered" \
             and d["status"] == "uncertain"
-        if req is not None and not upgrade:
-            passes.check_package_token(conn, req["request_id"], package_token)
         if d["withdrawn_at"] is not None and not upgrade:
             raise db.Refusal("this send was taken back before it was recorded — nothing was "
                              "written")
         conn.execute("UPDATE deliveries SET status=?, message_id=?, settled_at=? WHERE"
                      " delivery_id=?", (outcome, message_id, db.now(), delivery_id))
-        if req is not None:
-            conn.execute("UPDATE package_requests SET state=?, updated_at=? WHERE request_id=?",
-                         (outcome, db.now(), req["request_id"]))
-            if package_token is not None:
-                import job
-                job.credit(conn, package_token, req["pass_id"],
-                           f"req:pkg:{req['request_id']}:delivered")
-
+        changed = []
         if outcome == "delivered" and d["package_id"] is not None:
             changed = settle_delivered(conn, d)
-            note = _package_note(conn, d)
-        out = {"delivery_id": delivery_id, "status": outcome,
-               "more": passes.queued_waiting(conn)}    # issue #15: continue_pass next
-        if note:
-            out["note_render_id"] = note
-        if outcome == "delivered" and d["package_id"] is not None and changed:
+        out = {"delivery_id": delivery_id, "status": outcome}
+        if changed:
             out["speak"] = alerts.pending_in_tx(conn, must=changed)
         if outcome in ("uncertain", "failed") and d["package_id"] is not None \
                 and arrived(conn, d["package_id"]) is None:
@@ -540,24 +425,6 @@ def settle_delivered(conn, d) -> list:
     conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
     close_offers(conn, d["package_id"])
     return ledger.check_delivered_package(conn, d["package_id"])
-
-
-def _package_note(conn, d):
-    """§6.1: the caption's lines after the first, as a rendering the next post carries
-    (the file's own caption is one line). None when there are none. Tagged (binding V2)
-    and offering its package (#44): a quote of it binds, and "send it again" on it reaches
-    resend_target, which answers a package that arrived with its own reason."""
-    pk = conn.execute("SELECT caption FROM packages WHERE package_id=?",
-                      (d["package_id"],)).fetchone()
-    rest = [x for x in pk["caption"].split("\n")[1:] if x.strip()]
-    if not rest:
-        return None
-    rid = f"r{db.next_seq(conn)}"
-    conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
-                 " membership_json) VALUES (?, 'package-note', ?, ?, ?, '[]')",
-                 (rid, db.canonical({"delivery": d["delivery_id"], "offers": [d["package_id"]]}),
-                  db.now(), "\n".join(views.fit_lines(rest, tag=views.tag_for(rid))[0])))
-    return rid
 
 
 def offer_lines(filename: str, status: str = "uncertain") -> list:

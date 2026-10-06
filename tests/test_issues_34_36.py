@@ -247,15 +247,6 @@ class TestARejectionSticks(Base):
             self.conn, self.pid, documents._doc(self.conn, doc),
             R.facts_of(self.snapshot(self.pid)), "invoice", None))
 
-    def test_a_blocked_document_makes_no_payment_judge_due(self):
-        doc = self.doc()
-        self.assertTrue(work.describe(self.conn, self.pid)["fresh"])
-        self.assertIn(self.pid, work.judge_due_state(self.conn))      # it fits: due
-        self.reject(self.machine(doc)["match_id"])
-        self.assertNotIn(self.pid, work.judge_due_state(self.conn))   # rejected: not due
-        self.doc(document_number="OTHER")                              # another that fits
-        self.assertIn(self.pid, work.judge_due_state(self.conn))
-
 
 class TestZeroRows(StoreCase):
     def test_a_zero_amount_wants_its_document_optionally(self):
@@ -314,14 +305,6 @@ class TestTheBanksRate(Base):
         small = {"rate": "1", "unit": "EUR"}                          # 30 -> 30
         self.assertIsNone(fx.screen(small, 30, "EUR", 32, "USD"))
         self.assertIsNotNone(fx.screen(small, 30, "EUR", 33, "USD"))
-
-    def test_judge_due_follows_the_rate(self):
-        # C1 (Astra: mutant survived): a document the rate rules out makes nothing due
-        self.fx_row()
-        self.doc(amount_minor=718, currency="USD", document_date="2026-07-02")
-        self.assertNotIn(self.pid, work.judge_due_state(self.conn))
-        self.doc(amount_minor=1105, currency="USD", document_date="2026-07-02")
-        self.assertIn(self.pid, work.judge_due_state(self.conn))
 
     def test_the_pair_is_kept_only_valid(self):
         self.assertEqual(fx.pair("1.16", "EUR"), ("1.16", "EUR"))

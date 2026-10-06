@@ -204,7 +204,6 @@ def build(st, sections: dict) -> dict:
                                      row_snapshot=StoreCase.snapshot(st, pid), token=token,
                                      labels=(section,))
             else:
-                st.handed(pid)
                 work.record_search(st.conn, pid=pid, token=token, queries=["x"])
             out.setdefault(section, []).append(pid)
     for i, payee in enumerate(sections.get("missing", [])[:3]):
@@ -427,16 +426,17 @@ def _render(st, kind, text) -> str:
 
 
 def gen_post_results(sh, st, b):
-    """Item 5 (the package note is posted in gen_post_package, where its send makes it):
-    three BODY_LIMIT renderings of hostile lines in one post (package notices whose reasons
-    are hostile, composed by alerts.pending_in_tx as the job's cursor composes them, each
-    leaving out the ones before); two legacy 4,096-unit renderings in one post, plain and
-    hostile; the job-left line."""
-    import alerts, db, job, views
+    """Item 5: three BODY_LIMIT renderings of hostile lines in one post (package notices
+    whose reasons are hostile, composed by alerts.pending_in_tx as the run's post composes
+    them, each leaving out the ones before); two legacy 4,096-unit renderings in one post,
+    plain and hostile."""
+    import alerts, db, views
     with db.tx(st.conn):
         for i in range(ALERTS):
-            alerts.raise_package(st.conn, "package-stopped", f"gate:{i}", quarter=QUARTER,
-                                 reason=hostile(i, "_"), pass_id="")
+            # reasons kept to 150 characters: each rendering then fills to within the 400
+            # units the fullness check below allows (one escaped hostile notice is longer)
+            alerts.raise_package(st.conn, "package-not-sent", f"gate:{i}", quarter=QUARTER,
+                                 reason=hostile(i, "_")[:150], pass_id="")
     rids, skip = [], set()
     for _ in range(3):
         with db.tx(st.conn):
@@ -457,43 +457,34 @@ def gen_post_results(sh, st, b):
                        display=display)
         if display is True and body["value"] != views.deposit_safe("\n\n".join(texts)):
             raise AssertionError(f"{case}: a legacy text is posted as itself, cleaned")
-    with db.tx(st.conn):
-        left = job._left_render(st.conn, "aaaaaaaa-1")
-    body = sh.call(st, b, "results:job-left", "post_results", {"render_ids": [left]})
-    if body["value"] != job.LEFT_WAITING:
-        raise AssertionError("results: the job-left line is not posted as itself")
 
 
-JOB = "aaaaaaaa-1"
-# the stored caption's lines, as the package build composed them, made hostile: a first
-# line (the file's own caption: escaped plain, clipped) carrying every marker, a link, a
-# control character and 2,000+ characters; then a 2,000-character count line, which with
-# the build's own further lines becomes the package note (§6.1)
+# the stored caption's first line, made hostile: every marker, a link, a control character
+# and 2,000+ characters (the file's own caption: escaped plain, clipped)
 CAPTION_FIRST = ("Accounting Q3 2026 · *Acme* _x_ `y` a<b>c www.evil.example ACME\x01Corp "
                  + "Z" * 2000)
-COUNT_LINE = _units("12 still missing, 3 not yet classified — listed in notes.md. ", 2000)
 
 
 def gen_post_package(sh, st, b):
-    """Item 6: the package posted as a first send (the job's deliver unit, request-bound),
-    a resend ("send it again" after an uncertain first send) and a send-last ("send me the
-    last package you built"), with a hostile caption line; the resend's delivery makes
-    the package note, posted (item 5)."""
-    import db, delivery, views
-    import asks
+    """Item 6: the package as a file. get_package's send (simple loop §1, Task 9: built now,
+    posted, the file the receipt — its own shape comes with Task 17), then a first send
+    whose receipt was withheld (uncertain), its offer posted, its resend ("send it again")
+    and a send-last ("send me the last package you built"), each posted with a hostile
+    caption line."""
+    import db, delivery, package, posting, views
     st.bind(label=ACCOUNT_LABEL)                    # the zip's name: the label's slug
-    asks.request_package(st.conn, QUARTER)
-    did, tok = st.drive_to_staged(JOB)
-    pk = st.conn.execute("SELECT p.package_id, p.caption, p.filename FROM packages p JOIN"
-                         " deliveries d ON d.package_id=p.package_id WHERE"
-                         " d.delivery_id=?", (did,)).fetchone()
-    rest = pk["caption"].split("\n")[1:]
+    st.import_again()                               # get_package builds from a checked store
+    n0 = len(b.deposits)
+    got = posting.get_package(st.conn, QUARTER)
+    if len(b.deposits) != n0 + 1 or b.deposits[-1]["filename"] != got["filename"]:
+        raise AssertionError("package: get_package did not post its file under its name")
+    pk = package.build_quarterly_package(st.conn, QUARTER)
     with db.tx(st.conn):
         st.conn.execute("UPDATE packages SET caption=? WHERE package_id=?",
-                        ("\n".join([CAPTION_FIRST, COUNT_LINE] + rest), pk["package_id"]))
+                        (CAPTION_FIRST, pk["package_id"]))
 
-    def post(case, args):
-        body = sh.call(st, b, case, "post_package", args)
+    def post(case, did):
+        body = sh.call(st, b, case, "post_package", {"delivery_id": did})
         if body.get("filename") != pk["filename"] or body.get("kind") != "zip":
             raise AssertionError(f"{case}: posted as {body.get('filename')!r}, not the "
                                  f"package's name {pk['filename']!r}")
@@ -501,24 +492,20 @@ def gen_post_package(sh, st, b):
             raise AssertionError(f"{case}: the caption is not one clipped line")
         return body
 
-    post("package:first", {"delivery_id": did, "package_token": tok})
-    out = delivery.record_delivery(st.conn, delivery_id=did, outcome="uncertain",
-                                   package_token=tok)
+    did = delivery.stage_for_delivery(st.conn, package_id=pk["package_id"])["delivery_id"]
+    post("package:first", did)
+    out = delivery.record_delivery(st.conn, delivery_id=did, outcome="uncertain")
+    # the offer, posted as the desk posts record_delivery's `speak` — quotable (#44: a
+    # swipe-reply "send it again" on it binds the package it offers)
+    sh.call(st, b, "results:package-offer", "post_results",
+            {"render_ids": [out["speak"]["render_id"]]}, bind=True)
     views.mark_rendering_delivered(st.conn, out["speak"]["render_id"])   # the offer is seen
     s = delivery.stage_for_delivery(st.conn, resend=True,
                                     package_id=delivery.resend_target(st.conn))
-    post("package:resend", {"delivery_id": s["delivery_id"]})
-    out = delivery.record_delivery(st.conn, delivery_id=s["delivery_id"], outcome="delivered")
-    note = out.get("note_render_id")
-    if note is None:
-        raise AssertionError("package: the delivered send made no package note")
-    body = sh.call(st, b, "results:package-note", "post_results", {"render_ids": [note]},
-                   bind=True)
-    if COUNT_LINE not in views.unesc(body["value"]):
-        raise AssertionError("package: the note does not carry the count line")
-    views.mark_rendering_delivered(st.conn, note)       # Casa's receipt: the note is seen
+    post("package:resend", s["delivery_id"])
+    delivery.record_delivery(st.conn, delivery_id=s["delivery_id"], outcome="delivered")
     s = delivery.stage_for_delivery(st.conn, last_built=True)
-    post("package:last", {"delivery_id": s["delivery_id"]})
+    post("package:last", s["delivery_id"])
 
 
 SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_single,

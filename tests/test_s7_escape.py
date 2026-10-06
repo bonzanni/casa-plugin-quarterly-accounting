@@ -49,7 +49,7 @@ class Escape(StoreCase):
         """Every fixed template, composed with empty fields, is its own display text:
         nothing in it is a dialect marker (the Casa gate renders them for real)."""
         import alerts, asks, job, views
-        for t in (asks.STOPPED, asks.NOT_FOUND, asks.NOT_AN_INVOICE, asks.NEXT_CHECK,
+        for t in (alerts.STOPPED, job.RUN_FINISHED, *asks.LINES.values(),
                   views.MORE_LINE, views.FIT_CLOSING, *alerts.PACKAGE.values()):
             self.assertEqual(views.unesc(t), t, t)
             # every dialect marker is escaped, or absent (unesc alone passes "*bold*")

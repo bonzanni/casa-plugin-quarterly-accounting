@@ -12,8 +12,8 @@ class Acquisition(StoreCase):
         super().setUp()
         import job
         self.bind()
-        self.tok = job.claim(self.conn, A)
-        self.pid = self.start_job_pass(self.tok)
+        self.tok = job.claim(self.conn, A)          # the run's pass starts with its claim
+        self.pid = self.conn.execute("SELECT pass_id FROM pass_marker").fetchone()[0]
 
     def probes(self, acq, sync_ok=True):
         import passes
@@ -34,14 +34,14 @@ class Acquisition(StoreCase):
         returns its path, as bank-feed's export_history does."""
         return self.export_csv(rows)
 
-    def handed(self):
-        import db, job
+    def acquire(self):
+        import db, loop
         with db.tx(self.conn):
-            return job.hand_acquisition(self.conn, self.tok, self.pid)
+            return loop.hand_acquisition(self.conn, self.tok, self.pid)
 
     def test_import_needs_its_acquisitions_sync_under_the_same_claim(self):
         import db, ledger
-        acq = self.handed()
+        acq = self.acquire()
         path = self.export([{"row_id": 1}])
         with self.assertRaises(db.Refusal):            # no bank_sync for this acq yet
             ledger.import_ledger_export(self.conn, path=path, token=self.tok,
@@ -53,12 +53,12 @@ class Acquisition(StoreCase):
 
     def test_an_export_is_imported_once(self):
         import db, ledger
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         path = self.export([{"row_id": 1}])
         ledger.import_ledger_export(self.conn, path=path, token=self.tok,
                                     ledger_instance=self.LEDGER, acq=acq)
-        acq2 = self.handed()
+        acq2 = self.acquire()
         self.probes(acq2)
         with self.assertRaises(db.Refusal):
             ledger.import_ledger_export(self.conn, path=path, token=self.tok,
@@ -66,9 +66,9 @@ class Acquisition(StoreCase):
 
     def test_a_superseded_acquisition_is_refused(self):
         import db, ledger
-        acq1 = self.handed()
+        acq1 = self.acquire()
         self.probes(acq1)
-        acq2 = self.handed()                            # re-handed in the same claim
+        acq2 = self.acquire()                            # re-handed in the same claim
         path = self.export([{"row_id": 1}])
         with self.assertRaises(db.Refusal):
             ledger.import_ledger_export(self.conn, path=path, token=self.tok,
@@ -76,7 +76,7 @@ class Acquisition(StoreCase):
 
     def test_another_claims_acquisition_is_refused(self):
         import db, job, ledger
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         self.tok = job.claim(self.conn, A)              # the turn ended; a new turn
         path = self.export([{"row_id": 1}])
@@ -92,13 +92,13 @@ class Acquisition(StoreCase):
         return str(cm.exception)
 
     def test_a_sync_not_naming_this_acquisition_is_refused(self):
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(None)                               # a sync, but not this read's
         self.assertIn("record this bank read's sync", self.refusal(acq))
 
     def test_a_sync_recorded_under_another_claim_is_refused(self):
         import db
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         with db.tx(self.conn):                          # unreachable through record_probe
             self.conn.execute("UPDATE probes SET gen=gen-1 WHERE kind='bank_sync'")
@@ -108,20 +108,20 @@ class Acquisition(StoreCase):
     # required a successful sync); the identity checks are unchanged
     def test_a_failed_sync_of_this_acquisition_under_this_claim_binds_the_import(self):
         import ledger
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq, sync_ok=False)
         out = ledger.import_ledger_export(self.conn, path=self.export([{"row_id": 1}]),
                                           token=self.tok, ledger_instance=self.LEDGER, acq=acq)
         self.assertEqual(out["rows"], 1)
 
     def test_a_failed_sync_of_another_acquisition_is_refused(self):
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq - 1, sync_ok=False)              # a failed sync, not this read's
         self.assertIn("record this bank read's sync", self.refusal(acq))
 
     def test_a_failed_sync_recorded_under_another_claim_is_refused(self):
         import db
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq, sync_ok=False)
         with db.tx(self.conn):                          # unreachable through record_probe
             self.conn.execute("UPDATE probes SET gen=gen-1 WHERE kind='bank_sync'")
@@ -129,42 +129,37 @@ class Acquisition(StoreCase):
 
     def test_an_earlier_turns_acquisition_is_refused_as_such(self):
         import job
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         self.tok = job.claim(self.conn, A)
         self.assertIn("earlier turn", self.refusal(acq))
 
     def test_an_import_without_acq_is_refused_in_a_job_pass(self):
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         self.assertIn("call job_next", self.refusal(None))
 
     def test_a_replayed_export_is_refused_by_name(self):
         import ledger
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         path = self.export([{"row_id": 1}])
         ledger.import_ledger_export(self.conn, path=path, token=self.tok,
                                     ledger_instance=self.LEDGER, acq=acq)
-        acq2 = self.handed()
+        acq2 = self.acquire()
         self.probes(acq2)
         self.assertIn("imported already", self.refusal(acq2, path))
 
     def test_the_import_records_its_read(self):
         import ledger, os, pathlib
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         path = self.export([{"row_id": 1}])
         sid = ledger.import_ledger_export(self.conn, path=path, token=self.tok,
                                           ledger_instance=self.LEDGER, acq=acq)["snapshot"]
         s = self.conn.execute("SELECT * FROM snapshots WHERE snapshot_id=?", (sid,)).fetchone()
-        p = self.conn.execute("SELECT read_seq FROM passes WHERE pass_id=?",
-                              (self.pid,)).fetchone()
-        self.assertEqual((s["job_id"], s["read_seq"], s["acq"], s["export_ref"]),
-                         (A, p["read_seq"], acq,
-                          pathlib.Path(os.path.realpath(path)).parent.name))
-        self.assertIsNotNone(s["read_seq"])
-        self.assertIsNone(s["swept_at"])
+        self.assertEqual((s["job_id"], s["pass_id"], s["acq"], s["export_ref"]),
+                         (A, self.pid, acq, pathlib.Path(os.path.realpath(path)).parent.name))
 
 
 class ProbeArguments(StoreCase):
@@ -174,8 +169,7 @@ class ProbeArguments(StoreCase):
         super().setUp()
         import job
         self.bind()
-        self.tok = job.claim(self.conn, A)
-        self.start_job_pass(self.tok)
+        self.tok = job.claim(self.conn, A)          # the run's pass starts with its claim
 
     def probe(self, kind):
         import json

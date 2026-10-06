@@ -1,7 +1,7 @@
 # tests/test_s7_packages.py
-"""S7 §6: the job builds and posts the package itself; the file keeps its package name
-through Casa's filename; the caption is one line and the rest a rendering; first sends at
-most once; resend and send-last from the desk; no email."""
+"""S7 §6: the package is posted as a file (simple loop §1: never by the job); the file keeps
+its package name through Casa's filename; the caption is one line; first sends at most
+once; resend and send-last from the desk; no email."""
 import json
 from tests._base import StoreCase
 from tests.fakebroker import FakeBroker
@@ -11,20 +11,16 @@ A = "aaaaaaaa-1"
 
 class Packages(StoreCase):
     def test_a_refused_filename_settles_the_send_and_says_so(self):
-        import asks, db, posting  # noqa: F401
-        did, tok = self.staged_package()
+        did = self.staged_package()
         with FakeBroker() as b:
             b.refuse = "bad_filename"
             import tools, qa_server  # noqa: F401
-            out = qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did,
-                                                         "package_token": tok})
+            out = qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did})
         self.assertIsNone(out["package"])
         self.assertIn("could not be sent under its name", out["refused"])
         d = self.conn.execute("SELECT status FROM deliveries WHERE delivery_id=?",
                               (did,)).fetchone()[0]
         self.assertEqual(d, "failed")
-        r = self.conn.execute("SELECT state FROM package_requests").fetchone()[0]
-        self.assertEqual(r, "stopped")
         staged = self.conn.execute("SELECT staged_path FROM deliveries WHERE delivery_id=?",
                                    (did,)).fetchone()[0]
         import pathlib
@@ -82,14 +78,6 @@ class Review(StoreCase):
             out = qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did})
         self.assertIsNone(out["package"])
         self.assertIn("no longer waiting", out["refused"])
-        self.assertEqual(b.deposits, [])
-
-    def test_post_package_checks_the_package_token(self):
-        import asks, tools, qa_server  # noqa: F401
-        did, tok = self.staged_package()
-        with FakeBroker() as b:
-            out = qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did})
-        self.assertIsNone(out["package"])
         self.assertEqual(b.deposits, [])
 
     def test_the_manifest_declares_the_delivered_filename(self):

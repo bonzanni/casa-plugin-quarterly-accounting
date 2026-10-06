@@ -1,12 +1,11 @@
 # server/alerts.py
 """The only things this plugin ever says unprompted (spec §"When the plugin
 may speak first"): collection stopped working, a delivered quarter changed
-underneath, and what a package request the operator made came to when no
-turn was there to say it (package notices: it stopped, the bank could not be
-read, its send was taken back or revoked, its send may not have arrived or
-did not go out). Once per occurrence, never repeated while the condition
+underneath, and what became of a package send when no turn was there to say it
+(package notices: it could not be sent, it was taken back or revoked, it may
+not have arrived or did not go out). Once per occurrence, never repeated while the condition
 persists, never escalated, no "all better". An occurrence is keyed by the
-moment the condition began (a package notice: by its request or delivery),
+moment the condition began (a package notice: by its delivery),
 so a condition that clears and recurs is new. An alert counts as said only
 when its rendering was DELIVERED (mark_rendering_delivered sets sent_at); a
 send that failed is offered again."""
@@ -113,15 +112,12 @@ def pending_lines(conn, budget=LINES_BUDGET, said=()) -> tuple:
     return _lines(chosen)[0], sorted([u[0] for u in chosen] + said)
 
 
-# The package notices (issue #2): what a continuation owes the operator about a
-# package they asked for. `package-uncertain` and `package-send-failed` offer the
+# The package notices (issue #2): what the operator is owed about a package send. `package-uncertain` and `package-send-failed` offer the
 # package, so "send it again" binds to the rendering that printed them (D3).
 PACKAGE = {
-    "package-stopped": "I couldn't build the {quarter} package: {reason}.",
     # a BUILT package that could not be posted (Casa refused the deposit, or it is over
     # Telegram's limit): no Casa code reaches the operator (final fix wave T11-d)
     "package-not-sent": "I couldn't send the {quarter} package{why} — ask again when you want it.",
-    "package-failed": "I couldn't read the bank for the {quarter} package — ask for it again.",
     "package-revoked": "The bank was re-read before I could send the {quarter} package — ask "
                        "for it again and I'll rebuild it.",
     "package-send-failed": "The {quarter} package didn't go out. Say \"send it again\" and "
@@ -149,15 +145,6 @@ def raise_package(conn, kind: str, key: str, *, quarter: str, reason: str = "",
     conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
                  " VALUES (?,?,?,?)", (kind, key, db.canonical(detail), db.now()))
     return conn.execute("SELECT alert_id FROM alerts WHERE occurrence_key=?", (key,)).fetchone()[0]
-
-
-def pass_notices(conn, pass_id) -> list:
-    """The undelivered package notices raised during `pass_id` (by its import's
-    revocations, say): the ones its end_pass, or the begin_pass that reclaims it,
-    must carry."""
-    return [r[0] for r in conn.execute(
-        "SELECT alert_id FROM alerts WHERE sent_at IS NULL AND kind LIKE 'package-%' AND"
-        " json_extract(detail, '$.pass_id')=? ORDER BY alert_id", (pass_id,))]
 
 
 def _musts(must) -> set:

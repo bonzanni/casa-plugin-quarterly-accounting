@@ -39,9 +39,9 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              "not_fresh", "not_searched",
              # the job's unit fields
              "documents_first", "page_next", "triage_remaining", "start_job", "end_batch",
-             "package_token", "delivery_id", "dates_unread", "job_busy",
+             "delivery_id", "job_busy",
              # S7: the desk's and the units' answer fields
-             "render_ids", "note_render_id", "casa_delivery", "package_id"}
+             "render_ids", "casa_delivery", "package_id"}
 # §15: tools that left the surface in S7 (their functions stay server-side).
 REMOVED_S7 = ("job_report", "apply_reply", "confirm_match", "reject_match", "set_exemption",
               "stop_chasing", "set_watermark", "set_package_name")
@@ -132,13 +132,13 @@ class TestBothSkills(TempEnv):
                 self.assertNotIn(gone, text, gone)
 
     def test_every_bank_feed_write_carries_workflow_and_generation(self):
-        # S7 §3: the desk makes no bank-feed write; the job's sweep still carries all three.
+        # S7 §3: the desk makes no bank-feed write; any the job names carries all three (the
+        # simple loop's mirror unit hands its calls whole, their arguments included)
         for line in (SKILL + JOB).splitlines():
             if re.search(r"`(tag_transaction|untag_transaction|add_note)[`(]", line):
                 self.assertIn("workflow", line, line)
                 self.assertIn("expected_generation", line, line)
                 self.assertIn("expected_ledger", line, line)
-        self.assertIn("`untag_transaction(", JOB)
         self.assertNotIn("tag_transaction", SKILL)
 
     def test_refusals_are_relayed_not_retried(self):
@@ -212,15 +212,14 @@ class TestDesk(TempEnv):
         # S7 §5: receipt pages are now render_ids posted by post_results, then marked.
         s = flat(section(SKILL, "## Sending again", "## Setup"))
         # final fix wave T13-a: which id goes in render_ids is named
-        self.assertIn("`record_delivery` may return `speak` (a notice) or `note_render_id` "
-                      "(the package's details): `post_results(render_ids=[…])` — "
-                      "`render_ids=[speak.render_id]` or `render_ids=[note_render_id]` — then "
+        self.assertIn("`record_delivery` may return `speak` (a notice): "
+                      "`post_results(render_ids=[speak.render_id])`, then "
                       "`mark_rendering_delivered` on its receipt.", s)
 
     def test_the_quarter_format_and_the_uncertain_offer(self):
         asks = flat(section(SKILL, "## Asks", "## A file the operator sent"))
         self.assertIn('"Give me Q3", "rebuild it", "the package for Q2": '
-                      "`request_package(quarter=…)`", asks)
+                      "`get_package(quarter=…)`", asks)
         send = flat(section(SKILL, "## Sending again", "## Setup"))
         self.assertIn('or `outcome="uncertain"` when it was withheld', send)
         self.assertIn("after a send that arrived it says so; that is right", send)
@@ -234,15 +233,15 @@ class TestDesk(TempEnv):
     def test_every_flow_and_its_line(self):
         asks = flat(section(SKILL, "## Asks", "## A file the operator sent"))
         for phrase in ('`request_work(kind="check", trigger="operator")`',
-                       "`request_package(quarter=…)`",
-                       "Then always `start_job` with the ask's `start_job` exactly.",
+                       "`get_package(quarter=…)`",
+                       "After `request_work`, always `start_job` with the ask's `start_job` "
+                       "exactly.",
                        "`pending` → say the ask's `line`",
                        "`job_busy` → `ask_state(kind=<the ask's kind>, request_id=<its "
                        "request_id>)`, and say its `line`",
                        "The ask stays recorded.", "check emailed invoices"):
             self.assertIn(phrase, asks, phrase)
         self.assertLess(asks.index("`request_work("), asks.index("`start_job`"))
-        self.assertLess(asks.index("`request_package("), asks.index("`start_job`"))
         filing = flat(section(SKILL, "## A file the operator sent", "## Sending again"))
         order = ["`list_inbound_files`", "`share_inbound_file(path)`",
                  "`ingest_document(source_path=<the shared path>",
@@ -331,9 +330,8 @@ class TestJob(TempEnv):
     def test_the_specialist_order_matches_the_design(self):
         units = section(JOB, "## Units", "## Never")
         order = ["### `probes`", "record_probe", "sync", "### `snapshot`",
-                 "import_ledger_export", "not_found", "### `sweep`", "list_projections",
-                 "### `gmail-probe`", "### `filing`", "### `item`", "### `judge`",
-                 "list_quarter_state"]
+                 "import_ledger_export", "not_found", "### `gmail-probe`", "### `filing`",
+                 "### `item`", "### `judge`", "list_quarter_state"]
         pos = [units.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
 
@@ -344,40 +342,18 @@ class TestJob(TempEnv):
         self.assertIn("`Queue:` line", probes)
         self.assertIn('"missing": [<each workflow it marks FILE MISSING>]', probes)
         self.assertIn("never wait for it", probes)
-        snap = self.units("snapshot", "### `sweep`")
+        snap = self.units("snapshot", "### `gmail-probe`")
         self.assertIn("`import_ledger_export(path, pass_token, ledger_instance=<the reply's "
                       "\"Ledger instance:\" id>, acq=<the unit's acq>)`", snap)
         self.assertIn("the export you made in THIS unit", snap)
 
-    def test_bank_writes_refused_means_write_nothing(self):
-        self.assertIn("If `bank_writes` is not allowed, make no bank-feed write", JOB)
-
-    def test_sweep_transcribes_the_sim(self):
-        sweep = section(JOB, "### `sweep`", "### `gmail-probe`")
-        for phrase in ("observed_tags", "observed_notes", "observed_first_seen",
-                       "observed_tag_revision", "`Tag revision:` line", "Other workflows' tags",
-                       "first seen", "write_error",
-                       "Never make two writes without a read between them",
-                       "the bank ledger changed during this pass"):
-            self.assertIn(phrase, sweep, phrase)
-        order = ["`get_transaction(row_id)`", "`record_observation(pid, pass_token, "
-                 "snapshot_id, observed_tags=", "`untag_transaction(", "read the row again",
-                 "write_error=", "record it again"]
-        pos = [sweep.index(k) for k in order]
-        self.assertEqual(pos, sorted(pos))
-        f = flat(sweep)
-        self.assertIn("`list_projections(pass_token, quarter=<the unit's quarter>, limit=10)`", f)
-        self.assertIn("Work in batches", f)
-        self.assertIn("one write per row, then that row read again", f)
-
     def test_every_observation_names_the_import_it_was_read_under(self):
         units = flat(section(JOB, "## Units", "## Never"))
-        self.assertIn("snapshot_id=<the import's snapshot>, not_found=true", units)
-        self.assertIn("passes the `snapshot_id` that `list_projections` returned", units)
-        self.assertIn("read the payment again with its new `snapshot_id`", units)
+        self.assertIn("`record_not_found(pass_token, pid, snapshot_id=<the import's "
+                      "snapshot>)`", units)
 
     def test_a_refused_import_stops_the_unit_including_a_failed_withdrawal(self):
-        snap = self.units("snapshot", "### `sweep`")
+        snap = self.units("snapshot", "### `gmail-probe`")
         self.assertIn("If the import is refused, the unit stops there", snap)
         self.assertIn("could not withdraw a staged package — nothing was imported", snap)
 
@@ -429,13 +405,6 @@ class TestJob(TempEnv):
         self.assertIn("pass all its `candidate_ids` in `resolves`", j)
         self.assertNotIn("row_snapshot", JOB)
 
-    def test_a_package_judgment_confirms_the_dates_its_files_are_named_by(self):
-        j = self.judge()
-        self.assertIn("`list_quarter_state(quarter=<the unit's quarter>, dates_unread=true, "
-                      "limit=5, pass_token=…)`", j)
-        self.assertIn("`update_document_metadata(doc_id, document_date=<that date>, "
-                      "pass_token=…)` — the same date when the filed one was right", j)
-
     def test_the_specialist_states_the_date_it_read(self):
         j = self.judge()
         self.assertIn("passes it as `document_date`", j)
@@ -459,27 +428,20 @@ class TestJob(TempEnv):
                       "payment as missing", j)
 
     def test_the_units_post_and_package(self):
-        """S7 §5/§6: the four units; a package is posted once, its delivery recorded."""
+        """S7 §5: the two posting units (simple loop §1: the job never builds or sends a
+        package)."""
         turn = self.every_turn()
-        self.assertIn("- `post`, `view`, `build`, `deliver` → the units below.", turn)
+        self.assertIn("- `post`, `view` → the units below.", turn)
         post = self.units("post", "### `view`")
         self.assertIn("`post_results(render_ids=<the unit's render_ids>)`", post)
         self.assertIn("Withheld, or `results` null: mark nothing.", post)
-        view = self.units("view", "### `build`")
+        view = self.units("view", "## Never")
         self.assertIn("`show_view(render_id=<the unit's render_id>)`", view)
         self.assertIn("`propose_account()` instead (nothing to mark)", view)
-        build = self.units("build", "### `deliver`")
-        self.assertIn("`build_quarterly_package(quarter=<the unit's quarter>, "
-                      "package_token=<its token>, request_id=<its request_id>)`", build)
-        deliver = self.units("deliver", "## Never")
-        order = ["`stage_for_delivery(package_id=…, package_token=…)`",
-                 "`post_package(delivery_id=<the staged delivery_id>, package_token=…)`",
-                 '`record_delivery(delivery_id, outcome="delivered", package_token=…)`',
-                 'outcome="uncertain"', "Never post a package twice."]
-        pos = [deliver.index(k) for k in order]
-        self.assertEqual(pos, sorted(pos))
         units = section(JOB, "## Units", "## Never")
-        order = ["### `judge`", "### `post`", "### `view`", "### `build`", "### `deliver`"]
+        order = ["### `judge`", "### `post`", "### `view`"]
+        self.assertNotIn("### `build`", units)
+        self.assertNotIn("### `deliver`", units)
         pos = [units.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
 
@@ -498,9 +460,9 @@ class TestJob(TempEnv):
         self.assertIn("are the operator's, by their tap: never call `set_expectation` except "
                       "in the judge unit", never)
         # T16: a misrouted desk turn must not conclude the desk is someone else
-        self.assertIn("Never call `request_work`, `request_package` or `start_job`: those "
-                      "asks are made at your desk (skill quarterly-accounting), not by the "
-                      "job.", never)
+        self.assertIn("Never call `request_work` or `start_job`: those asks are made at your "
+                      "desk (skill quarterly-accounting), not by the job.", never)
+        self.assertNotIn("get_package", JOB)            # R6: never in the job
         self.assertNotIn("the asks are the desk's", never)
         self.assertIn("never speak to the operator", never)
         self.assertNotIn("packaging", never)

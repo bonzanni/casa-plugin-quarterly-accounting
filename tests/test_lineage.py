@@ -135,17 +135,6 @@ class TestSettle(Base):
         self.assertEqual(self.conn.execute("SELECT revision FROM match_state WHERE match_id=?",
                                            (mid,)).fetchone()[0], m0 + 1)
 
-    def test_note_revision_comes_from_the_store_sequence_and_moves_with_status(self):
-        self.settle(self.pid)
-        n1 = self.proj()["note_seq"]
-        self.settle(self.pid)
-        self.assertEqual(self.proj()["note_seq"], n1)
-        self.machine_pair(self.pid, self.doc())
-        n2 = self.proj()["note_seq"]
-        self.assertGreater(n2, n1)
-        self.assertTrue(lineage.note_text(self.conn, self.pid).startswith(
-            "Accounting revision %d: " % n2))
-
     def test_ineligible_before_the_watermark_desires_nothing(self):
         self.row(1, booking_date="2026-06-30", value_date="2026-06-30")
         red = self.settle(self.pid)

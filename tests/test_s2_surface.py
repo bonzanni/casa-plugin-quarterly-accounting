@@ -16,10 +16,11 @@ class Surface(StoreCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         import qa_server, tools  # noqa: F401
         for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work",
-                     "job_report"):                     # S7 §9: the relay is deleted
+                     "job_report",                      # S7 §9: the relay is deleted
+                     "request_package", "build_quarterly_package",  # removed-name: asserted absent
+                     "list_projections", "record_observation"):     # removed-name: asserted absent
             self.assertNotIn(gone, qa_server.TOOLS)
-        for new in ("job_next", "job_status", "request_work",
-                    "request_package", "record_filing"):
+        for new in ("job_next", "job_status", "request_work", "record_filing"):
             self.assertIn(new, qa_server.TOOLS)
 
     def test_the_job_declaration_is_verbatim(self):
@@ -44,14 +45,14 @@ class Surface(StoreCase):
     def test_a_waived_freshness_window_is_disclosed(self):
         import views
         tok = self.pass_("cron")
-        self.end_with_counts(tok, "complete", {"read_age_min": 75})
+        self.end_live_pass("complete", {"read_age_min": 75})
         self.assertIn("bank read from 75 minutes",
                       views.build_review(self.conn, view="status")["text"])
 
     def test_payments_awaiting_classification_are_said(self):
         import views
         tok = self.pass_("cron")
-        self.end_with_counts(tok, "complete", {"awaiting_classification": 3})
+        self.end_live_pass("complete", {"awaiting_classification": 3})
         self.assertIn("3 payments still await classification",
                       views.build_review(self.conn, view="status")["text"])
 
@@ -71,7 +72,7 @@ class SurfaceBound(StoreCase):
     def test_the_notes_lead_the_bound_status_sheet(self):
         import asks, db, views
         tok = self.pass_("cron")
-        self.end_with_counts(tok, "complete", {"read_age_min": 75,
+        self.end_live_pass("complete", {"read_age_min": 75,
                                                "awaiting_classification": 1})
         t0 = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
         with self.patch_clock(t0):
@@ -157,11 +158,6 @@ class ToolLayer(StoreCase):
         self.assertEqual(first["unit"], "probes")
         self.assertTrue(self.call("job_next").startswith("refused: "))
 
-    def test_request_package_returns_its_start(self):
-        out = self.call("request_package", quarter="Q3 2026")
-        self.assertEqual(out["status"], "asked")
-        self.assertEqual(out["start_job"]["job"], "quarterly-accounting:work")
-
     def test_the_descriptions_carry_calls_made_and_never_a_claim(self):
         import qa_server, tools  # noqa: F401
         nxt = " ".join(qa_server.TOOLS["job_next"]["description"].split())
@@ -181,16 +177,3 @@ class RefusalsNameNoRemovedTool(StoreCase):
                                         ledger_instance="whatever")
         self.assertEqual(str(cm.exception), "an import belongs to a pass: pass the "
                                             "pass_token job_next handed out")
-
-
-class ReportOrder(StoreCase):
-    """Carry (Task 10): the operator's reply binds to the LAST delivered rendering, so
-    the job posts every handover and stop page before a status view (S7 §5: the status
-    sheet only when nothing else is owed)."""
-    def test_the_not_found_line_offers_no_resend(self):
-        import asks, reply
-        self.assertNotIn("send it again", asks.NOT_FOUND)
-        for clause in reply._clauses(asks.NOT_FOUND):
-            self.assertEqual(reply._parse(clause), (None, None), clause)
-        self.assertEqual(asks.NOT_FOUND, "I can't find that document in what I've filed — "
-                                         "please send the file once more.")

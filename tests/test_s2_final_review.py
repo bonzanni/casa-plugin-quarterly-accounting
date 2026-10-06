@@ -69,25 +69,3 @@ class RestoreMidPass(StoreCase):
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
         self.assertEqual((r["state"], r["outcome"]), ("reported", "stopped"))
         self.assertIn("Accounting check stopped:", units[-1]["text"])
-
-
-class LateStop(StoreCase):
-    """Minor: a job pass's step reads no wall-clock age (INV-J3): a stop after
-    SWEEP_STOP_S is taken as given, never refused as a time-out."""
-
-    def test_a_job_pass_stop_is_never_refused_as_late(self):
-        import datetime as _dt, db, job, steps
-        self.bind()
-        t = job.claim(self.conn, A)
-        pid = self.start_job_pass(t)
-        steps.start(self.conn, t, "sweep", {})
-        with db.tx(self.conn):
-            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
-                              " VALUES (?, ?, 0, 0)", (pid, db.now()))
-        later = db._clock() + _dt.timedelta(seconds=steps.SWEEP_STOP_S + 60)
-        with self.patch_clock(later):
-            steps.finish(self.conn, t, "sweep", counts={"remaining_in_cycle": 3},
-                         stopped="the bank sync failed")
-        fin = json.loads(self.conn.execute("SELECT finish_json FROM pass_steps WHERE"
-                                           " step='sweep'").fetchone()[0])
-        self.assertEqual(fin.get("stopped"), "the bank sync failed")

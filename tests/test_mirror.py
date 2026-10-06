@@ -400,13 +400,13 @@ class RealBankFeed(StoreCase):
 
     def run_and_import(self):
         """A run, its bank read (the acquisition its import is bound to) and the import of
-        a fresh export, as the cursor hands them out (tests/test_sweep_real.py job_pass)."""
-        import job
+        a fresh export, as the cursor hands them out."""
         import ledger
+        import loop
         import passes
         token = self.run_claim(instance=self.bf.instance(), generation=self.bf.generation())
         with db.tx(self.conn):
-            acq = job.hand_acquisition(self.conn, token, self.pass_id)
+            acq = loop.hand_acquisition(self.conn, token, self.pass_id)
         passes.record_probe(self.conn, token, "bank_sync", True, acq=acq)
         ledger.import_ledger_export(self.conn, path=self.bf.export(), token=token,
                                     ledger_instance=self.bf.last_export_instance, acq=acq)

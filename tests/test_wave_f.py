@@ -40,15 +40,9 @@ class TestQuarterWords(ToolCase):
         out = _json("list_quarter_state", quarter="Q3")
         self.assertEqual((out["quarter"], [d["pid"] for d in out["items"]]), ("2026-Q3", [self.pid]))
 
-    def test_the_package_of_q3_2026(self):
-        out = _json("build_quarterly_package", quarter="Q3 2026",
-                    package_token=self.package_token())
-        self.assertIn("-2026-Q3-", out["filename"])
-
     def test_anything_else_is_a_refusal_in_words_never_an_error(self):
         calls = [("build_review", {"view": "quarter", "quarter": "the third quarter"}),
                  ("list_quarter_state", {"quarter": "Q5"}),
-                 ("build_quarterly_package", {"quarter": "Q3-2026", "package_token": 1}),
                  ("build_review", {"view": "quarter", "quarter": 3})]
         for name, args in calls:
             res = _tool(name, **args)
@@ -59,9 +53,8 @@ class TestQuarterWords(ToolCase):
 
     def test_the_schemas_show_the_format(self):
         import qa_server
-        for name, arg in (("build_review", "quarter"), ("build_quarterly_package", "quarter"),
-                          ("list_quarter_state", "quarter"),
-                          ("list_projections", "quarter")):
+        for name, arg in (("build_review", "quarter"), ("get_package", "quarter"),
+                          ("list_quarter_state", "quarter")):
             desc = qa_server.TOOLS[name]["schema"]["properties"][arg].get("description", "")
             self.assertIn("YYYY-Qn, e.g. 2026-Q3 (Qn and Qn YYYY accepted)", desc, name)
 
@@ -123,8 +116,8 @@ class TestSendItAgainAfterATimeout(ToolCase):
         pid = self.lineage_for(1)
         self.classify(pid, {"software"})
         self.settle(pid)
-        self.other = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
-        self.pkg = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        self.other = package.build_quarterly_package(self.conn, "2026-Q3")
+        self.pkg = package.build_quarterly_package(self.conn, "2026-Q3")
 
     def test_timeout_offer_mark_delivered_then_send_it_again(self):
         import os
@@ -153,6 +146,10 @@ class TestSendItAgainAfterATimeout(ToolCase):
         for outcome, pkg in (("delivered", self.other), ("failed", self.pkg)):
             staged = _json("stage_for_delivery", channel="telegram",
                            package_id=pkg["package_id"])
+            if outcome == "delivered":              # r3 #2: posted first
+                from tests.fakebroker import FakeBroker
+                with FakeBroker():
+                    _json("post_package", delivery_id=staged["delivery_id"])
             out = _json("record_delivery", delivery_id=staged["delivery_id"], outcome=outcome)
             for f in os.listdir(self.outbox):
                 os.unlink(self.outbox / f)
@@ -165,37 +162,6 @@ class TestSendItAgainAfterATimeout(ToolCase):
                                                  " render_id=?",
                                                  (out["speak"]["render_id"],)).fetchone()[0])
             self.assertEqual(scope["offers"], [self.pkg["package_id"]])
-
-
-class TestEndPass(ToolCase):
-    def setUp(self):
-        super().setUp()
-        self.bind()
-        self.token = self.pass_()
-
-    def test_the_outcome_vocabulary_includes_stopped_and_is_validated(self):
-        # S2: end_pass is no longer a tool (tests/legacy_tools.py drives it); the
-        # description assertion went with the tool
-        res = _text("end_pass", pass_token=self.token, outcome="done")
-        self.assertTrue(res.startswith("refused: outcome is one of"), res)
-        import passes
-        self.assertIsNotNone(passes.current_pass(self.conn))           # nothing ended
-        self.assertEqual(_json("end_pass", pass_token=self.token, outcome="stopped")["outcome"],
-                         "stopped")
-
-    def test_a_busy_reap_after_the_commit_still_reports_the_pass_ended(self):
-        # the pass ended in its own commit; the reaper's custody lock being held by
-        # another session must not answer "NOT applied — ask again"
-        import documents
-        import passes
-
-        def busy(conn, older_than_s=3600):
-            raise db.Busy("another session is filing or erasing documents past 30 s; this "
-                          "change was NOT applied — ask again")
-        with mock.patch.object(documents, "reap_orphans", busy):
-            out = _json("end_pass", pass_token=self.token, outcome="complete")
-        self.assertEqual(out["outcome"], "complete")
-        self.assertIsNone(passes.current_pass(self.conn))
 
 
 if __name__ == "__main__":

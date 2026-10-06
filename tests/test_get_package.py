@@ -87,7 +87,7 @@ class GetPackage(Case):
             " deliveries WHERE delivery_id=?)", (out["delivery_id"],)).fetchone()[0], 3)
         # the package-note follow-up is removed (§4): no such rendering is ever made
         self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE kind="
-                                           "'package-note'").fetchone()[0], 0)
+                                           "'package-note'").fetchone()[0], 0)  # removed-name: asserted absent
         # the stored caption IS the one line (no rest, so nothing else to post)
         self.assertEqual(self.conn.execute("SELECT caption FROM packages").fetchone()[0],
                          "Q3 · as of 6 Oct · 1 of 3 documented · 2 open")
@@ -158,7 +158,7 @@ class GetPackage(Case):
         p = self.lineage_for(9009)
         self.classify(p, {"software"})
         self.settle(p)
-        built = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        built = package.build_quarterly_package(self.conn, "2026-Q3")
         with zipfile.ZipFile(built["path"]) as z:
             ledger = z.read("ledger.csv").decode()
             notes = z.read("notes.md").decode()
@@ -205,7 +205,7 @@ class GetPackage(Case):
         self.assertEqual(statuses[exempt], "exempt")
         self.assertEqual(statuses[self.pids[2]], "matched")
         self.assertNotIn(statuses[zero], ("open", "proposed"), statuses)   # not open anyway
-        built = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        built = package.build_quarterly_package(self.conn, "2026-Q3")
         st = self.assert_tally(built["path"], built["caption"])
         self.assertEqual({k: st[k] for k in ("Zero", "Exempt Co")},
                          {"Zero": "PENDING", "Exempt Co": "PENDING"})
@@ -227,7 +227,7 @@ class GetPackage(Case):
                               document_date="2026-09-01", alternatives=[alt])
         self.assertEqual(self.conn.execute("SELECT status FROM projections WHERE pid=?",
                                            (self.pids[0],)).fetchone()[0], "proposed")
-        built = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        built = package.build_quarterly_package(self.conn, "2026-Q3")
         with zipfile.ZipFile(built["path"]) as z:
             names = z.namelist()
             notes = z.read("notes.md").decode()

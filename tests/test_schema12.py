@@ -96,3 +96,48 @@ class Schema12(StoreCase):
         self.work_rows([1, 2])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM run_work WHERE job_id=?",
                                            (self.job_id,)).fetchone()[0], 2)
+
+    def test_the_deleted_machinery_leaves_no_table_or_column(self):
+        tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE"
+                                                  " type='table'")}
+        self.assertFalse({"credits", "cursor", "pass_steps", "package_requests"} & tables)  # removed-name: asserted absent
+        self.assertFalse({"judge_epoch", "w_refreshes", "adoptions"} & self.cols("passes"))  # removed-name: asserted absent
+        self.assertFalse({"note_seq", "readback_owed", "observed_revision"}  # removed-name: asserted absent
+                         & self.cols("projections"))
+        self.assertNotIn("spent", self.cols("claims"))
+
+    def test_the_deleted_modules_are_gone(self):
+        import importlib.util
+        for mod in ("steps", "sweep"):
+            self.assertIsNone(importlib.util.find_spec(mod), mod)
+
+    def test_an_unsaid_package_request_notice_is_said_as_not_sent_after_the_upgrade(self):
+        """Task 11: the stopped / bank-unread notices lose their wording with their raisers;
+        one still unsaid at 11 -> 12 is said as the not-sent notice, with its reason."""
+        import alerts, db, json
+        from tests.schema_history import build_v11_store
+        path = self.tmp / "v11n" / "accounting.sqlite"
+        path.parent.mkdir()
+        build_v11_store(path)
+        import sqlite3
+        c = sqlite3.connect(path)
+        for i, (kind, sent) in enumerate((("package-stopped", None),  # removed-name: asserted absent
+                                          ("package-failed", None),   # removed-name: asserted absent
+                                          ("package-stopped", "x"))):  # removed-name: asserted absent
+            c.execute("INSERT INTO alerts(kind, occurrence_key, detail, raised_at, sent_at)"
+                      " VALUES (?,?,?,?,?)", (kind, f"k{i}", json.dumps(
+                          {"quarter": "2026-Q2", "reason": "the gate refused" if i == 0
+                           else "", "package_id": None, "pass_id": ""}), "x", sent))
+        c.commit()
+        c.close()
+        conn = db.open_store(path)
+        self.addCleanup(conn.close)
+        kinds = [r[0] for r in conn.execute("SELECT kind FROM alerts ORDER BY alert_id")]
+        self.assertEqual(kinds, ["package-not-sent", "package-not-sent",
+                                 "package-stopped"])  # removed-name: asserted absent (said already)
+        r = alerts.pending_rendering(conn)
+        self.assertIn("I couldn't send the Q2 2026 package (the gate refused)", r["text"])
+        self.assertEqual(json.loads(conn.execute("SELECT scope_json FROM renders WHERE"
+                                                 " render_id=?", (r["render_id"],))
+                                    .fetchone()[0])["alerts"], [1, 2])
+

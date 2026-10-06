@@ -12,13 +12,10 @@ import documents
 import kb
 import ledger
 import matches
-import package
 import passes
-import steps
-import sweep
 import views
 import work
-from qa_server import register as _register
+from qa_server import register
 
 _CONN = None
 
@@ -28,26 +25,6 @@ def conn():
     if _CONN is None:
         _CONN = db.open_store()
     return _CONN
-
-
-def register(name, description, schema):
-    """qa_server.register, plus the clock (issue #2): every answer to a call that
-    carries a pass_token also carries `clock` — the time left for the running
-    step — while that token is live and its step runs."""
-    def deco(fn):
-        def with_clock(args):
-            out = fn(args)
-            token = args.get("pass_token")
-            if isinstance(token, str) and token.strip().isdigit():
-                token = int(token)
-            if isinstance(out, dict) and isinstance(token, int) and not isinstance(token, bool):
-                c = steps.clock(conn(), token)
-                if c is not None:
-                    out["clock"] = c
-            return out
-        _register(name, description, schema)(with_clock)
-        return fn
-    return deco
 
 
 def _need(args, *names):
@@ -179,8 +156,6 @@ O = {"type": "object"}
 A = {"type": "array", "items": {"type": "string"}}
 AI = {"type": "array", "items": {"type": "integer"}}
 TOKEN = {"type": "integer", "description": "the pass_token job_next gave you in this turn"}
-PKG_TOKEN = {"type": "integer", "description": "the package_token the job's build or deliver "
-                                               "unit gave you"}
 Q = {"type": "string", "description": "YYYY-Qn, e.g. 2026-Q3 (Qn and Qn YYYY accepted)"}
 
 
@@ -415,7 +390,7 @@ def t_relabel(args):
                                  token=_int(args, "pass_token"))
 
 
-# --- the ledger and the sweep --------------------------------------------------
+# --- the ledger -----------------------------------------------------------------
 @register("import_ledger_export",
           "Import this pass's bank snapshot: the path export_history returned. Admits new "
           "payments, follows supersessions, merges lineages, ends tombstoned ones, and returns "
@@ -428,45 +403,6 @@ def t_import(args):
     return ledger.import_ledger_export(conn(), path=args["path"], token=_int(args, "pass_token"),
                                        ledger_instance=args["ledger_instance"],
                                        acq=_int(args, "acq"))
-
-
-@register("list_projections",
-          "The next page of the sweep: the payments not read since this pass's import (resumes "
-          "where the last one stopped; remaining_in_cycle 0 = every one was), and the "
-          "snapshot_id to pass to record_observation. For each: row_id to "
-          "read with get_transaction, desired tags, the accounting note. bank_writes says whether "
-          "you may write and with which workflow and expected_generation. quarter: only that "
-          "quarter's payments (the package pass: a package needs only its own rows read).",
-          obj({"pass_token": TOKEN, "limit": I, "quarter": Q}, ("pass_token",)))
-def t_list_proj(args):
-    _need(args, "pass_token")
-    return sweep.list_projections(conn(), token=_int(args, "pass_token"),
-                                  limit=_limit(args, 25), quarter=_quarter(args))
-
-
-@register("record_observation",
-          "Record what get_transaction showed for one payment (observed_tags: all its tags; "
-          "observed_notes: the notes shown; observed_first_seen: the row's first_seen; "
-          "observed_tag_revision: the number on its `Tag revision:` line — all four "
-          "required), or not_found=true when it answered 'no transaction #N', or write_error with bank-feed's "
-          "reply when a write did not take. Returns the exact writes to make; apply them, then "
-          "read the row again and record it. snapshot_id: the one list_projections returned "
-          "(the import's `snapshot` for an erase candidate).",
-          obj({"pid": I, "pass_token": TOKEN, "snapshot_id": I, "observed_tags": A,
-               "observed_notes": A, "observed_first_seen": S, "observed_tag_revision": I,
-               "not_found": B, "write_error": S},
-              ("pid", "pass_token", "snapshot_id")))
-def t_observe(args):
-    _need(args, "pid", "pass_token", "snapshot_id")
-    return sweep.record_observation(conn(), pid=_int(args, "pid"),
-                                    token=_int(args, "pass_token"),
-                                    snapshot_id=_int(args, "snapshot_id"),
-                                    observed_tags=args.get("observed_tags"),
-                                    observed_notes=args.get("observed_notes"),
-                                    not_found=_bool(args, "not_found", False),
-                                    write_error=args.get("write_error"),
-                                    observed_first_seen=args.get("observed_first_seen"),
-                                    observed_tag_revision=args.get("observed_tag_revision"))
 
 
 # --- the job (S2 §3, §5, §6.4, §13) -------------------------------------------------
@@ -535,19 +471,6 @@ def t_request_work(args):
     _need(args, "kind", "trigger")
     return asks.request_work(conn(), args["kind"], args["trigger"], args.get("doc_ids"),
                              quarter=_quarter(args))
-
-
-@register("request_package",
-          "Ask for a quarter's package BEFORE start_job; then start_job with the returned "
-          "start_job; then say the result's reading: "
-          "pending → `line`; job_busy → ask_state(kind, request_id) and say its line; "
-          "anything else → \"I couldn't start the check (<Casa's message>). Ask again in "
-          "a minute.\"",
-          obj({"quarter": Q}, ("quarter",)))
-def t_request_package(args):
-    import asks
-    _need(args, "quarter")
-    return asks.request_package(conn(), _quarter(args))
 
 
 @register("ask_state",
@@ -659,23 +582,19 @@ def t_search(args):
           "remaining say what was left out, and `next` is the cursor for the next page — pass it "
           "back unchanged as `after` (null when nothing is left); pages follow payment ids, so a "
           "page asked again with the same `after` is the same page. pid=N re-reads that one "
-          "payment (`item`; null once it has ended). dates_unread=true with a quarter lists "
-          "its payments whose paired document's date was never read on the document "
-          "(`dates_unread`, paged the same way): read each and confirm its date with "
-          "update_document_metadata. Read it fresh for every "
+          "payment (`item`; null once it has ended). Read it fresh for every "
           "question; never answer from memory. It posts nothing: show_view posts a view to "
           "the operator. During a pass, pass the pass_token.",
           obj({"quarter": Q, "triage": B, "fresh_only": B, "limit": I, "pass_token": TOKEN,
-               "pid": I, "dates_unread": B,
+               "pid": I,
                "after": {"type": "array", "description": "the cursor from the previous `next`, "
                                                           "passed back unchanged"}}))
 def t_state(args):
     return work.list_quarter_state(conn(), _quarter(args),
                                    triage_only=_bool(args, "triage", False),
                                    fresh_only=_bool(args, "fresh_only", True),
-                                   limit=_limit(args, work.TRIAGE_LIMIT),
-                                   after=args.get("after"), pid=_int(args, "pid"),
-                                   unread_dates=_bool(args, "dates_unread", False))
+                                   limit=_limit(args, 50),
+                                   after=args.get("after"), pid=_int(args, "pid"))
 
 
 @register("build_review",
@@ -738,7 +657,7 @@ def t_verdict(args):
           "run each (an instruction {\"show_view\": {…}} is show_view with exactly those "
           "arguments — \"more\" and \"all of them\" come so; show_view for \"show the rest\", "
           "\"show older\", \"show item N\"; "
-          "request_package then start_job for \"rebuild Qn\"; resend and send-last as "
+          "get_package(quarter=Qn) for \"rebuild Qn\"; resend and send-last as "
           "your skill says). `reshow`: show_view(view=\"item\", pid=…) for each. "
           "`understood: false`: nothing was read as an accounting reply.",
           obj({"text": S, "quoted": S}, ("text",)))
@@ -823,14 +742,13 @@ def t_delivered(args):
           "Post a staged package to the operator as a file (Casa posts it, labelled, under "
           "the package's name). After Casa's receipt (casa_delivery.status delivered): "
           "record_delivery(delivery_id, outcome=\"delivered\"); withheld or no receipt: "
-          "record_delivery(outcome=\"uncertain\") — never post it again yourself. A send staged "
-          "for a package request (the job's deliver unit) needs that unit's package_token.",
-          obj({"delivery_id": I, "package_token": PKG_TOKEN}, ("delivery_id",)))
+          "record_delivery(outcome=\"uncertain\") — never post it again yourself.",
+          obj({"delivery_id": I}, ("delivery_id",)))
 @capability("package")
 def t_post_package(args):
     import posting
     _need(args, "delivery_id")
-    return posting.post_package(conn(), _int(args, "delivery_id"), _int(args, "package_token"))
+    return posting.post_package(conn(), _int(args, "delivery_id"))
 
 
 @register("get_package",
@@ -846,21 +764,6 @@ def t_get_package(args):
 
 
 # --- packaging ---------------------------------------------------------------------
-@register("build_quarterly_package",
-          "Build the quarter's zip from what is known now (partial while the quarter runs), for "
-          "the package request the job's build unit names: pass its quarter, package_token "
-          "and request_id. Returns the package_id.",
-          obj({"quarter": Q, "package_token": PKG_TOKEN,
-               "request_id": {"type": "integer",
-                              "description": "the request_id the job's build unit gave you"}},
-              ("quarter", "package_token")))
-def t_build(args):
-    _need(args, "quarter", "package_token")
-    return package.build_quarterly_package(conn(), _quarter(args),
-                                           _int(args, "package_token"),
-                                           request_id=_int(args, "request_id"))
-
-
 @register("stage_for_delivery",
           "Stage a built package (package_id) to post to the operator. Then "
           "post_package(delivery_id), then record_delivery. For propose_reading's `resend` "
@@ -868,13 +771,10 @@ def t_build(args):
           "exact file the last view the operator saw offered, or refuses with the words to "
           "say; its `stage_for_delivery` instruction (a reply to one message) gives the "
           "arguments, render_id included. For its `send last` instruction pass last_built=true (and the quarter it "
-          "names, if any) and neither id: the last package built, unchanged. A package built "
-          "for a package request needs its package_token (the job's deliver unit gives it: "
-          "that unit's check has ended, and the package_token admits the send); staging it "
-          "again returns the same send. channel is telegram (the default). During a pass, "
-          "pass the pass_token.",
+          "names, if any) and neither id: the last package built, unchanged. channel is telegram "
+          "(the default). During a pass, pass the pass_token.",
           obj({"channel": S, "package_id": I, "resend": B, "render_id": S, "last_built": B,
-               "quarter": Q, "pass_token": TOKEN, "package_token": PKG_TOKEN}))
+               "quarter": Q, "pass_token": TOKEN}))
 def t_stage(args):
     if args.get("doc_id") is not None:
         # final fix wave T11-a: post_package posts packages only, so a staged document
@@ -893,7 +793,6 @@ def t_stage(args):
     return delivery.stage_for_delivery(conn(), channel=args.get("channel") or "telegram",
                                        package_id=package_id,
                                        pass_token=_int(args, "pass_token"),
-                                       package_token=_int(args, "package_token"),
                                        resend=resend,
                                        last_built=_bool(args, "last_built", False),
                                        quarter=_quarter(args))
@@ -901,17 +800,14 @@ def t_stage(args):
 
 @register("record_delivery",
           "Record a send's outcome: delivered (on Casa's receipt), uncertain (withheld or no "
-          "receipt — never post it again yourself), failed. A send staged for a package "
-          "request needs its package_token (the job's deliver unit's: it admits the record "
-          "after that unit's check has ended). Returns `speak` (uncertain/failed) or "
-          "`note_render_id` (delivered): post it with post_results(render_ids=[…]), then mark "
-          "it delivered on the receipt — in a job turn the next `post` does it for you. "
+          "receipt — never post it again yourself), failed. Returns `speak` when there is "
+          "something to tell (a send uncertain or failed, a delivered quarter that changed): "
+          "post it with post_results(render_ids=[…]), then mark it delivered on the receipt. "
           "During a pass, pass the pass_token.",
-          obj({"delivery_id": I, "outcome": S, "message_id": S, "pass_token": TOKEN,
-               "package_token": PKG_TOKEN}, ("delivery_id", "outcome")))
+          obj({"delivery_id": I, "outcome": S, "message_id": S, "pass_token": TOKEN},
+              ("delivery_id", "outcome")))
 def t_record_delivery(args):
     _need(args, "delivery_id", "outcome")
     return _deliverable("record_delivery", delivery.record_delivery(
         conn(), delivery_id=_int(args, "delivery_id"), outcome=args["outcome"],
-        message_id=args.get("message_id"), pass_token=_int(args, "pass_token"),
-        package_token=_int(args, "package_token")))
+        message_id=args.get("message_id"), pass_token=_int(args, "pass_token")))

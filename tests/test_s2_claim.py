@@ -1,5 +1,6 @@
-"""S2 Task 4 (spec §4, §6.3): a job turn's claim rotates the token, only the newest
-claim's token may act, and a live job pass is adopted at most ADOPTIONS_MAX times."""
+"""S2 Task 4 (spec §4, §6.3): a job turn's claim rotates the token, and only the newest
+claim's token may act (simple loop §2: another job's claim ends a live pass; none is
+adopted)."""
 
 from tests._base import StoreCase
 
@@ -40,8 +41,7 @@ class Claim(StoreCase):
 
     def test_an_adoption_moves_the_fence_to_the_adopter(self):
         import db, job, passes
-        tA = job.claim(self.conn, A)
-        self.start_job_pass(tA)
+        tA = job.claim(self.conn, A)                 # A's run and its pass
         tB = job.claim(self.conn, B)
         with db.tx(self.conn):
             job.check_claim(self.conn, tB)
@@ -55,8 +55,7 @@ class Claim(StoreCase):
 
     def test_check_claim_runs_the_pass_fence_while_a_job_pass_is_live(self):
         import db, job
-        t = job.claim(self.conn, A)
-        self.start_job_pass(t)
+        job.claim(self.conn, A)                      # the run's pass starts with its claim
         t = job.claim(self.conn, A)
         self.assertIsNone(self.conn.execute("SELECT lease_at FROM pass_marker").fetchone()[0])
         with db.tx(self.conn):

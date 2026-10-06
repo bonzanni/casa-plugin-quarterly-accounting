@@ -104,7 +104,6 @@ class Base(StoreCase):
                                  expected_revision=self.rev(pid), row_snapshot=self.snapshot(pid),
                                  token=self.token, labels=("guessed",))
         else:
-            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=self.token, queries=[cp])
         return pid
 
@@ -189,7 +188,7 @@ class TestAlertsProperty(Base):
             if rounds < 3:
                 passes.record_probe(self.conn, t, rng.choice(("gmail", "bank_sync")), False,
                                     _word(rng, rng.choice((10, 400, 6000))))
-            speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+            speak = self.end_and_speak()
             if speak is None:
                 break
             text = speak["text"]
@@ -507,7 +506,7 @@ class TestSeenNameProperty(Base):
                 else:
                     t = self.pass_()
                     passes.record_probe(self.conn, t, "gmail", False, "down %d %d" % (step, _))
-                    speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+                    speak = self.end_and_speak()
                     if speak:
                         views.mark_rendering_delivered(self.conn, speak["render_id"])
                     self.token = self.pass_()

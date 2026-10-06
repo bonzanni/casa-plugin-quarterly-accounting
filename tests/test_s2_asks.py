@@ -15,16 +15,6 @@ class Requests(StoreCase):
         self.assertEqual(self.conn.execute("SELECT state FROM work_requests").fetchone()[0],
                          "queued")
 
-    def test_a_package_ask_opens_a_queued_request_without_a_pass(self):
-        import asks
-        out = asks.request_package(self.conn, "2026-Q3")
-        self.assertEqual(out["status"], "asked")
-        self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
-                         "queued")
-        self.assertEqual(self.conn.execute("SELECT live FROM pass_marker").fetchone(), None)
-        self.assertEqual(asks.request_package(self.conn, "2026-Q3")["status"],
-                         "already")
-
     def test_taken_only_by_the_live_pass_and_settled_at_its_end(self):
         import asks, db, job, loop
         asks.request_work(self.conn, "check", "cron")

@@ -413,10 +413,9 @@ def start_pass(conn, token, job_id) -> str:
     assert conn.in_transaction
     op = _run(conn, job_id)["started_by"] == "operator"
     _, pass_id = passes.start_pass(conn, "operator" if op else "cron",
-                                   "telegram" if op else "silent", protocol="job", token=token)
-    conn.execute("UPDATE passes SET holder_job=?, adopters_json=? WHERE pass_id=?",
-                 (job_id, json.dumps([job_id]), pass_id))
-    conn.execute("UPDATE runs SET pass_id=?, passes=1 WHERE job_id=?", (pass_id, job_id))
+                                   "telegram" if op else "silent", token=token)
+    conn.execute("UPDATE passes SET holder_job=? WHERE pass_id=?", (job_id, pass_id))
+    conn.execute("UPDATE runs SET pass_id=? WHERE job_id=?", (pass_id, job_id))
     return pass_id
 
 
@@ -432,7 +431,7 @@ def end_pass(conn, token, outcome, report=None) -> None:
     conn.execute("UPDATE passes SET ended_at=?, outcome=?, report_json=? WHERE pass_id=?",
                  (db.now(), outcome, db.canonical(report or {}), m["pass_id"]))
     asks.settle_taken(conn, m["pass_id"], outcome)
-    conn.execute("UPDATE pass_marker SET live=0, claimed_step=NULL, lease_at=NULL WHERE id=1")
+    conn.execute("UPDATE pass_marker SET live=0, lease_at=NULL WHERE id=1")
 
 
 def take(conn, job_id, pass_id) -> list:
@@ -465,19 +464,25 @@ def _stop(conn, token, job_id, reason) -> None:
     alerts.raise_stop(conn, reason)
 
 
+def hand_acquisition(conn, token, pass_id) -> int:
+    """A new bank read for the pass (spec §5.2): its id, owned by this claim alone."""
+    acq = db.next_seq(conn)
+    conn.execute("UPDATE passes SET acq=?, acq_gen=? WHERE pass_id=?", (acq, token, pass_id))
+    return acq
+
+
 def _acquire(conn, token, job_id, p):
-    """§2 step 1, the bank read (job._acquisition at 26b68ee minus the W refresh and F):
+    """§2 step 1, the bank read (26b68ee's acquisition step minus the W refresh and F):
     `probes` until this claim's probes for the pass's acquisition are recorded, then
     `snapshot`, until the pass has imported. The pass stops when bank-feed's tools are
     absent or setup / the bank gate refuses. Returns a unit, or None once imported (or
     stopped)."""
     import binding
-    import job
     import passes
     if conn.execute("SELECT 1 FROM snapshots WHERE pass_id=?", (p["pass_id"],)).fetchone():
         return None
     if p["acq"] is None or p["acq_gen"] != int(token):
-        return {"unit": "probes", "acq": job.hand_acquisition(conn, token, p["pass_id"])}
+        return {"unit": "probes", "acq": hand_acquisition(conn, token, p["pass_id"])}
     tools_ = conn.execute("SELECT ok, gen FROM probes WHERE kind='bank_tools'").fetchone()
     if tools_ is not None and tools_["gen"] == int(token) and not tools_["ok"]:
         _stop(conn, token, job_id, NO_TOOLS)
@@ -635,6 +640,15 @@ def next_unit(conn, token, calls_made) -> dict:
     for line in logs:
         import sys
         print(line, file=sys.stderr, flush=True)
+    if out["unit"] == "complete":
+        # housekeeping after the run's end (what the delegation end_pass did): documents a
+        # crashed ingest left unindexed. Another session holding the documents lock past the
+        # bound must not fail this answer; the next run's end reaps instead
+        import documents
+        try:
+            documents.reap_orphans(conn)
+        except db.Busy:
+            pass
     return out
 
 

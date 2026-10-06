@@ -1,5 +1,5 @@
 """S7 §14: schema 11 — readings, tap keys, account choices, post offers; claims.seq,
-package_requests.asked_seq, runs.completed_at; the drain and cancel records gone; open
+runs.completed_at; the drain and cancel records gone; open
 email asks re-pointed to telegram; a staged email send settled uncertain."""
 import json, sqlite3
 from tests._base import StoreCase
@@ -21,7 +21,6 @@ class Schema11(StoreCase):
                         <= self.cols("account_choices"))
         self.assertTrue({"render_id", "job_id", "n"} <= self.cols("post_offers"))
         self.assertIn("seq", self.cols("claims"))
-        self.assertIn("asked_seq", self.cols("package_requests"))
         self.assertIn("completed_at", self.cols("runs"))
 
     def test_reading_states_are_closed(self):
@@ -45,9 +44,10 @@ class Schema11(StoreCase):
 
     def test_migration_from_10(self):
         """A v0.9.0 store: a drain, a cancel record, an open email package ask, a staged
-        email send. After 10 -> 11: no drain, no cancel record; the open ask is telegram
-        and keeps its created_seq as asked_seq; the staged email send is uncertain with
-        its notice raised; claims.seq is NULL (read as 0)."""
+        email send. After 10 -> 12: no drain, no cancel record; the package asks are gone
+        with their table (simple loop §4); the staged email send is uncertain with
+        its notice raised (the 10 -> 11 data step runs before 12's drops); claims.seq is
+        NULL (read as 0)."""
         import db
         from tests.schema_history import build_v10_store
         # a path of its own: StoreCase.setUp already opened a schema-11 store at the
@@ -61,10 +61,8 @@ class Schema11(StoreCase):
         keys = {r[0] for r in conn.execute("SELECT key FROM meta")}
         self.assertNotIn("drain", keys)
         self.assertFalse(any(k.startswith("cancelled:") for k in keys))
-        r = conn.execute("SELECT channel, asked_seq, created_seq FROM package_requests"
-                         " WHERE state='queued'").fetchone()
-        self.assertEqual(r["channel"], "telegram")
-        self.assertEqual(r["asked_seq"], r["created_seq"])
+        self.assertIsNone(conn.execute("SELECT 1 FROM sqlite_master WHERE"
+                                       " name='package_requests'").fetchone())  # removed-name: asserted absent
         d = conn.execute("SELECT status, withdrawn_at FROM deliveries WHERE channel='email'"
                          ).fetchone()
         self.assertEqual(d["status"], "uncertain")

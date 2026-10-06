@@ -340,7 +340,6 @@ class ContinuedPages(StoreCase):
         self.pid = self.lineage_for(1)
         self.classify(self.pid, {"software"})
         self.settle(self.pid)
-        self.handed(self.pid)
         work.record_search(self.conn, pid=self.pid, token=self.token, queries=["Adobe"])
         self.docs = []
         for i in range(2):
@@ -986,7 +985,7 @@ class LegacyFields(_Q3):
                               (db.canonical(old), rid))
 
     def _migrated(self):
-        """The store copied into the v10 schema and opened (10 -> 11), as
+        """The store copied into the v10 schema and opened (10 -> 12), as
         review_migrated_sheet.py does."""
         import db
         import tools
@@ -997,7 +996,12 @@ class LegacyFields(_Q3):
         tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'"
                                           " AND name NOT LIKE 'sqlite_%'")]
         for table in tables:
-            cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
+            # the columns both schemas have: schema 12 dropped the machinery v10 carried
+            # (a dropped table copies nothing; a dropped column keeps v10's default)
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})") if r[1] in have]
+            if not cols:
+                continue
             names = ",".join(cols)
             rows = self.conn.execute(f"SELECT {names} FROM {table}").fetchall()
             c.execute(f"DELETE FROM {table}")

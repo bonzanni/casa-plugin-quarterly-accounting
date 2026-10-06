@@ -4,6 +4,7 @@ to the newest delivered rendering that offers a package (I-2, §6.3); a staged s
 posted at most once (Codex r2 S2); store refusals escape names (T3-a); an import does not stale a typed verdict (T6-c, M-2); no document
 is staged from the surface (T11-a); a package that could not be posted says so (T11-d)."""
 import json
+import os
 from tests._base import StoreCase
 from tests.fakebroker import FakeBroker, arguments_ok
 
@@ -88,17 +89,15 @@ class SendAgainBinding(StoreCase):
 class PostOnce(StoreCase):
     """Codex r2 S2: a second post_package on a still-staged send deposits nothing."""
 
-    def post(self, did, tok):
+    def post(self, did):
         import tools, qa_server  # noqa: F401
-        return qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did,
-                                                      "package_token": tok})
+        return qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did})
 
     def test_two_posts_one_deposit(self):
-        import asks
-        did, tok = self.staged_package()
+        did = self.staged_package()
         with FakeBroker() as b:
-            first = self.post(did, tok)
-            second = self.post(did, tok)
+            first = self.post(did)
+            second = self.post(did)
         self.assertRegex(first["package"], r"^casa-cap-")
         self.assertEqual(sum(1 for d in b.deposits if d["slot"] == "package"), 1)
         self.assertEqual(set(second), {"package", "refused"})
@@ -108,11 +107,12 @@ class PostOnce(StoreCase):
                                            (did,)).fetchone()[0], "staged")
 
     def test_a_posted_send_without_a_receipt_is_still_recovered_uncertain(self):
-        import asks, datetime as dt, db, job, steps
-        did, tok = self.staged_package()
+        import datetime as dt, db, job, passes
+        did = self.staged_package()
         with FakeBroker():
-            self.post(did, tok)
-        lapsed = steps._stamp(db._clock() - dt.timedelta(seconds=steps.LEASE_S + 60))
+            self.post(did)
+        lapsed = (db._clock() - dt.timedelta(seconds=passes.LEASE_S + 60)
+                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
         with db.tx(self.conn):
             self.conn.execute("UPDATE deliveries SET lease_at=? WHERE delivery_id=?",
                               (lapsed, did))
@@ -185,30 +185,21 @@ class NoDocumentStaging(StoreCase):
 
 class NotPostedNotice(StoreCase):
     """T11-d: a built package that could not be posted is told as not sent, without a Casa
-    code; an oversized one too."""
-
-    def notice_text(self):
-        import alerts
-        out = alerts.pending_rendering(self.conn)
-        return " ".join(out["text"].split())
-
-    def assert_plain(self, text):
-        import views
-        self.assertIn("I couldn't send the Q3 2026 package", text)
-        self.assertNotIn("build", text)
-        self.assertNotIn("bad_filename", text)
-        for w in views.FORBIDDEN:
-            self.assertNotIn(w, text)
+    code (simple loop: the refusal is the post's own answer; no request is left to close)."""
 
     def test_a_refused_deposit(self):
-        import asks, tools, qa_server  # noqa: F401
-        did, tok = self.staged_package()
+        import posting, tools, qa_server, views  # noqa: F401
+        did = self.staged_package()
         with FakeBroker() as b:
             b.refuse = "bad_filename"
-            qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
-        text = self.notice_text()
-        self.assert_plain(text)
-        self.assertIn("ask again when you want it", text)
+            out = qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did})
+        self.assertEqual((out["package"], out["refused"]), (None, posting.PKG_REFUSED))
+        self.assertNotIn("bad_filename", out["refused"])
+        for w in views.FORBIDDEN:
+            self.assertNotIn(w, out["refused"])
+        self.assertEqual(self.conn.execute("SELECT status FROM deliveries WHERE delivery_id=?",
+                                           (did,)).fetchone()[0], "failed")
+        self.assertEqual(os.listdir(self.outbox), [])           # the staged copy taken back
 
 # --- Codex r3 (frozen 3f76ff3): Astra's reproductions, ported as stdlib pins -------------
 
@@ -219,60 +210,54 @@ class R3PostedSendLeftThePlugin(StoreCase):
     by counting package deposits: one deposit is one claimable file)."""
 
     def test_one_ask_one_deposit_across_an_interrupted_turn(self):
-        import asks, tools, qa_server  # noqa: F401
-        did, tok = self.staged_package()
+        import tools, qa_server  # noqa: F401
+        did = self.staged_package()
         with FakeBroker() as b:
-            qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
+            qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did})
             # the turn dies before record_delivery; a new run starts within the lease
-            units = self.drive(B, deliver=True)
-        kinds = [u["unit"] for u in units]
-        self.assertNotIn("build", kinds)
-        self.assertNotIn("deliver", kinds)
+            self.drive(B, deliver=True)
         self.assertEqual(sum(1 for d in b.deposits if d["slot"] == "package"), 1)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0], 1)
         self.assertEqual(self.conn.execute("SELECT status FROM deliveries WHERE delivery_id=?",
                                            (did,)).fetchone()[0], "uncertain")
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM package_requests"
-                                           ).fetchone()[0], 1)
 
     def test_the_late_receipt_still_upgrades_it(self):
-        import asks, delivery, job, tools, qa_server  # noqa: F401
-        did, tok = self.staged_package()
+        import delivery, job, tools, qa_server  # noqa: F401
+        did = self.staged_package()
         with FakeBroker():
-            qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
+            qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did})
         job.claim(self.conn, B)
         out = delivery.record_delivery(self.conn, delivery_id=did, outcome="delivered")
         self.assertEqual(out["status"], "delivered")
 
     def test_an_import_does_not_revoke_a_posted_send(self):
-        import asks, db, delivery, tools, qa_server  # noqa: F401
-        did, tok = self.staged_package()
+        import db, delivery, tools, qa_server  # noqa: F401
+        did = self.staged_package()
         with FakeBroker():
-            qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did, "package_token": tok})
+            qa_server.TOOLS["post_package"]["fn"]({"delivery_id": did})
         with db.tx(self.conn):
             sid = self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows,"
                                     " max_row_id) VALUES (NULL, ?, 0, 0)",
                                     (db.now(),)).lastrowid
             self.assertEqual(delivery.revoke_superseded_first_sends(self.conn, sid), [])
-        self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
-                         "staged")
+        self.assertEqual(self.conn.execute("SELECT status, revoked_at FROM deliveries WHERE"
+                                           " delivery_id=?", (did,)).fetchone()[:],
+                         ("staged", None))
 
 
 class R3DeliveredNeedsAPost(StoreCase):
     """r3 #2 (Terra S1): a package send never posted cannot be recorded delivered."""
 
     def test_delivered_without_a_post_is_refused(self):
-        import asks, db, delivery
-        did, tok = self.staged_package()
+        import db, delivery
+        did = self.staged_package()
         with self.assertRaises(db.Refusal) as cm:
-            delivery.record_delivery(self.conn, delivery_id=did, outcome="delivered",
-                                     package_token=tok)
+            delivery.record_delivery(self.conn, delivery_id=did, outcome="delivered")
         self.assertIn("never posted", str(cm.exception))
         self.assertIn("uncertain", str(cm.exception))
-        self.assertEqual(self.conn.execute("SELECT state FROM package_requests").fetchone()[0],
-                         "staged")
-        out = delivery.record_delivery(self.conn, delivery_id=did, outcome="uncertain",
-                                       package_token=tok)
+        self.assertEqual(self.conn.execute("SELECT status FROM deliveries WHERE delivery_id=?",
+                                           (did,)).fetchone()[0], "staged")
+        out = delivery.record_delivery(self.conn, delivery_id=did, outcome="uncertain")
         self.assertEqual(out["status"], "uncertain")
 
 

@@ -59,20 +59,19 @@ def data_dir() -> pathlib.Path:
 # DDL and MIGRATIONS[9] create byte-identical tables.
 CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   gen INTEGER PRIMARY KEY, job_id TEXT NOT NULL, at TEXT NOT NULL,
-  spent INTEGER NOT NULL DEFAULT 0, reported INTEGER NOT NULL DEFAULT 0,
   batch INTEGER NOT NULL,        -- the batch this claim belongs to: its first claim's gen
   closed INTEGER NOT NULL DEFAULT 0,    -- this claim was answered end-batch or complete
   seq INTEGER,                   -- the store sequence taken at the claim (S7 §10)
   progressed INTEGER NOT NULL DEFAULT 0);   -- the batch moved the work list on (simple loop §2.2)"""
 
-# INV-J8 (spec §15): what the job earned, once per pass and key, under the claim that
-# earned it; and each Casa job run's pass count (MAX_PASSES_PER_JOB)
+# Schema 10's credits (INV-J8), frozen for MIGRATIONS[9]; MIGRATIONS[11] drops it.
 CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (
   pass_id TEXT NOT NULL, key TEXT NOT NULL, gen INTEGER NOT NULL,
   PRIMARY KEY (pass_id, key));"""
 CREDITS_GEN_DDL = "CREATE INDEX IF NOT EXISTS ix_credits_gen ON credits(gen);"
+# Each Casa job run (simple loop §3 "Run").
 RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
-  job_id TEXT PRIMARY KEY, passes INTEGER NOT NULL DEFAULT 0,
+  job_id TEXT PRIMARY KEY,
   completed_at TEXT,             -- the run answered `complete` (S7 §10)
   started_by TEXT, pass_id TEXT,            -- who started the run, its pass (simple loop §3 "Run")
   filed_at TEXT, listed_at TEXT,            -- filing and listing done (§3 "Run")
@@ -90,7 +89,6 @@ WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
   state TEXT NOT NULL CHECK (state IN ('queued', 'taken', 'done', 'reported')),
   pass_id TEXT, outcome TEXT,
   render_ids_json TEXT NOT NULL DEFAULT '[]',
-  verdicts_json TEXT NOT NULL DEFAULT '{}',
   quarter TEXT);                 -- an operator check that names its quarter (ruling Q2)"""
 # Schema 10's own work_requests, frozen: MIGRATIONS[9] creates it and MIGRATIONS[11] adds
 # quarter, so a store migrated from 9 does not add the column twice.
@@ -206,7 +204,6 @@ CREATE TABLE IF NOT EXISTS pass_marker (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   generation INTEGER NOT NULL, live INTEGER NOT NULL,   -- generation: the live pass token
   pass_id TEXT, trigger TEXT, started_at TEXT,
-  claimed_step TEXT,             -- the step the current token continues (continue_pass)
   lease_at TEXT);                -- when the token's holder last made progress
 CREATE TABLE IF NOT EXISTS passes (
   pass_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, trigger TEXT NOT NULL,
@@ -218,47 +215,8 @@ CREATE TABLE IF NOT EXISTS passes (
   reply TEXT NOT NULL DEFAULT 'telegram',   -- where a continuation reports: telegram | silent
   protocol TEXT NOT NULL DEFAULT 'delegation',   -- 'delegation' (pre-S2) | 'job' (spec §3)
   holder_job TEXT,               -- the job run id that holds this pass (job protocol)
-  orphaned_by TEXT,               -- the job run id that adopted this pass's work, if orphaned
-  adoptions INTEGER NOT NULL DEFAULT 0,          -- adoptions spent (at most 2 per pass, §6.3)
-  adopters_json TEXT NOT NULL DEFAULT '[]',      -- job run ids that adopted this pass's work
   acq INTEGER,                    -- the bank-feed acquisition id this pass last imported under
-  acq_gen INTEGER,                -- that acquisition's restore generation
-  read_seq INTEGER,               -- the store sequence this pass's read-back is owed from
-  w_refreshes INTEGER NOT NULL DEFAULT 0,        -- W-refreshes spent (at most 2 per pass, §5.2)
-  judge_after TEXT,               -- the running judgment's page start: a validated [pid]
-  w_pending INTEGER NOT NULL DEFAULT 0,
-  judge_epoch INTEGER NOT NULL DEFAULT 0,       -- judgments started for a bounded cause (INV-J8)
-  late_takes INTEGER NOT NULL DEFAULT 0);       -- requests taken while live (LATE_TAKES_MAX)
-CREATE TABLE IF NOT EXISTS pass_steps (
-  pass_id TEXT NOT NULL,
-  step TEXT NOT NULL CHECK (step IN ('sweep', 'judge', 'handover', 'snapshot')),
-  started_at TEXT NOT NULL,      -- written by Ellen before she delegates
-  finished_at TEXT,
-  finished_by TEXT CHECK (finished_by IN ('specialist', 'resident')),
-  finish_json TEXT,              -- counts, stopped (clipped), failed
-  carry_json TEXT NOT NULL DEFAULT '{}',   -- doc_ids / report: ids and counts only
-  protocol TEXT NOT NULL DEFAULT 'delegation',
-  started_seq INTEGER,            -- the store sequence this step started at (job protocol)
-  started_gen INTEGER,            -- the pass generation this step started under (job protocol)
-  PRIMARY KEY (pass_id, step));
-CREATE TABLE IF NOT EXISTS package_requests (
-  request_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  quarter TEXT NOT NULL, channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
-  pass_id TEXT,                  -- the pass of its latest round (NULL: queued, never run)
-  pass_outcome TEXT, reason TEXT,
-  package_id INTEGER, delivery_id INTEGER,
-  token INTEGER, lease_at TEXT,
-  state TEXT NOT NULL CHECK (state IN ('queued', 'snapshot', 'snapshot-done', 'built',
-        'staged', 'delivered', 'uncertain', 'failed', 'stopped', 'recovery-failed',
-        'revoked', 'withdrawn', 'superseded')),
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-  created_seq INTEGER NOT NULL DEFAULT 0,  -- a search counts for it only after this (#15)
-  round INTEGER NOT NULL DEFAULT 0,        -- rounds of its check finished (#15)
-  remaining INTEGER,                       -- what the last round left (#15)
-  check_json TEXT,                         -- what the caption says about the check (#15)
-  checked_snapshot INTEGER,                -- the import its finished check ran on (#15)
-  asked_seq INTEGER NOT NULL DEFAULT 0);   -- the request's latest ask (S7 §10)
-CREATE INDEX IF NOT EXISTS ix_package_requests_open ON package_requests(quarter, state);
+  acq_gen INTEGER);               -- the claim that handed that acquisition out
 CREATE TABLE IF NOT EXISTS probes (
   kind TEXT PRIMARY KEY, ok INTEGER NOT NULL, detail TEXT, data_json TEXT,
   observed_at TEXT NOT NULL, pass_id TEXT, failing_since TEXT,
@@ -296,10 +254,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
   imported_at TEXT NOT NULL, rows INTEGER NOT NULL, max_row_id INTEGER NOT NULL,
   bank_through TEXT,             -- the date bank data is known good through (sync ok this pass)
   job_id TEXT,                   -- the job run id this import belongs to (job protocol)
-  read_seq INTEGER,              -- the store sequence this import's read-back is owed from
   acq INTEGER,                   -- the bank-feed acquisition id this import ran under
-  export_ref TEXT,               -- the export's own ref (idempotency: at most one import per ref)
-  swept_at TEXT);                -- when the sweep this import belongs to completed (§5.2's W)
+  export_ref TEXT);              -- the export's own ref (idempotency: at most one import per ref)
 CREATE UNIQUE INDEX IF NOT EXISTS ux_snapshots_export_ref ON snapshots(export_ref)
   WHERE export_ref IS NOT NULL;
 CREATE TABLE IF NOT EXISTS bank_rows (
@@ -323,25 +279,12 @@ CREATE TABLE IF NOT EXISTS projections (
   reasons_json TEXT NOT NULL DEFAULT '[]',
   exp_kind TEXT, exp_tier TEXT, exp_row INTEGER,
   class_tags_json TEXT, class_observed_at TEXT, last_known_kind TEXT,
-  class_observed_snapshot INTEGER,  -- the snapshot_id it was last observed at: import or read (E2, #1)
-  observed_revision INTEGER,     -- the projection's revision that read left it at (fix E2)
+  class_observed_snapshot INTEGER,  -- the snapshot_id it was last observed at: an import (E2, #1)
   observed_tags_json TEXT, observed_at TEXT,
   export_tag_revision INTEGER,   -- the row's tag_revision in the latest import (issue #1)
-  note_seen_seq INTEGER,         -- the note_seq a read last saw visible (issue #1)
   mirror_note TEXT,              -- the note text last written (simple loop §3 "Per projection")
   considered_seq INTEGER,        -- store sequence at which the job last decided this payment (§2.1)
-  note_seen_rev INTEGER,         -- that read's `Tag revision:` (issue #1)
-  note_seen_at TEXT,             -- the import time of the snapshot that read belongs to
-  note_issued_at TEXT,           -- when an add_note was last returned to the specialist
-  note_issued_seq INTEGER,       -- the note_seq that add_note carried (issue #14)
-  note_other_issued_at TEXT,     -- the latest add_note of any OTHER note_seq (issue #14)
-  readback_owed INTEGER NOT NULL DEFAULT 0,  -- a read confirms a note only after it (job protocol)
-  note_issued_gen INTEGER,       -- the pass generation add_note was last issued under
-  note_other_issued_gen INTEGER, -- the pass generation any OTHER note_seq was last issued under
-  note_seen_gen INTEGER,         -- the pass generation a read last saw the note under
-  read_snapshot INTEGER,         -- the snapshot the sweep's latest READ belongs to
   last_facts_json TEXT,          -- the destination row's facts when last seen (names an erased row)
-  note_seq INTEGER, note_body TEXT,
   unprojectable TEXT, last_error TEXT,
   search_state TEXT NOT NULL DEFAULT 'active'
     CHECK (search_state IN ('active', 'aged-out', 'accepted-missing')),
@@ -351,10 +294,6 @@ CREATE TABLE IF NOT EXISTS projections (
 CREATE TABLE IF NOT EXISTS aliases (
   row_id INTEGER PRIMARY KEY, pid INTEGER NOT NULL, first_seen TEXT);
 CREATE INDEX IF NOT EXISTS ix_aliases_pid ON aliases(pid);
-CREATE TABLE IF NOT EXISTS cursor (
-  id INTEGER PRIMARY KEY CHECK (id = 1), last_pid INTEGER NOT NULL DEFAULT 0,
-  cycle_started_at TEXT, last_cycle_completed_at TEXT);
-INSERT OR IGNORE INTO cursor(id, last_pid) VALUES (1, 0);
 
 CREATE TABLE IF NOT EXISTS matches (
   match_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -407,12 +346,11 @@ CREATE TABLE IF NOT EXISTS packages (
   filename TEXT NOT NULL UNIQUE, path TEXT NOT NULL, built_at TEXT NOT NULL,
   partial INTEGER NOT NULL, digest TEXT NOT NULL, size INTEGER NOT NULL,
   oversize INTEGER NOT NULL DEFAULT 0, caption TEXT NOT NULL, manifest_json TEXT NOT NULL,
-  snapshot_id INTEGER,           -- the import the build froze (fix E4: its first send checks it)
-  request_id INTEGER);           -- the package request it was built for (#15, D3)
+  snapshot_id INTEGER);          -- the import the build froze (fix E4: its first send checks it)
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id INTEGER PRIMARY KEY AUTOINCREMENT, package_id INTEGER, doc_id INTEGER,
   channel TEXT NOT NULL CHECK (channel IN ('telegram', 'email')),
-  staged_path TEXT NOT NULL, request_id TEXT,
+  staged_path TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('staged', 'delivered', 'uncertain', 'failed')),
   message_id TEXT, created_at TEXT NOT NULL, settled_at TEXT,
   revoked_at TEXT,               -- an unsent first send an import superseded (fix E5)
@@ -435,7 +373,7 @@ CREATE TABLE IF NOT EXISTS operator_refs (
   -- mail, a Telegram file) by its own ref, once filed, so a pass's capped filing skips it
   ref TEXT PRIMARY KEY, source TEXT NOT NULL, doc_id INTEGER NOT NULL, filed_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at);
-""" + "\n".join((CLAIMS_DDL, WORK_REQUESTS_DDL, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL,
+""" + "\n".join((CLAIMS_DDL, WORK_REQUESTS_DDL, RUNS_DDL,
                          READINGS_DDL, RENDER_KEYS_DDL, ACCOUNT_CHOICES_DDL, POST_OFFERS_DDL,
                          RUN_WORK_DDL, RUN_MIRROR_DDL, QUARTER_NOTICES_DDL,
                          RENDER_STATES_DDL)) + "\n"
@@ -632,30 +570,45 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE runs ADD COLUMN partial INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE runs ADD COLUMN quarter TEXT",
          "ALTER TABLE work_requests ADD COLUMN quarter TEXT",
-         RUN_WORK_DDL, RUN_MIRROR_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL],
+         RUN_WORK_DDL, RUN_MIRROR_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL,
+         # ... then the machinery §4 deletes: the sweep, the chunk carry, the judge,
+         # credits, nested passes, package requests and the delegation protocol
+         "DROP TABLE IF EXISTS credits", "DROP TABLE IF EXISTS cursor",
+         "DROP TABLE IF EXISTS pass_steps", "DROP TABLE IF EXISTS package_requests",
+         *(f"ALTER TABLE passes DROP COLUMN {c}" for c in (
+             "orphaned_by", "adoptions", "adopters_json", "read_seq", "w_refreshes",
+             "judge_after", "w_pending", "judge_epoch", "late_takes")),
+         *(f"ALTER TABLE snapshots DROP COLUMN {c}" for c in ("read_seq", "swept_at")),
+         *(f"ALTER TABLE projections DROP COLUMN {c}" for c in (
+             "observed_revision", "note_seen_seq", "note_seen_rev", "note_seen_at",
+             "note_issued_at", "note_issued_seq", "note_other_issued_at", "readback_owed",
+             "note_issued_gen", "note_other_issued_gen", "note_seen_gen", "read_snapshot",
+             "note_seq", "note_body")),
+         *(f"ALTER TABLE claims DROP COLUMN {c}" for c in ("spent", "reported")),
+         "ALTER TABLE runs DROP COLUMN passes",
+         "ALTER TABLE pass_marker DROP COLUMN claimed_step",
+         "ALTER TABLE work_requests DROP COLUMN verdicts_json",
+         "ALTER TABLE packages DROP COLUMN request_id",
+         "ALTER TABLE deliveries DROP COLUMN request_id",
+         "DELETE FROM meta WHERE key='store_epoch_at' OR key LIKE 'left:%'",
+         # a package request's own notices (stopped / the bank unread) lose their wording
+         # with their raisers: one still unsaid is said as the request's not-sent notice
+         "UPDATE alerts SET kind='package-not-sent' WHERE sent_at IS NULL AND kind IN"
+         " ('package-stopped', 'package-failed')"],
 }
 
 
-def set_epoch(conn: sqlite3.Connection) -> None:
-    """The store's epoch (issue #14): a store is created, reset or upgraded from a
-    version that did not record its note writes by revision. Any write an earlier
-    generation handed out may still land within a delegation's ceiling after it, so
-    no read confirms a note until then (sweep.note_confirmed)."""
-    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('store_epoch_at', ?)",
-                 (now(),))
-
-
-def epoch(conn: sqlite3.Connection):
-    row = conn.execute("SELECT value FROM meta WHERE key='store_epoch_at'").fetchone()
-    return row[0] if row else None
-
-
-def _close_delegation_and_epoch(conn: sqlite3.Connection) -> None:
-    """The 9 -> 10 data step: a read confirms a note only >= Z after the migration (§4),
-    and a live delegation-protocol pass is closed."""
-    set_epoch(conn)
-    import passes       # lazy: passes imports db
-    passes.close_delegation_pass_on_upgrade(conn)
+def _close_delegation_pass(conn: sqlite3.Connection) -> None:
+    """The 9 -> 10 data step (spec §8): a live delegation-protocol pass is ended
+    `interrupted` and the marker goes dead, so every old token is refused by check_token.
+    (Its package request goes with the 11 -> 12 drops; a 9 -> 10 store has no work request
+    yet.) The store epoch it also set went with the sweep (simple loop §4)."""
+    m = conn.execute("SELECT live, pass_id FROM pass_marker WHERE id=1").fetchone()
+    if m is None or not m[0]:
+        return
+    conn.execute("UPDATE passes SET ended_at=?, outcome='interrupted' WHERE pass_id=? AND"
+                 " ended_at IS NULL", (now(), m[1]))
+    conn.execute("UPDATE pass_marker SET live=0, lease_at=NULL WHERE id=1")
 
 
 def _settle_staged_email_on_upgrade(conn) -> None:
@@ -678,9 +631,10 @@ def _settle_staged_email_on_upgrade(conn) -> None:
 
 
 # A version's data step runs right after MIGRATIONS[version], inside the loop, so a later
-# version's drop can never break an earlier step (Task 11 drops package_requests).
-SCHEMA_DATA_STEPS = {5: set_epoch, 9: _close_delegation_and_epoch,
-                     10: _settle_staged_email_on_upgrade}
+# version's drop can never break an earlier step (MIGRATIONS[11] drops package_requests).
+# The 4 -> 5 store epoch (issue #14) went with the sweep that read it (simple loop §4): no
+# step at 5, and 9 -> 10 only closes a live delegation pass.
+SCHEMA_DATA_STEPS = {9: _close_delegation_pass, 10: _settle_staged_email_on_upgrade}
 
 
 def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:
@@ -696,7 +650,6 @@ def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:
                 conn.execute(stmt)
             conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
                          (str(SCHEMA_VERSION),))
-            set_epoch(conn)
             return
         for version in range(current, SCHEMA_VERSION):
             for stmt in MIGRATIONS[version]:
@@ -792,16 +745,15 @@ def next_seq(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT value FROM counters WHERE name='seq'").fetchone()[0]
 
 
-# Renderings that offer nothing to answer (S2 §6.4): a handover's case lines, a stop
-# line, a package's details note, the package file's caption and the run's asks-waiting
-# line (S7 §4.2, §6.1). Delivered after a view or an offer, they never take the operator's
+# Renderings that offer nothing to answer (S2 §6.4): a handover's case lines, a stop line
+# and the package file's caption (S7 §6.1). Delivered after a view or an offer, they never take the operator's
 # reply from it (diff round 1, R3; Astra S2: a handover page delivered after `speak`'s
 # resend offer made "send it again" refuse).
-INFORMATIONAL_KINDS = ("handover", "job-stop", "package-note", "job-left", "package-file")
-# Of those, the ones a QUOTE can never bind (views.bound_rendering). The package's note
-# and file are quotable (#44): a swipe-reply "send it again" on either names its package
-# (their scope's `offers`), answered by delivery.resend_target.
-UNQUOTABLE_KINDS = ("handover", "job-stop", "job-left")
+INFORMATIONAL_KINDS = ("handover", "job-stop", "package-file")
+# Of those, the ones a QUOTE can never bind (views.bound_rendering). The package file is
+# quotable (#44): a swipe-reply "send it again" on it names its package (its scope's
+# `offers`), answered by delivery.resend_target.
+UNQUOTABLE_KINDS = ("handover", "job-stop")
 
 
 def seen_render(row) -> bool:

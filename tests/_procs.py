@@ -146,7 +146,7 @@ def pending_rendering(path, barrier, out):
 
 
 
-def import_export(export_path, token, instance, out):
+def import_export(export_path, token, instance, out, acq=None):
     """A second session's import_ledger_export under the same pass token (round
     E3, Astra S1: an import landing between a read and its record)."""
     import db
@@ -154,13 +154,14 @@ def import_export(export_path, token, instance, out):
     conn = db.open_store()
     try:
         _report(out, lambda: ledger.import_ledger_export(
-            conn, path=export_path, token=token, ledger_instance=instance)["snapshot"])
+            conn, path=export_path, token=token, ledger_instance=instance,
+            acq=acq)["snapshot"])
     finally:
         conn.close()
 
 
 def build_paused(quarter, rendered, resume, out):
-    """build_quarterly_package, paused after its frozen inputs were rendered and
+    """package.build_quarterly_package, paused after its frozen inputs were rendered and
     before the package is registered (round E3, Terra S1)."""
     import db
     import package
@@ -174,12 +175,12 @@ def build_paused(quarter, rendered, resume, out):
     package._render = paused
     conn = db.open_store()
     try:
-        _report(out, lambda: package.build_quarterly_package(conn, quarter, bound=False))
+        _report(out, lambda: package.build_quarterly_package(conn, quarter))
     finally:
         conn.close()
 
 
-def import_paused(export_path, token, instance, withdrawn, resume, out):
+def import_paused(export_path, token, instance, acq, withdrawn, resume, out):
     """import_ledger_export, paused right after it withdrew the staged bytes of the
     first sends it revokes and before its commit (round E6, Terra S1)."""
     import db
@@ -196,7 +197,8 @@ def import_paused(export_path, token, instance, withdrawn, resume, out):
     conn = db.open_store()
     try:
         _report(out, lambda: ledger.import_ledger_export(
-            conn, path=export_path, token=token, ledger_instance=instance)["revoked_deliveries"])
+            conn, path=export_path, token=token, ledger_instance=instance,
+            acq=acq)["revoked_deliveries"])
     finally:
         conn.close()
 
@@ -220,7 +222,7 @@ def build_repeatedly(quarter, n, out):
     try:
         for _ in range(n):
             try:
-                package.build_quarterly_package(conn, quarter, bound=False)
+                package.build_quarterly_package(conn, quarter)
                 results.append("ok")
             except db.Refusal as exc:
                 results.append(f"{type(exc).__name__}: {exc}")
@@ -231,20 +233,7 @@ def build_repeatedly(quarter, n, out):
         conn.close()
 
 
-def continue_pass(path, barrier, out):
-    """continue_pass from a sibling session, released by the barrier together with
-    another (issue #2: two notices race one claim)."""
-    import db
-    import steps
-    conn = db.open_store(path)
-    try:
-        barrier.wait(30)
-        out.put(steps.claim(conn))
-    finally:
-        conn.close()
-
-
-def import_poison_paused(export_path, token, instance, rolled_back, resume, out):
+def import_poison_paused(export_path, token, instance, rolled_back, resume, out, acq=None):
     """import_ledger_export with a mismatched ledger instance, paused inside poison()
     right after it rolled back the checked transaction and before its own verdict
     transaction (review C4: a superseded caller must not poison the live pass)."""
@@ -266,6 +255,6 @@ def import_poison_paused(export_path, token, instance, rolled_back, resume, out)
     conn = db.open_store()
     try:
         _report(out, lambda: ledger.import_ledger_export(conn, path=export_path, token=token,
-                                                          ledger_instance=instance))
+                                                          ledger_instance=instance, acq=acq))
     finally:
         conn.close()

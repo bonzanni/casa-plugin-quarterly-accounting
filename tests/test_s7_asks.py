@@ -1,35 +1,14 @@
 # tests/test_s7_asks.py
-"""S7 §4: every ask returns its request_id and kind; a repeated package ask renews
-asked_seq; ask_state says whether the live run will take it; no email; desk filing."""
+"""S7 §4: every ask returns its request_id and kind; ask_state says whether the live run
+will take it; desk filing."""
 from tests._base import StoreCase
 
 
 class Asks(StoreCase):
-    def test_both_asks_return_their_id_and_kind(self):
+    def test_an_ask_returns_its_id_and_kind(self):
         import asks
         w = asks.request_work(self.conn, "check", "operator")
         self.assertEqual((w["kind"], type(w["request_id"])), ("work", int))
-        p = asks.request_package(self.conn, "2026-Q3")
-        again = asks.request_package(self.conn, "2026-Q3")
-        self.assertEqual(again["status"], "already")
-        self.assertEqual(again["request_id"], p["request_id"])
-        self.assertEqual(again["kind"], "package")
-
-    def test_a_repeated_package_ask_renews_asked_seq(self):
-        import asks
-        p = asks.request_package(self.conn, "2026-Q3")
-        first = self.conn.execute("SELECT asked_seq FROM package_requests").fetchone()[0]
-        asks.request_package(self.conn, "2026-Q3")
-        second = self.conn.execute("SELECT asked_seq FROM package_requests").fetchone()[0]
-        self.assertGreater(second, first)
-
-    def test_no_channel_and_never_email(self):
-        import asks
-        asks.request_package(self.conn, "2026-Q3")
-        self.assertEqual(self.conn.execute("SELECT channel FROM package_requests").fetchone()[0],
-                         "telegram")
-        import tools, qa_server  # noqa: F401
-        self.assertNotIn("channel", qa_server.TOOLS["request_package"]["schema"]["properties"])
 
     def test_ask_state_queued_without_a_live_run_says_busy_just_now(self):
         import asks, db, job
@@ -78,26 +57,11 @@ class Asks(StoreCase):
                               (r["request_id"],))
         s = asks.ask_state(self.conn, "work", r["request_id"])
         self.assertEqual((s["state"], s["line"]), ("done", asks.DONE_ALREADY))
-        for kind, rid in (("email", r["request_id"]), ("work", 9999)):
+        # simple loop §4: package asks are gone with their requests
+        for kind, rid in (("email", r["request_id"]), ("package", r["request_id"]),
+                          ("work", 9999)):
             with self.assertRaises(db.Refusal):
                 asks.ask_state(self.conn, kind, rid)
-
-    def test_ask_state_for_a_package_ask(self):
-        """T8-a: a package ask being checked is `taken` with its own line; delivered, done."""
-        import asks, db
-        p = asks.request_package(self.conn, "2026-Q3")
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE package_requests SET state='snapshot' WHERE"
-                              " request_id=?", (p["request_id"],))
-        s = asks.ask_state(self.conn, "package", p["request_id"])
-        self.assertEqual(s["state"], "taken")
-        self.assertIn("for Q3 2026", s["line"])
-        self.assertIn("the package follows", s["line"])
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE package_requests SET state='delivered' WHERE"
-                              " request_id=?", (p["request_id"],))
-        self.assertEqual(asks.ask_state(self.conn, "package", p["request_id"])["line"],
-                         asks.DONE_ALREADY)
 
     def test_desk_filing_needs_no_token_and_resident_is_refused(self):
         import documents, db

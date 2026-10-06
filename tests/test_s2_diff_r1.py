@@ -48,7 +48,6 @@ class Tools(StoreCase):
         self.addCleanup(setattr, tools, "_CONN", None)
         self.rows, self.bank, self.instance = [], {}, self.LEDGER
         self.handed = []                # S7 §5: the post/view units, their receipts withheld
-        self.package_receipt = True     # S7 §6.1: a posted package's receipt arrives
 
     def call(self, name, **kw):
         import qa_server
@@ -62,7 +61,7 @@ class Tools(StoreCase):
         return self.call("job_next", job_id=A)
 
     def do(self, u):
-        t, k, ans = u["pass_token"], u["unit"], {}
+        t, k = u["pass_token"], u["unit"]
         if k == "probes":
             for kind, data in (("bank_tools", {}),
                                ("bank_accounts", {"accounts": [{"account_id": "acc-biz",
@@ -78,30 +77,6 @@ class Tools(StoreCase):
                          tag_revision=self.bank[r["row_id"]]["rev"]) for r in self.rows]
             self.call("import_ledger_export", path=self.export_csv(rows), pass_token=t,
                       ledger_instance=self.instance, acq=u["acq"])
-        elif k == "sweep":
-            page = self.call("list_projections", pass_token=t, limit=10, quarter=u["quarter"])
-            for it in page["projections"]:
-                b = self.bank[it["row_id"]]
-                for _ in range(6):
-                    w = self.call("record_observation", pid=it["pid"], pass_token=t,
-                                  snapshot_id=page["snapshot_id"], observed_tags=b["tags"],
-                                  observed_notes=b["notes"],
-                                  observed_first_seen="2026-07-03T08:00:00Z",
-                                  observed_tag_revision=b["rev"])["instructions"]
-                    if not w:
-                        break
-                    if "tag" in w:
-                        b["tags"] = sorted(set(b["tags"]) | set(w["tag"]))
-                        b["rev"] += 1
-                    if "untag" in w:
-                        b["tags"] = sorted(set(b["tags"]) - set(w["untag"]))
-                        b["rev"] += 1
-                    if "add_note" in w:
-                        b["notes"].append(w["add_note"])
-                else:
-                    self.fail("the sweep did not settle")
-        elif k == "gmail-probe":
-            self.call("record_probe", pass_token=t, kind="gmail", ok=True)
         elif k == "filing":
             self.call("record_probe", pass_token=t, kind="gmail", ok=True)
             self.call("record_filing", pass_token=t)
@@ -111,34 +86,11 @@ class Tools(StoreCase):
                 for x in u["payments"]])
         elif k == "mirror":
             self.call("record_mirror", pass_token=t, done=[c["n"] for c in u["calls"]])
-        elif k == "item":
-            self.call("record_search", pass_token=t, pid=u["item"]["pid"],
-                      queries=["invoice"], exhausted=True)
-        elif k == "judge":
-            page = self.call("list_quarter_state", pass_token=t, triage=True, limit=8,
-                             quarter=u["quarter"], after=u["after"])
-            ans = {"judged": {"judgment": u["judgment"], "after": u["after"],
-                              "page_next": page["next"], "triage_remaining": page["remaining"],
-                              "documents": {str(i): "no-payment-yet"
-                                            for i in u["documents_first"]}}}
         elif k in ("post", "view"):
             self.handed.append(u)       # posted; its receipt arrives when deliver() says
-        elif k == "build":
-            self.call("build_quarterly_package", quarter=u["quarter"],
-                      package_token=u["package_token"], request_id=u["request_id"])
-        elif k == "deliver":
-            from tests.fakebroker import FakeBroker
-            st = self.call("stage_for_delivery", package_id=u["package_id"],
-                           package_token=u["package_token"])
-            with FakeBroker():
-                self.call("post_package", delivery_id=st["delivery_id"],
-                          package_token=u["package_token"])
-            self.call("record_delivery", delivery_id=st["delivery_id"],
-                      outcome="delivered" if self.package_receipt else "uncertain",
-                      package_token=u["package_token"])
         else:
             raise AssertionError(u)
-        return self.call("job_next", pass_token=t, calls_made=0, **ans)
+        return self.call("job_next", pass_token=t, calls_made=0)
 
     def until(self, u, unit, job_id=A):
         for _ in range(400):

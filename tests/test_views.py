@@ -40,7 +40,6 @@ class Base(StoreCase):
                               (observed, pid))
         self.settle(pid)
         if searched:                # the pass looked; a never-searched item is not `missing`
-            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=self.token, queries=["x"])
         return pid
 
@@ -195,7 +194,7 @@ class TestSheet(Base):
         self.assertNotIn("New1", text)
         self.assertNotIn("not checked yet", text)    # could not look is not "not reached"
         self.assertIn("3 transactions, 1 missing a document.", flat(text))
-        self.end_with_counts(self.token, "interrupted", {"checked": 18, "total": 30})
+        self.end_live_pass("interrupted", {"checked": 18, "total": 30})
         text = untag(self.render()["text"])
         self.assertIn("Review interrupted.\n18 of 30 new payments checked.\n12 not checked yet. Saved.",
                       text)
@@ -397,25 +396,20 @@ class TestSheet(Base):
     def test_an_interrupted_pass_says_not_checked_once(self):
         self.add(counterparty="Seen")
         self.add(counterparty="Unreached", searched=False)
-        self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 2})
+        self.end_live_pass("interrupted", {"checked": 1, "total": 2})
         text = untag(self.render()["text"])
         self.assertIn("Review interrupted.\n1 of 2 new payments checked.\n1 not checked yet. Saved.",
                       text)
         self.assertEqual(text.count("not checked yet"), 1)
 
-    def test_a_package_or_handover_pass_keeps_the_interrupted_block(self):
-        # Task 22 review, item 5: those passes are not reviews; ending one must not
-        # erase what the interrupted review still owes the operator.
+    def test_a_complete_run_clears_the_interrupted_block(self):
         self.add(counterparty="Seen")
         self.add(counterparty="Unreached", searched=False)
-        self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 2})
-        for trigger in ("package", "handover"):
-            tok = self.pass_(trigger=trigger)
-            passes.end_pass(self.conn, tok, "complete", {})
-            self.assertIn("Review interrupted.\n1 of 2 new payments checked.",
-                          untag(self.render()["text"]), trigger)
-        tok = self.pass_(trigger="cron")
-        passes.end_pass(self.conn, tok, "complete", {})
+        self.end_live_pass("interrupted", {"checked": 1, "total": 2})
+        self.assertIn("Review interrupted.\n1 of 2 new payments checked.",
+                      untag(self.render()["text"]))
+        self.pass_(trigger="cron")
+        self.end_live_pass()
         self.assertNotIn("Review interrupted.", self.render()["text"])
 
     def _older(self, counterparty, searched):
@@ -431,7 +425,7 @@ class TestSheet(Base):
         for i in range(3):
             self._older(f"OldNew{i}", searched=False)
         self.add(counterparty="NowSeen", tags=("internal-transfer",))
-        self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 4})
+        self.end_live_pass("interrupted", {"checked": 1, "total": 4})
         text = self.render()["text"]
         self.assertIn('+3 older not searched yet (Q2) — say "show older"', flat(text))
         older = self.render("older")["text"]

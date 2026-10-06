@@ -340,97 +340,20 @@ def caption_line(quarter, as_of, counts) -> str:
             f" · {n - open_} of {n} documented · {open_} open")
 
 
-def _request_for_build(conn, quarter: str, package_token, request_id=None) -> int:
-    """The package request this build is for: `request_id` (the job's build unit names
-    it) when given, holding `package_token`, open and not yet staged, for this quarter.
-    Refuses otherwise. Returns its id. Ruling F8: every request one job claim hands out
-    holds the same token (the claim's gen), so the token alone names a request only when
-    one buildable request of the quarter holds it — more than one is refused."""
-    import passes
-    if package_token is None:
-        raise db.Refusal("a package is built for a package request: pass the package_token "
-                         "and request_id the job's build unit gave you")
-    if request_id is None:
-        rows = conn.execute("SELECT * FROM package_requests WHERE token=? AND quarter=? AND"
-                            " state='snapshot-done'", (int(package_token), quarter)).fetchall()
-        if len(rows) > 1:
-            raise db.Refusal("pass the request_id the job's build unit gave you")
-        req = rows[0] if rows else conn.execute(
-            "SELECT * FROM package_requests WHERE token=? ORDER BY request_id DESC",
-            (int(package_token),)).fetchone()
-    else:
-        req = conn.execute("SELECT * FROM package_requests WHERE request_id=?",
-                           (int(request_id),)).fetchone()
-    if req is None:
-        raise db.Refusal("this package request has been taken over by a later turn — stop, "
-                         "nothing was written")
-    req = passes.check_package_token(conn, req["request_id"], package_token)
-    if req["quarter"] != quarter:
-        raise db.Refusal(f"this package_token is for the {dates.quarter_label(req['quarter'])} "
-                         "package")
-    # one request builds one package: a second build would unlink the first from its
-    # request, and that package could then be sent outside the send-once rule
-    if req["state"] != "snapshot-done":
-        raise db.Refusal("this package request already built its package — stage it, or ask "
-                         "for the package again for a new one")
-    return req["request_id"]
-
-
-RECHECK = ("the bank was re-read since the check — the check runs again, and the package "
-           "follows it; call job_next")
-
-
-def stale_check(conn, request_id, token) -> bool:
-    """Issue #15 (design D2): a request's check describes the import it ran on. Once a
-    newer import landed, the request goes back to `queued` (committed on its own) and
-    the caller refuses with RECHECK. True when that happened. Only the holder of the
-    request's CURRENT token moves it (code round C1, Astra S1: a superseded holder
-    requeued the request under its successor); anyone else changes nothing."""
-    import passes
-    with db.tx(conn):
-        req = conn.execute("SELECT * FROM package_requests WHERE request_id=?",
-                           (request_id,)).fetchone()
-        if req is None or req["state"] not in ("snapshot-done", "built"):
-            return False
-        if token is None or req["token"] is None or int(token) != req["token"]:
-            return False
-        if req["checked_snapshot"] is not None and \
-                req["checked_snapshot"] == lineage.latest_import(conn):
-            return False
-        passes.requeue(conn, request_id)
-        return True
-
-
-class _Recheck(Exception):
-    def __init__(self, request_id):
-        self.request_id = request_id
-
-
-def build_quarterly_package(conn, quarter: str, package_token=None, *, request_id=None,
-                            bound=True) -> dict:
-    """Build the quarter's zip for package request `request_id`, holding `package_token`.
-    The token is checked before the custody lock (an early refusal) and again in
-    the transaction that registers the zip and links it to the request, so a
-    holder rotated while it waited registers nothing and leaves no zip behind.
-    bound=False builds outside any request (in-process callers and tests only;
-    the tool always binds)."""
+def build_quarterly_package(conn, quarter: str) -> dict:
+    """Build the quarter's zip from the store as it is (get_package; simple loop §1). The
+    custody lock over documents/ and packages/ (db.custody_lock): a build reads held
+    documents' bytes and writes into packages/, which reset_store erases under that lock.
+    Taken BEFORE the freeze transaction, never inside one (lock order: custody, then
+    SQLite)."""
     dates.parse_quarter(quarter)
     if conn.in_transaction:
-        raise RuntimeError("build_quarterly_package opens its own transactions")
-    if bound:
-        request_id = _request_for_build(conn, quarter, package_token, request_id)
-        if stale_check(conn, request_id, package_token):
-            raise db.Refusal(RECHECK)
-    # The custody lock over documents/ and packages/ (db.custody_lock): a build
-    # reads held documents' bytes and writes into packages/, which reset_store
-    # erases under that lock. Taken BEFORE the freeze transaction, never inside
-    # one (lock order: custody, then SQLite).
+        raise RuntimeError("a package build opens its own transactions")
     with db.custody_lock():
-        return _build(conn, quarter, package_token if bound else None, bound,
-                      request_id if bound else None)
+        return _build(conn, quarter)
 
 
-def _build(conn, quarter: str, package_token=None, bound=False, bound_id=None) -> dict:
+def _build(conn, quarter: str) -> dict:
     stamp = db.now()
     today = stamp[:10]
     frozen = _freeze(conn, quarter)
@@ -453,13 +376,6 @@ def _build(conn, quarter: str, package_token=None, bound=False, bound_id=None) -
     caption = caption_line(quarter, frozen["as_of"], manifest["counts"])
     try:
         with db.tx(conn):
-            # the binding check: in the transaction that registers and links the zip
-            request_id = (_request_for_build(conn, quarter, package_token, bound_id)
-                          if bound else None)
-            if request_id is not None and conn.execute(
-                    "SELECT checked_snapshot FROM package_requests WHERE request_id=?",
-                    (request_id,)).fetchone()[0] != lineage.latest_import(conn):
-                raise _Recheck(request_id)
             if lineage.latest_import(conn) != frozen["snapshot_id"]:
                 # round E3 (Terra S1): an import landed between the freeze and this
                 # commit, so rows judged fresh may no longer be; never register or hand
@@ -467,24 +383,11 @@ def _build(conn, quarter: str, package_token=None, bound=False, bound_id=None) -
                 raise db.Refusal("the bank was re-read while building — build again")
             pkg_id = conn.execute(
                 "INSERT INTO packages(quarter, filename, path, built_at, partial, digest, size,"
-                " oversize, caption, manifest_json, snapshot_id, request_id)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " oversize, caption, manifest_json, snapshot_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (quarter, path.name, str(path), stamp, int(partial), digest, len(data),
                  int(oversize), caption, db.canonical(manifest),
-                 frozen["snapshot_id"], request_id)).lastrowid
-            if request_id is not None:
-                conn.execute("UPDATE package_requests SET package_id=?, state='built',"
-                             " updated_at=? WHERE request_id=?", (pkg_id, db.now(), request_id))
-                pass_id = conn.execute("SELECT pass_id FROM package_requests WHERE"
-                                       " request_id=?", (request_id,)).fetchone()[0]
-                import job
-                job.credit(conn, package_token, pass_id, f"req:pkg:{request_id}:built")
-    except _Recheck as exc:
-        path.unlink(missing_ok=True)
-        if stale_check(conn, exc.request_id, package_token):
-            raise db.Refusal(RECHECK)
-        raise db.Refusal("this package request has been taken over by a later turn — stop, "
-                         "nothing was written")
+                 frozen["snapshot_id"])).lastrowid
     except BaseException:
         path.unlink(missing_ok=True)       # an unregistered zip is never left to hand out
         raise

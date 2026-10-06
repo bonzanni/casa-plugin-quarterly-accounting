@@ -118,13 +118,11 @@ PKG_REFUSED = "the package could not be sent under its name — ask again"
 ALREADY_POSTED = "That package was already sent once — nothing was posted again."
 
 
-def post_package(conn, delivery_id, package_token=None) -> dict:
+def post_package(conn, delivery_id) -> dict:
     """§6.1: deposit a staged package as an operator_file — the staged path (Casa claims and
     consumes it), kind zip, the package's filename as the delivered name (S7a), and one
     caption line. A deposit Casa refuses settles the send `failed` (the staged copy taken
-    back) and closes its request with a package-not-sent notice — never a send under the
-    storage name."""
-    import passes
+    back) — never a send under the storage name."""
     with db.tx(conn):
         d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?",
                          (delivery_id,)).fetchone()
@@ -137,27 +135,22 @@ def post_package(conn, delivery_id, package_token=None) -> dict:
             # at most one deposit per send: Casa consumes the staged copy, so a second
             # deposit's claim fails after a send that went out (Codex r2 S2)
             raise db.Refusal(ALREADY_POSTED)
-        req = conn.execute("SELECT * FROM package_requests WHERE delivery_id=?",
-                           (delivery_id,)).fetchone()
-        if req is not None:
-            passes.check_package_token(conn, req["request_id"], package_token)
         pk = conn.execute("SELECT * FROM packages WHERE package_id=?",
                           (d["package_id"],)).fetchone()
         line = pk["caption"].split("\n", 1)[0]
         if d["as_built"]:
             import dates
             line += f" · built {dates.short_day(pk['built_at'])}, as it was then"
-    ref = _deposit_package(conn, d, pk, line, req)
+    ref = _deposit_package(conn, d, pk, line)
     return {"package": ref, "delivery_id": delivery_id, "filename": pk["filename"]}
 
 
-def _deposit_package(conn, d, pk, line, req) -> str:
+def _deposit_package(conn, d, pk, line) -> str:
     """Deposit staged send `d` (package row `pk`) with caption `line`: the tagged
     `package-file` rendering and the post mark commit first, the deposit is the LAST step.
     A deposit Casa refuses settles the send `failed` (its staged copy taken back, its
-    caption rendering removed) and — for a request-bound send (`req`) — closes the request
-    with a package-not-sent notice, then refuses with PKG_REFUSED. Returns the reference."""
-    import alerts, delivery
+    caption rendering removed), then refuses with PKG_REFUSED. Returns the reference."""
+    import delivery
     delivery_id = d["delivery_id"]
     with db.tx(conn):
         # #44: the caption is a rendering of its own (`package-file`), tagged (binding V2)
@@ -192,13 +185,6 @@ def _deposit_package(conn, d, pk, line, req) -> str:
                 # so no quote can bind a file that did not arrive
                 conn.execute("DELETE FROM renders WHERE render_id=? AND kind='package-file'",
                              (rid,))
-                if req is not None:
-                    conn.execute("UPDATE package_requests SET state='stopped', reason=?,"
-                                 " updated_at=? WHERE request_id=?",
-                                 (PKG_REFUSED, now, req["request_id"]))
-                    alerts.raise_package(conn, "package-not-sent",
-                                         f"request:{req['request_id']}:posted",
-                                         quarter=pk["quarter"])
         raise db.Refusal(PKG_REFUSED)
 
 
@@ -216,19 +202,18 @@ def get_package(conn, quarter) -> dict:
         raise RuntimeError("get_package opens its own transactions")
     if conn.execute("SELECT 1 FROM snapshots").fetchone() is None:
         raise db.Refusal(NO_CHECK)
-    built = package.build_quarterly_package(conn, quarter, bound=False)   # Task 11: no `bound`
+    built = package.build_quarterly_package(conn, quarter)
     if built["oversize"]:
         raise db.Refusal(f"the {dates.quarter_label(quarter)} package is "
                          f"{built['size'] / 1e6:.1f} MB, over Telegram's 20 MB limit; it is "
                          "kept here, and notes.md names the largest files")
     with db.custody_lock():
-        st = delivery._stage(conn, built["package_id"], None, None, None, None)
-        # Task 11: delivery._stage(conn, package_id, None, None)
+        st = delivery._stage(conn, built["package_id"], None, None)
     d = conn.execute("SELECT * FROM deliveries WHERE delivery_id=?",
                      (st["delivery_id"],)).fetchone()
     pk = conn.execute("SELECT * FROM packages WHERE package_id=?",
                       (built["package_id"],)).fetchone()
-    ref = _deposit_package(conn, d, pk, pk["caption"], None)    # raises Refusal on a refusal
+    ref = _deposit_package(conn, d, pk, pk["caption"])    # raises Refusal on a refusal
     # Nothing may raise past this point: the file has landed. Any failure to record the
     # send delivered rolls its transaction back and leaves the send staged and posted, and
     # the next claim's recovery (delivery.posted_unrecorded) settles it `uncertain` (D15).
