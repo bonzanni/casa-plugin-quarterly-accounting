@@ -49,7 +49,7 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              # queues: a unit's handed items and the probe's / record_search's answer
              "files", "files_total", "rows", "snapshot_id", "refs", "search",
              # rev 18.4: the payment unit's fields
-             "searches_left", "holds", "why", "candidates"}
+             "searches_left", "holds", "why", "candidates", "handed_over", "decided"}
 # §15: tools that left the surface in S7 (their functions stay server-side).
 REMOVED_S7 = ("job_report", "apply_reply", "confirm_match", "reject_match", "set_exemption",
               "stop_chasing", "set_watermark", "set_package_name")

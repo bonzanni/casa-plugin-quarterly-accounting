@@ -500,7 +500,8 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
             head.append(f"{_s(earlier, 'earlier item')} still open")
         head += _fit_receipts(receipts, head, _confirm_room(new_props) + tail)
         return _summary(conn, "end", q, head, new_props, _vendor_items(new_miss), tail,
-                        reported, scheduled=True, extra_scope=extra_scope, questions=qs)
+                        reported, scheduled=True, extra_scope=extra_scope,
+                        questions=new_qs)       # e1 (Astra S2): only this run's new ones
     c = st["counts"].get(q, collections.Counter())
     n = sum(c.values())
     qs = replace.open_ones(conn)
@@ -645,7 +646,8 @@ def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):
              f"Current: {doc_line(old)} ({how}).",
              f"New: {doc_line(qn['new_doc_id'])} (from you)."]
     scope = {"quarter": quarter, "scheduled": scheduled, "review_of": review_of, "pos": pos,
-             "pid": qn["pid"], "question_id": qid, "new_doc_id": qn["new_doc_id"]}
+             "pid": qn["pid"], "question_id": qid, "new_doc_id": qn["new_doc_id"],
+             "new_doc_fp": replace.new_doc_fp(conn, qn["new_doc_id"])}
     return _store(conn, "replace", lines, scope, {qn["pid"]: 1},
                   {qn["pid"]: item_state(d)}, docs={qn["pid"]: {cur[0]: 2}})
 

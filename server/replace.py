@@ -56,20 +56,38 @@ def get(conn, qid):
 
 
 def open_ones(conn) -> list:
-    """Every live question whose payment is still in scope, oldest first."""
+    """Every live question, oldest first. e1 (Astra S1): a question whose payment left
+    scope, or no longer holds the pairing it asked about, is retired here — superseded, never
+    offered — so no message advertises a card nothing can show. Inside a transaction."""
+    assert conn.in_transaction
     out = []
     for q in conn.execute("SELECT * FROM replace_questions WHERE state='open' ORDER BY"
                           " question_id").fetchall():
         p = lineage.projection(conn, q["pid"])
-        if p is not None and not p["ended"] and p["merged_into"] is None:
-            out.append(q)
+        cur = current(conn, q["pid"])
+        if p is None or p["ended"] or p["merged_into"] is not None or cur is None \
+                or cur[0] != q["match_id"]:
+            conn.execute("UPDATE replace_questions SET state='superseded', answered_at=?"
+                         " WHERE question_id=?", (db.now(), q["question_id"]))
+            continue
+        out.append(q)
     return out
 
 
-def answer_in_tx(conn, grant, q, action, render_id) -> str:
+def new_doc_fp(conn, doc_id) -> str:
+    """e1 (Astra S1): what the card showed of the handed document — its fingerprint."""
+    import documents
+    return documents.fingerprint(conn.execute("SELECT * FROM documents WHERE doc_id=?",
+                                              (doc_id,)).fetchone())
+
+
+def answer_in_tx(conn, grant, q, action, render_id, shown_fp=None) -> str:
     """[Keep current] / [Use new] on the question's card, under the tap's grant, the
     card's binding already checked (taps._card_tap: the payment and the displayed pairing
-    as the card recorded them). Returns the receipt line."""
+    as the card recorded them); `shown_fp` is the handed document's fingerprint as the card
+    showed it (e1, Astra S1): a corrected document commits nothing. Returns the receipt."""
+    if shown_fp is not None and new_doc_fp(conn, q["new_doc_id"]) != shown_fp:
+        raise db.Refusal("the new document's details changed since this was shown")
     if q["state"] != "open":
         raise db.Refusal("this question was replaced by a newer one" if q["state"] ==
                          "superseded" else "this question was answered already")

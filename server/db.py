@@ -630,7 +630,14 @@ MIGRATIONS: dict[int, list[str]] = {
          # a package request's own notices (stopped / the bank unread) lose their wording
          # with their raisers: one still unsaid is said as the request's not-sent notice
          "UPDATE alerts SET kind='package-not-sent' WHERE sent_at IS NULL AND kind IN"
-         " ('package-stopped', 'package-failed')"],
+         " ('package-stopped', 'package-failed')",
+         # e1 (Astra S1): a pass live at the upgrade is the old machinery's — it ends
+         # interrupted, and the requests it had taken (a handover among them) are queued
+         # again for the first run of the new loop, which takes them (asks.requeue_taken)
+         "UPDATE passes SET ended_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),"
+         " outcome='interrupted' WHERE ended_at IS NULL",
+         "UPDATE work_requests SET state='queued', pass_id=NULL WHERE state='taken'",
+         "UPDATE pass_marker SET live=0, lease_at=NULL"],
 }
 
 

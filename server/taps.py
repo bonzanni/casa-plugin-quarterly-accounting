@@ -196,7 +196,8 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
                     receipt, then = CARD_CHANGED, "fresh"
                 else:
                     receipt = replace.answer_in_tx(
-                        conn, grant, replace.get(conn, scope["question_id"]), action, rid)
+                        conn, grant, replace.get(conn, scope["question_id"]), action, rid,
+                        shown_fp=scope["new_doc_fp"])
             elif _changed(conn, rid, [pid]):
                 receipt, then = CARD_CHANGED, "fresh"
             else:

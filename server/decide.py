@@ -147,6 +147,25 @@ def _entry(conn, token, e, seen) -> dict:
             "status": lineage.projection(conn, pid)["status"]}
 
 
+def _check_handed(conn, token, entries) -> None:
+    """e1 (Terra S2): once the run's work list exists, the job decides the payment handed
+    out now, alone (rev 18.4 §R18.1) — never one whose facts and candidates it was not
+    handed."""
+    import queues
+    job_id = queues.job_of(conn, token)
+    if job_id is None:
+        return
+    run = conn.execute("SELECT listed_at FROM runs WHERE job_id=?", (job_id,)).fetchone()
+    if run is None or run["listed_at"] is None:
+        return
+    pid = queues.pid_of_unit(queues.handed_unit(conn, job_id))
+    e = entries[0] if len(entries) == 1 and isinstance(entries[0], dict) else {}
+    want = e.get("pid")
+    if pid is None or isinstance(want, bool) or not isinstance(want, int) or \
+            lineage.resolve_pid(conn, want) != lineage.resolve_pid(conn, pid):
+        raise db.Refusal("decide the payment handed out now, in one entry: call job_next")
+
+
 def _check_order(conn, token, entries) -> None:
     """Rev 18.4 §R18.2: a payment whose searches found an attachment still queued decides
     nothing — what a search found is filed (or set aside) before the decision."""
@@ -170,6 +189,7 @@ def decide(conn, token, entries) -> dict:
     results, seen = [], set()
     with db.tx(conn):
         passes.check_token(conn, token)
+        _check_handed(conn, token, entries)
         _check_order(conn, token, entries)
         for e in entries:
             head = {"pid": e.get("pid") if isinstance(e, dict) else None,

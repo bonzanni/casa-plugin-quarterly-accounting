@@ -745,7 +745,7 @@ class JobDriver:
         import dates
         vendor, pid = u["vendor"], u["pid"]
         filed = self._file_vendor(token, vendor, u["files"])
-        if u["files_total"] > len(u["files"]):
+        if u.get("decided") or u["files_total"] > len(u["files"]):
             return None                 # the skill: the rest come with the next job_next
         hint = u["kb"].get("hint_sender") if u["kb"].get("known") else None
         win = u["search_window"]
@@ -797,7 +797,7 @@ class JobDriver:
         if held is not None and u["why"] == "handover":
             # the skill (rev 18.4 §R18.3): the handed document, the first candidate, belongs
             # to this payment when it fits exactly → replace (the operator is asked); else keep
-            c = u["candidates"][0] if u["candidates"] else None
+            c = next((x for x in u["candidates"] if x["doc_id"] in u["handed_over"]), None)
             fits = (c is not None and c["doc_id"] != held and c["currency"] == u["currency"]
                     and c["amount_minor"] == u["amount_minor"] and gap(c) <= self.replace_days)
             entry = ({**base, "outcome": "replace", "doc_id": c["doc_id"]} if fits

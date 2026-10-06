@@ -100,7 +100,7 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
    order, read once:
    `ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<the ref, exactly>, vendor=<the unit's vendor, when it is from that vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`;
    no invoice: `set_aside(pass_token, items=[{"ref": …}], reason=…)`. `files_total` more
-   than `files`: then `job_next` — the rest come.
+   than `files`, or `decided: true`: then `job_next`.
 2. **Judge the candidates from their reading**; open one (`read_document(doc_id)`, then
    `Read` its path) only when in doubt.
 3. **Nothing fits:** search the vendor's mail over the `search_window` dates (with a learned
@@ -122,7 +122,7 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
    delivery or email date. The server enforces the floor; no date window. Re-decide only
    a refused entry. Then `job_next`.
    **`why: handover` with `holds`:** the payment already has a document and the operator
-   handed one over (the first candidate). It belongs to this payment →
+   handed one over (`handed_over`). It belongs to this payment →
    `outcome: "replace", doc_id` (the operator is asked); it does not → `outcome: "keep"`.
 5. **Save what worked:** when a search found an invoice,
    `upsert_counterparty(name=<vendor>, hint_sender=<the sender address>, hint_subject=<a subject pattern>, pass_token)`.
