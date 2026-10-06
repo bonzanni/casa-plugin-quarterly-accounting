@@ -147,6 +147,11 @@ def _alternatives(conn, match_id) -> list:
                                    (match_id,)).fetchone()[0])
 
 
+def alternatives(conn, match_id) -> list:
+    """D3: the alternative documents a machine proposal names (doc ids, in its order)."""
+    return _alternatives(conn, match_id)
+
+
 def _relevant_doc(conn, doc_id):
     """A real document not marked irrelevant (checked BEFORE the exemption branch too, so an
     exempt payment's residue names only a real, relevant document: fix round 1)."""

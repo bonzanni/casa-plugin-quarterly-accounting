@@ -61,7 +61,7 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
                 raise db.Refusal("that rendering is too long for buttons: post it with "
                                  "post_results(render_ids=[…]) instead")
         elif view == "open":
-            if any(v is not None for v in (pid, page, after, prev)):
+            if any(v is not None for v in (pid, page, after, prev, walk)):
                 raise db.Refusal("the open items are one card: name at most its quarter")
             rid = cards.compose_open(conn, quarter or cards.main_quarter(conn))
             r = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()

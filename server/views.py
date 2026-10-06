@@ -85,6 +85,12 @@ _NAMES = None
 _TAG = ""                   # binding V2: the first-line tag of the rendering being composed
 
 
+def printed_ref(pid):
+    """The generated "ref <hex>" a payment's headline prints under the disambiguation being
+    composed (`named`), or None."""
+    return _NAMES.pids.get(pid) if _NAMES is not None else None
+
+
 def tag_for(render_id: str) -> str:
     """Binding V2: every rendering composed after S7 ends its first line with " · <n>", its
     render id's digits — a separator and digits only, no machinery word — so two post-S7

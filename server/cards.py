@@ -26,7 +26,9 @@ import views
 import work
 
 KINDS = ("end", "open-items", "review", "vendor-page", "ready")
-TAP_CARDS = ("review", "vendor-page")
+# cards posted with no delivery callback — a tap's `next` (#1302) or show_view(view="open"):
+# seen once posted (review round 1 ruling: the closing open-items card included)
+TAP_CARDS = ("review", "vendor-page", "open-items")
 CONFIRM_ALL_MAX = 24          # §1: with 25 or more proposals it is left out
 CANDIDATE_BUTTONS = 4         # §1: up to four named candidates
 PAGE_LINES = 25               # a vendor page's payments, then fitted to BODY_LIMIT
@@ -102,12 +104,13 @@ def seen_state(conn, pid, st) -> bool:
     count only once delivered (plan round 2, Astra S2: show_view stamps posted_seq BEFORE the
     deposit, so a cut before the receipt left an end message "seen" that never arrived). A
     tap's card has no delivery callback (#1302 posts it after the tap's receipt), so a posted
-    one counts."""
+    one counts — and so does an open-items card, which is only ever posted that way (a
+    tap's `next`, or show_view(view="open")): review round 1 ruling."""
     return conn.execute(
         "SELECT 1 FROM render_states i JOIN renders r ON r.render_id=i.render_id WHERE"
         " i.pid=? AND i.item_state=? AND (r.delivered_at IS NOT NULL OR (r.kind IN"
-        " ('review', 'vendor-page') AND r.posted_seq IS NOT NULL)) LIMIT 1",
-        (pid, st)).fetchone() is not None
+        " (%s) AND r.posted_seq IS NOT NULL)) LIMIT 1" % ",".join("?" * len(TAP_CARDS)),
+        (pid, st, *TAP_CARDS)).fetchone() is not None
 
 
 def never_set(conn, vendor) -> list:
@@ -162,7 +165,7 @@ def _offered(conn, d) -> list:
     if cur is not None:
         return [{"doc": cur["document"], "match_id": cur["match_id"]}] + [
             {"doc": _doc_summary(conn, a), "match_id": None}
-            for a in matches._alternatives(conn, cur["match_id"])]
+            for a in matches.alternatives(conn, cur["match_id"])]
     return [{"doc": c["document"], "match_id": c["match_id"]} for c in d["candidates"]]
 
 
@@ -221,10 +224,10 @@ def _grammar(ds) -> dict:
     payee each was shown as, and the generated refs printed on them."""
     names = {str(d["pid"]): views.field_raw(d["counterparty"]) for d in ds}
     refs: dict = {}
-    if views._NAMES is not None:
-        for d in sorted(ds, key=lambda x: x["pid"]):
-            if views._NAMES.pids.get(d["pid"]):
-                refs.setdefault(views._NAMES.pids[d["pid"]], []).append(d["pid"])
+    for d in sorted(ds, key=lambda x: x["pid"]):
+        ref = views.printed_ref(d["pid"])
+        if ref:
+            refs.setdefault(ref, []).append(d["pid"])
     return {"names": names, "refs": refs}
 
 
@@ -234,8 +237,8 @@ def _store(conn, kind, lines, scope, bound, states, docs=None) -> str:
     FINAL lines (escaped fields, suffixes such as "· left missing"); the tag ends line 1
     (binding V2). `bound` maps each payment the rendering binds to the index of its line;
     `docs` maps a bound payment to {match_id or ("alt", doc_id): line index} for the
-    candidates it displays (None: the payment's current pairing only, as a summary line
-    names it); `states` maps every payment it reports (displayed or counted) to its
+    pairings it displays — explicitly: a payment it does not name binds no pairing (review
+    round 1: no fallback to the current pairing); `states` maps every payment it reports (displayed or counted) to its
     item_state. If the fit (views.fit_lines) would print a bound line less than whole,
     nothing is stored: Undisplayed."""
     rid = f"r{db.next_seq(conn)}"
@@ -254,9 +257,7 @@ def _store(conn, kind, lines, scope, bound, states, docs=None) -> str:
                  (rid, kind, db.canonical(full), db.now(), text, json.dumps(sorted(bound))))
     for pid in bound:
         rev = conn.execute("SELECT revision FROM projections WHERE pid=?", (pid,)).fetchone()[0]
-        shown = {m for m in ((docs or {}).get(pid) or ()) if isinstance(m, int)} or {
-            r[0] for r in conn.execute("SELECT current_match FROM projections WHERE pid=? AND"
-                                       " current_match IS NOT NULL", (pid,))}
+        shown = {m for m in (docs or {}).get(pid, ()) if isinstance(m, int)}
         mrevs = {str(r[0]): r[1] for r in conn.execute(
             "SELECT match_id, revision FROM match_state WHERE pid=? AND state IN ('matched',"
             " 'proposed', 'conflicted')", (pid,)) if r[0] in shown}
@@ -304,6 +305,8 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
             + list(tail)
         listed = proposals[:k]
         bound = {d["pid"]: len(before) + j for j, d in enumerate(listed)}
+        docs = {d["pid"]: ({d["current"]["match_id"]: bound[d["pid"]]}
+                           if d["current"] is not None else {}) for d in listed}
         chosen = [d["pid"] for d in listed if d["current"] is not None]
         confirm_all = (k == len(proposals) and 1 <= len(chosen)
                        and len(proposals) <= CONFIRM_ALL_MAX)
@@ -311,7 +314,7 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
                  "confirm_all": len(chosen) if confirm_all else 0,
                  "order": [{"p": d["pid"]} for d in proposals] + list(vendors),
                  **_grammar(listed), **(extra_scope or {})}
-        return _store(conn, kind, lines, scope, bound, states)
+        return _store(conn, kind, lines, scope, bound, states, docs=docs)
 
 
 def _counts_line(c) -> str:
@@ -556,12 +559,17 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page):
     first, prior = (None, [])
     if page > 1:
         first, prior = _vendor_pages_of(conn, review_of, pos, page)
+    now = set(_unanswered(conn, vendor, item["pids"]) if scheduled
+              else never_set(conn, vendor))
     if first is not None:
+        # a later page copies page 1's frozen pages, but lists only the payments still in
+        # the walk's set now (review round 1: a page-2 payment matched meanwhile is no
+        # missing invoice — never printed under that header, never bound for an exemption);
+        # Never's union then differs from the vendor's set, so Never refuses with page 1
         pages = json.loads(first["scope_json"])["pages"]
-        pids = [p for pg in pages for p in pg]
+        pids = [p for pg in pages for p in pg if p in now]
     else:
-        pids = (_unanswered(conn, vendor, item["pids"]) if scheduled
-                else never_set(conn, vendor))
+        pids = sorted(now)
         pages = None
     if not pids:
         return None
@@ -572,7 +580,9 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page):
         if pages is None:
             pages = _pages(vendor, order, pos + 1, n, link, quarter)
         page = max(1, min(page, len(pages)))
-        mine = [ds[p] for p in pages[page - 1]]
+        mine = [ds[p] for p in pages[page - 1] if p in ds]
+        if not mine:
+            return None
         lines = _page_lines(vendor, mine, pos + 1, n, page, len(pages), link, quarter)
         # a later page whose payments changed since page 1 froze it may no longer fit: it
         # binds what it displays whole, and Never then sees a changed union (fresh page 1)

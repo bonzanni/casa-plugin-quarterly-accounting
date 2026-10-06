@@ -108,9 +108,12 @@ class Cards(StoreCase):
         r, scope = self.rendering(rid)
         self.assertIn("1 earlier item still open", r["text"])
         self.assertEqual(scope["order"], [{"v": "Adobe", "pids": [new]}])
+        self.assertTrue(r["text"].startswith("Q3 · new: 0 to confirm · 1 missing"))
         page = self.c(cards.card, rid, 0)
         self.assertNotIn("Never for Adobe", self.labels(page))                 # rev 17
-        self.assertNotEqual(old, new)
+        p, pscope = self.rendering(page)
+        self.assertEqual([int(x) for x in pscope["bound_lines"]], [new])     # not the old one
+        self.assertEqual(json.loads(p["membership_json"]), [new])
 
     def test_an_end_message_posted_but_never_delivered_is_not_seen(self):
         import cards
@@ -290,6 +293,72 @@ class Cards(StoreCase):
         self.assertLess(len(bound), len(pages[1]))
         self.assertEqual(sorted(bound), sorted(pages[1][:len(bound)]))      # its first lines
         self.assertEqual(sorted(pids), cards.never_set(self.conn, self.WIDE))
+
+    def test_a_later_page_lists_only_payments_still_missing(self):
+        """Review round 1: page 1 froze 50 payments over two pages; a page-2 payment is
+        machine-matched meanwhile. Page 2 neither prints nor binds it (an exemption there
+        would hit a matched payment); what the walk displayed is then exactly what Never
+        changes now."""
+        import cards
+        pids = [self.pay("Adobe", 100 + i, "2026-%02d-%02d" % (7 + i % 3, i % 28 + 1))
+                for i in range(50)]
+        end = self.c(cards.compose_end, self.job_id, scheduled=False)
+        first = self.c(cards.card, end, 0)
+        pages = self.rendering(first)[1]["pages"]
+        gone = pages[1][3]
+        amount = self.conn.execute("SELECT amount_minor FROM bank_rows b JOIN projections p"
+                                   " ON p.dest_row_id=b.row_id WHERE p.pid=?",
+                                   (gone,)).fetchone()[0]
+        self.machine_match(gone, self.doc(amount_minor=amount), self.token)
+        self.assertNotIn(gone, cards.never_set(self.conn, "Adobe"))
+        second = self.c(cards.card, end, 0, page=2)
+        r, scope = self.rendering(second)
+        self.assert_binds_exactly_what_it_shows(second)
+        bound = sorted(int(p) for p in scope["bound_lines"])
+        self.assertEqual(bound, sorted(p for p in pages[1] if p != gone))
+        self.assertEqual(json.loads(r["membership_json"]), bound)
+        self.assertEqual(scope["pages"], pages)                  # still page 1's frozen pages
+        union = set(pages[0]) | set(bound)                       # what the walk displayed
+        self.assertEqual(sorted(union), cards.never_set(self.conn, "Adobe"))
+        self.assertEqual(sorted(union | {gone}), sorted(pids))
+
+    def test_a_closing_open_items_card_counts_as_seen_once_posted(self):
+        """Review round 1 ruling: Wrong during a walk turns a proposal into a missing item;
+        the closing open-items card (the tap's `next`) counts it and is posted, never
+        delivered; the next scheduled run posts nothing for it."""
+        import cards, matches, views
+        p = self.pay()
+        self.propose(p)
+        end = self.c(cards.compose_end, self.job_id, scheduled=False)
+        views.mark_rendering_delivered(self.conn, end)
+        card = self.c(cards.card, end, 0)
+        self.c(cards.deposit_of, card)
+        mid = self.conn.execute("SELECT current_match FROM projections WHERE pid=?",
+                                (p,)).fetchone()[0]
+        with db.tx(self.conn):
+            matches.reject_in_tx(self.conn, grant=self.grant(), match_id=mid,
+                                 expected_revision=self.rev(match_id=mid), render_id=card)
+            closing = cards.next_after(self.conn, end, 0)
+            cards.deposit_of(self.conn, closing)
+        r, _ = self.rendering(closing)
+        self.assertEqual(r["kind"], "open-items")
+        self.assertIn("still open: 0 to confirm · 1 missing", r["text"])
+        self.assertIsNone(r["delivered_at"])
+        self.assertTrue(cards.seen_state(self.conn, p, "missing"))
+        self.assertIsNone(self.c(cards.compose_end, self.job_id, scheduled=True))
+
+    def test_an_end_line_binds_only_the_pairing_it_names(self):
+        """Review round 1: a joint set's summary line names no pairing, and binds none."""
+        import cards
+        p, mids = self.legacy_set(2)
+        q = self.pay("AWS", 4120)
+        self.propose(q, amount_minor=4120)
+        end = self.c(cards.compose_end, self.job_id, scheduled=False)
+        mrevs = {r[0]: json.loads(r[1]) for r in self.conn.execute(
+            "SELECT pid, match_revisions_json FROM render_items WHERE render_id=?", (end,))}
+        cur = self.conn.execute("SELECT current_match FROM projections WHERE pid=?",
+                                (q,)).fetchone()[0]
+        self.assertEqual(mrevs, {p: {}, q: {str(cur): self.rev(match_id=cur)}})
 
     def test_the_measure_counts_the_worst_case_tag(self):
         import cards, views
@@ -550,6 +619,8 @@ class Cards(StoreCase):
                          {"tool": "get_package", "arguments": {"quarter": "2026-Q3"}})
         self.assertIsNotNone(self.conn.execute("SELECT posted_seq FROM renders WHERE"
                                                " render_id=?", (end,)).fetchone()[0])
+        with self.assertRaises(db.Refusal):
+            posting.show_view(self.conn, view="open", walk=end)
 
     def test_store_refuses_to_bind_a_line_that_does_not_fit(self):
         import cards
