@@ -44,8 +44,8 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              "render_ids", "casa_delivery", "package_id",
              # the simple loop's vendor unit fields (§2.2)
              "exact_fit", "search_window", "vendor_queries",
-             # d2: the filing unit's slice size
-             "max_files"}
+             # d3: every unit's call budget
+             "max_calls"}
 # §15: tools that left the surface in S7 (their functions stay server-side).
 REMOVED_S7 = ("job_report", "apply_reply", "confirm_match", "reject_match", "set_exemption",
               "stop_chasing", "set_watermark", "set_package_name")
@@ -409,14 +409,18 @@ class TestJob(TempEnv):
 
     READING = "amount_minor, currency, document_date, issuer, document_number, pass_token)`"
 
-    def test_the_filing_is_sliced_and_records_filing_only_when_drained(self):
-        """d2 (Astra S1): at most `max_files` per hand-out; record_filing only when every
-        attachment is filed — `filing` comes again until then (the job_next checkpoint)."""
+    def test_every_unit_has_a_call_budget_and_filing_records_only_when_drained(self):
+        """d3 (Astra S1, generalized): a unit's `max_calls` — at it the model stops and
+        checkpoints with job_next, the unit comes again; record_filing only when every
+        attachment is filed; a vendor continuation skips what it filed."""
+        turn = flat(section(JOB, "## Every turn", "**Refusals.**"))
+        self.assertIn("**Budget:** a unit carries `max_calls`; at that many calls for it, stop "
+                      "where you are and call `job_next`: an unfinished unit comes again.", turn)
         f = flat(self.units("filing", "### `vendor`"))
-        self.assertIn("newest first, at most `max_files`;", f)
-        self.assertIn("When all are filed: `record_filing(pass_token)`; until then `filing` "
-                      "comes again.", f)
-        self.assertLess(f.index("at most `max_files`"), f.index("`record_filing("))
+        self.assertIn("When all are filed: `record_filing(pass_token)`.", f)
+        self.assertNotIn("max_files", JOB)
+        self.assertIn("**File** every plausible invoice found (none in `filed_refs`), reading "
+                      "each once", flat(self.vendor()))
 
     def test_own_mail_and_vendor_filing_pass_the_reading(self):
         """d2 (Astra S2): the model reads each document and passes amount, currency, date,
@@ -428,7 +432,8 @@ class TestJob(TempEnv):
                       "source_ref=<message id>:<attachment id>, " + self.READING, f)
         self.assertNotIn("vendor=", f)
         v = flat(self.vendor())
-        self.assertIn("**File** every plausible invoice found, reading each once: "
+        self.assertIn("**File** every plausible invoice found (none in `filed_refs`), reading "
+                      "each once: "
                       '`ingest_document(source_path, kind, source="gmail", '
                       'extraction_author="specialist", source_ref=<message id>, '
                       "vendor=<the unit's vendor>, " + self.READING, v)

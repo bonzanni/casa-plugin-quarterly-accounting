@@ -356,10 +356,17 @@ def filed_refs(conn) -> list:
     first, while they render within FILED_REFS_BUDGET — what a pass's filing skips."""
     import datetime as _dt
     since = (db._clock() - _dt.timedelta(days=FILED_REFS_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return refs_in_budget(r["ref"] for r in conn.execute(
+        "SELECT ref FROM operator_refs WHERE filed_at >= ? ORDER BY filed_at DESC, ref",
+        (since,)))
+
+
+def refs_in_budget(refs) -> list:
+    """Filed refs as a unit hands them (d2/d3): distinct, each clipped, while they render
+    within FILED_REFS_BUDGET — the own-mail filing's and a vendor continuation's."""
     out, used = [], 0
-    for r in conn.execute("SELECT ref FROM operator_refs WHERE filed_at >= ?"
-                          " ORDER BY filed_at DESC, ref", (since,)):
-        ref = budget.clip(r["ref"], FILED_REF_CLIP)
+    for ref in refs:
+        ref = budget.clip(ref, FILED_REF_CLIP)
         if ref in out:
             continue
         used += budget.size([ref]) + 1               # its rendering and the separator

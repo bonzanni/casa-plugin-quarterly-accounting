@@ -412,7 +412,9 @@ def t_import(args):
           "line, verbatim, when it is a `Started by:` line; else omit it>) — it gives you a "
           "pass_token; then after each unit job_next(pass_token=…, calls_made=<the tool calls "
           "you made this turn so far>). Do exactly the unit it returns: probes, snapshot, "
-          "filing, vendor, mirror, view, post. When it says report=true, call "
+          "filing, vendor, mirror, view, post. Each unit carries max_calls: when your calls "
+          "for it reach that, stop and call job_next — an unfinished unit comes again. When "
+          "it says report=true, call "
           "report_job_progress with its `progress` verbatim; at end-batch, end your turn; at "
           "complete, report_job_progress then emit_completion(status=\"ok\", text=<its "
           "text>). `view` → show_view(render_id); on its receipt "
@@ -484,9 +486,8 @@ def t_ask_state(args):
 
 @register("record_filing",
           "The job's filing is done: every attachment of your own mail is filed "
-          "(ingest_document with its source_ref, at most the unit's max_files per filing "
-          "unit) and Gmail's probe recorded. Until then call job_next: it hands filing "
-          "again.",
+          "(ingest_document with its source_ref) and Gmail's probe recorded. Until then, at "
+          "the unit's max_calls, call job_next: it hands filing again.",
           obj({"pass_token": TOKEN}, ("pass_token",)))
 def t_record_filing(args):
     import loop

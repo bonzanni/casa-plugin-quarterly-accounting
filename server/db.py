@@ -62,7 +62,8 @@ CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   batch INTEGER NOT NULL,        -- the batch this claim belongs to: its first claim's gen
   closed INTEGER NOT NULL DEFAULT 0,    -- this claim was answered end-batch or complete
   seq INTEGER,                   -- the store sequence taken at the claim (S7 §10)
-  progressed INTEGER NOT NULL DEFAULT 0);   -- the batch moved the work list on (simple loop §2.2)"""
+  progressed INTEGER NOT NULL DEFAULT 0,    -- the batch moved the work list on (simple loop §2.2)
+  said INTEGER NOT NULL DEFAULT 0);         -- d3: the batch's progress was handed for reporting"""
 
 # Schema 10's credits (INV-J8), frozen for MIGRATIONS[9]; MIGRATIONS[11] drops it.
 CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (
@@ -78,7 +79,10 @@ RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
   mirror_at TEXT, mirrored_at TEXT,         -- mirror calls handed out / all settled (§2.4)
   end_render_id TEXT,                       -- the end message's rendering (§1); '' = none
   partial INTEGER NOT NULL DEFAULT 0,       -- the run ended partial (§3 "Run")
-  quarter TEXT);                            -- the run's main quarter, when a check named it"""
+  quarter TEXT,                             -- the run's main quarter, when a check named it
+  hand_unit TEXT, hand_seq INTEGER,         -- d3: the last budgeted unit handed, at this seq
+  hand_progressed INTEGER NOT NULL DEFAULT 0,  -- d3: that unit persisted work since
+  idle_hands INTEGER NOT NULL DEFAULT 0);   -- d3: filing hand-outs in a row that persisted nothing"""
 
 WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,6 +165,7 @@ RUN_WORK_DDL = """CREATE TABLE IF NOT EXISTS run_work (
   handed_upto INTEGER,           -- the latest filed_seq among the documents handed out for it
   hinted INTEGER NOT NULL DEFAULT 0,     -- the vendor's learned-hint search ran this run (§2.2)
   plain INTEGER NOT NULL DEFAULT 0,      -- the vendor's plain vendor-and-dates search ran this run
+  hand_seq INTEGER,              -- d3: the hand-out (runs.hand_seq) that last carried it
   PRIMARY KEY (job_id, pid));"""
 # §2.4: the mirror calls a run handed out, numbered, and what became of them (D9);
 # args_json holds the call's canonical [tool, args]. Nothing is planned ahead (round 7)
@@ -560,6 +565,7 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE render_keys ADD COLUMN doc_id INTEGER",
          "ALTER TABLE probes ADD COLUMN fail_runs INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE claims ADD COLUMN progressed INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE claims ADD COLUMN said INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE counterparties ADD COLUMN hint_sender TEXT",
          "ALTER TABLE counterparties ADD COLUMN hint_subject TEXT",
          "ALTER TABLE runs ADD COLUMN started_by TEXT",
@@ -571,6 +577,10 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE runs ADD COLUMN end_render_id TEXT",
          "ALTER TABLE runs ADD COLUMN partial INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE runs ADD COLUMN quarter TEXT",
+         "ALTER TABLE runs ADD COLUMN hand_unit TEXT",
+         "ALTER TABLE runs ADD COLUMN hand_seq INTEGER",
+         "ALTER TABLE runs ADD COLUMN hand_progressed INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE runs ADD COLUMN idle_hands INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE work_requests ADD COLUMN quarter TEXT",
          RUN_WORK_DDL, RUN_MIRROR_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL,
          # ... then the machinery §4 deletes: the sweep, the chunk carry, the judge,
@@ -644,7 +654,27 @@ def _settle_staged_email_on_upgrade(conn) -> None:
 # version's drop can never break an earlier step (MIGRATIONS[11] drops a table the step reads).
 # The 4 -> 5 store epoch (issue #14) went with the sweep that read it (simple loop §4): no
 # step at 5, and 9 -> 10 only closes a live delegation pass.
-SCHEMA_DATA_STEPS = {9: _close_delegation_pass, 10: _settle_staged_email_on_upgrade}
+def _backfill_render_states(conn) -> None:
+    """The 11 -> 12 data step (d3, Astra S2): schema 11 kept what a rendering showed only in
+    render_items. A delivered one's item whose projection still has the revision it was
+    shown at is provably unchanged since: its current item state is recorded as shown
+    (render_states), so the first scheduled run after the upgrade does not announce it
+    again. A payment that changed since, or no longer missing or proposed, is not."""
+    import cards
+    import work
+    for r in conn.execute(
+            "SELECT i.render_id, i.pid FROM render_items i JOIN renders r ON"
+            " r.render_id=i.render_id JOIN projections p ON p.pid=i.pid WHERE"
+            " r.delivered_at IS NOT NULL AND p.merged_into IS NULL AND"
+            " p.revision=i.projection_revision ORDER BY i.render_id, i.pid").fetchall():
+        d = work.describe(conn, r[1])
+        if d["status"] in ("open", "proposed"):
+            conn.execute("INSERT OR IGNORE INTO render_states(render_id, pid, item_state)"
+                         " VALUES (?,?,?)", (r[0], r[1], cards.item_state(d)))
+
+
+SCHEMA_DATA_STEPS = {9: _close_delegation_pass, 10: _settle_staged_email_on_upgrade,
+                     11: _backfill_render_states}
 
 
 def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:

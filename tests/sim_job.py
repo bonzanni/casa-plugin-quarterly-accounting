@@ -10,10 +10,9 @@ driver makes in a turn is counted into `calls_made` (a new turn — a claim — 
   snapshot  export_history -> import_ledger_export(acq) -> each erase candidate:
             get_transaction; "no transaction #N" -> record_not_found
   filing    one search of the operator's own mail, record_probe(gmail, ok) — failed when
-            Gmail.down — then at most the unit's `max_files` attachments not in `filed_refs`
-            filed, newest first (download, Read, ingest_document with the reading: amount,
-            currency, date, issuer, number; no vendor), and record_filing only when none is
-            left unfiled (d2: the server re-hands `filing` until then)
+            Gmail.down — then each attachment not in `filed_refs` filed, newest first
+            (download, Read, ingest_document with the reading: amount, currency, date,
+            issuer, number; no vendor), and record_filing once none is left unfiled
   vendor    the skill's search rule (Task 16): only while a payment is uncovered (no exact
             fit, no unheld candidate), the hinted search (a learned hint, not yet run this
             run), then the plain one (still uncovered, not yet run); each message found
@@ -29,6 +28,12 @@ driver makes in a turn is counted into `calls_made` (a new turn — a claim — 
   view      show_view(render_id) under a broker; on the receipt (`deliver`),
             mark_rendering_delivered
   post      post_results(render_ids); on the receipt, mark_rendering_delivered
+
+Every unit is done within its `max_calls` (d3): at the budget the driver stops where it is
+and calls job_next — the unit comes again as a continuation. `casa_cut` (an int): Casa's
+batch bound — a call past it ends the batch without job_next (the driver re-claims), and
+three batches in a row without a reported progress (`report` with `progressed`) fail the
+run, as Casa ends it.
 
 Plugin tools are called through qa_server.TOOLS (#43: the call shape the model makes)."""
 from __future__ import annotations
@@ -67,6 +72,15 @@ def ledger_state(listing: str) -> dict:
             "instance": inst.group(1) if inst else None}
 
 MAX_UNITS = 600         # a cursor that never finishes is a failure, never a hang
+CASA_IDLE_BATCHES = 3   # Casa ends a run after this many batches without reported progress
+
+
+class CasaCut(Exception):
+    """Casa ended the batch at its call bound, before the model's next job_next."""
+
+
+class UnitBudget(Exception):
+    """The unit's `max_calls` is reached: the model stops and calls job_next."""
 
 
 class JobLedger(bankfeed.Ledger):
@@ -123,7 +137,8 @@ class Gmail:
         path = self.test.publish(f"{number}.pdf", b"%PDF-1.4 " + number.encode() + b"\n")
         self.messages.append({"vendor": vendor, "amount_minor": amount_minor,
                               "currency": currency, "date": day, "number": number,
-                              "path": path, "sender": sender, "kind": kind, "sent": sent})
+                              "path": path, "sender": sender, "kind": kind, "sent": sent,
+                              "id": f"msg-{len(self.messages) + 1:04d}"})
 
     def search_emails(self, query):
         """The messages the query finds; None when Gmail is down."""
@@ -200,6 +215,10 @@ class JobDriver:
         self._spec = {}                 # fixture row number -> its bank row (quarter fixtures)
         self._broker_now = None
         self.batch_calls = []           # calls_made at each batch's end, the last run_job
+        self.casa_cut = None            # Casa's batch call bound, when the test enforces it
+        self.cuts = 0                   # batches Casa cut (casa_cut)
+        self.batch_reported = []        # per batch: a progress report was handed (progressed)
+        self._limit = None              # the unit in hand's call budget
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
 
     # --- the bank, as the operator's bank has it ------------------------------------
@@ -471,6 +490,7 @@ class JobDriver:
         `end-batch`. Returns every unit handed out."""
         self.claim(job_id, started_by)
         self.batch_calls = []
+        self.batch_reported = []
         return self._loop(job_id)
 
     @property
@@ -479,30 +499,51 @@ class JobDriver:
         return sum(self.batch_calls)
 
     def _loop(self, job_id) -> list:
-        units = []
+        units, idle, reported = [], 0, False
+
+        def batch_end():
+            nonlocal idle, reported
+            self.batch_calls.append(self.calls)
+            self.batch_reported.append(reported)
+            idle = 0 if reported else idle + 1
+            reported = False
+            if self.casa_cut is not None and idle >= CASA_IDLE_BATCHES:
+                raise AssertionError(f"Casa ends the run: {idle} batches without reported "
+                                     f"progress (calls {self.batch_calls})")
         with self._broker():
             for _ in range(MAX_UNITS):
+                if self.casa_cut is not None and self.calls + 1 > self.casa_cut:
+                    self.cuts += 1                 # cut before the job_next
+                    batch_end()
+                    self.token = job.claim(self.conn, job_id)
+                    self.calls = 1
+                    continue
                 u = job.next_unit(self.conn, self.token, self.calls)
                 self.calls += 1
                 units.append(u)
                 self.units.append(u)
                 self.last = u
                 assert u.get("pass_token") == self.token, u
+                reported = reported or (u["report"] and u["progress"]["progressed"])
                 if u["unit"] == "complete":
-                    self.batch_calls.append(self.calls)
+                    batch_end()
                     return units
                 if u["unit"] == "end-batch":
-                    self.batch_calls.append(self.calls)
+                    batch_end()
                     self.token = job.claim(self.conn, job_id)
                     self.calls = 1
-                    continue
-                if self.refusals is None:
-                    self.do(u, self.token)
                     continue
                 import db
                 try:
                     self.do(u, self.token)
+                except CasaCut:
+                    self.cuts += 1
+                    batch_end()
+                    self.token = job.claim(self.conn, job_id)
+                    self.calls = 1
                 except db.Refusal as exc:   # the model reads `refused:` and calls job_next
+                    if self.refusals is None:
+                        raise
                     self.refusals.append(str(exc))
         raise AssertionError(f"the cursor handed out {MAX_UNITS} units without finishing: "
                              f"{[x['unit'] for x in units[-20:]]}")
@@ -523,10 +564,26 @@ class JobDriver:
 
     # --- the units ---------------------------------------------------------------------
     def do(self, u, token):
-        """Carry out unit `u` under claim `token`."""
+        """Carry out unit `u` under claim `token`, within its `max_calls` (d3): at the
+        budget the unit stops where it is (the model then calls job_next)."""
         self.token = token
-        with self._broker():
-            return getattr(self, "_" + u["unit"].replace("-", "_"))(u, token)
+        self._limit = self.calls + u["max_calls"] if "max_calls" in u else None
+        try:
+            with self._broker():
+                return getattr(self, "_" + u["unit"].replace("-", "_"))(u, token)
+        except UnitBudget:
+            return None
+        finally:
+            self._limit = None
+
+    def _spend(self, k=1) -> None:
+        """k tool calls: past Casa's bound the batch is cut; past the unit's budget the unit
+        stops (neither call is made)."""
+        if self.casa_cut is not None and self.calls + k > self.casa_cut:
+            raise CasaCut()
+        if self._limit is not None and self.calls + k > self._limit:
+            raise UnitBudget()
+        self.calls += k
 
     def _tool(self, name, args):
         """#43: the plugin tool `name` called the way the model calls it — through
@@ -535,46 +592,46 @@ class JobDriver:
         import db
         import qa_server
         import tools  # noqa: F401  -- registers every tool
-        self.calls += 1
+        self._spend()
         out = qa_server.TOOLS[name]["fn"](args)
         if isinstance(out, dict) and isinstance(out.get("refused"), str):
             raise db.Refusal(out["refused"])
         return out
 
     def _bank(self, tool, **args) -> str:
-        self.calls += 1
+        self._spend()
         return self.bf.call(tool, **args)
 
     def _probes(self, u, token):
         conn, bf = self.conn, self.bf
-        self.calls += 1                                   # bank-feed's tools looked up
+        self._spend(1)                                   # bank-feed's tools looked up
         if self._no_tools:
             self._tool("record_probe", {"pass_token": token, "kind": "bank_tools", "ok": False,
                                         "detail": "bank-feed's tools are not visible"})
             return None
         self._tool("record_probe", {"pass_token": token, "kind": "bank_tools", "ok": True})
-        self.calls += 1                                   # list_accounts
+        self._spend(1)                                   # list_accounts
         accounts = [{"account_id": r["account_id"], "category": r["category"],
                      "label": r["name"]}
                     for r in bf.conn.execute("SELECT account_id, category, name FROM accounts")]
         self._tool("record_probe", {"pass_token": token, "kind": "bank_accounts", "ok": True,
                                     "data": {"accounts": accounts}})
         ok, detail = True, ""
-        self.calls += 1                                   # the sync
+        self._spend(1)                                   # the sync
         if self._sync_fail is not None:
             ok, detail, self._sync_fail = False, self._sync_fail, None
         self._tool("record_probe", {"pass_token": token, "kind": "bank_sync", "ok": ok,
                                     "detail": detail, "acq": u["acq"]})
-        self.calls += 1                                   # list_backups
+        self._spend(1)                                   # list_backups
         self._tool("record_probe", {"pass_token": token, "kind": "ledger", "ok": True,
                                     "data": ledger_state(bf.listing())})
-        self.calls += 1
+        self._spend(1)
         binding.check_setup(conn)
         return None
 
     def _snapshot(self, u, token):
         conn, bf = self.conn, self.bf
-        self.calls += 2                                   # export_history, the import
+        self._spend(2)                                   # export_history, the import
         imp = ledger.import_ledger_export(conn, path=self._export(), token=token,
                                           ledger_instance=bf.last_export_instance, acq=u["acq"])
         self.imports.append(imp)
@@ -585,27 +642,27 @@ class JobDriver:
         return None
 
     def _filing(self, u, token):
-        """The skill's filing slice (d2): the search and its probe, then at most
-        `max_files` attachments not in `filed_refs` filed, each downloaded and read once,
-        with the reading (no vendor: own mail is no vendor's); record_filing only when none
-        is left unfiled."""
-        self.calls += 1
+        """The skill's filing: the search and its probe, then each attachment not in
+        `filed_refs` filed, newest first, downloaded and read once, with the reading (no
+        vendor: own mail is no vendor's); record_filing once none is left — a unit cut at
+        its `max_calls` comes again (d3)."""
+        self._spend(1)
         found = self.gmail.search_emails("from:me to:me has:attachment newer_than:8d")
         self._tool("record_probe", {"pass_token": token, "kind": "gmail",
                                     "ok": found is not None,
                                     **({"detail": "Gmail search failed"} if found is None
                                        else {})})
-        todo = [m for m in found or () if m["ref"] not in u["filed_refs"]]
-        for m in todo[:u.get("max_files", len(todo))]:
-            self.calls += 2                               # download_attachment, Read
+        for m in found or ():
+            if m["ref"] in u["filed_refs"]:
+                continue
+            self._spend(2)                                # download_attachment, Read
             self._tool("ingest_document", {
                 "source_path": m["path"], "kind": "invoice", "source": "manual-email",
                 "extraction_author": "specialist", "source_ref": m["ref"],
                 "amount_minor": m["amount_minor"], "currency": m["currency"],
                 "document_date": m["date"], "issuer": m["issuer"],
                 "document_number": m["number"], "pass_token": token})
-        if len(todo) <= u.get("max_files", len(todo)):
-            self._tool("record_filing", {"pass_token": token})
+        self._tool("record_filing", {"pass_token": token})
         return None
 
     def _vendor(self, u, token):
@@ -634,19 +691,19 @@ class JobDriver:
 
         def search(kind, query):
             want = [p["pid"] for p in uncovered()]
-            self.calls += 1
+            self._spend(1)
             found = self.gmail.search_emails(query) or []
             self.search_log.append((vendor, kind, query))
             searched.append((kind, query, want, found))
             for m in found:
-                if m["path"] in seen:
-                    continue
+                if m["path"] in seen or m["id"] in u.get("filed_refs", ()):
+                    continue                   # d3: a continuation skips what it filed
                 seen.add(m["path"])
-                self.calls += 1                           # download_attachment
+                self._spend(1)                           # download_attachment
                 out = self._tool("ingest_document", {
                     "source_path": m["path"], "kind": m["kind"], "source": "gmail",
                     "extraction_author": "specialist", "counterparty": m["vendor"],
-                    "issuer": m["vendor"], "document_date": m["date"],
+                    "source_ref": m["id"], "issuer": m["vendor"], "document_date": m["date"],
                     "document_number": m["number"], "amount_minor": m["amount_minor"],
                     "currency": m["currency"], "vendor": vendor, "pass_token": token})
                 if not out["created"]:

@@ -20,8 +20,12 @@ DATE_READ = ("pass document_date: the date printed on the document you opened (i
 
 
 def note_progress(conn, token) -> None:
-    """§2.2 `progressed`: the batch persisted work (a decision, a filing, a search)."""
+    """§2.2 `progressed`: the batch persisted work (a decision, a filing, a search). d3: the
+    run records it too (runs.hand_progressed), so the cursor can tell whether the unit it
+    last handed out persisted anything (loop._settle_hand)."""
     conn.execute("UPDATE claims SET progressed=1 WHERE gen=?", (int(token),))
+    conn.execute("UPDATE runs SET hand_progressed=1 WHERE job_id=(SELECT job_id FROM claims"
+                 " WHERE gen=?)", (int(token),))
 
 
 def record_outcome(conn, token, pid, outcome, reason=None) -> None:

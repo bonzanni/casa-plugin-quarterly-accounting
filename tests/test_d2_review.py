@@ -1,9 +1,9 @@
 """Diff round d2 (Astra, 26b68ee..3d9f262), the three accepted findings, each reproduced
 through the real surface (qa_server.TOOLS, a real bank-feed):
-- Astra S1a: own-mail filing is handed in slices of at most loop.FILING_SLICE files; the
-  model checkpoints with job_next(calls_made) after each, so no batch is cut at Casa's 80
-  calls without a progress report, and record_filing comes only once the attachments are
-  drained;
+- Astra S1a: own-mail filing is handed within a call budget (d3 generalized it to every
+  unit: `max_calls`); the model checkpoints with job_next(calls_made) at it, so no batch is
+  cut at Casa's 80 calls without a progress report, and record_filing comes only once the
+  attachments are drained;
 - Astra S1b: a handover that joins an operator check keeps the check's full summary and
   Review order, the handover's receipt line added; the handover-only rendering is for a
   standalone continuation;
@@ -31,18 +31,16 @@ class OwnMailFilingIsSliced(StoreCase):
         g.own(2000, day="2026-08-05", number="ZAP-2")
         for i in range(81):
             g.own(70000 + i, day="2026-07-20")
+        self.drv.casa_cut = CASA_CALLS
         units = self.drv.run_job("d2d2d2d2-a1")
         # Casa never cut a batch: every batch ended at or under its 80 calls
+        self.assertEqual(self.drv.cuts, 0)
         self.assertLessEqual(max(self.drv.batch_calls), CASA_CALLS, self.drv.batch_calls)
-        ends = [u for u in units if u["unit"] in ("end-batch", "complete")]
-        self.assertGreaterEqual(len(ends), 4)               # 83 files need several batches
-        self.assertEqual(len(ends), len(self.drv.batch_calls))
-        for u in ends:                                       # progress in EVERY batch
-            self.assertTrue(u["report"], u)
-            self.assertTrue(u["progress"]["progressed"], u)
+        self.assertGreaterEqual(len(self.drv.batch_calls), 4)    # 83 files: several batches
+        self.assertTrue(all(self.drv.batch_reported), self.drv.batch_reported)
         filing = [u for u in units if u["unit"] == "filing"]
-        self.assertTrue(all(u["max_files"] == loop.FILING_SLICE <= 8 for u in filing))
-        self.assertEqual(len(filing), -(-83 // loop.FILING_SLICE))
+        self.assertGreater(len(filing), 1)
+        self.assertTrue(all(u["max_calls"] <= loop.CALLS_SOFT for u in filing))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM documents").fetchone()[0], 83)
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM operator_refs WHERE source='manual-email'").fetchone()[0], 83)
@@ -60,11 +58,11 @@ class OwnMailFilingIsSliced(StoreCase):
         drained (record_filing)."""
         import job
         g = self.drv.gmail
-        for i in range(10):
+        for i in range(30):
             g.own(70000 + i)
         self.drv.claim("d2d2d2d2-a2")
         seen = []
-        for _ in range(12):
+        for _ in range(20):
             u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
             self.drv.calls += 1
             if u["unit"] == "filing":
@@ -78,7 +76,9 @@ class OwnMailFilingIsSliced(StoreCase):
                 self.drv.claim("d2d2d2d2-a2")
                 continue
             self.drv.do(u, self.drv.token)
-        self.assertEqual(seen, [0, 8])                      # two slices: 8, then 2
+        self.assertGreater(len(seen), 1)                     # handed again, refs growing
+        self.assertEqual(seen, sorted(seen))
+        self.assertGreater(seen[-1], 0)
         self.assertIsNotNone(self.conn.execute(
             "SELECT filed_at FROM runs WHERE job_id='d2d2d2d2-a2'").fetchone()[0])
 

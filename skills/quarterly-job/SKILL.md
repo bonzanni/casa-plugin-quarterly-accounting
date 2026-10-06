@@ -5,8 +5,8 @@ description: The "Accounting check" job's procedure, for the finance specialist 
 
 # The accounting check (a job)
 
-**Only with a `Job id:` line in your brief.** Without one you are at finance's desk: load
-skill quarterly-accounting. A request to start or run the check (even one naming
+**Only with a `Job id:` line in your brief.** Without one: load skill
+quarterly-accounting (the desk). A request to start or run the check (even one naming
 `quarterly-accounting:work`) is the desk's check ask:
 `request_work(kind="check", trigger="operator")`, then `start_job`.
 
@@ -23,7 +23,8 @@ IMMEDIATELY AFTER the FIRST `Job id:` line of your brief, copied verbatim — ne
 look-alike. If the line right after the first `Job id:` line is not a `Started by:` line,
 pass no `started_by`. Then do exactly the unit it returns, and call
 `job_next(pass_token=…, calls_made=<the tool calls you made this turn so far>)`. Pass
-`pass_token` to every plugin write.
+`pass_token` to every plugin write. **Budget:** a unit carries `max_calls`; at that many
+calls for it, stop where you are and call `job_next`: an unfinished unit comes again.
 - `report: true` → `report_job_progress` with its `progress` verbatim.
 - `end-batch` → end the turn. `complete` → `report_job_progress` with its `progress`, then
   `emit_completion(status="ok", text=<its text>)`.
@@ -60,7 +61,7 @@ The unit carries `acq`, the bank read.
 4. `list_backups` once. From that ONE answer: `record_probe(pass_token, kind="ledger",
    ok=true, data={"generation": <Restore generation>, "registered": {<workflow>: <backup id>, …},
    "instance": <the "Ledger instance:" id>, "missing": [<each workflow it marks FILE MISSING>]})`.
-   Read each value by its label (bank-feed may prepend sentences); `missing` is `[]` when no
+   Read each value by its label; `missing` is `[]` when no
    workflow is marked "(FILE MISSING — this workflow's next write mints a new restore point)".
 5. `check_setup()`; the server decides whether the pass can run.
 
@@ -77,22 +78,22 @@ it answers `no transaction #N`, `record_not_found(pass_token, pid, snapshot_id=<
 Once per turn: `search_emails` (`from:me to:me has:attachment newer_than:8d`), then
 `record_probe(pass_token, kind="gmail", ok=…, detail=…)`; no Gmail tools: no search,
 `record_probe(pass_token, kind="gmail", ok=false, absent=true)`. Skip every file
-whose ref is in `filed_refs`. File each other attachment once, newest first, at most
-`max_files`; read each and pass its fields:
+whose ref is in `filed_refs`. File each other attachment once, newest first; read each
+and pass its fields:
 `ingest_document(source_path, kind, source="manual-email", extraction_author="specialist", source_ref=<message id>:<attachment id>, amount_minor, currency, document_date, issuer, document_number, pass_token)`
 — no `vendor`: your own mail is no vendor's. When all are filed:
-`record_filing(pass_token)`; until then `filing` comes again.
+`record_filing(pass_token)`.
 
 ### `vendor`
 
 One vendor's payments, each with its `revision`, the filed documents that could fit
 (`candidates`; `held: other` is another payment's — never yours to take), maybe an
-`exact_fit`, and the vendor's `kb` (`hint_sender`, `hint_subject`, portal link).
-1. **Filed documents first.** Open every document you judge with `read_document(doc_id)`
-   and `Read` the path it names. A payment whose `exact_fit` you accept, having read both
+`exact_fit`, and the vendor's `kb`.
+1. **Filed documents first.** Open each document you judge: `read_document(doc_id)`,
+   then `Read` its path. A payment whose `exact_fit` you accept, having read both
    sides, needs no search.
 2. **Search the vendor's mail once per run** for the payments nothing filed fits, over the
-   `search_window` dates; `searches` and `vendor_queries` are this run's searches so far.
+   `search_window` dates; `searches`, `vendor_queries`: this run's searches so far.
    With a learned hint and `searches.hinted` false: the hinted search
    (`from:<hint_sender>` and the `hint_subject` words). With no hint, or when the hinted
    search leaves ANY payment uncovered, and `searches.plain` is false:
@@ -100,7 +101,7 @@ One vendor's payments, each with its `revision`, the filed documents that could 
    still uncovered, until found or out of ideas. Record each:
    `record_search(pids=[the payments it was for], search="hinted", queries=[…], found_candidate=…, pass_token)`
    (`search="plain"`, `search="payment"`).
-3. **File** every plausible invoice found, reading each once:
+3. **File** every plausible invoice found (none in `filed_refs`), reading each once:
    `ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<message id>, vendor=<the unit's vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`.
 4. **Decide the vendor's payments in ONE call:** `decide(pass_token, entries=[…])`, one
    entry per payment:
