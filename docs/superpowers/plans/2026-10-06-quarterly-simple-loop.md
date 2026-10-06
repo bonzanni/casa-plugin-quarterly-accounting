@@ -424,6 +424,7 @@ class Schema12(StoreCase):
                         <= self.cols("run_mirror"))
         self.assertTrue({"quarter", "sig", "times", "render_id"}
                         <= self.cols("quarter_notices"))
+        self.assertTrue({"render_id", "pid", "item_state"} <= self.cols("render_states"))
         for table, col in (("projections", "mirror_note"), ("projections", "considered_seq"),
                            ("documents", "vendor"),
                            ("documents", "filed_seq"), ("matches", "alternatives_json"),
@@ -474,9 +475,14 @@ class Schema12(StoreCase):
                               " ('j', 1, 'Adobe', 'open')")
             self.conn.execute("INSERT INTO quarter_notices(quarter, sig) VALUES"
                               " ('2026-Q3', 'x')")
+            self.conn.execute("INSERT INTO render_states(render_id, pid, item_state) VALUES"
+                              " ('r1', 1, 'missing')")
         binding.reset_store(self.conn)
-        for t in ("run_work", "run_mirror", "quarter_notices"):
+        for t in ("run_work", "run_mirror", "render_states", "quarter_notices"):
             self.assertEqual(self.conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0], 0, t)
+        with db.tx(self.conn):          # the sequence restarted: the same render id again
+            self.conn.execute("INSERT INTO render_states(render_id, pid, item_state) VALUES"
+                              " ('r1', 1, 'missing')")
 ```
 
 - [ ] **Step 2: Run it and see it fail**
@@ -510,8 +516,9 @@ def build_v11_store(path, with_rows=False):
 ```
 
 - [ ] **Step 4: Schema 12 in `server/db.py`**
-  - Add `RUN_WORK_DDL`, `RUN_MIRROR_DDL` and `QUARTER_NOTICES_DDL` (above) next to
-    `POST_OFFERS_DDL`, and append them to the `DDL` concatenation (L367–368).
+  - Add `RUN_WORK_DDL`, `RUN_MIRROR_DDL`, `RENDER_STATES_DDL` and `QUARTER_NOTICES_DDL`
+    (above) next to `POST_OFFERS_DDL`, and append all four to the `DDL` concatenation
+    (L367–368).
   - Add the new columns to their `CREATE TABLE` in `DDL`, each with a `--` comment naming
     its design section.
   - Add `progressed INTEGER NOT NULL DEFAULT 0` to `CLAIMS_DDL`. Add the eight `runs`
@@ -546,7 +553,24 @@ def build_v11_store(path, with_rows=False):
 
   - Set `SCHEMA_VERSION = 12`, add `SCHEMA_DATA_STEPS`, and change the `migrate` loop as in
     Interfaces.
-  - In `binding._TABLES_TO_WIPE`, add `"run_work", "run_mirror", "quarter_notices"`.
+  - In `binding._TABLES_TO_WIPE`, add `"run_work", "run_mirror", "render_states",
+    "quarter_notices"`. A reset restarts `counters.seq`, so render ids repeat, and a kept
+    `render_states` row would collide on its key (plan round 8).
+
+  **Every table this plan adds, against every list it must be in** (plan round 8, both
+  reviewers):
+
+  | table | fresh `DDL` | `MIGRATIONS[11]` | `binding._TABLES_TO_WIPE` | `scripts/reset_keep_kb.py` (Task 15) |
+  |---|---|---|---|---|
+  | `run_work` | yes | yes | yes | wiped (not KB) |
+  | `run_mirror` | yes | yes | yes | wiped |
+  | `render_states` | yes | yes | yes | wiped |
+  | `quarter_notices` | yes | yes | yes | wiped |
+  | (new columns on `counterparties`: `hint_sender`, `hint_subject`) | yes | yes | table already wiped | **kept**: the KB rows are copied verbatim, hints included (§6.8) |
+  | (every other new column) | yes | yes | its table already wiped | wiped with its table |
+
+  Task 11's drops (`credits`, `cursor`, `pass_steps`, `package_requests`) leave the fresh
+  `DDL` and `_TABLES_TO_WIPE` in the same step.
   - **Every retained INSERT into a table this schema changes names its columns** (plan
     round 2, Astra S1: `render_items` gains a column, so a column-less INSERT fails with
     "has 5 columns but 4 values were supplied"). A grep at 26b68ee finds two, both in tests,
@@ -2810,8 +2834,20 @@ composes its `next` in the tap's own transaction.
   vendor with unanswered missing payments (`search_state != 'accepted-missing'`), sorted by
   vendor. It is stored as `scope["order"] = [{"p": pid} | {"v": vendor, "pids": [...]}]`.
 - **Proposal card** (§1). The text is `"Card {i} of {n} · to confirm"`, then `headline(d)`,
-  then `evidence(d)`.
-  - The candidates are the chosen document plus its alternatives, or the conflicted set.
+  then one line per candidate it offers, `"{k}. {views.ident(doc)} · {doc amount}"`, at most
+  `CANDIDATE_BUTTONS` (4), then the rest of `evidence(d)` without its "Could be:" line.
+  - The candidates are the chosen document plus its alternatives, or the conflicted set
+    (legacy sets can hold more than four).
+  - **A card binds only the candidate documents whose line appears whole in its final
+    text** (plan round 8, Astra S1: round 7's rule extended to documents). The rest are
+    named by count only, `"{m} more could fit — say \"candidates for …\""`, and are never
+    bound. `_store` takes, per bound payment, its line index AND the shown candidates'
+    line indexes. Its `render_items.match_revisions_json` holds only the match ids of the
+    displayed candidates, and `scope["alternatives"]` only the displayed alternatives.
+    Every tap reads only what is bound, so the displayed set is all it can act on:
+    - [Wrong] on a set rejects `taps._apply_one`'s candidates that are in `mrevs`
+      (taps.py:69);
+    - `pick_in_tx` and `reject_alternatives_in_tx` act only on displayed documents.
   - With ≥ 2 candidates: one `pick` button per candidate (≤ 4), labelled
     `"{number or kind} · {day}"` clipped to 32, then [Wrong] and [Leave for now].
   - Otherwise: [Confirm] [Wrong] [Leave for now].
@@ -3088,16 +3124,20 @@ class Undisplayed(RuntimeError):
     composer's pagination or trimming, never a deposit."""
 
 
-def _store(conn, kind, lines, scope, bound, states) -> str:
-    """One rendering (plan round 7: a rendering binds exactly the payments whose lines appear
-    in its final deposited text). `lines` are the FINAL lines (escaped fields, suffixes such
-    as "· left missing"); the tag ends line 1 (binding V2). `bound` maps each payment the
-    rendering binds to the index of its line; `states` maps every payment it reports
-    (displayed or counted) to its item_state. If the fit (views.fit_lines) would print a
-    bound payment's line less than whole, nothing is stored: Undisplayed."""
+def _store(conn, kind, lines, scope, bound, states, docs=None) -> str:
+    """One rendering (plan rounds 7–8: a rendering binds exactly the payments, and the
+    candidate documents, whose lines appear in its final deposited text). `lines` are the
+    FINAL lines (escaped fields, suffixes such as "· left missing"); the tag ends line 1
+    (binding V2). `bound` maps each payment the rendering binds to the index of its line;
+    `docs` maps a bound payment to {match_id: line index} for the candidates it displays
+    (None: the payment's current pairing only, as a summary line names it); `states` maps
+    every payment it reports (displayed or counted) to its item_state. If the fit
+    (views.fit_lines) would print a bound line less than whole, nothing is stored:
+    Undisplayed."""
     rid = f"r{db.next_seq(conn)}"
     out, whole = views.fit_lines(lines, tag=views.tag_for(rid))
-    late = [pid for pid, i in bound.items() if i >= whole]
+    late = [pid for pid, i in bound.items() if i >= whole] + [
+        (pid, m) for pid, ms in (docs or {}).items() for m, i in ms.items() if i >= whole]
     if late:
         raise Undisplayed(f"{kind} would bind payments {late} whose lines do not fit")
     text = "\n".join(out)
@@ -3110,9 +3150,12 @@ def _store(conn, kind, lines, scope, bound, states) -> str:
                  (rid, kind, db.canonical(full), db.now(), text, json.dumps(sorted(bound))))
     for pid in bound:
         rev = conn.execute("SELECT revision FROM projections WHERE pid=?", (pid,)).fetchone()[0]
+        shown = set((docs or {}).get(pid) or ()) or {r[0] for r in conn.execute(
+            "SELECT current_match FROM projections WHERE pid=? AND current_match IS NOT"
+            " NULL", (pid,))}
         mrevs = {str(r[0]): r[1] for r in conn.execute(
             "SELECT match_id, revision FROM match_state WHERE pid=? AND state IN ('matched',"
-            " 'proposed', 'conflicted')", (pid,))}
+            " 'proposed', 'conflicted')", (pid,)) if r[0] in shown}
         conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
                      " match_revisions_json) VALUES (?,?,?,?)",
                      (rid, pid, rev, db.canonical(mrevs)))
@@ -3427,6 +3470,33 @@ class Taps(StoreCase):
                                   ).fetchone()[0]
         self.assertEqual(open_, 0)
 
+    def test_wrong_on_a_legacy_set_rejects_only_the_candidates_the_card_showed(self):
+        """Plan round 8 (Astra S1): a legacy set of five machine candidates; the card shows
+        four; Wrong rejects those four, and the fifth stays proposable."""
+        import lineage, matches
+        import reducer as R
+        p = self.pay()
+        docs = [self.doc(document_number="L-%d" % k, document_date="2026-09-0%d" % k)
+                for k in range(1, 6)]
+        with db.tx(self.conn):                            # a pre-floor store's set
+            row = lineage.live_row(self.conn, lineage.projection(self.conn, p))
+            for d in docs:
+                mid = self.conn.execute("INSERT INTO matches(pid_created, doc_id, created_seq)"
+                                        " VALUES (?,?,0)", (p, d)).lastrowid
+                lineage.append(self.conn, p, "propose", "auto", match_id=mid, doc_id=d,
+                               fp=R.fingerprint(R.facts_of(row), "invoice"))
+            lineage.settle(self.conn, p)
+        card = self.tap(self.end(), "Review 1")["next"]
+        self.assertEqual(len([b for b in card["buttons"] if b["label"].startswith("L-")]), 4)
+        self.assertIn("1 more could fit", card["text"])
+        self.tap(card, "Wrong")
+        unseen = next(d for d in docs if ("L-%d" % (docs.index(d) + 1)) not in
+                      " ".join(b["label"] for b in card["buttons"]))
+        out = matches.propose_match(self.conn, pid=p, doc_id=unseen,
+                                    expected_revision=self.rev(p), token=self.token,
+                                    document_date=self.stored_date(unseen))
+        self.assertTrue(out["wrote"])                      # never shown: never rejected
+
     def test_a_pick_key_is_bound_to_its_document(self):
         import keys, qa_server, tools  # noqa: F401
         p = self.pay()
@@ -3572,7 +3642,7 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
     if action == "pick":
         mrevs = json.loads(_item(conn, rid, pid)["match_revisions_json"])
         matches.pick_in_tx(conn, grant=grant, pid=pid, doc_id=doc_id, render_id=rid,
-                           mrevs=mrevs)
+                           mrevs=mrevs, alternatives_shown=scope.get("alternatives") or [])
         line = f"Paired {views.headline(d)}."
     elif action == "wrong":
         # D3 / plan round 2 (Astra S1): Wrong answers every candidate the card showed — the
@@ -3617,7 +3687,7 @@ def _confirm_all(conn, r, scope, grant) -> dict:
   `matches.pick_in_tx`:
 
 ```python
-def pick_in_tx(conn, *, grant, pid, doc_id, render_id, mrevs) -> dict:
+def pick_in_tx(conn, *, grant, pid, doc_id, render_id, mrevs, alternatives_shown=()) -> dict:
     """§1 named candidate: the operator pairs `doc_id`, which the card showed (the chosen
     document, an alternative, or one of a set); every other machine candidate of the
     payment is the operator's rejection (#34), so it is never proposed again for it."""
@@ -3631,12 +3701,13 @@ def pick_in_tx(conn, *, grant, pid, doc_id, render_id, mrevs) -> dict:
         raise db.Refusal(keys.NO_LONGER)
     if taken_elsewhere(conn, doc_id, pid):
         raise db.Refusal("that document has since been paired with another payment")
+    displayed = {int(m) for m in mrevs}                   # what the card bound (round 8)
     for c in own:
-        if c.doc_id != doc_id:
+        if c.doc_id != doc_id and c.match_id in displayed:
             _append_rejection(conn, pid, _state(conn, c.match_id), render_id)
     reject_alternatives_in_tx(conn, grant=grant, pid=pid, render_id=render_id,
-                              doc_ids=[a for a in shown if a != doc_id
-                                       and a not in {c.doc_id for c in own}])
+                              doc_ids=[a for a in alternatives_shown
+                                       if a != doc_id])
     hit = next((c for c in own if c.doc_id == doc_id), None)
     return _operator_pair(conn, pid, doc_id, render_id,
                           match_id=hit.match_id if hit is not None else None)
@@ -5921,3 +5992,24 @@ three were accepted and folded; the first and third were generalized as asked.
 | Astra S1: a vendor page bound a payment its fitted text cut off | **Rule for every card kind** (Tasks 1, 7): a rendering binds exactly the payments whose lines appear in its final deposited text. `_store(conn, kind, lines, scope, bound, states)` takes the final lines and each bound payment's line index. If `views.fit_lines` would print a bound line less than whole, it raises `Undisplayed` and stores nothing. `render_items` (binding) holds only displayed payments. The states a rendering reports, displayed or only counted (an end message's "4 missing"), move to a new `render_states` table read by `seen_state`, replacing round 1's `render_items.item_state` column. `_pages` measures each page on its complete final lines (`_page_lines`: escaped vendor name, "· left missing" suffixes, link, worst-case header and tag), the same function `_store` renders. End message and open-items drop trailing proposal lines before `_store`, measured the same way. A Review card binds its one payment at its headline line. Pinned: `test_every_card_kind_binds_only_displayed_payments_when_oversized`, an oversized case per kind (a 60-character punctuated vendor, 24 left-missing suffixes, 40 long proposals) checked by `assert_binds_exactly_what_it_shows`; and `test_item_states_are_recorded_with_the_rendering` (a counted missing payment is reported, not bound). |
 | Astra S1: two Task 6 tests contradicted round 6 | `handed_candidates(cands, [])`, not `None` (checked: the function from the plan gives 8 with `[]` and raises the reported TypeError with `None`). The competitor test hands out the vendor unit before the no-op decision, so `handed_upto` covers the trigger. Astra reported both passing after these corrections. They were not run here: they need Tasks 1–6 built. |
 | Astra S2: a mid-run handover left the mirror stale behind a frozen plan | **Generalized** (Tasks 1, 5, 10, D9): no frozen plan and no invalidation hook. `mirror.hand_calls` re-hands in-flight calls, then a FRESH `plan()` over the current store against the export tags and `mirror_note`, minus this run's in-flight and refused calls. `mirror.owed` is in-flight plus that fresh diff. The cursor reaches `post` only when it is 0, re-checked at every `job_next`. `run_mirror` keeps only handed / done / failed acknowledgements. Pinned: `test_a_change_after_the_mirror_began_is_mirrored_in_the_same_run` (mirrored missing, then matched: owed > 0, the untag/tag/note calls are handed, then owed 0). **Run:** Task 5's `mirror.py` and all seven of its tests, copied from the plan into a disposable worktree of 26b68ee (Task 1's columns and the `run_claim` helper added there; `job.require_fresh` stubbed, as Task 3 deletes it), pass: `Ran 7 tests … OK`. |
+
+## Plan round 8 dispositions
+
+Astra `gpt-6-astra` medium and Terra `gpt-5.6-terra` medium. Both reported the schema-list
+miss; Astra also reported the undisplayed-candidate miss. Both were accepted and folded.
+
+| finding | disposition |
+|---|---|
+| both, S1: `render_states` missing from the fresh DDL and from `_TABLES_TO_WIPE` (a reset restarts the sequence and re-renders collide) | Task 1 Step 4 adds `RENDER_STATES_DDL` to the fresh DDL and `render_states` to `_TABLES_TO_WIPE`. The reset test seeds `render_states` and inserts the same key again after the reset. Task 1 now has ONE table checking every table and column the plan adds against the fresh DDL, `MIGRATIONS[11]`, `_TABLES_TO_WIPE` and `reset_keep_kb.py`. |
+| Astra S1: Wrong rejects a legacy candidate the card never showed | Round 7's rule is extended to documents (Task 7, Task 8). A proposal card displays one line per offered candidate (at most 4) and counts the rest. `_store` binds only the displayed candidates' match revisions, and `scope["alternatives"]` holds only the displayed alternatives, so Wrong (`taps._apply_one` reads only `mrevs`), pick and the alternatives' rejection act on the displayed set alone. Pinned: `test_wrong_on_a_legacy_set_rejects_only_the_candidates_the_card_showed` (five legacy candidates, four shown, the fifth still proposable after Wrong). |
+
+## Plan review closed after 8 rounds
+
+Plan review stopped here, after eight rounds (BRAIN and QUART). The findings still possible
+at this point are inconsistencies between the plan's text and its tests, which the build
+surfaces mechanically: a task's own tests fail. The review budget goes to diff rounds on the
+applied tree: Astra + Terra on each task batch's diff, re-review after fixes (Global
+Constraints, "After the tasks"). Task 5's mirror module and its seven tests were already run
+from this text (round 7), as were the Casa gate's checker changes against v0.344.37 (rounds 4
+and 6).
+
