@@ -169,7 +169,7 @@ class LateHandover(StoreCase):
     def test_astras_sequence_the_handover_waits_for_the_continuation(self):
         import cards, job
         jid = "dadadada-1"
-        self.drv.gmail.invoice("Zapier", 1000, "2026-07-05", "ORIGINAL")
+        self.drv.gmail.invoice("Zapier", 1000, "EUR", "2026-07-05", "ORIGINAL")
         first = self.until(jid, "view")                       # the end message is composed
         composed = self.conn.execute("SELECT end_render_id FROM runs WHERE job_id=?",
                                      (jid,)).fetchone()[0]
