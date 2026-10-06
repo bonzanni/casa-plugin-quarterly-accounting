@@ -584,7 +584,6 @@ class JobDriver:
         filed; ONE decide; each search recorded for the payments it was for; the hint saved
         from the search that found an invoice (step 5)."""
         import dates
-        import matches
         vendor, pays = u["vendor"], u["payments"]
         hint = u["kb"].get("hint_sender") if u["kb"].get("known") else None
         win = u["search_window"]
@@ -619,8 +618,10 @@ class JobDriver:
                     "issuer": m["vendor"], "document_date": m["date"],
                     "document_number": m["number"], "amount_minor": m["amount_minor"],
                     "currency": m["currency"], "vendor": vendor, "pass_token": token})
-                if matches.holders(self.conn, out["doc_id"]):
-                    continue                              # found again: another's already
+                if not out["created"]:
+                    # filed before (ingest's own answer): if it can fit, it is already among
+                    # the unit's candidates with its `held` flag; if not, it is no candidate
+                    continue
                 filed.append({"doc_id": out["doc_id"], "amount_minor": m["amount_minor"],
                               "currency": m["currency"], "date": m["date"], "held": None})
             return found

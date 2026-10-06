@@ -2,10 +2,40 @@
 """Simple loop §6 as code: a whole quarter through the real tools (qa_server.TOOLS) and the
 real bank-feed (tests/bankfeed.py, vendored component v0.21.0)."""
 import collections
+import datetime
 import json
 from tests._base import StoreCase
 import db                     # server/ is on sys.path once tests._base is imported
 from tests.sim_job import JobDriver
+
+
+TODAY = datetime.datetime(2026, 10, 6, 9, 0, tzinfo=datetime.timezone.utc)
+
+
+def pin_clock(test, at=TODAY):
+    """Ruling P8: the store's clock (db._clock, dates._today) starts at `at` and ticks with
+    real time, so a run's coverage (`bank_through`: the day its sync succeeded), the
+    quarter's end and the sync-age alerts never depend on the day the suite runs."""
+    import dates
+    import time
+    start = time.monotonic()
+
+    def clock():
+        return at + datetime.timedelta(seconds=time.monotonic() - start)
+    test.patch(db, "_clock", clock)
+    test.patch(dates, "_today", lambda: clock().date())
+
+
+def _bank_writes(bf) -> tuple:
+    """bank-feed's own record of every write: each row's tag revision (store
+    TAG_REVISIONS_TABLE, bumped by its triggers on any tag insert or delete) and every note
+    (append-only, by note_id). A delete-and-re-add moves the first; a note re-added the
+    second."""
+    import store
+    return (bf.conn.execute("SELECT row_id, revision FROM %s ORDER BY row_id"
+                            % store.TAG_REVISIONS_TABLE).fetchall(),
+            bf.conn.execute("SELECT note_id, row_id, note FROM transaction_notes ORDER BY"
+                            " note_id").fetchall())
 
 
 def _log_seq(conn):
@@ -19,6 +49,7 @@ def _mirror_calls(units) -> list:
 class Quarter(StoreCase):
     def setUp(self):
         super().setUp()
+        pin_clock(self)
         self.bind()
         self.drv = JobDriver(self, payments=0)
         self.rows = self.drv.quarter_fixture()
@@ -80,20 +111,15 @@ class Quarter(StoreCase):
             if bucket != "not_needed":
                 self.assertTrue(owned, bucket)
             self.assertEqual(notes[-1], mirror.note_text(self.conn, pid))
-        bank_notes = self.drv.bf.conn.execute("SELECT count(*) FROM transaction_notes"
-                                              ).fetchone()[0]
-        bank_tags = self.drv.bf.conn.execute("SELECT count(*) FROM transaction_tags"
-                                             ).fetchone()[0]
+        bank = _bank_writes(self.drv.bf)
+        self.assertTrue(bank[0] and bank[1])
         seq = _log_seq(self.conn)
         units = self.drv.run_job("eeeeeeee-2", started_by="operator")
         self.assertEqual(units[-1]["unit"], "complete")
         self.assertEqual(_mirror_calls(units), [])
         self.assertEqual(_log_seq(self.conn), seq)
-        # measured on the real bank-feed: not one note or tag written by the rerun
-        self.assertEqual(self.drv.bf.conn.execute("SELECT count(*) FROM transaction_notes"
-                                                  ).fetchone()[0], bank_notes)
-        self.assertEqual(self.drv.bf.conn.execute("SELECT count(*) FROM transaction_tags"
-                                                  ).fetchone()[0], bank_tags)
+        # measured on the real bank-feed: no tag revision moved, no note added
+        self.assertEqual(_bank_writes(self.drv.bf), bank)
 
     def test_a_re_decision_writes_nothing(self):
         """The rerun re-decides Twilio `missing` (still open, still on the list) and a
@@ -243,6 +269,7 @@ class CheckQ2(StoreCase):
 
     def setUp(self):
         super().setUp()
+        pin_clock(self)
         self.bind(watermark="2026-04-01")
         self.drv = JobDriver(self, payments=0)
         g = self.drv.gmail
@@ -301,6 +328,7 @@ class RealisticQuarter(StoreCase):
 
     def test_sixty_payments_finish_within_seven_batches(self):
         import cards
+        pin_clock(self)
         self.bind()
         drv = JobDriver(self, payments=0)
         rows = drv.quarter_fixture_60()
@@ -326,6 +354,6 @@ class RealisticQuarter(StoreCase):
         self.assertEqual(max(kinds.values()), 1)
         self.assertEqual({k for (v, k) in kinds if v == "Notion"}, {"hinted"})
         self.assertFalse(drv.searches_of("IKEA Business") + drv.searches_of("Conrad"))
-        import sys
-        print(f"\n60 payments: {batches} batches, {drv.calls_total} tool calls "
-              f"(per batch {drv.batch_calls})", file=sys.stderr)
+        # every turn stays inside Casa's 80-call turn (§2.2), counted honestly
+        self.assertLess(max(drv.batch_calls), 80, drv.batch_calls)
+        self.assertEqual(sum(drv.batch_calls), drv.calls_total)
