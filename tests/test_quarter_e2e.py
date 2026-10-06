@@ -130,7 +130,7 @@ class Quarter(StoreCase):
         revs = (self.rev(adobe), self.rev(twilio))
         seq = _log_seq(self.conn)
         units = self.drv.run_job("eeeeeeee-7", started_by="operator")
-        vendors = [u["vendor"] for u in units if u["unit"] == "vendor"]
+        vendors = [u["vendor"] for u in units if u["unit"] == "payment"]
         self.assertEqual(vendors, ["Twilio"])               # re-decided, missing again
         held = self.conn.execute("SELECT m.doc_id, d.document_date FROM projections p JOIN"
                                  " matches m ON m.match_id=p.current_match JOIN documents d"
@@ -205,40 +205,50 @@ class Quarter(StoreCase):
         self.assertEqual(self.conn.execute("SELECT status FROM projections WHERE pid=?",
                                            (tw,)).fetchone()[0], "proposed")
 
-    def reopened_by(self, file_later, job_id):
-        """A document of Adobe's amount filed after run 1 (`file_later`), then run
-        `job_id`: July's machine match becomes ONE proposal — its held document chosen, the
-        later one its alternative — and August's re-decision (the same document is now
-        July's alternative) writes nothing."""
+    def test_a_later_mail_document_never_reopens_a_machine_match(self):
+        """Rev 18.4 §R18.3: a document of Adobe's amount filed after run 1 by mail (no
+        handover) stays filed and unmatched; both machine matches stand, nothing moves."""
+        adobe, adobe_aug = self.rows[1], self.rows[2]
+        revs = (self.rev(adobe), self.rev(adobe_aug))
+        doc = self.drv.file_document(vendor=None, amount_minor=10000, currency="EUR",
+                                     document_date="2026-07-02")
+        self.drv.run_job("eeeeeeee-a", started_by="operator")
+        got = self.buckets()
+        self.assertEqual((got[adobe], got[adobe_aug]), ("matched", "matched"))
+        self.assertEqual((self.rev(adobe), self.rev(adobe_aug)), revs)
+        import matches
+        self.assertEqual(matches.holders(self.conn, doc), [])
+
+    def test_a_handover_onto_a_machine_match_asks_and_use_new_swaps(self):
+        """Rev 18.4 §R18.3: the operator hands over July's real invoice; the job judges it
+        July's (a replace), never Aug's (keep); ONE card asks; [Use new] pairs it as the
+        operator's and leaves the old one filed, unmatched."""
         import matches
         adobe, adobe_aug = self.rows[1], self.rows[2]
-        held = self.conn.execute("SELECT m.doc_id FROM projections p JOIN matches m ON"
-                                 " m.match_id=p.current_match WHERE p.pid=?",
-                                 (adobe,)).fetchone()[0]
-        doc = file_later()
-        rev_aug = self.rev(adobe_aug)
-        self.drv.run_job(job_id, started_by="operator")
-        got = self.buckets()
-        self.assertEqual((got[adobe], got[adobe_aug]), ("proposed", "matched"))
-        cur = self.conn.execute("SELECT current_match FROM projections WHERE pid=?",
+        old = self.conn.execute("SELECT m.doc_id FROM projections p JOIN matches m ON"
+                                " m.match_id=p.current_match WHERE p.pid=?",
                                 (adobe,)).fetchone()[0]
-        chosen = self.conn.execute("SELECT doc_id FROM matches WHERE match_id=?",
-                                   (cur,)).fetchone()[0]
-        self.assertEqual((chosen, matches.alternatives(self.conn, cur)), (held, [doc]))
-        self.assertEqual(self.rev(adobe_aug), rev_aug)
-        self.assertIn("To confirm", self.end_text(job_id))
-
-    def test_a_later_document_reopens_a_machine_match_as_one_proposal(self):
-        """The desk's filing, handed over (§2.5)."""
-        self.reopened_by(lambda: self.drv.hand_over(
-            vendor=None, amount_minor=10000, currency="EUR", document_date="2026-07-02"),
-            "eeeeeeee-4")
-
-    def test_a_document_filed_later_without_a_handover_reopens_it_too(self):
-        """Filed with no handover (§2.2 "Reopening": newly filed, fitting exactly)."""
-        self.reopened_by(lambda: self.drv.file_document(
-            vendor=None, amount_minor=10000, currency="EUR", document_date="2026-07-02"),
-            "eeeeeeee-a")
+        doc = self.drv.hand_over(vendor=None, amount_minor=10000, currency="EUR",
+                                 document_date="2026-07-02")
+        self.drv.run_job("eeeeeeee-4", started_by="operator")
+        got = self.buckets()
+        self.assertEqual((got[adobe], got[adobe_aug]), ("matched", "matched"))
+        end = self.drv.posted_end("eeeeeeee-4")
+        self.assertIn("1 handed-over document to check — Review shows it.", end["text"])
+        card = self.drv.tap(end, "Review 1")["next"]
+        self.assertIn("already has an invoice.", card["text"])
+        self.assertIn("(matched by the job)", card["text"])
+        self.assertIn("(from you)", card["text"])
+        self.assertEqual([b["label"] for b in card["buttons"]], ["Keep current", "Use new"])
+        out = self.drv.tap(card, "Use new")
+        self.assertIn("Used the new document", out["receipt"])
+        cur = self.conn.execute("SELECT s.doc_id, s.author FROM projections p JOIN"
+                                " match_state s ON s.match_id=p.current_match WHERE p.pid=?",
+                                (adobe,)).fetchone()
+        self.assertEqual(tuple(cur), (doc, "operator"))
+        self.assertEqual(matches.holders(self.conn, old), [])
+        again = self.drv.tap(card, "Keep current")              # single-use: answered
+        self.assertNotIn("Kept", again["receipt"])
 
     def test_confirm_all_after_a_review_answer(self):
         end = self.drv.posted_end("eeeeeeee-1")             # the end message's deposit
@@ -349,9 +359,13 @@ class RealisticQuarter(StoreCase):
         self.assertEqual(collections.Counter(seen.values()),
                          {"matched": 42, "proposed": 5, "missing": 5, "not_needed": 7,
                           "pending": 1})
-        # every vendor group searched at most once per kind; the hinted vendors only hinted
+        # rev 18.4: per payment, and a recurring vendor's first search (its quarter) files
+        # what its later payments need — so a vendor is searched at most once per payment,
+        # and the hinted vendors only hinted
         kinds = collections.Counter((v, k) for v, k, _ in drv.search_log)
-        self.assertEqual(max(kinds.values()), 1)
+        per_vendor = collections.Counter(drv._spec[n]["vendor"] for n in rows)
+        self.assertTrue(all(c <= per_vendor[v] for (v, _), c in kinds.items()), kinds)
+        self.assertLessEqual(len(drv.search_log), 40)
         self.assertEqual({k for (v, k) in kinds if v == "Notion"}, {"hinted"})
         self.assertFalse(drv.searches_of("IKEA Business") + drv.searches_of("Conrad"))
         # every turn stays inside Casa's 80-call turn (§2.2), counted honestly

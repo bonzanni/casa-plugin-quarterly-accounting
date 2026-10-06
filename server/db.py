@@ -154,20 +154,17 @@ POST_OFFERS_DDL = """CREATE TABLE IF NOT EXISTS post_offers (
 RUN_WORK_DDL = """CREATE TABLE IF NOT EXISTS run_work (
   job_id TEXT NOT NULL, pid INTEGER NOT NULL,
   vendor TEXT NOT NULL,          -- loop.vendor_of: the group it is handed out in (D1)
-  why TEXT NOT NULL CHECK (why IN ('open', 'new', 'reopen', 'competitor', 'changed',
-                                   'handover')),
-  outcome TEXT CHECK (outcome IN ('match', 'propose', 'missing',
-                                  'settled')),   -- settled: no longer work at hand-out
+  why TEXT NOT NULL CHECK (why IN ('open', 'new', 'changed', 'handover')),
+  outcome TEXT CHECK (outcome IN ('match', 'propose', 'missing', 'keep', 'replace',
+                                  'settled')),   -- settled: no longer work at hand-out;
+                                                 -- keep / replace: a handover (rev 18.4 §R18.3)
   reason TEXT,                   -- a `missing` outcome's reason, as the model gave it (§2.2)
   attempts INTEGER NOT NULL DEFAULT 0,   -- queues: hand-outs that carried it and progressed nothing
-  handed_upto INTEGER,           -- the latest filed_seq among the documents handed out for it
-  hinted INTEGER NOT NULL DEFAULT 0,     -- the vendor's learned-hint search ran this run (§2.2)
-  plain INTEGER NOT NULL DEFAULT 0,      -- the vendor's plain vendor-and-dates search ran this run
-  payment INTEGER NOT NULL DEFAULT 0,    -- a per-payment search for it ran this run
+  searches INTEGER NOT NULL DEFAULT 0,   -- rev 18.4: its searches recorded this run (SEARCHES_MAX)
   hand_seq INTEGER,              -- the hand-out (runs.hand_seq) that last carried it
   seq INTEGER,                   -- queues: when it was (re)listed
   closed_seq INTEGER,            -- queues: when it took its outcome
-  searched_seq INTEGER,          -- queues: the latest first record of a search kind for it
+  searched_seq INTEGER,          -- the latest search recorded for it (a hand-out's progress)
   PRIMARY KEY (job_id, pid));"""
 # §2.4: the mirror calls a run handed out, numbered, and what became of them (D9);
 # args_json holds the call's canonical [tool, args]. Nothing is planned ahead (round 7)
@@ -179,6 +176,15 @@ RUN_MIRROR_DDL = """CREATE TABLE IF NOT EXISTS run_mirror (
   error TEXT,
   attempts INTEGER NOT NULL DEFAULT 0, hand_seq INTEGER, closed_seq INTEGER,   -- queues
   PRIMARY KEY (job_id, n));"""
+# Rev 18.4 §R18.3: a handed-over document the job judged belongs to a payment that already
+# has one — the question its one card asks, bound to the pairing it displayed
+REPLACE_QUESTIONS_DDL = """CREATE TABLE IF NOT EXISTS replace_questions (
+  question_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL, pid INTEGER NOT NULL,
+  match_id INTEGER NOT NULL,     -- the pairing the payment held when asked (match or proposal)
+  new_doc_id INTEGER NOT NULL,   -- the handed-over document
+  state TEXT NOT NULL CHECK (state IN ('open', 'kept', 'used', 'superseded')),
+  created_seq INTEGER NOT NULL, answered_at TEXT);"""
 # Queues (operator ruling A): every other item a unit owes, from the moment it is known —
 # an erase candidate, the own-mail search, a found attachment (docs queues-design.md)
 RUN_ITEMS_DDL = """CREATE TABLE IF NOT EXISTS run_items (
@@ -305,7 +311,6 @@ CREATE TABLE IF NOT EXISTS projections (
   observed_tags_json TEXT, observed_at TEXT,
   export_tag_revision INTEGER,   -- the row's tag_revision in the latest import (issue #1)
   mirror_note TEXT,              -- the note text last written (simple loop §3 "Per projection")
-  considered_seq INTEGER,        -- store sequence at which the job last decided this payment (§2.1)
   last_facts_json TEXT,          -- the destination row's facts when last seen (names an erased row)
   unprojectable TEXT, last_error TEXT,
   search_state TEXT NOT NULL DEFAULT 'active'
@@ -397,7 +402,7 @@ CREATE TABLE IF NOT EXISTS operator_refs (
 CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at);
 """ + "\n".join((CLAIMS_DDL, WORK_REQUESTS_DDL, RUNS_DDL,
                          READINGS_DDL, RENDER_KEYS_DDL, ACCOUNT_CHOICES_DDL, POST_OFFERS_DDL,
-                         RUN_WORK_DDL, RUN_MIRROR_DDL, RUN_ITEMS_DDL, QUARTER_NOTICES_DDL,
+                         RUN_WORK_DDL, RUN_MIRROR_DDL, RUN_ITEMS_DDL, REPLACE_QUESTIONS_DDL, QUARTER_NOTICES_DDL,
                          RENDER_STATES_DDL)) + "\n"
 
 # Migrations from version N to N+1, appended when the schema changes. Each is
@@ -573,7 +578,6 @@ MIGRATIONS: dict[int, list[str]] = {
     # keyed documents; item states; the Gmail streak; batch progress; the learned hint.
     # Task 11 of the plan appends the drops of the deleted machinery to this same list.
     11: ["ALTER TABLE projections ADD COLUMN mirror_note TEXT",
-         "ALTER TABLE projections ADD COLUMN considered_seq INTEGER",
          "ALTER TABLE documents ADD COLUMN vendor TEXT",
          "ALTER TABLE documents ADD COLUMN filed_seq INTEGER",
          "ALTER TABLE matches ADD COLUMN alternatives_json TEXT NOT NULL DEFAULT '[]'",
@@ -594,7 +598,7 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE runs ADD COLUMN hand_unit TEXT",
          "ALTER TABLE runs ADD COLUMN hand_seq INTEGER",
          "ALTER TABLE work_requests ADD COLUMN quarter TEXT",
-         RUN_WORK_DDL, RUN_MIRROR_DDL, RUN_ITEMS_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL,
+         RUN_WORK_DDL, RUN_MIRROR_DDL, RUN_ITEMS_DDL, REPLACE_QUESTIONS_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL,
          # ... then the machinery §4 deletes: the sweep, the chunk carry, the judge,
          # credits, nested passes, package requests and the delegation protocol
          # a package asked for and not yet sent is told, once, before its request goes

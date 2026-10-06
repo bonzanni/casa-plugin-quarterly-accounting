@@ -79,3 +79,33 @@ class ErasuresAreAllConfirmed(StoreCase):
         run = self.conn.execute("SELECT partial FROM runs WHERE job_id='d6d6d6d6-b2'"
                                 ).fetchone()
         self.assertEqual(run["partial"], 0)
+
+
+class ErasureProgressIsReported(StoreCase):
+    """d7 Astra S1b: confirming erasures is progress (rev 18.4 §R18.5, progress in ONE
+    place): 150 erased payments take several batches, each reports progress, and the run
+    completes with every one confirmed."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+
+    def test_d7_150_erasures_report_progress_every_batch_and_complete(self):
+        drv = JobDriver(self, payments=151)
+        drv.run_job("d7d7d7d7-b1")
+        bf = drv.bf
+        rows = bf.rows(state="active")
+        gone = rows[1:]
+        bf.conn.execute("DELETE FROM transactions WHERE row_id IN (%s)"
+                        % ",".join(str(r["row_id"]) for r in gone))
+        bf.conn.commit()
+        bf.fetch([bf.row(rows[0]["booking_date"], amount=rows[0]["amount_minor"],
+                         ref=rows[0]["provider_ref"], counterparty=rows[0]["counterparty"])])
+        drv.casa_cut = CASA_CALLS
+        drv.run_job("d7d7d7d7-b2")
+        self.assertGreater(len(drv.batch_reported), 2)
+        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM projections WHERE"
+                                           " ended='erased'").fetchone()[0], 150)
+        self.assertIsNotNone(self.conn.execute("SELECT completed_at FROM runs WHERE"
+                                               " job_id='d7d7d7d7-b2'").fetchone()[0])

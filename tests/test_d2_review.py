@@ -76,7 +76,7 @@ class OwnMailFilingIsSliced(StoreCase):
                 self.assertGreater(queued(), 0)             # not drained yet
                 self.assertIsNone(self.conn.execute(
                     "SELECT listed_at FROM runs WHERE job_id='d2d2d2d2-a2'").fetchone()[0])
-            if u["unit"] == "vendor":
+            if u["unit"] == "payment":
                 break
             if u["unit"] == "end-batch":                    # a fresh batch (turn)
                 self.drv.claim("d2d2d2d2-a2")
@@ -131,7 +131,7 @@ class HandoverJoiningACheck(StoreCase):
         self.bind()
         self.drv = JobDriver(self, payments=2)          # Zapier EUR 10.00 and 20.00
 
-    def hand_over_during(self, jid, at="vendor", started="operator"):
+    def hand_over_during(self, jid, at="payment", started="operator"):
         import job
         self.drv.claim(jid, started)
         for _ in range(40):
@@ -220,8 +220,8 @@ class OwnMailInvoiceIsACandidate(StoreCase):
         self.assertEqual((doc["amount_minor"], doc["currency"], doc["document_date"],
                           doc["issuer"], doc["document_number"], doc["vendor"]),
                          (1000, "EUR", "2026-07-05", "Zapier", "ZAP-OWN", None))
-        (v,) = [u for u in units if u["unit"] == "vendor"]
-        pay = v["payments"][0]
+        (v,) = [u for u in units if u["unit"] == "payment"]
+        pay = v
         self.assertEqual([c["doc_id"] for c in pay["candidates"]], [doc["doc_id"]])
         self.assertIsNone(pay["exact_fit"])                  # vendorless: never exact_fit
         self.assertEqual(self.conn.execute("SELECT status FROM projections").fetchone()[0],

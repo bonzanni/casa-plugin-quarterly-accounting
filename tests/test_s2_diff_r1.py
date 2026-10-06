@@ -79,10 +79,9 @@ class Tools(StoreCase):
                       ledger_instance=self.instance, acq=u["acq"])
         elif k == "filing":
             self.call("record_probe", pass_token=t, kind="gmail", ok=True)
-        elif k == "vendor":                 # simple loop Task 10: nothing found, missing
+        elif k == "payment":                # rev 18.4: nothing found, missing
             self.call("decide", pass_token=t, entries=[
-                {"pid": x["pid"], "outcome": "missing", "expected_revision": x["revision"]}
-                for x in u["payments"]])
+                {"pid": u["pid"], "outcome": "missing", "expected_revision": u["revision"]}])
         elif k == "mirror":
             self.call("record_mirror", pass_token=t, done=[c["n"] for c in u["calls"]])
         elif k in ("post", "view"):

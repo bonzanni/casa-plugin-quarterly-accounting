@@ -206,7 +206,7 @@ class Decide(StoreCase):
         decide.decide(self.conn, self.token, [self.entry(self.pids[0], "match", d)])
         rev = self.rev(self.pids[0])
         with db.tx(self.conn):
-            self.conn.execute("UPDATE run_work SET outcome=NULL, handed_upto=77 WHERE pid=?",
+            self.conn.execute("UPDATE run_work SET outcome=NULL WHERE pid=?",
                               (self.pids[0],))
         out = decide.decide(self.conn, self.token, [self.entry(self.pids[0], "match", d)])
         self.assertEqual((out["results"][0]["applied"], out["results"][0]["wrote"]),
@@ -214,9 +214,6 @@ class Decide(StoreCase):
         self.assertEqual(self.rev(self.pids[0]), rev)
         self.assertEqual(self.conn.execute("SELECT outcome FROM run_work WHERE pid=?",
                                            (self.pids[0],)).fetchone()[0], "match")
-        # §2.1: the decision considered the documents handed out for it, up to handed_upto
-        self.assertEqual(self.conn.execute("SELECT considered_seq FROM projections WHERE"
-                                           " pid=?", (self.pids[0],)).fetchone()[0], 77)
 
     def test_a_refused_entry_leaves_the_work_list_undecided(self):
         import decide
@@ -299,14 +296,10 @@ class Decide(StoreCase):
             self.conn.execute("UPDATE projections SET merged_into=? WHERE pid=?",
                               (self.pids[1], loser))
         self.work_rows([loser])
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE run_work SET handed_upto=55 WHERE pid=?", (loser,))
         out = decide.decide(self.conn, self.token,
                             [self.entry(self.pids[1], "missing", reason="none")])
         self.assertTrue(out["results"][0]["applied"])
         self.assertEqual(self.outcome(loser), "missing")
-        self.assertEqual(self.conn.execute("SELECT considered_seq FROM projections WHERE"
-                                           " pid=?", (self.pids[1],)).fetchone()[0], 55)
 
     def test_record_missing_is_one_missing_entry(self):
         import decide
@@ -404,24 +397,6 @@ class VendorSearch(StoreCase):
         self.work_rows(self.pids[:3], vendor="Adobe")
         self.work_rows(self.pids[3:], vendor="Zapier")
 
-    def flags(self):
-        return {r["pid"]: (r["hinted"], r["plain"]) for r in self.conn.execute(
-            "SELECT pid, hinted, plain FROM run_work")}
-
-    def test_a_vendor_search_marks_the_vendor_for_the_run_kind_by_kind(self):
-        import work
-        a1, a2, a3, z = self.pids
-        # one split group of Adobe searched: the whole vendor, its later group included
-        work.record_search(self.conn, pids=[a1, a2], token=self.token, search="hinted",
-                           queries=["from:billing@adobe.com"])
-        self.assertEqual(self.flags(), {a1: (1, 0), a2: (1, 0), a3: (1, 0), z: (0, 0)})
-        work.record_search(self.conn, pids=[a3], token=self.token, search="plain",
-                           queries=["Adobe invoice"])
-        self.assertEqual(self.flags(), {a1: (1, 1), a2: (1, 1), a3: (1, 1), z: (0, 0)})
-        work.record_search(self.conn, pid=z, token=self.token, queries=["Zapier"])
-        self.assertEqual(self.flags()[z], (0, 0))           # a per-payment search marks none
-        self.assertEqual(work.describe(self.conn, a3)["search"]["queries"], ["Adobe invoice"])
-
     def test_a_search_marks_progress_and_the_kind_is_checked(self):
         import work
         with self.assertRaisesRegex(db.Refusal, "search is hinted"):
@@ -432,10 +407,9 @@ class VendorSearch(StoreCase):
         with self.assertRaisesRegex(db.Refusal, "not both"):
             work.record_search(self.conn, pids=self.pids[:1], pid=self.pids[1],
                                token=self.token, queries=["q"])
-        # an identity question or a bare `incomplete` is no search: no flag, no progress
+        # an identity question or a bare `incomplete` is no search: no progress
         work.record_search(self.conn, pids=self.pids[:1], token=self.token, search="hinted",
                            identity_unknown=True, incomplete=True)
-        self.assertEqual(self.flags()[self.pids[1]], (0, 0))
         self.assertEqual(self.conn.execute("SELECT progressed FROM claims WHERE gen=?",
                                            (self.token,)).fetchone()[0], 0)
         work.record_search(self.conn, pid=self.pids[0], token=self.token, queries=["q"])
@@ -447,16 +421,15 @@ class VendorSearch(StoreCase):
         import tools  # noqa: F401
         props = qa_server.TOOLS["record_search"]["schema"]["properties"]
         self.assertIn("pids", props)
-        self.assertIn("counts as the vendor's search only when it carries queries",
-                      qa_server.TOOLS["record_search"]["description"])
+        self.assertIn("at most 3 searches a run", qa_server.TOOLS["record_search"]["description"])
         with self.assertRaisesRegex(db.Refusal, "not both"):
             qa_server.TOOLS["record_search"]["fn"]({"pids": self.pids[:1], "pid": self.pids[1],
                                                     "pass_token": self.token})
         self.assertIn("search", props)
-        qa_server.TOOLS["record_search"]["fn"]({"pids": self.pids[:2], "search": "plain",
-                                                "pass_token": self.token,
-                                                "queries": ["Adobe"]})
-        self.assertEqual(self.flags()[self.pids[2]], (0, 1))
+        out = qa_server.TOOLS["record_search"]["fn"]({"pids": self.pids[:1], "search": "plain",
+                                                      "pass_token": self.token,
+                                                      "queries": ["Adobe"]})
+        self.assertEqual(len(out["recorded"]), 1)
 
 
 class LearnedHint(StoreCase):

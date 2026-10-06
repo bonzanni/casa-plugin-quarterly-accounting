@@ -47,7 +47,7 @@ class FailedSync(StoreCase):
         and works the payments (the new units), its pass complete, bank_through kept."""
         first, later, units = self.failed_sync_run()
         kinds = [u["unit"] for u in units]
-        for k in ("probes", "snapshot", "filing", "vendor"):
+        for k in ("probes", "snapshot", "filing", "payment"):
             self.assertIn(k, kinds)
         self.assertEqual(kinds[-1], "complete")
         sync = self.conn.execute("SELECT ok, detail FROM probes WHERE kind='bank_sync'"

@@ -198,23 +198,21 @@ class TestOperatorWrites(Base):
             self.granted(matches.confirm_in_tx, match_id=a, expected_revision=self.rev(match_id=a),
                          render_id=rid)
 
-    def test_confirming_a_document_another_proposal_holds_as_an_alternative_is_refused(self):
-        """Task 3 review carry (R5): P2's live proposal holds B as an alternative; P1's own
-        pairing of B (a pre-floor store, or a merge) is never confirmed onto P1 — the
-        document would be held twice."""
+    def test_confirming_a_document_another_proposal_names_as_an_alternative_is_allowed(self):
+        """Rev 18.4 §R18.4 (r2 Astra S1 #2): P2's live proposal names B only as an
+        alternative, which holds nothing — P1's own pairing of B is confirmed."""
         self.row(2)
         p2 = self.lineage_for(2)
         self.classify(p2, {"software"})
         self.settle(p2)
         b = self.doc()
         self.auto(pid=p2, doc_id=self.doc(), kind="propose", alternatives=[b])
-        self.assertEqual(matches.holders(self.conn, b), [(p2, "alternative")])
-        mine = self.machine_entry(self.pid, b, kind="propose")   # the floor refuses this now
+        self.assertEqual(matches.holders(self.conn, b), [])
+        mine = self.auto(doc_id=b, kind="propose")["match_id"]
         rid = self.show(self.pid)
-        with self.assertRaisesRegex(db.Refusal, f"payment #{p2}"):
-            self.granted(matches.confirm_in_tx, match_id=mine,
-                         expected_revision=self.rev(match_id=mine), render_id=rid)
-        self.assertEqual(self.state(mine), "proposed")
+        self.granted(matches.confirm_in_tx, match_id=mine,
+                     expected_revision=self.rev(match_id=mine), render_id=rid)
+        self.assertEqual(self.state(mine), "matched")
 
     def test_exemption_rejects_the_pairing_and_says_so(self):
         mid = self.auto(doc_id=self.doc(), kind="propose")["match_id"]

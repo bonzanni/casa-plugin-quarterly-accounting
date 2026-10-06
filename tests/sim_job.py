@@ -14,18 +14,15 @@ driver makes in a turn is counted into `calls_made` (a new turn — a claim — 
             record_probe(gmail, ok, data.refs) — failed when Gmail.down; then each of the
             unit's (or the probe's) `files` (download, Read, ingest_document with the reading:
             amount, currency, date, issuer, number; no vendor)
-  vendor    `files` (no payments): each filed with ingest_document(vendor=…). Payments: the
-            skill's search rule (Task 16): only while a payment is uncovered (no exact
-            fit, no unheld candidate), the hinted search (a learned hint, not yet run this
-            run), then the plain one (still uncovered, not yet run); each recorded at once
-            with its refs (q5), then each of its answer's `files` filed with
-            ingest_document(vendor=…). Then per payment: one holding a document
-            with another same-amount candidate → propose the held one with it as the
-            alternative (refused: match the held one); the exact fit or the nearest-dated
-            same-currency, same-amount unheld candidate → match; else an unheld candidate →
-            propose; else missing. All in ONE decide; a refused entry decided again once
-            (missing, or the held match); upsert_counterparty(hint_sender=…) when a search
-            found an invoice
+  payment   one payment (rev 18.4): `files` first (each filed with ingest_document(vendor=…));
+            the candidates judged from their stored reading — the exact fit, else the
+            nearest-dated same-currency, same-amount unheld one → match; nothing fits: its
+            searches left (hinted with a learned hint, plain, wider), each recorded at once
+            with its refs, then each of its answer's `files` filed, until something fits;
+            then ONE decide: match, else an unheld candidate → propose, else missing; a
+            payment holding a document with another same-amount candidate → propose the
+            held one with it (refused: match the held one); upsert_counterparty(hint_sender=…)
+            when a search found an invoice
   mirror    each call through bank-feed (a reply starting `refused`, or bank-feed's
             "Nothing was changed.", counts as failed), then one record_mirror
   view      show_view(render_id) under a broker; on the receipt (`deliver`),
@@ -232,6 +229,9 @@ class JobDriver:
         self._limit = None              # the unit in hand's call budget
         self._reserve = 0               # the calls its closing write needs (loop.CLOSING)
         self.tool_calls = {}            # plugin tool name -> calls made, every run
+        self.replace_days = 3           # a handed document this near an exact fit replaces
+        self.near_days = 10             # the skill's "certain": a match dated this near
+        self.propose_days = 20          # a look-alike this near is proposed; farther: not it
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
 
     # --- the bank, as the operator's bank has it ------------------------------------
@@ -732,124 +732,109 @@ class JobDriver:
                               "currency": m["currency"], "date": m["date"], "held": None})
         return filed
 
-    def _vendor(self, u, token):
-        """The skill's vendor unit (§2.2, plan round 6): filed documents first; the vendor
-        search only while a payment is uncovered — the hinted one (a learned hint, not yet
-        run this run), then the plain one (still uncovered, not yet run); each message found
-        filed; ONE decide; each search recorded for the payments it was for; the hint saved
-        from the search that found an invoice (step 5)."""
+    def _payment(self, u, token):
+        """The skill's payment unit (rev 18.4 §R18.1): `files` first; the candidates judged
+        from their stored reading (the exact fit, else the nearest-dated same-currency,
+        same-amount unheld one → match); nothing fits: the searches left — hinted (a
+        learned hint), plain, wider — each recorded at once with its refs, then every found
+        invoice of its answer filed, until something fits; then ONE decide: match, else an
+        unheld candidate → propose (alternatives: the others), else missing. A payment that
+        holds a document with another same-amount candidate: propose the held one with it
+        as the alternative (refused: match the held one). Then the hint saved from the
+        search that found an invoice."""
         import dates
-        vendor, pays = u["vendor"], u["payments"]
-        if u["files"]:                      # the skill's **`files` first**
-            self._file_vendor(token, vendor, u["files"])
-            return None
+        vendor, pid = u["vendor"], u["pid"]
+        filed = self._file_vendor(token, vendor, u["files"])
+        if u["files_total"] > len(u["files"]):
+            return None                 # the skill: the rest come with the next job_next
         hint = u["kb"].get("hint_sender") if u["kb"].get("known") else None
         win = u["search_window"]
         span = f" after:{win['after']} before:{win['before']}" if win["after"] else ""
-        filed, searched = [], []
 
-        def gap(c, pay):
-            if not (c["date"] and pay["date"]):
+        def gap(c):
+            if not (c["date"] and u["date"]):
                 return 10 ** 6
-            return abs((dates.parse_day(c["date"][:10]) - dates.parse_day(pay["date"][:10])).days)
+            return abs((dates.parse_day(c["date"][:10]) - dates.parse_day(u["date"][:10])).days)
 
-        def unheld(pay):
-            return [c for c in pay["candidates"] + filed if c["held"] is None]
+        def plausible(c):
+            """What the server would list (loop.candidates): the same currency and amount,
+            or another currency (the FX screen is the server's)."""
+            return c["currency"] != u["currency"] or c["amount_minor"] == u["amount_minor"]
 
-        def uncovered():
-            return [p for p in pays if p["exact_fit"] is None and not unheld(p)]
+        def unheld():
+            return [c for c in u["candidates"] + [f for f in filed if plausible(f)]
+                    if c["held"] is None]
 
-        def search(kind, query):
-            want = [p["pid"] for p in uncovered()]
-            self._spend(1)
-            found = self.gmail.search_emails(query) or []
-            self.search_log.append((vendor, kind, query))
-            searched.append((kind, query, want, found))
-            # the skill: recorded right after it ran, with every attachment it found (q5)
-            out = self._tool("record_search", {"pass_token": token, "pids": want or [
-                p["pid"] for p in pays], "search": kind, "queries": [query],
-                "found_candidate": bool(found), "refs": [m["ref"] for m in found]})
-            # each attachment it answers to file (only what no ingest filed, any run: d5)
-            filed.extend(self._file_vendor(token, vendor, out["files"]))
-            return found
-
-        if uncovered() and hint and not u["searches"]["hinted"]:
-            search("hinted", f"from:{hint}{span}")
-        if uncovered() and not u["searches"]["plain"]:
-            search("plain", f"{vendor} invoice{span}")
-
-        # the same-currency, same-amount pairs, nearest dates first across the whole group
-        # (the exact fit first of all): a later month's invoice never takes an earlier
-        # payment's place when its own month's is there
-        pairs = sorted((-1 if c["doc_id"] == p["exact_fit"] else gap(c, p), i, c["doc_id"])
-                       for i, p in enumerate(pays) if not p["holds"]
-                       for c in p["candidates"] + filed
-                       if c["held"] is None and c["currency"] == p["currency"]
-                       and c["amount_minor"] == p["amount_minor"])
-        nearest, used = {}, set()
-        for _, i, doc in pairs:
-            if i not in nearest and doc not in used:
-                nearest[i] = doc
-                used.add(doc)
-        entries, again, taken, rest = [], {}, set(used), []
-        for i, pay in enumerate(pays):
-            cands = [c for c in pay["candidates"] + filed if c["doc_id"] not in taken]
-            held = (pay["holds"] or {}).get("doc_id")
-            base = {"pid": pay["pid"], "expected_revision": pay["revision"]}
-            if held is not None:
-                # it holds a document: another unheld one of the same currency and amount
-                # → propose the held one with the other as its alternative; refused by the
-                # floor (the other is another payment's alternative already) it is decided
-                # again once as `match` of the held one, which writes nothing; no other →
-                # `match` of the held one
-                other = sorted((c for c in pay["candidates"] + filed
-                                if c["held"] is None and c["doc_id"] != held
-                                and c["currency"] == pay["currency"]
-                                and c["amount_minor"] == pay["amount_minor"]),
-                               key=lambda c: (gap(c, pay), c["doc_id"]))
-                day = pay["holds"].get("date") or pay["date"]
-                keep = {**base, "outcome": "match", "doc_id": held, "document_date": day}
-                if other:
-                    entries.append({**base, "outcome": "propose", "doc_id": held,
-                                    "alternatives": [other[0]["doc_id"]], "document_date": day})
-                    again[pay["pid"]] = keep
-                    taken.update({held, other[0]["doc_id"]})
-                else:
-                    entries.append(keep)
-                    taken.add(held)
-                continue
-            fit = nearest.get(i)
-            if fit is None:
-                cands = [c for c in cands if c["held"] is None]
-            else:
-                cands = [c for c in pay["candidates"] + filed if c["doc_id"] == fit]
-            pick, outcome = (fit, "match") if fit is not None else (
-                (cands[0]["doc_id"], "propose") if cands else (None, "missing"))
-            if outcome == "missing":
-                rest.append(pay)
-                continue
-            taken.add(pick)
-            day = next(c["date"] for c in cands if c["doc_id"] == pick) or pay["date"]
-            entries.append({**base, "outcome": outcome, "doc_id": pick, "document_date": day})
-        entries += [{"pid": p["pid"], "outcome": "missing", "reason": "no invoice found",
-                     "expected_revision": p["revision"]} for p in rest]
-        out = self._tool("decide", {"pass_token": token, "entries": entries})
-        # the refused entries decided again, once: a held document's proposal as `match` of
-        # it; a document the floor rules out for the payment (the bank's rate, #35) as
-        # `missing` — as the skill says, "re-decide only the refused entries"
-        if any("changed since it was handed out" in (r.get("refused") or "")
-               for r in out["results"]):
-            return None    # the skill: a refusal → job_next (a search that aged it out, D7)
-        redo = [again.get(e["pid"]) or {"pid": e["pid"], "outcome": "missing",
-                                        "reason": "no fitting invoice found",
-                                        "expected_revision": e["expected_revision"]}
-                for e, r in zip(entries, out["results"]) if not r["applied"]]
-        assert all(e["outcome"] != "missing" for e, r in zip(entries, out["results"])
-                   if not r["applied"]), out     # the sim decides only what the floor takes
-        if redo:
-            out = self._tool("decide", {"pass_token": token, "entries": redo})
+        def exact():
+            """Same currency and amount, dated near the payment: a recurring charge's
+            invoice dated weeks away is another month's — the skill's judgment."""
+            return sorted((c for c in unheld() if c["currency"] == u["currency"]
+                           and c["amount_minor"] == u["amount_minor"]
+                           and gap(c) <= self.near_days),
+                          key=lambda c: (c["doc_id"] != u["exact_fit"], gap(c), c["doc_id"]))
+        found_any = []
+        kinds = (["hinted"] if hint else []) + ["plain", "payment"]
+        kinds = kinds[u["searches"]:][:u["searches_left"]]
+        if not u["holds"]:
+            for k, kind in enumerate(kinds):
+                if exact():
+                    break
+                query = (f"from:{hint}{span}" if kind == "hinted"
+                         else f"{vendor} invoice{span}" if kind == "plain" else f"{vendor}{span}")
+                self._spend(1)
+                found = self.gmail.search_emails(query) or []
+                self.search_log.append((vendor, kind, query))
+                found_any += found
+                out = self._tool("record_search", {
+                    "pass_token": token, "pids": [pid], "search": kind, "queries": [query],
+                    "found_candidate": bool(found), "refs": [m["ref"] for m in found],
+                    "exhausted": k == len(kinds) - 1})
+                filed.extend(self._file_vendor(token, vendor, out["files"]))
+                if out["files_total"] > len(out["files"]):
+                    return None         # more found than one answer carries: job_next
+        base = {"pid": pid, "expected_revision": u["revision"]}
+        held = (u["holds"] or {}).get("doc_id")
+        if held is not None and u["why"] == "handover":
+            # the skill (rev 18.4 §R18.3): the handed document, the first candidate, belongs
+            # to this payment when it fits exactly → replace (the operator is asked); else keep
+            c = u["candidates"][0] if u["candidates"] else None
+            fits = (c is not None and c["doc_id"] != held and c["currency"] == u["currency"]
+                    and c["amount_minor"] == u["amount_minor"] and gap(c) <= self.replace_days)
+            entry = ({**base, "outcome": "replace", "doc_id": c["doc_id"]} if fits
+                     else {**base, "outcome": "keep"})
+            out = self._tool("decide", {"pass_token": token, "entries": [entry]})
             assert out["refused"] == 0, out
-        senders = [m["sender"] for _, _, _, found in searched for m in found if not m["sent"]]
+            return None
+        if held is not None:
+            other = [c for c in exact() if c["doc_id"] != held]
+            day = u["holds"].get("date") or u["date"]
+            keep = {**base, "outcome": "match", "doc_id": held, "document_date": day}
+            entry = ({**base, "outcome": "propose", "doc_id": held,
+                      "alternatives": [other[0]["doc_id"]], "document_date": day}
+                     if other else keep)
+        elif exact():
+            c = exact()[0]
+            entry = {**base, "outcome": "match", "doc_id": c["doc_id"],
+                     "document_date": c["date"] or u["date"]}
+        elif [c for c in unheld() if gap(c) <= self.propose_days]:
+            cs = sorted((c for c in unheld() if gap(c) <= self.propose_days),
+                        key=lambda c: (gap(c), c["doc_id"]))
+            entry = {**base, "outcome": "propose", "doc_id": cs[0]["doc_id"],
+                     "alternatives": [c["doc_id"] for c in cs[1:4]],
+                     "document_date": cs[0]["date"] or u["date"]}
+        else:
+            entry = {**base, "outcome": "missing", "reason": "no invoice found"}
+        out = self._tool("decide", {"pass_token": token, "entries": [entry]})
+        r = out["results"][0]
+        if not r["applied"]:
+            if "changed since it was handed out" in (r.get("refused") or ""):
+                return None    # the skill: a refusal → job_next (a search that aged it out)
+            redo = keep if held is not None else {
+                **base, "outcome": "missing", "reason": "no fitting invoice found"}
+            assert entry["outcome"] != "missing", out   # the sim decides what the floor takes
+            out = self._tool("decide", {"pass_token": token, "entries": [redo]})
+            assert out["refused"] == 0, out
+        senders = [m["sender"] for m in found_any if not m["sent"]]
         if senders and senders[0] != hint:
             self._tool("upsert_counterparty", {"name": vendor, "hint_sender": senders[0],
                                                "hint_subject": f"{vendor} invoice",

@@ -111,21 +111,20 @@ def rejected_by_operator(conn, pid, doc, facts, kind, fx_pair):
     return None
 
 
+# rev 18.4 §R18.4: a document is held only by a match or a proposal's PRIMARY document (a
+# joint set's members included); a proposal's alternatives hold nothing (r2 Astra S1 #2)
 HOLDERS_SQL = (
     "SELECT s.pid, s.state AS how FROM match_state s JOIN projections p ON p.pid=s.pid"
     " WHERE s.doc_id=:d AND (s.state IN ('matched','proposed') OR (s.state='conflicted'"
-    " AND p.status='proposed' AND p.current_match IS NULL))"
-    " UNION ALL SELECT s.pid, 'alternative' FROM match_state s JOIN matches m ON"
-    " m.match_id=s.match_id, json_each(m.alternatives_json) j WHERE s.state='proposed'"
-    " AND j.value=:d")
+    " AND p.status='proposed' AND p.current_match IS NULL))")
 ALTERNATIVES_MAX = 3      # §1: up to four named candidates on a card, the chosen one included
 
 
 def holders(conn, doc_id) -> list:
     """THE ownership of a document (R5), the one function the floor, the candidates and the
-    exact fit all read (plan round 3, Astra + Terra S2: a second query advertised a live
-    proposal's alternative as unheld): every (pid, how) holding it — `matched`, `proposed`,
-    `conflicted` (a joint set, D3) or `alternative` (a live proposal's, D3)."""
+    exact fit all read: every (pid, how) holding it — `matched`, `proposed` (a proposal's
+    primary) or `conflicted` (a joint set, D3). A proposal's alternatives hold nothing (rev
+    18.4 §R18.4)."""
     return [(r["pid"], r["how"]) for r in conn.execute(HOLDERS_SQL, {"d": doc_id})]
 
 
@@ -403,13 +402,11 @@ def confirm_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="
 
 def _require_unheld(conn, doc_id, pid) -> None:
     """R5 at an operator pairing (Task 3 review carry): a document another payment holds —
-    its match, its proposal, a joint set, or an alternative of its live proposal
-    (`holders`, the one ownership function) — is never paired onto `pid` as well."""
+    its match, its proposal's primary, a joint set (`holders`, the one ownership function)
+    — is never paired onto `pid` as well."""
     other = next(((p, how) for p, how in holders(conn, doc_id) if p != pid), None)
     if other is None:
         return
-    if other[1] == "alternative":
-        raise db.Refusal(f"that document is a candidate on payment #{other[0]}'s proposal")
     raise db.Refusal(f"that document has since been paired with payment #{other[0]}")
 
 

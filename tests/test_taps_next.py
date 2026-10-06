@@ -406,24 +406,29 @@ class TapsMore(_Tapping):
         self.assertIn("Card 1 of 1", out["next"]["text"])
 
     def test_confirm_all_commits_the_rest_when_one_confirm_is_refused(self):
-        """Each proposal in its own savepoint: a refused confirm (R5 — its document is an
-        alternative of another payment's live proposal, a pre-floor store's state) commits
-        nothing for it and leaves the others' confirmations standing."""
+        """Each proposal in its own savepoint: a confirm refused AFTER it wrote (the floor
+        at the write) commits nothing for it and leaves the other's confirmation standing.
+        (Rev 18.4 §R18.4: an alternative no longer holds, so the refusal is injected.)"""
+        import taps
         a, b = self.pay("A", 1000), self.pay("B", 1001)
-        other = self.pay("A", 1000, "2026-09-03")
-        held = self.doc(amount_minor=1000)
-        self.propose(other, alternatives=[held], amount_minor=1000)
-        self.machine_entry(a, held, kind="propose")          # the floor refuses this now
+        self.propose(a, amount_minor=1000)
         self.propose(b, amount_minor=1001)
-        out = self.tap(self.end(), "Confirm all 3")
-        self.assertTrue(out["receipt"].startswith("Confirmed 2 of 3.\n"), out["receipt"])
-        self.assertIn(f"payment #{other}", out["receipt"])
+        real = taps._apply_one
+
+        def refusing(conn, grant, rid, action, d):
+            out = real(conn, grant, rid, action, d)
+            if d["pid"] == a:
+                raise db.Refusal("that document has since been paired with payment #99")
+            return out
+        self.patch(taps, "_apply_one", refusing)
+        out = self.tap(self.end(), "Confirm all 2")
+        self.assertTrue(out["receipt"].startswith("Confirmed 1 of 2.\n"), out["receipt"])
+        self.assertIn("payment #99", out["receipt"])
         self.assertIsNone(self.conn.execute("SELECT 1 FROM log WHERE pid=? AND author="
                                             "'operator'", (a,)).fetchone())
-        for p in (b, other):
-            self.assertEqual(self.conn.execute("SELECT author FROM match_state WHERE pid=?"
-                                               " AND state='matched'", (p,)).fetchone()[0],
-                             "operator")
+        self.assertEqual(self.conn.execute("SELECT author FROM match_state WHERE pid=?"
+                                           " AND state='matched'", (b,)).fetchone()[0],
+                         "operator")
 
     def test_never_on_the_last_page_with_the_set_unchanged_applies_to_every_page(self):
         pids = [self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1)) for i in range(30)]

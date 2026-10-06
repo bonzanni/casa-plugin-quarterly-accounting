@@ -22,10 +22,11 @@ import kb
 import lineage
 import loop
 import matches
+import replace
 import views
 import work
 
-KINDS = ("end", "open-items", "review", "vendor-page", "ready")
+KINDS = ("end", "open-items", "review", "vendor-page", "ready", "replace")
 # cards posted with no delivery callback — a tap's `next` (#1302) or show_view(view="open"):
 # seen once posted (review round 1 ruling: the closing open-items card included)
 TAP_CARDS = ("review", "vendor-page", "open-items")
@@ -345,15 +346,25 @@ def _vendor_items(ds) -> list:
     return [groups[k] for k in sorted(groups)]
 
 
+def _questions_line(qs) -> list:
+    """Rev 18.4 §R18.3: the handed-over documents whose payment already has one."""
+    if not qs:
+        return []
+    return [f"{_s(len(qs), 'handed-over document')} to check — Review shows "
+            f"{'it' if len(qs) == 1 else 'them'}."]
+
+
 def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, scheduled,
-             extra_scope=None) -> str:
+             extra_scope=None, questions=()) -> str:
     """The end-message composer (§1), shared by the end message and the open-items card:
     `head` lines, then "To confirm:" and the numbered proposal lines that fit whole (the
     rest behind one closing line: Review shows them, Confirm all is left out), then `tail`.
-    The Review order is every proposal in line order, then `vendors`."""
+    The Review order is every replace question (rev 18.4 §R18.3), every proposal in line
+    order, then `vendors`."""
     with views.named(proposals, quarter):
         plines = [_proposal_line(conn, i, d) for i, d in enumerate(proposals, 1)]
-        before = list(head) + (["To confirm:"] if proposals else [])
+        before = list(head) + _questions_line(questions) + (["To confirm:"] if proposals
+                                                            else [])
 
         def closing(left):
             return f"… and {left} more to confirm — Review shows them."
@@ -369,7 +380,8 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
                        and len(proposals) <= CONFIRM_ALL_MAX)
         scope = {"quarter": quarter, "scheduled": scheduled, "proposed": chosen,
                  "confirm_all": len(chosen) if confirm_all else 0,
-                 "order": [{"p": d["pid"]} for d in proposals] + list(vendors),
+                 "order": [{"q": q["question_id"]} for q in questions]
+                 + [{"p": d["pid"]} for d in proposals] + list(vendors),
                  **_grammar(listed), **(extra_scope or {})}
         return _store(conn, kind, lines, scope, bound, states, docs=docs)
 
@@ -399,6 +411,9 @@ def _receipts(conn, docs) -> tuple:
             head.append(f"Filed. Paired with {views.field(d['counterparty'])} · "
                         f"{_day(d['date'])} · {_money(d['amount_minor'], d['currency'])}")
             continue
+        if conn.execute("SELECT 1 FROM replace_questions WHERE new_doc_id=? AND state='open'",
+                        (doc,)).fetchone():
+            continue          # rev 18.4 §R18.3: its question is the "to check" line + card
         d = work.describe(conn, held[0]) if held else None
         if d is not None and d["status"] == "proposed":
             if all(x["pid"] != d["pid"] for x in props):
@@ -434,7 +449,8 @@ def _handover(conn, job_id, docs, quarter, tail, ready, sent=None) -> str:
     return _summary(conn, "end", quarter, head, props, [], tail,
                     {d["pid"]: item_state(d) for d in props}, scheduled=False,
                     extra_scope={"job_id": job_id, **(sent or {}),
-                                 **(_ready_scope(conn, ready) if ready else {})})
+                                 **(_ready_scope(conn, ready) if ready else {})},
+                    questions=replace.open_ones(conn))
 
 
 def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), ready=(),
@@ -471,7 +487,9 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         new_props = [d for d in st["proposals"]
                      if not seen_state(conn, d["pid"], item_state(d))]
         new_miss = [d for d in open_missing if not seen_state(conn, d["pid"], "missing")]
-        if not new_props and not new_miss:
+        qs = replace.open_ones(conn)
+        new_qs = [x for x in qs if x["job_id"] == job_id]    # asked by this run: new
+        if not new_props and not new_miss and not new_qs:
             if ready:
                 return compose_ready(conn, ready, extra, alerts=alerts, receipts=receipts)
             if not receipts:
@@ -482,11 +500,12 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
             head.append(f"{_s(earlier, 'earlier item')} still open")
         head += _fit_receipts(receipts, head, _confirm_room(new_props) + tail)
         return _summary(conn, "end", q, head, new_props, _vendor_items(new_miss), tail,
-                        reported, scheduled=True, extra_scope=extra_scope)
+                        reported, scheduled=True, extra_scope=extra_scope, questions=qs)
     c = st["counts"].get(q, collections.Counter())
     n = sum(c.values())
+    qs = replace.open_ones(conn)
     if not st["proposals"] and not open_missing:
-        if ready:
+        if ready and not qs:
             return compose_ready(conn, ready, extra, alerts=alerts, receipts=receipts)
         if not c["pending"]:
             first = ([stopped] if stopped else
@@ -494,7 +513,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
             rest = list(extra[1:] if stopped else extra)
             first += _fit_receipts(receipts, first, rest)
             return _summary(conn, "end", q, first, [], [], rest, reported,
-                            scheduled=False, extra_scope=extra_scope)
+                            scheduled=False, extra_scope=extra_scope, questions=qs)
     earlier = []
     for eq in sorted(st["counts"]):
         if eq == q:
@@ -506,7 +525,8 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     head = [stopped or f"{_qn(q)} checked · {_s(n, 'payment')}", _counts_line(c)]
     head += _fit_receipts(receipts, head, _confirm_room(st["proposals"]) + earlier + tail)
     return _summary(conn, "end", q, head, st["proposals"], _vendor_items(open_missing),
-                    earlier + tail, reported, scheduled=False, extra_scope=extra_scope)
+                    earlier + tail, reported, scheduled=False, extra_scope=extra_scope,
+                    questions=qs)
 
 
 def compose_open(conn, quarter, *, scheduled=False) -> str:
@@ -515,13 +535,15 @@ def compose_open(conn, quarter, *, scheduled=False) -> str:
     st = state(conn)
     open_missing = [d for ds in st["missing"].values() for d in ds if not _answered(d)]
     reported = {d["pid"]: item_state(d) for d in st["proposals"] + open_missing}
-    if not st["proposals"] and not open_missing:
+    qs = replace.open_ones(conn)
+    if not st["proposals"] and not open_missing and not qs:
         head = [f"{_qn(quarter)} · all answered"]
     else:
         head = [f"{_qn(quarter)} · still open: {len(st['proposals'])} to confirm · "
                 f"{len(open_missing)} missing"]
     return _summary(conn, "open-items", quarter, head, st["proposals"],
-                    _vendor_items(open_missing), [], reported, scheduled=scheduled)
+                    _vendor_items(open_missing), [], reported, scheduled=scheduled,
+                    questions=qs)
 
 
 def compose_ready(conn, quarters: list, extra=(), alerts=(), receipts=()) -> str:
@@ -594,6 +616,38 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
                  **_grammar([d])}
         return _store(conn, "review", lines, scope, {pid: 1}, {pid: item_state(d)},
                       docs={pid: docs})
+
+
+def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):
+    """Rev 18.4 §R18.3: "<payment> already has an invoice. Current: … (matched by the job |
+    confirmed by you | suggested by the job). New: … (from you)." [Keep current] [Use new].
+    Bound to the payment and the displayed pairing (render_items: 18.4). None when the
+    question is answered, superseded, or its payment holds another pairing now."""
+    qn = replace.get(conn, qid)
+    if qn is None or qn["state"] != "open":
+        return None
+    cur = replace.current(conn, qn["pid"])
+    if cur is None or cur[0] != qn["match_id"]:
+        return None
+    d = work.describe(conn, qn["pid"])
+    old = conn.execute("SELECT doc_id FROM match_state WHERE match_id=?",
+                       (cur[0],)).fetchone()[0]
+    how = ("confirmed by you" if cur[2] == "operator" else
+           "matched by the job" if cur[1] == "matched" else "suggested by the job")
+
+    def doc_line(doc_id):
+        x = _doc_summary(conn, doc_id)
+        number = f" {views.field(x['number'])}" if x.get("number") else ""
+        return (f"{views.KIND_WORD.get(x['kind'], 'document')}{number} · {_day(x['date'])}"
+                f" · {_money(x['amount_minor'], x['currency'])}")
+    lines = [f"Card {pos + 1} of {n} · to check",
+             f"{views.headline(d, quarter)} already has an invoice.",
+             f"Current: {doc_line(old)} ({how}).",
+             f"New: {doc_line(qn['new_doc_id'])} (from you)."]
+    scope = {"quarter": quarter, "scheduled": scheduled, "review_of": review_of, "pos": pos,
+             "pid": qn["pid"], "question_id": qid, "new_doc_id": qn["new_doc_id"]}
+    return _store(conn, "replace", lines, scope, {qn["pid"]: 1},
+                  {qn["pid"]: item_state(d)}, docs={qn["pid"]: {cur[0]: 2}})
 
 
 def _mark(d) -> str:
@@ -725,6 +779,8 @@ def card(conn, review_of, pos, page=1):
         return None
     o = order[pos]
     q, scheduled = src["quarter"], bool(src.get("scheduled"))
+    if "q" in o:
+        return _replace_card(conn, review_of, pos, len(order), q, scheduled, o["q"])
     if "p" in o:
         return _proposal_card(conn, review_of, pos, len(order), q, scheduled, o["p"])
     return _vendor_page(conn, review_of, pos, len(order), q, scheduled, o, page)
@@ -737,7 +793,13 @@ def next_after(conn, review_of, pos) -> str:
     order = scope.get("order") or []
     for k in range(pos + 1, len(order)):
         o = order[k]
-        if "p" in o:
+        if "q" in o:
+            qn = replace.get(conn, o["q"])
+            if qn is not None and qn["state"] == "open":
+                rid = card(conn, review_of, k)
+                if rid is not None:
+                    return rid
+        elif "p" in o:
             if work.describe(conn, o["p"])["status"] == "proposed":
                 rid = card(conn, review_of, k)
                 if rid is not None:
@@ -775,6 +837,9 @@ def buttons(conn, r) -> list:
         return out + [get]
     if kind == "ready":
         return [get]
+    if kind == "replace":
+        pid, doc = scope["pid"], scope["new_doc_id"]
+        return [v("Keep current", "keep-current", pid, doc), v("Use new", "use-new", pid, doc)]
     if kind == "review":
         pid = scope["pid"]
         if scope.get("picks"):

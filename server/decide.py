@@ -11,7 +11,8 @@ import matches
 import passes
 
 ENTRIES_MAX = 30
-OUTCOMES = ("match", "propose", "missing")      # no `not-needed`: the operator's (§2.2, r9)
+OUTCOMES = ("match", "propose", "missing",      # no `not-needed`: the operator's (§2.2, r9)
+            "keep", "replace")                 # a handover onto a paired payment (rev 18.4)
 REASON_MAX = 200
 NOT_NEEDED = ("outcome is match, propose or missing: \"no invoice needed\" is the "
               "operator's tap, a KB rule or an expectation of none, never the job's")
@@ -30,20 +31,45 @@ def record_outcome(conn, token, pid, outcome, reason=None) -> None:
     `outcome`; a payment not on the list: no row, nothing. Marks the batch progressed."""
     job = conn.execute("SELECT job_id FROM claims WHERE gen=?", (int(token),)).fetchone()
     # the work row handed out for this payment: its own pid, or a pid since merged into it
-    rows = [r for r in conn.execute("SELECT pid, handed_upto FROM run_work WHERE job_id=?",
-                                    (job[0],))
+    rows = [r for r in conn.execute("SELECT pid FROM run_work WHERE job_id=?", (job[0],))
             if lineage.resolve_pid(conn, r["pid"]) == pid] if job is not None else []
     for r in rows:
         conn.execute("UPDATE run_work SET outcome=?, reason=?, closed_seq=? WHERE job_id=? AND"
                      " pid=?", (outcome, reason, db.next_seq(conn), job[0], r["pid"]))
-    # §2.1, per payment (plan round 5): the job considered the documents it was HANDED for
-    # this payment — a re-decision that writes nothing included — and no others (plan
-    # round 6: a capped hand-out must never mark an unseen document as considered). A
-    # decision outside a work entry (no hand-out) advances nothing.
-    upto = max((r["handed_upto"] or 0 for r in rows), default=0)
-    conn.execute("UPDATE projections SET considered_seq=max(coalesce(considered_seq, 0), ?)"
-                 " WHERE pid=?", (upto, pid))
     note_progress(conn, token)
+
+
+def _handover_onto_pairing(conn, token, pid, e) -> bool:
+    """Rev 18.4 §R18.3: a handover entry whose payment already holds a document (a match or
+    a proposal) is answered keep or replace — never a match or proposal of another document
+    by the job (nothing is replaced without the operator's tap)."""
+    import queues
+    import replace
+    job_id = queues.job_of(conn, token)
+    if job_id is None or replace.current(conn, pid) is None:
+        return False
+    why = conn.execute("SELECT why FROM run_work WHERE job_id=? AND pid=?",
+                       (job_id, pid)).fetchone()
+    return why is not None and why[0] == "handover"
+
+
+def _handover_entry(conn, token, pid, e, outcome) -> dict:
+    """keep | replace (rev 18.4 §R18.3), checked against the payment as handed out."""
+    import queues
+    import replace
+    proj = lineage.projection(conn, pid)
+    if _int(e, "expected_revision") != proj["revision"]:
+        raise db.Refusal("this payment changed since it was handed out; decide it again "
+                         "with the revision job_next gives now")
+    if outcome not in ("keep", "replace"):
+        raise db.Refusal("this payment already has a document: answer replace (the handed "
+                         "document belongs to it — the operator is asked) or keep")
+    if replace.current(conn, pid) is None:
+        raise db.Refusal(f"{outcome} is for a payment that already has a document")
+    if outcome == "keep":
+        return {"applied": True, "wrote": False}
+    replace.ask_in_tx(conn, queues.job_of(conn, token), pid, _int(e, "doc_id"))
+    return {"applied": True, "wrote": True}
 
 
 def _int(e, k):
@@ -95,6 +121,11 @@ def _entry(conn, token, e, seen) -> dict:
     if pid in seen:
         raise db.Refusal("this payment was decided earlier in this call")
     reason = None
+    if outcome in ("keep", "replace") or _handover_onto_pairing(conn, token, pid, e):
+        out = _handover_entry(conn, token, pid, e, outcome)
+        record_outcome(conn, token, pid, outcome)
+        seen.add(pid)
+        return {"pid": pid, **out, "status": lineage.projection(conn, pid)["status"]}
     if outcome == "missing":
         reason = str(e.get("reason") or "")[:REASON_MAX]
         out = missing_in_tx(conn, pid, rev, reason)
@@ -117,19 +148,18 @@ def _entry(conn, token, e, seen) -> dict:
 
 
 def _check_order(conn, token, entries) -> None:
-    """Queues rule 3: a vendor with a found attachment still queued (or given up) decides
-    nothing — what a search found is filed (or set aside) before any decision."""
-    import kb
+    """Rev 18.4 §R18.2: a payment whose searches found an attachment still queued decides
+    nothing — what a search found is filed (or set aside) before the decision."""
     import queues
     job_id = queues.job_of(conn, token)
     if job_id is None:
         return
-    pids = {e.get("pid") for e in entries if isinstance(e, dict)}
-    for r in conn.execute("SELECT pid, vendor FROM run_work WHERE job_id=?", (job_id,)):
-        if r["pid"] in pids and queues.blocks_decide(conn, job_id,
-                                                     "vendor:" + kb.norm(r["vendor"])):
-            raise db.Refusal("this vendor's search found attachments not yet filed: file "
-                             "them (or set_aside what is no invoice), then call job_next")
+    for e in entries:
+        pid = e.get("pid") if isinstance(e, dict) else None
+        if isinstance(pid, int) and not isinstance(pid, bool) and queues.blocks_decide(
+                conn, job_id, queues.unit_of_payment(pid)):
+            raise db.Refusal("this payment's searches found attachments not yet filed: file "
+                             "them (or set_aside what is no invoice), then decide")
 
 
 def decide(conn, token, entries) -> dict:

@@ -19,7 +19,8 @@ class GeneratorCovers(unittest.TestCase):
         for prefix in ("end:operator", "end:scheduled", "end:nothing", "end:handover",
                        "end:completion", "open-items", "all-answered", "ready",
                        "review:candidates", "review:set", "review:single", "vendor:page1",
-                       "vendor:last", "vendor:scheduled", "get_package"):
+                       "vendor:last", "vendor:scheduled", "get_package", "end:replace",
+                       "replace:job", "replace:operator"):
             self.assertTrue(any(c.startswith(prefix) for c in cases), prefix)
         nexts = [r for r in records if "next" in r]
         self.assertTrue(nexts)

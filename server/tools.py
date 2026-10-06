@@ -170,9 +170,9 @@ def obj(props, required=()):
           "sent); any other path is refused. Bytes are copied and hashed; filing the same bytes "
           "twice returns the same doc_id. The metadata is your provisional reading, for filing. "
           "extraction_author is desk (a desk turn's filing, no token) or specialist (the "
-          "job's filing). During a pass, pass the pass_token. vendor: the vendor group you "
-          "are working when you file it (its KB name, as job_next hands it out); leave it "
-          "out for a document filed otherwise (own mail, a handover).",
+          "job's filing). During a pass, pass the pass_token. vendor: the handed payment's "
+          "vendor (its KB name, as job_next hands it out) when the document is from that "
+          "vendor; leave it out for a document filed otherwise (own mail, a handover).",
           obj({"source_path": S, "kind": S, "source": S, "extraction_author": S,
                "counterparty": S, "issuer": S, "document_date": S, "document_number": S,
                "amount_minor": I, "currency": S, "recipient": S, "source_ref": S,
@@ -337,7 +337,7 @@ def _machine_args(args) -> dict:
 
 
 @register("decide",
-          "Decide a vendor group's payments in one call (one entry each): match (a pair you "
+          "Decide the handed payment in one call (one entry): match (a pair you "
           "judged certain: same currency, exact amount, a document no other payment holds), "
           "propose (any doubt, another currency, or several fit: doc_id the one you chose, "
           "alternatives up to 3), or missing (reason). Each entry is checked on its own, in "
@@ -412,7 +412,7 @@ def t_import(args):
           "line, verbatim, when it is a `Started by:` line; else omit it>) — it gives you a "
           "pass_token; then after each unit job_next(pass_token=…, calls_made=<the tool calls "
           "you made this turn so far>). Do exactly the unit it returns: probes, snapshot, "
-          "erasures, filing, vendor, mirror, view, post. Each unit carries max_calls: when your calls "
+          "erasures, filing, payment, mirror, view, post. Each unit carries max_calls: when your calls "
           "for it reach that, stop and call job_next — an unfinished unit comes again. When "
           "it says report=true, call "
           "report_job_progress with its `progress` verbatim; at end-batch, end your turn; at "
@@ -555,18 +555,17 @@ def t_reset(args):
 
 # --- work ------------------------------------------------------------------------
 @register("record_search",
-          "Record a search for the payments it covered: pids (a vendor search: every payment "
-          "of the vendor it was for) or pid (one payment). search is hinted (the vendor search "
-          "led by its learned hint), plain (the plain vendor-and-dates search) or payment (a "
-          "per-payment search, the default). Also: the queries you ran, whether a candidate "
+          "Record a search for the payment it was for: pid (or pids=[it]). search is hinted "
+          "(led by the vendor's learned hint), plain (the vendor-and-dates search) or payment "
+          "(a wider search, the default). Also: the queries you ran, whether a candidate "
           "turned up, whether the ideas are exhausted or the run ran out of room (incomplete), "
           "whether the payee is unknown (identity_unknown). revive=true to look again. The "
           "pass_token is required, except for a bare revive (no queries, nothing found, not "
-          "exhausted). A hinted or plain record counts as the vendor's search only when it "
-          "carries queries, found_candidate or exhausted. During a pass, pass the pass_token. "
-          "In the job, also refs: every attachment the search found, as <message id>:"
-          "<attachment id>, [] when none — recorded right after the search ran; it answers "
-          "files, the vendor's found attachments to file now, and files_total.",
+          "exhausted). During a pass, pass the pass_token. In the job: the payment handed out "
+          "now, at most 3 searches a run, "
+          "recorded right after the search ran with refs: every attachment it found, as "
+          "<message id>:<attachment id>, [] when none; it answers files, the payment's found "
+          "attachments to file now, and files_total.",
           obj({"pids": AI, "pid": I, "search": S, "pass_token": TOKEN, "queries": A,
                "found_candidate": B, "exhausted": B, "incomplete": B, "identity_unknown": B,
                "revive": B, "refs": A}))

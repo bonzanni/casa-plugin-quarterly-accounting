@@ -17,10 +17,12 @@ import work
 ACTIONS = ("all-good", "right", "wrong", "no-invoice")
 # simple loop §1: the cards' taps (cards.buttons), each valid on its own kind of card only
 CARD_ACTIONS = ("review", "confirm-all", "confirm", "wrong", "leave", "pick",
-                "exempt-these", "leave-missing", "never", "next-page")
+                "exempt-these", "leave-missing", "never", "next-page",
+                "keep-current", "use-new")             # rev 18.4 §R18.3
 _ON_KIND = {"end": ("review", "confirm-all"), "open-items": ("review", "confirm-all"),
             "review": ("confirm", "wrong", "leave", "pick"),
-            "vendor-page": ("exempt-these", "leave-missing", "never", "next-page")}
+            "vendor-page": ("exempt-these", "leave-missing", "never", "next-page"),
+            "replace": ("keep-current", "use-new")}
 CARD_CHANGED = "That changed since it was shown — nothing applied. Here it is as it is now."
 LIST_CHANGED = "That list changed since it was shown — nothing applied. Here it is as it is now."
 
@@ -187,6 +189,14 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
             if action in ("exempt-these", "leave-missing", "never"):
                 out = _vendor_answer(conn, rid, scope, action, grant)
                 receipt, then = out if out is not None else (LIST_CHANGED, "fresh")
+            elif action in ("keep-current", "use-new"):
+                # rev 18.4 §R18.3: bound to the payment and the pairing the card displayed
+                import replace
+                if _changed(conn, rid, [pid]):
+                    receipt, then = CARD_CHANGED, "fresh"
+                else:
+                    receipt = replace.answer_in_tx(
+                        conn, grant, replace.get(conn, scope["question_id"]), action, rid)
             elif _changed(conn, rid, [pid]):
                 receipt, then = CARD_CHANGED, "fresh"
             else:

@@ -29,7 +29,7 @@ class Surface(StoreCase):
             "name": "work", "skill": "quarterly-job", "title": "Accounting check",
             "summary": "Checks the bank and Gmail, matches invoices, keeps the bank ledger's "
                        "notes current",
-            "batches": "unlimited", "turnsPerBatch": 80, "session": "fresh",
+            "batches": 20, "turnsPerBatch": 80, "session": "fresh",
             "host": "specialist", "quietWhenScheduled": True}])
         self.assertEqual(m["version"], "0.11.0")
         import job                  # the batch budget and the batch window's claim count

@@ -200,25 +200,31 @@ class LateHandover(StoreCase):
         self.assertIn("accounted for", delivered[0][1])            # the composed one
         self.assertEqual(self.conn.execute("SELECT count(*) FROM projections WHERE"
                                            " status='proposed'").fetchone()[0], 0)
-        # the next run — the continuation — takes the handover and posts its proposal
+        # the next run — the continuation — takes the handover and posts its question (rev
+        # 18.4 §R18.3: the payment already has a document; only the operator replaces it)
         cont = "dadadada-2"
-        v = self.until(cont, "vendor")
+        v = self.until(cont, "payment")
         self.assertEqual(self.conn.execute("SELECT state FROM work_requests WHERE"
                                            " request_id=?", (ask["request_id"],)).fetchone()[0],
                          "taken")
-        pay = v["payments"][0]
+        pay = v
+        self.assertEqual((pay["why"], pay["candidates"][0]["doc_id"]), ("handover", doc["doc_id"]))
         out = self.drv._tool("decide", dict(pass_token=self.drv.token, entries=[dict(
             pid=pay["pid"], outcome="propose", doc_id=doc["doc_id"],
             expected_revision=pay["revision"], document_date="2026-07-05")]))
+        self.assertEqual(out["applied"], 0)                   # never the job's to replace
+        out = self.drv._tool("decide", dict(pass_token=self.drv.token, entries=[dict(
+            pid=pay["pid"], outcome="replace", doc_id=doc["doc_id"],
+            expected_revision=pay["revision"])]))
         self.assertEqual(out["applied"], 1)
         self.drv._loop(cont)
         end = self.conn.execute("SELECT end_render_id FROM runs WHERE job_id=?",
                                 (cont,)).fetchone()[0]
         r = self.conn.execute("SELECT * FROM renders WHERE render_id=?", (end,)).fetchone()
         self.assertIsNotNone(r["delivered_at"])
-        self.assertIn("To confirm:", r["text"])
+        self.assertIn("1 handed-over document to check — Review shows it.", r["text"])
         self.assertEqual([b[0] for b in cards.buttons(self.conn, r)],
-                         ["Review 1", "Confirm all 1", "Get package"])
+                         ["Review 1", "Get package"])
         self.assertEqual(self.conn.execute("SELECT state FROM work_requests WHERE"
                                            " request_id=?", (ask["request_id"],)).fetchone()[0],
                          "reported")                             # the continuation's result

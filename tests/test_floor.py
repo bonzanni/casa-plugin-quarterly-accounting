@@ -47,11 +47,13 @@ class Floor(StoreCase):
             with self.assertRaisesRegex(db.Refusal, "taken"):
                 self.write(kind, self.p2, d)
 
-    def test_an_alternative_of_a_live_proposal_is_taken(self):
+    def test_an_alternative_of_a_live_proposal_holds_nothing(self):
+        """Rev 18.4 §R18.4 (r2 Astra S1 #2): only a match or a proposal's primary holds."""
         a, b = self.doc(), self.doc()
         self.write("propose", self.p1, a, alternatives=[b])
+        self.assertTrue(self.write("pair", self.p2, b)["applied"])
         with self.assertRaisesRegex(db.Refusal, "taken"):
-            self.write("pair", self.p2, b)
+            self.write("pair", self.p2, a)                # the primary stays held
 
     def test_reopening_replaces_the_own_machine_match_and_A_stays_taken_for_others(self):
         a = self.doc()
@@ -63,8 +65,8 @@ class Floor(StoreCase):
                                         (self.p1,)).fetchall())
         self.assertEqual(states[b], "proposed")          # the new proposal, b chosen
         self.assertEqual(states[a], "rejected")          # the own machine match, replaced
-        with self.assertRaisesRegex(db.Refusal, "taken"):
-            self.write("pair", self.p2, a)               # a is the proposal's alternative
+        # a is only the proposal's alternative: it holds nothing (rev 18.4 §R18.4)
+        self.assertTrue(self.write("pair", self.p2, a)["applied"])
 
     def test_the_same_outcome_and_document_writes_nothing(self):
         d = self.doc()
@@ -86,9 +88,8 @@ class Floor(StoreCase):
             "SELECT alternatives_json FROM matches WHERE match_id=?",
             (out["match_id"],)).fetchone()[0]), [doc_a])
         import matches
-        self.assertEqual(matches.holders(self.conn, doc_a), [(self.p1, "alternative")])
-        with self.assertRaisesRegex(db.Refusal, "taken"):
-            self.write("pair", self.p2, doc_a)
+        self.assertEqual(matches.holders(self.conn, doc_a), [])     # rev 18.4 §R18.4
+        self.assertTrue(self.write("pair", self.p2, doc_a)["applied"])
 
     def test_the_kept_alternative_counts_against_the_cap(self):
         self.write("pair", self.p1, self.doc())

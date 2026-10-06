@@ -42,12 +42,14 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              "delivery_id", "job_busy",
              # S7: the desk's and the units' answer fields
              "render_ids", "casa_delivery", "package_id",
-             # the simple loop's vendor unit fields (§2.2)
-             "exact_fit", "search_window", "vendor_queries",
+             # the payment unit's fields (rev 18.4 §R18.1)
+             "exact_fit", "search_window",
              # d3: every unit's call budget
              "max_calls",
              # queues: a unit's handed items and the probe's / record_search's answer
-             "files", "files_total", "rows", "snapshot_id", "refs", "search"}
+             "files", "files_total", "rows", "snapshot_id", "refs", "search",
+             # rev 18.4: the payment unit's fields
+             "searches_left", "holds", "why", "candidates"}
 # §15: tools that left the surface in S7 (their functions stay server-side).
 REMOVED_S7 = ("job_report", "apply_reply", "confirm_match", "reject_match", "set_exemption",
               "stop_chasing", "set_watermark", "set_package_name")
@@ -348,16 +350,16 @@ class TestJob(TempEnv):
 
     def test_the_job_skill_names_exactly_the_new_units_and_rules(self):
         text = (ROOT / "skills/quarterly-job/SKILL.md").read_text()
-        for unit in ("probes", "snapshot", "erasures", "filing", "vendor", "mirror", "view",
+        for unit in ("probes", "snapshot", "erasures", "filing", "payment", "mirror", "view",
                      "post", "end-batch", "complete"):
             self.assertIn(f"`{unit}`", text)
         for gone in ("sweep", "gmail-probe", "`item`", "`judge`", "build_quarterly_package",  # removed-name: asserted absent
                      "list_projections", "record_observation", "judged", "resolves",  # removed-name: asserted absent
                      "set_expectation(", "window (default 10 days)"):
             self.assertNotIn(gone, text)
-        for rule in ("calls_made", "decide(", "exact_fit", "hint_sender", "once per run",
-                     'search="hinted"', 'search="plain"', "searches.plain",
-                     "plain vendor-and-dates search", "record_mirror", "record_not_found",
+        for rule in ("calls_made", "decide(", "exact_fit", "hint_sender", "searches_left",
+                     'search="hinted"', 'search="plain"',
+                     "vendor-and-dates search", "record_mirror", "record_not_found",
                      "certain", "reset_store", "set_aside(", "refs=["):
             self.assertIn(rule, text)
         self.assertLessEqual(len(text), 9_600)     # queues: + the erasures unit, refs, set_aside
@@ -367,7 +369,7 @@ class TestJob(TempEnv):
         units = section(JOB, "## Units", "## Never")
         order = ["### `probes`", "record_probe", "sync", "### `snapshot`",
                  "import_ledger_export", "### `erasures`", "record_not_found", "### `filing`",
-                 "### `vendor`",
+                 "### `payment`",
                  "decide(", "### `mirror`", "record_mirror", "### `post`", "### `view`"]
         pos = [units.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
@@ -402,7 +404,7 @@ class TestJob(TempEnv):
         """The gmail probe is the filing's own search (simple loop §2); own mail is no
         vendor's. d4, queues: the probe carries every ref found, at once; the server queues
         the exact unfiled ones and answers `files`."""
-        f = flat(self.units("filing", "### `vendor`"))
+        f = flat(self.units("filing", "### `payment`"))
         for phrase in ('`record_probe(pass_token, kind="gmail", ok=false, absent=true)`',
                        'then at once `record_probe(pass_token, kind="gmail", ok=…, detail=…, '
                        'data={"refs": [every attachment found, as <message id>:<attachment '
@@ -430,60 +432,62 @@ class TestJob(TempEnv):
         self.assertIn("Record each **right after it ran, before anything else**, with every "
                       "attachment it found:", v)
         self.assertIn("refs=[each attachment found, as <message id>:<attachment id>; [] when "
-                      "none], pass_token)`", v)
+                      "none], exhausted=<true on your last>, pass_token)`", v)
         self.assertIn("refused while a found attachment is neither filed nor set aside", v)
 
     def test_own_mail_and_vendor_filing_pass_the_reading(self):
         """d2 (Astra S2): the model reads each document and passes amount, currency, date,
         issuer and number — own mail with no vendor (a candidate, never an exact_fit), the
         vendor search's filing with the unit's vendor."""
-        f = flat(self.units("filing", "### `vendor`"))
+        f = flat(self.units("filing", "### `payment`"))
         self.assertIn("read each, pass its fields: `ingest_document(source_path, kind, "
                       'source="manual-email", extraction_author="specialist", '
                       "source_ref=<the ref, exactly>, " + self.READING, f)
         self.assertNotIn("vendor=", f)
         v = flat(self.vendor())
-        self.assertIn("file each, in order, read once: "
+        self.assertIn("File each, in order, read once: "
                       '`ingest_document(source_path, kind, source="gmail", '
                       'extraction_author="specialist", source_ref=<the ref, exactly>, '
-                      "vendor=<the unit's vendor>, " + self.READING, v)
+                      "vendor=<the unit's vendor, when it is from that vendor>, "
+                      + self.READING, v)
 
     def vendor(self):
-        return self.units("vendor", "### `mirror`")
+        return self.units("payment", "### `mirror`")
 
-    def test_the_vendor_searches_once_with_the_plain_fallback(self):
-        """§2.2 rev 17: filed documents first; the vendor search once per run, led by the
-        hint; the plain search whenever the hinted one leaves any payment uncovered; then
-        per payment only for what is still uncovered."""
-        v = self.vendor()
-        order = ["**Filed documents first.**", "`exact_fit` you accept",
-                 "**Search the vendor's mail once per run**", "`searches.hinted` false",
-                 "With no hint, or when the hinted search leaves ANY payment uncovered, and "
-                 "`searches.plain` is false: the plain vendor-and-dates search once",
-                 "Then per-payment searches only for what is still uncovered",
-                 '`record_search(pids=[the payments it was for], search="hinted"',
-                 'search="plain"', 'search="payment"', "3. **File** each of its answer's `files`",
-                 "**Decide the vendor's payments in ONE call:**",
-                 "**Save what worked:**"]
+    def test_the_payment_unit_judges_then_searches_then_decides_once(self):
+        """Rev 18.4 §R18.1: `files` first; the candidates judged from their stored reading;
+        nothing fits: the vendor's mail searched (hint, plain, wider), each search recorded
+        at once with its refs, every invoice found filed; then ONE decide."""
+        v = flat(self.vendor())
+        order = ["1. **`files` first**", "2. **Judge the candidates from their reading**",
+                 "only when in doubt", "3. **Nothing fits:**", "at most `searches_left`",
+                 "Record each **right after it ran, before anything else**",
+                 '`record_search(pid, search="hinted"', 'search="plain"', 'search="payment"',
+                 "File EVERY invoice", "4. **Decide it in ONE call:**",
+                 "5. **Save what worked:**"]
         pos = [v.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
         self.assertIn("`upsert_counterparty(name=<vendor>, hint_sender=<the sender address>, "
                       "hint_subject=<a subject pattern>, pass_token)`", v)
         self.assertIn("`held: other` is another payment's — never yours to take", v)
+        self.assertNotIn("once per run", JOB)
 
-    def test_the_vendor_decides_certain_matches_and_proposes_on_doubt(self):
-        """R5/G1: commit only when certain having read both sides; any doubt or another
-        currency proposes; no not-needed; the printed issue date (Task 3 carry)."""
-        v = self.vendor()
-        for phrase in ("`decide(pass_token, entries=[…])`",
-                       "only when you are **certain**, having read both sides",
-                       '`"propose"` on any doubt, and always for another currency',
+    def test_the_payment_is_decided_certain_or_proposed_on_doubt(self):
+        """R5/G1: commit only when certain; any doubt, look-alikes or another currency
+        propose; no not-needed; the printed issue date; a handover onto a paired payment is
+        keep or replace (rev 18.4 §R18.3)."""
+        v = flat(self.vendor())
+        for phrase in ("`decide(pass_token, entries=[{pid, expected_revision, …}])`",
+                       "only when you are **certain**",
+                       '`"propose"` on any doubt — look-alikes: the closest date, or propose — '
+                       "and always for another currency",
                        '`"missing"` with a `reason` when nothing fits',
                        'Never "no invoice needed": that is the operator\'s',
-                       "`document_date` is the date printed on the document you opened: its "
-                       "issue date, not a due, delivery or email date",
-                       "Re-decide only the refused entries.",
-                       "no date window"):
+                       "`document_date` is the date printed on the document: its issue date, "
+                       "not a due, delivery or email date",
+                       "Re-decide only a refused entry.", "no date window",
+                       '`outcome: "replace", doc_id` (the operator is asked)',
+                       '`outcome: "keep"`'):
             self.assertIn(phrase, v, phrase)
         self.assertNotIn("not-needed", v)
         self.assertNotIn("record_match", JOB)

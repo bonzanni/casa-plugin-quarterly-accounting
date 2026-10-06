@@ -17,8 +17,8 @@ class Run(StoreCase):
     def test_an_operator_run_unit_by_unit(self):
         units = [u["unit"] for u in self.drv.run_job("aaaaaaaa-1", started_by="operator")]
         self.assertEqual(units[:3], ["probes", "snapshot", "filing"])
-        self.assertIn("vendor", units)
-        self.assertLess(units.index("vendor"), units.index("mirror"))
+        self.assertIn("payment", units)
+        self.assertLess(units.index("payment"), units.index("mirror"))
         self.assertEqual(units[-2:], ["view", "complete"])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM passes").fetchone()[0], 1)
         end = self.conn.execute("SELECT end_render_id FROM runs").fetchone()[0]
@@ -37,7 +37,7 @@ class Run(StoreCase):
         self.assertTrue(u["progress"]["progressed"])        # the filing and import progressed
         tok = job.claim(self.conn, "aaaaaaaa-2")
         u = job.next_unit(self.conn, tok, 0)
-        self.assertEqual(u["unit"], "vendor")
+        self.assertEqual(u["unit"], "payment")
         self.assertFalse(u["report"])
 
     def test_a_scheduled_run_lists_only_new_state_items_and_omits_never(self):
@@ -120,13 +120,17 @@ class Carries(StoreCase):
         seen = []
 
         def cut(u, token):                       # the batch never gets to decide
-            seen.append([p["pid"] for p in u["payments"]])
+            seen.append([u["pid"]])
             if len(seen) == 1:
                 self.granted(lambda c, grant: work.leave_missing_in_tx(
-                    c, [u["payments"][0]["pid"]], grant=grant))
-        drv._vendor = cut
+                    c, [u["pid"]], grant=grant))
+        drv._payment = cut
         units = drv.run_job("dddddddd-2")
-        self.assertEqual([len(s) for s in seen], [3, 2])          # handed twice (D8)
+        # one payment per hand-out (rev 18.4): the first, left missing by the operator
+        # meanwhile, is settled; each other one is handed twice (D8)
+        self.assertEqual(len(seen), 5)
+        self.assertEqual(seen[1], seen[2])
+        self.assertEqual(seen[3], seen[4])
         rows = dict(self.conn.execute("SELECT pid, outcome FROM run_work WHERE job_id="
                                       "'dddddddd-2'").fetchall())
         self.assertEqual(sorted(rows.values(), key=lambda v: v or ""), [None, None, "settled"])
@@ -159,7 +163,7 @@ class Carries(StoreCase):
         import asks, job
         drv = self._job_driver = JobDriver(self, payments=1)
         units = self.drive("dddddddd-3", stop_before="mirror")
-        self.assertEqual([u["unit"] for u in units].count("vendor"), 1)
+        self.assertEqual([u["unit"] for u in units].count("payment"), 1)
         path = self.publish("handed.pdf", b"%PDF-1.4 handed\n", producer="telegram")
         doc = drv._tool("ingest_document", {
             "source_path": path, "kind": "invoice", "source": "manual-telegram",
@@ -171,7 +175,7 @@ class Carries(StoreCase):
             rest.append(job.next_unit(self.conn, drv.token, drv.calls))
             if rest[-1]["unit"] not in ("complete", "end-batch"):
                 drv.do(rest[-1], drv.token)
-        self.assertEqual([u["unit"] for u in rest].count("vendor"), 1)
+        self.assertEqual([u["unit"] for u in rest].count("payment"), 1)
         (row,) = self.conn.execute("SELECT why, outcome, attempts FROM run_work").fetchall()
         self.assertEqual(tuple(row), ("handover", "match", 0))
 
@@ -393,7 +397,7 @@ class ReviewRound1(StoreCase):
         for n, day in enumerate((0, 7, 14, 21, 28, 42)):
             with self.patch_clock(start + dt.timedelta(days=day)):
                 units = drv.run_job(f"ffffff{n:02x}-b", started_by="scheduled")
-            searched.append(sum(1 for u in units if u["unit"] == "vendor"))
+            searched.append(sum(1 for u in units if u["unit"] == "payment"))
             states.append(self.conn.execute("SELECT search_state FROM projections"
                                             ).fetchone()[0])
         self.assertEqual(searched, [1, 1, 1, 0, 0, 1])

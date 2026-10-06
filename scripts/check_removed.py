@@ -83,6 +83,12 @@ REMOVED = [
     (r"\b(record_filing|hand_progressed|idle_hands|HAND_MAX|_settle_hand|unfiled_total)\b|"
      r"\bruns\.filed_at\b|run\[['\"]filed_at['\"]\]|SET filed_at|['\"]unfiled['\"]",
      "the per-unit continuation state the queues replace"),
+    # rev 18.4: payment by payment, the model decides (vendor units, group splitting, the
+    # once-per-run search marks, reopening by a later document, considered_seq)
+    (r"\b(vendor_unit|vendor_unit_in_tx|GROUP_MAX|_vendor_searches|owing_vendors|"
+     r"unit_of_vendor|_mark_vendor_search|_queue_refs|considered_seq|handed_upto|_reopening|"
+     r"vendor_queries)\b|\bsearches\.(hinted|plain)\b|['\"](reopen|competitor)['\"]",
+     "the vendor unit and the reopening rev 18.4 deletes"),
     # test helpers
     (r"\bself\.(handed|close_chunk|hand_empty_chunk|end_with_counts|package_built_unsent|"
      r"stage_stalled_package|check_round|bind_round_and_take|sweep_to_zero|start_job_pass|"

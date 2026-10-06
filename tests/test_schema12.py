@@ -12,15 +12,17 @@ class Schema12(StoreCase):
     def test_version_tables_and_columns(self):
         import db
         self.assertEqual(db.SCHEMA_VERSION, 12)
-        self.assertTrue({"job_id", "pid", "vendor", "why", "outcome", "reason", "attempts", "hinted",
-                         "plain"}
+        self.assertTrue({"job_id", "pid", "vendor", "why", "outcome", "reason", "attempts",
+                         "searches", "searched_seq"}
                         <= self.cols("run_work"))
+        self.assertTrue({"question_id", "pid", "match_id", "new_doc_id", "state"}
+                        <= self.cols("replace_questions"))
         self.assertTrue({"job_id", "n", "tool", "args_json", "pids_json", "state", "error"}
                         <= self.cols("run_mirror"))
         self.assertTrue({"quarter", "sig", "times", "render_id"}
                         <= self.cols("quarter_notices"))
         self.assertTrue({"render_id", "pid", "item_state"} <= self.cols("render_states"))
-        for table, col in (("projections", "mirror_note"), ("projections", "considered_seq"),
+        for table, col in (("projections", "mirror_note"), 
                            ("documents", "vendor"),
                            ("documents", "filed_seq"), ("matches", "alternatives_json"),
                            ("render_keys", "doc_id"), ("render_states", "item_state"),

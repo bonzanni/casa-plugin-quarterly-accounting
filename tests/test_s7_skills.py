@@ -43,7 +43,7 @@ class Skills(unittest.TestCase):
             self.assertIsNone(re.search(rf"`{t}\(", DESK), t)
 
     def test_the_job_skill_has_the_simple_loops_units_and_no_relay(self):
-        for unit in ("probes", "snapshot", "filing", "vendor", "mirror", "post", "view"):
+        for unit in ("probes", "snapshot", "filing", "payment", "mirror", "post", "view"):
             self.assertIn(f"### `{unit}`", JOB, unit)
         for s in ("post_results", "show_view", "decide(", "record_mirror"):
             self.assertIn(s, JOB, s)

@@ -3,9 +3,10 @@ loop-diff/queues-design.md, q6). Every piece of work a unit owes is a server row
 moment it is known, and a unit is finished only when it owes nothing:
 
 - `run_items`: an erase candidate (unit `erasures`), the own-mail search and the attachments
-  it found (unit `filing`), the attachments a vendor's search found (unit `vendor:<norm>`);
-- `run_work`: a vendor's payments to decide (loop.py builds it); `run_mirror`: the mirror's
-  calls (mirror.py hands them out).
+  it found (unit `filing`), the attachments a payment's searches found (unit
+  `payment:<pid>`, rev 18.4 §R18.2);
+- `run_work`: the payments to decide, one at a time (loop.py builds it); `run_mirror`: the
+  mirror's calls (mirror.py hands them out).
 
 THE rule: a unit is handed with its queued items, oldest first, as many as fit; the next
 `job_next` settles that hand-out once (`settle`): one that closed or enqueued an item — or
@@ -15,7 +16,6 @@ Closing writes close only `queued` items: `done` and `given_up` are terminal for
 from __future__ import annotations
 
 import db
-import kb
 
 ATTEMPTS_MAX = 2         # D8: an item is handed again at most once without progress
 COST = {"erase": 2, "search": 2, "ref": 3}   # calls per item: get_transaction + a write;
@@ -23,8 +23,13 @@ COST = {"erase": 2, "search": 2, "ref": 3}   # calls per item: get_transaction +
 UPSTREAM = ("erase", "search", "ref")        # every kind a decision depends on (rule 5)
 
 
-def unit_of_vendor(vendor) -> str:
-    return "vendor:" + kb.norm(vendor or "")
+def unit_of_payment(pid) -> str:
+    """Rev 18.4 §R18.2: the unit owing a payment's found attachments."""
+    return f"payment:{int(pid)}"
+
+
+def pid_of_unit(unit):
+    return int(unit.split(":", 1)[1]) if unit and unit.startswith("payment:") else None
 
 
 def job_of(conn, token):
@@ -116,18 +121,10 @@ def stamp(conn, job_id, rows, hand_seq) -> None:
                      " AND key=?", (hand_seq, job_id, r["unit"], r["kind"], r["key"]))
 
 
-def owing_vendors(conn, job_id) -> set:
-    """The vendor units with a queued found attachment."""
-    return {r[0] for r in conn.execute("SELECT DISTINCT unit FROM run_items WHERE job_id=?"
-                                       " AND unit LIKE 'vendor:%' AND state='queued'",
-                                       (job_id,))}
-
-
 def blocks_decide(conn, job_id, unit) -> bool:
-    """Rule 3: a vendor with a queued or given-up found attachment decides nothing."""
+    """Rev 18.4 §R18.2: a payment with a found attachment still queued decides nothing."""
     return conn.execute("SELECT 1 FROM run_items WHERE job_id=? AND unit=? AND kind='ref'"
-                        " AND state IN ('queued', 'given_up')", (job_id, unit)
-                        ).fetchone() is not None
+                        " AND state='queued'", (job_id, unit)).fetchone() is not None
 
 
 def gave_up_upstream(conn, job_id) -> bool:
@@ -142,20 +139,6 @@ def given_up(conn, job_id) -> dict:
 
 
 # ---- the settle (rule 2) -------------------------------------------------------------------
-def _progressed(conn, job_id, unit, h) -> bool:
-    if conn.execute("SELECT 1 FROM run_items WHERE job_id=? AND unit=? AND (closed_seq > ?"
-                    " OR seq > ?)", (job_id, unit, h, h)).fetchone():
-        return True
-    if unit == "mirror":
-        return conn.execute("SELECT 1 FROM run_mirror WHERE job_id=? AND closed_seq > ?",
-                            (job_id, h)).fetchone() is not None
-    if unit.startswith("vendor:"):
-        return any(unit_of_vendor(r["vendor"]) == unit for r in conn.execute(
-            "SELECT vendor FROM run_work WHERE job_id=? AND (closed_seq > ? OR seq > ? OR"
-            " searched_seq > ?)", (job_id, h, h, h)))
-    return False
-
-
 def settle(conn, job_id) -> None:
     """The last hand-out judged, once (rule 2). Inside the cursor's transaction."""
     assert conn.in_transaction
@@ -165,19 +148,24 @@ def settle(conn, job_id) -> None:
         return
     unit, h = run["hand_unit"], run["hand_seq"]
     conn.execute("UPDATE runs SET hand_unit=NULL WHERE job_id=?", (job_id,))
-    if _progressed(conn, job_id, unit, h):
+    import progress
+    if progress.made(conn, job_id, h, unit):      # rev 18.4 §R18.5: the ONE definition
         return
     conn.execute("UPDATE run_items SET attempts=attempts+1 WHERE job_id=? AND unit=? AND"
                  " hand_seq=? AND state='queued'", (job_id, unit, h))
     conn.execute("UPDATE run_items SET state='given_up', reason='not reached', closed_seq=?"
                  " WHERE job_id=? AND unit=? AND state='queued' AND attempts >= ?",
                  (db.next_seq(conn), job_id, unit, ATTEMPTS_MAX))
-    if unit.startswith("vendor:"):
-        for r in conn.execute("SELECT pid, vendor FROM run_work WHERE job_id=? AND hand_seq=?"
-                              " AND outcome IS NULL", (job_id, h)).fetchall():
-            if unit_of_vendor(r["vendor"]) == unit:
-                conn.execute("UPDATE run_work SET attempts=attempts+1 WHERE job_id=? AND"
-                             " pid=?", (job_id, r["pid"]))
+    pid = pid_of_unit(unit)
+    if pid is not None:
+        conn.execute("UPDATE run_work SET attempts=attempts+1 WHERE job_id=? AND pid=? AND"
+                     " hand_seq=? AND outcome IS NULL", (job_id, pid, h))
+        if conn.execute("SELECT 1 FROM run_work WHERE job_id=? AND pid=? AND outcome IS NULL"
+                        " AND attempts >= ?", (job_id, pid, ATTEMPTS_MAX)).fetchone():
+            # the payment is given up ("missing · search incomplete"): so is what it owes
+            conn.execute("UPDATE run_items SET state='given_up', reason='not reached',"
+                         " closed_seq=? WHERE job_id=? AND unit=? AND state='queued'",
+                         (db.next_seq(conn), job_id, unit))
     elif unit == "mirror":
         import mirror
         conn.execute("UPDATE run_mirror SET attempts=attempts+1 WHERE job_id=? AND"

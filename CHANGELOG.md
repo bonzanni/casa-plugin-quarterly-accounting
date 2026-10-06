@@ -14,22 +14,32 @@ Requires Casa v0.344.38 or newer (the release carrying #1301, #1302 and #1303).
 0.10.0 was released separately as the S7 work (quarterly accounting off Ellen); this release
 builds on it.
 
-- **The loop.** One pass per run: probes, a snapshot, filing, the vendor units, the mirror and
-  the post. The job entry gains `quietWhenScheduled`: a scheduler-started run is silent unless
-  it has something to say. `job_next` hands out the work list; progress is counted at batch end
-  (`calls_made`) and a stop is said per streak.
-- **Work queues.** Everything a unit owes is a server row from the moment it is known: each
-  erase candidate (a new `erasures` unit), the own-mail search and every attachment it found,
-  every attachment a vendor search found (`record_search` now carries `refs`, recorded right
-  after the search). A unit ends only when it owes nothing; a unit handed twice without
-  progress gives its items up, visibly ("N attachments found but not filed", "Your own mail
-  was not read", "N erased bank rows not confirmed"), and a run that gave anything up says
-  its missing payments are "search incomplete". `decide` waits for the vendor's found
-  attachments. `set_aside` closes an attachment that is no invoice or a row bank-feed still
-  has; the filing's own closing tool is gone (filing ends when its queue is empty).
-- **The floor and decide.** A match needs the same currency and the exact amount; the machine's
-  own pairing is replaced by the operator's, a no-op re-decision changes nothing, and a
-  decision applies per vendor group. `record_missing` records a payment with no document.
+- **The loop.** One pass per run: probes, a snapshot, the erase checks, filing, the payments
+  one at a time in date order, the mirror and the post. The job entry gains
+  `quietWhenScheduled` (a scheduler-started run is silent unless it has something to say) and a
+  real batch cap, `"batches": 20`. Each payment comes with its candidate documents and their
+  stored reading; when nothing fits, the job searches that vendor's mail (at most three
+  searches a payment), files every invoice it finds, and decides the payment in one call.
+  Progress is one definition, read by Casa's batch report and by the hand-outs alike.
+- **Owed work survives a cut.** Everything a unit owes is a server row from the moment it is
+  known: each erase candidate, the own-mail search and every attachment it found, every
+  attachment a payment's search found (`record_search` carries `refs`, recorded right after
+  the search). A payment is decided only once its found attachments are filed or set aside; a
+  unit handed twice without progress gives its items up, visibly ("N attachments found but not
+  filed", "Your own mail was not read", "N erased bank rows not confirmed"), and a run that gave
+  anything up says its missing payments are "search incomplete". `set_aside` closes an
+  attachment that is no invoice or a row bank-feed still has; the filing's own closing tool is
+  gone (filing ends when its queue is empty). A payment decided missing is walked again in
+  the same run when a later search files its invoice.
+- **The floor and decide.** A match needs the same currency and the exact amount; another
+  currency is only proposed; a document is held only by a match or a proposal's chosen
+  document (a proposal's alternatives hold nothing); a no-op re-decision changes nothing.
+  `record_missing` records a payment with no document.
+- **Later documents and handovers.** A document found later by mail never reopens a match or a
+  proposal: it is filed and listed in the package as unmatched. A document the operator hands
+  over for a payment that already has one gets ONE card — "… already has an invoice. Current: …
+  New: …" [Keep current] [Use new] — bound to what it showed; nothing is replaced without the
+  tap.
 - **The mirror.** The bank ledger's `acct::` tags and notes are written as a diff against what
   was last mirrored, in plain note text, in grouped calls (`record_mirror`); rows that left
   scope lose their tags.

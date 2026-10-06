@@ -40,7 +40,8 @@ class EveryUnitHasABudget(StoreCase):
         run = self.conn.execute("SELECT * FROM runs WHERE job_id='d3d3d3d3-a1'").fetchone()
         self.assertIsNotNone(run["completed_at"])
         self.assertFalse(run["partial"])
-        self.assertTrue(any(u["unit"] == "vendor" and u["continued"] for u in units))
+        # a payment handed again with the attachments its search found still to file
+        self.assertTrue(any(u["unit"] == "payment" and u["files"] for u in units))
         # a progress report mid-batch, not only at its end (the first answer after work)
         self.assertTrue(any(u["report"] and u["unit"] not in ("end-batch", "complete")
                             for u in units))
@@ -56,19 +57,21 @@ class EveryUnitHasABudget(StoreCase):
             got.append((u["unit"], u["report"]))
             drv.do(u, drv.token)
         # the import persisted work: the next answer (filing) reports; filing persisted too,
-        # but the batch already reported, so the vendor unit does not
+        # but the batch already reported, so the payment unit does not
         self.assertEqual(got, [("probes", False), ("snapshot", False), ("filing", True),
-                               ("vendor", False)])
+                               ("payment", False)])
         self.assertTrue(all(u["max_calls"] > 0 for u in drv.units[-4:]))
 
     def test_a_continuation_that_progressed_is_not_counted(self):
-        """Queues: a vendor hand-out that queues one more found attachment (a per-payment
-        search recorded with its refs) and stops at its budget is handed again, more often
-        than ATTEMPTS_MAX, until the group is decided; each attachment set aside closes."""
-        import queues
+        """Queues (rev 18.4): a payment hand-out that records one search with a find and
+        stops at its budget progressed — it is handed again, more often than
+        ATTEMPTS_MAX, until decided; each attachment set aside closes."""
+        import kb, queues
         drv = JobDriver(self, payments=1)
+        kb.upsert_counterparty(self.conn, "Zapier", hint_sender="nobody@zapier.com",
+                               hint_subject="Zapier invoice")       # three searches to try
         drv.gmail.invoice("Zapier", 1000, "EUR", drv.DATES[0], "INV-1")
-        real, n = drv._vendor, [0]
+        real, n = drv._payment, [0]
 
         def partial(u, token):
             if u["files"]:                     # the attachment it queued: no invoice
@@ -76,29 +79,28 @@ class EveryUnitHasABudget(StoreCase):
                                         "items": [{"ref": r} for r in u["files"]]})
                 return None
             n[0] += 1
-            if n[0] <= 3:                      # one search with one find, then stops
+            if n[0] <= 2:                      # one search with one find, then stops
                 drv._tool("record_search", {"pass_token": token, "search": "payment",
-                                            "pids": [p["pid"] for p in u["payments"]],
+                                            "pids": [u["pid"]],
                                             "queries": [f"q{n[0]}"], "refs": [f"x-{n[0]}"]})
                 return None
             return real(u, token)
-        drv._vendor = partial
+        drv._payment = partial
         units = drv.run_job("d3d3d3d3-a3")
-        payments = [u for u in units if u["unit"] == "vendor" and u["payments"]]
-        self.assertEqual(len(payments), 4)
-        self.assertGreater(len(payments), queues.ATTEMPTS_MAX)
-        self.assertEqual([u["continued"] for u in payments], [False, True, True, True])
+        decided = [u for u in units if u["unit"] == "payment" and not u["files"]]
+        self.assertEqual(len(decided), 3)
+        self.assertGreater(len(decided), queues.ATTEMPTS_MAX)
         self.assertEqual(sorted(r[0] for r in self.conn.execute(
             "SELECT key FROM run_items WHERE kind='ref' AND state='done' AND key LIKE 'x-%'")),
-            ["x-1", "x-2", "x-3"])
+            ["x-1", "x-2"])
         self.assertEqual(self.conn.execute("SELECT status FROM projections").fetchone()[0],
                          "matched")
 
-    def test_a_vendor_unit_that_persists_nothing_still_ends_search_incomplete(self):
+    def test_a_payment_unit_that_persists_nothing_still_ends_search_incomplete(self):
         drv = JobDriver(self, payments=1)
-        drv._vendor = lambda u, token: None            # never persists anything
+        drv._payment = lambda u, token: None            # never persists anything
         units = drv.run_job("d3d3d3d3-a4")
-        self.assertEqual(sum(u["unit"] == "vendor" for u in units), 2)
+        self.assertEqual(sum(u["unit"] == "payment" for u in units), 2)
         run = self.conn.execute("SELECT * FROM runs WHERE job_id='d3d3d3d3-a4'").fetchone()
         self.assertIsNotNone(run["completed_at"])
         self.assertTrue(run["partial"])

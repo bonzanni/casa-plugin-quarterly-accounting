@@ -90,45 +90,41 @@ unit's, or the probe's answer), in order — read each, pass its fields:
 — no `vendor`: your own mail is no vendor's. No document, or refused:
 `set_aside(pass_token, items=[{"ref": …}], reason=…)`. Then `job_next`.
 
-### `vendor`
+### `payment`
 
-**`files` first** (a unit with no `payments`: what this vendor's searches found): file each,
-in order, read once:
-`ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<the ref, exactly>, vendor=<the unit's vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`;
-no invoice: `set_aside(pass_token, items=[{"ref": …}], reason=…)`. Then `job_next`.
-
-Otherwise: one vendor's payments, each with its `revision`, the filed documents that could
-fit (`candidates`; `held: other` is another payment's — never yours to take), maybe an
-`exact_fit`, and the vendor's `kb`.
-1. **Filed documents first.** Open each document you judge: `read_document(doc_id)`,
-   then `Read` its path. An `exact_fit` you accept, having read both sides,
-   needs no search.
-2. **Search the vendor's mail once per run** for the payments nothing filed fits, over the
-   `search_window` dates; `searches`, `vendor_queries`: this run's so far.
-   With a learned hint and `searches.hinted` false: the hinted search
-   (`from:<hint_sender>` and the `hint_subject` words). With no hint, or when the hinted
-   search leaves ANY payment uncovered, and `searches.plain` is false:
-   the plain vendor-and-dates search once. Then per-payment searches only for what is
-   still uncovered. Record each **right after it ran, before anything else**, with every
-   attachment it found:
-   `record_search(pids=[the payments it was for], search="hinted", queries=[…], found_candidate=…, refs=[each attachment found, as <message id>:<attachment id>; [] when none], pass_token)`
-   (`search="plain"`, `search="payment"`).
-3. **File** each of its answer's `files` as under **`files` first**.
-4. **Decide the vendor's payments in ONE call:** `decide(pass_token, entries=[…])` — refused
-   while a found attachment is neither filed nor set aside — one entry per payment:
-   - `{pid, expected_revision, outcome: "match", doc_id, document_date}` only when you are
-     **certain**, having read both sides: the vendor or issuer, the number, exactly the
-     payment's amount in the same currency, the date;
-   - `"propose"` on any doubt, and always for another currency (`alternatives`: up to 3
-     other doc ids);
+ONE payment: its facts and `revision`, its `candidates` — filed documents WITH their stored
+reading (kind, issuer, number, date, amount, currency, vendor; `held: other` is another
+payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, its
+`search_window`, `searches_left` and `files`.
+1. **`files` first**: the attachments its searches found, still to file. File each, in
+   order, read once:
+   `ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<the ref, exactly>, vendor=<the unit's vendor, when it is from that vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`;
+   no invoice: `set_aside(pass_token, items=[{"ref": …}], reason=…)`. `files_total` more
+   than `files`: then `job_next` — the rest come.
+2. **Judge the candidates from their reading**; open one (`read_document(doc_id)`, then
+   `Read` its path) only when in doubt.
+3. **Nothing fits:** search the vendor's mail over the `search_window` dates (with a learned
+   hint first `from:<hint_sender>` and the `hint_subject` words, then the plain
+   vendor-and-dates search, then wider), at most `searches_left` searches. Record each
+   **right after it ran, before anything else**, with every attachment it found:
+   `record_search(pid, search="hinted", queries=[…], found_candidate=…, refs=[each attachment found, as <message id>:<attachment id>; [] when none], exhausted=<true on your last>, pass_token)`
+   (`search="plain"`, `search="payment"`). File EVERY invoice of its answer's `files` as in 1.
+4. **Decide it in ONE call:** `decide(pass_token, entries=[{pid, expected_revision, …}])` —
+   refused while a found attachment is neither filed nor set aside:
+   - `outcome: "match", doc_id, document_date` only when you are **certain**: the vendor or
+     issuer, the number, exactly the payment's amount in the same currency, the date;
+   - `"propose"` on any doubt — look-alikes: the closest date, or propose — and always for
+     another currency (`alternatives`: up to 3 other doc ids); a recurring charge's invoice
+     dated weeks away is another month's, not this one's;
    - `"missing"` with a `reason` when nothing fits. Never "no invoice needed": that is the
      operator's.
-   `document_date` is the date printed on the document you opened: its issue date, not a
-   due, delivery or email date. The server enforces the floor; no date window.
-   Re-decide only the refused entries. A payment that
-   `holds` a document and now has another fit: `match` it again, or `propose` the right
-   one, the other as an alternative.
-5. **Save what worked:** when a vendor search found an invoice,
+   `document_date` is the date printed on the document: its issue date, not a due,
+   delivery or email date. The server enforces the floor; no date window. Re-decide only
+   a refused entry. Then `job_next`.
+   **`why: handover` with `holds`:** the payment already has a document and the operator
+   handed one over (the first candidate). It belongs to this payment →
+   `outcome: "replace", doc_id` (the operator is asked); it does not → `outcome: "keep"`.
+5. **Save what worked:** when a search found an invoice,
    `upsert_counterparty(name=<vendor>, hint_sender=<the sender address>, hint_subject=<a subject pattern>, pass_token)`.
 
 A vendor whose invoices sit behind a login: once, find the deepest link to its invoice

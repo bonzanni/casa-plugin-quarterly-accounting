@@ -774,6 +774,48 @@ def gen_review_cards(sh, st, b):
             raise AssertionError(f"{case}: {len(picks)} named candidates, not {want}")
 
 
+def gen_replace_cards(sh, st, b):
+    """Rev 18.4 §R18.3: a handed-over document for a payment that already has one — the end
+    message's "to check" line, the replace card (a machine match, and an operator-confirmed
+    one), and both taps."""
+    import cards
+    import db
+    loop_store(st)
+    rows = []
+    for i, how in ((0, "job"), (1, "operator")):
+        pid = st.pay(hostile(i), 10000 + i)
+        cur = st.doc(counterparty=hostile(i), issuer=hostile(i), amount_minor=10000 + i,
+                     document_date=Q3_DAY, document_number=docnum(i))
+        st.machine_match(pid, cur, st.token)
+        if how == "operator":
+            mid = st.conn.execute("SELECT current_match FROM projections WHERE pid=?",
+                                  (pid,)).fetchone()[0]
+            rid = st.show(pid)
+            st.granted(lambda c, grant, mid=mid, rid=rid: __import__("matches").confirm_in_tx(
+                c, grant=grant, match_id=mid, expected_revision=st.rev(match_id=mid),
+                render_id=rid, bind="rendered"))
+        new = st.doc(counterparty=hostile(i + 5), issuer=hostile(i + 5),
+                     amount_minor=10000 + i, document_date=Q3_DAY,
+                     document_number=docnum(10 + i))
+        mid = st.conn.execute("SELECT current_match FROM projections WHERE pid=?",
+                              (pid,)).fetchone()[0]
+        with db.tx(st.conn):
+            st.conn.execute("INSERT INTO replace_questions(job_id, pid, match_id, new_doc_id,"
+                            " state, created_seq) VALUES (?,?,?,?, 'open', ?)",
+                            (st.job_id, pid, mid, new, db.next_seq(st.conn)))
+        rows.append(pid)
+    end = _c(st, cards.compose_end, st.job_id, scheduled=False)
+    labels = [x["label"] for x in _post(sh, st, b, "end:replace", end, "to check")]
+    if labels != ["Review 2", "Get package"]:
+        raise AssertionError(f"end:replace: the buttons are {labels}")
+    for k, case in ((0, "replace:job"), (1, "replace:operator")):
+        buttons = _post(sh, st, b, case, _c(st, cards.card, end, k), "already has an invoice")
+        if [x["label"] for x in buttons] != ["Keep current", "Use new"]:
+            raise AssertionError(f"{case}: the buttons are {buttons}")
+        for x in buttons:
+            sh.tap(st, f"{case}:{x['label']}", x)
+
+
 VENDOR_PAYMENTS = 240                     # one vendor's missing invoices, many pages
 
 
@@ -836,7 +878,7 @@ SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_si
           gen_end_message_operator, gen_end_message_scheduled, gen_end_message_nothing_to_ask,
           gen_end_message_handover, gen_end_message_with_completion, gen_open_items,
           gen_all_answered, gen_ready_notice, gen_review_cards, gen_vendor_pages,
-          gen_vendor_pages_scheduled, gen_get_package]
+          gen_vendor_pages_scheduled, gen_get_package, gen_replace_cards]
 
 
 def generate(stores=None) -> Shapes:
