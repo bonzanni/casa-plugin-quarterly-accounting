@@ -27,12 +27,23 @@ class Surface(StoreCase):
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
         self.assertEqual(m["casa"]["jobs"], [{
             "name": "work", "skill": "quarterly-job", "title": "Accounting check",
-            "summary": "Checks the bank and Gmail, judges documents, prepares packages",
+            "summary": "Checks the bank and Gmail, matches invoices, keeps the bank ledger's "
+                       "notes current",
             "batches": "unlimited", "turnsPerBatch": 80, "session": "fresh",
-            "host": "specialist"}])
-        self.assertEqual(m["version"], "0.10.0")
+            "host": "specialist", "quietWhenScheduled": True}])
+        self.assertEqual(m["version"], "0.11.0")
         import job                  # the batch budget and the batch window's claim count
         self.assertEqual(job.TURNS_PER_BATCH, m["casa"]["jobs"][0]["turnsPerBatch"])
+
+    def test_the_readme_and_changelog_name_the_casa_floor(self):
+        for f in ("README.md", "CHANGELOG.md"):
+            text = (ROOT / f).read_text()
+            self.assertIn("#1301, #1302 and #1303", text, f)
+            self.assertIn("v0.344.38", text, f)
+            self.assertIn("quietWhenScheduled", text, f)
+        log = (ROOT / "CHANGELOG.md").read_text()
+        self.assertNotIn("never released", log)
+        self.assertIn("## 0.10.0", log)
 
     def test_gmail_absent_says_not_connected_not_reauthorise(self):
         import alerts, passes, views
