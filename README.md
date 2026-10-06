@@ -11,8 +11,8 @@ The checking runs as one Casa job on the finance specialist, `quarterly-accounti
 bank, searches Gmail vendor by vendor, matches invoices to payments, keeps the bank ledger's
 notes current (`record_mirror`) and ends with one message and its cards, in fresh sessions of
 80 turns per batch. The job declares `quietWhenScheduled`: started by the scheduler it runs
-silently and speaks only when there is something to say. The operator's taps (`decide`,
-`verdict`, `record_missing`) take effect at once and a tap's receipt posts the next card. The
+silently and speaks only when there is something to say. The operator's taps (`verdict`) are recorded at once and each answer posts the next card; the
+bank ledger's tags and notes follow at the next check. The
 finance specialist's desk (skill `skills/quarterly-accounting/SKILL.md`) answers the operator
 with posted views and their buttons, reads the operator's words into a reading to Apply
 (`propose_reading`), files the documents the operator sends, and asks for the check
@@ -25,7 +25,8 @@ job's filing step.
 - **Casa v0.344.38 or newer** (the release carrying #1301, #1302 and #1303, and #1308). #1301
   lets the job run silently when the scheduler starts it (`quietWhenScheduled`), #1302 lets a
   tap's receipt post the next card, #1303 lets a [Get package] button deliver the file, and
-  #1308 (v0.344.38) fixes stored-call taps on finance's role scope. An older Casa refuses this
+  #1308 (v0.344.38): a tap's pinned turn is the operator's tap, not a delegation (stored-call
+  taps no longer refuse on the specialist's role scope). An older Casa refuses this
   plugin's manifest (`casa.jobs invalid: entry 1 field quietWhenScheduled`): the plugin does
   not load. There is no Casa min-version field and no fallback.
 - bank-feed **0.20.0** or newer (casa-specialist-finance component 0.21.0) installed on the

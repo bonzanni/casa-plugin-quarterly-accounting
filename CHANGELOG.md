@@ -2,12 +2,12 @@
 
 ## 0.11.0
 
-The simple loop. Requires Casa v0.344.38 or newer (the release carrying #1301, #1302 and
-#1303, plus #1308). Casa v0.344.37 carries the three features: #1301 `quietWhenScheduled`
+The simple loop. Casa v0.344.37 carries the three features: #1301 `quietWhenScheduled`
 (v0.344.36), #1302 a tap's receipt posts the next card (v0.344.35), #1303 a file-delivering
-button (v0.344.37); v0.344.38 (#1308) fixes stored-call taps on finance's role scope. There is
-no Casa min-version field: an older Casa refuses the manifest (`casa.jobs invalid: entry 1
-field quietWhenScheduled`) and the plugin does not load.
+button (v0.344.37). v0.344.38 (#1308): a tap's pinned turn is the operator's tap, not a
+delegation (stored-call taps no longer refuse on the specialist's role scope). There is no
+Casa min-version field: an older Casa refuses the manifest (`casa.jobs invalid: entry 1 field
+quietWhenScheduled`) and the plugin does not load.
 
 Requires Casa v0.344.38 or newer (the release carrying #1301, #1302 and #1303).
 
