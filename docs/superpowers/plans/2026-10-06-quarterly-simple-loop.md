@@ -164,9 +164,10 @@ D8. **Re-handing a vendor group.** A vendor group whose entries are still undeci
     again at most once (`HAND_MAX = 2`). After that, its undecided payments are "missing ·
     search incomplete" and the run is `partial` (§2.3).
 
-D9. **Mirror acknowledgement.** The `mirror` unit hands numbered calls. The model reports
-    them with `record_mirror(pass_token, done=[n…], failed=[{n, error}])`. A restart
-    between the bank writes and `record_mirror` re-hands that unit. Tag calls are
+D9. **Mirror acknowledgement.** The `mirror` unit hands numbered calls, each computed at
+    that hand-out from the store as it is then (no frozen plan: plan round 7). The model
+    reports them with `record_mirror(pass_token, done=[n…], failed=[{n, error}])`. A restart
+    between the bank writes and `record_mirror` re-hands the in-flight calls. Tag calls are
     idempotent; a re-handed note call appends one duplicate note line (accepted: the newest
     note is the outcome, §2.4).
 
@@ -294,8 +295,11 @@ D19. **One message per run, the completion first** (plan round 2, Astra S1 + Ter
   - `order` (on `end` / `open-items` only);
   - `scheduled` (bool).
 
-  Each listed payment gets a `render_items` row with its revisions AND its `item_state`
-  (`missing`, or `proposed:<doc_id>` / `proposed:joint:<doc ids>`).
+  **A rendering binds exactly the payments whose lines appear in its final deposited text**
+  (plan round 7, every card kind). Those, and only those, get a `render_items` row with
+  their revisions. Every payment the rendering reports, displayed or only counted, gets a
+  `render_states` row with its `item_state` (`missing`, or `proposed:<doc_id>` /
+  `proposed:joint:<doc ids>`), which the §1 "new state" rule reads.
 - **A `next` card** is composed, stored, keyed and stamped `posted_seq` inside the tap's
   transaction (it is "a deposit attempted", as `show_view` stamps). It is returned as
   `{"text", "buttons", "revision"}`, with `revision = "walk:" + review_of` (≤ 64 chars).
@@ -328,7 +332,8 @@ D19. **One message per run, the completion first** (plan round 2, Astra S1 + Ter
   - `documents.filed_seq INTEGER` (store sequence at ingest: "newly filed", §2.1);
   - `matches.alternatives_json TEXT NOT NULL DEFAULT '[]'` (D3);
   - `render_keys.doc_id INTEGER` (a candidate button's document);
-  - `render_items.item_state TEXT` (the §1 "new state" rule);
+  - (no new `render_items` column: a rendering's `render_items` are exactly the payments
+    whose lines it displays, plan round 7; the states it reports go to `render_states`);
   - `probes.fail_runs INTEGER NOT NULL DEFAULT 0` (Gmail streak, D10);
   - `claims.progressed INTEGER NOT NULL DEFAULT 0` (§2.2 `progressed`);
   - `counterparties.hint_sender TEXT`, `counterparties.hint_subject TEXT` (D6);
@@ -336,7 +341,8 @@ D19. **One message per run, the completion first** (plan round 2, Astra S1 + Ter
     `runs.mirror_at TEXT`,
     `runs.mirrored_at TEXT`, `runs.end_render_id TEXT`, `runs.partial INTEGER NOT NULL DEFAULT 0`
     (§3 "Run").
-- Tables (constants `RUN_WORK_DDL`, `RUN_MIRROR_DDL`, `QUARTER_NOTICES_DDL`):
+- Tables (constants `RUN_WORK_DDL`, `RUN_MIRROR_DDL`, `QUARTER_NOTICES_DDL`,
+  `RENDER_STATES_DDL`):
 
 ```python
 # §3 "Run": the run's work list, each entry with its vendor group and outcome (§2.1, §2.2)
@@ -352,13 +358,20 @@ RUN_WORK_DDL = """CREATE TABLE IF NOT EXISTS run_work (
   hinted INTEGER NOT NULL DEFAULT 0,     -- the vendor's learned-hint search ran this run (§2.2)
   plain INTEGER NOT NULL DEFAULT 0,      -- the vendor's plain vendor-and-dates search ran this run
   PRIMARY KEY (job_id, pid));"""
-# §2.4: the mirror calls a run handed out, numbered, and what became of them (D9)
+# §2.4: the mirror calls a run handed out, numbered, and what became of them (D9);
+# args_json holds the call's canonical [tool, args]. Nothing is planned ahead (round 7)
 RUN_MIRROR_DDL = """CREATE TABLE IF NOT EXISTS run_mirror (
   job_id TEXT NOT NULL, n INTEGER NOT NULL,
   tool TEXT NOT NULL CHECK (tool IN ('untag_transaction', 'tag_transaction', 'add_note')),
   args_json TEXT NOT NULL, pids_json TEXT NOT NULL,
-  state TEXT NOT NULL CHECK (state IN ('owed', 'handed', 'done', 'failed')),
+  state TEXT NOT NULL CHECK (state IN ('handed', 'done', 'failed')),
   error TEXT, PRIMARY KEY (job_id, n));"""
+# §1 "new state" (rounds 1–2): every state a rendering REPORTS — a payment it displays,
+# or one it only counts (an end message's "4 missing") — read by cards.seen_state. Binding
+# stays in render_items, which holds only the payments whose lines the text displays
+RENDER_STATES_DDL = """CREATE TABLE IF NOT EXISTS render_states (
+  render_id TEXT NOT NULL, pid INTEGER NOT NULL, item_state TEXT NOT NULL,
+  PRIMARY KEY (render_id, pid));"""
 # §3 "Per quarter": the completion a "package ready" notice was delivered for (§1) — by
 # its signature, so a reopening and a re-completion within one run is still a new one
 QUARTER_NOTICES_DDL = """CREATE TABLE IF NOT EXISTS quarter_notices (
@@ -414,7 +427,7 @@ class Schema12(StoreCase):
         for table, col in (("projections", "mirror_note"), ("projections", "considered_seq"),
                            ("documents", "vendor"),
                            ("documents", "filed_seq"), ("matches", "alternatives_json"),
-                           ("render_keys", "doc_id"), ("render_items", "item_state"),
+                           ("render_keys", "doc_id"), ("render_states", "item_state"),
                            ("probes", "fail_runs"), ("claims", "progressed"),
                            ("counterparties", "hint_sender"),
                            ("counterparties", "hint_subject"), ("runs", "started_by"),
@@ -516,7 +529,6 @@ def build_v11_store(path, with_rows=False):
          "ALTER TABLE documents ADD COLUMN filed_seq INTEGER",
          "ALTER TABLE matches ADD COLUMN alternatives_json TEXT NOT NULL DEFAULT '[]'",
          "ALTER TABLE render_keys ADD COLUMN doc_id INTEGER",
-         "ALTER TABLE render_items ADD COLUMN item_state TEXT",
          "ALTER TABLE probes ADD COLUMN fail_runs INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE claims ADD COLUMN progressed INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE counterparties ADD COLUMN hint_sender TEXT",
@@ -529,7 +541,7 @@ def build_v11_store(path, with_rows=False):
          "ALTER TABLE runs ADD COLUMN mirrored_at TEXT",
          "ALTER TABLE runs ADD COLUMN end_render_id TEXT",
          "ALTER TABLE runs ADD COLUMN partial INTEGER NOT NULL DEFAULT 0",
-         RUN_WORK_DDL, RUN_MIRROR_DDL, QUARTER_NOTICES_DDL],
+         RUN_WORK_DDL, RUN_MIRROR_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL],
 ```
 
   - Set `SCHEMA_VERSION = 12`, add `SCHEMA_DATA_STEPS`, and change the `migrate` loop as in
@@ -1644,13 +1656,12 @@ NOTE_MAX = 1000                # bank-feed NOTE_MAX (tools_annotate.py:57)
 def note_text(conn, pid) -> str | None            # §2.4's plain words; None: no note owed
 def plan(conn) -> list[dict]                      # every owed call, in order: untag, tag, add_note
     # each {"tool", "args", "pids"}; args carry row_ids and the gate's workflow fence
-def start(conn, job_id) -> int                    # freeze plan() into run_mirror (state 'owed'),
-                                                  # log `mirror: start job=<job_id> rows=<n>`,
-                                                  # stamp runs.mirror_at; idempotent per run
-def hand_calls(conn, job_id, budget: int) -> list[dict] # up to `budget` owed/handed calls -> 'handed',
-                                                  # each {"n", "tool", "args"}
+def start(conn, job_id) -> None                   # log `mirror: start job=<job_id> rows=<n>`,
+                                                  # stamp runs.mirror_at; once per run
+def hand_calls(conn, job_id, budget: int) -> list[dict] # in-flight calls, then a FRESH diff,
+                                                  # up to `budget`; each {"n", "tool", "args"}
 def record(conn, token, done: list, failed: list) -> dict   # the model's report (D9)
-def owed(conn, job_id) -> int                     # calls not yet done or failed
+def owed(conn, job_id) -> int                     # in flight + the fresh diff (no frozen plan)
 def failed_lines(conn, job_id) -> list[str]       # for the end message (§2.4 last bullet)
 ```
 
@@ -1758,11 +1769,32 @@ class Mirror(StoreCase):
         for n in (1, 2):
             self.payment(n)
         job = self.job_id                      # the run run_claim() made
-        n = mirror.start(self.conn, job)
+        want = mirror.plan(self.conn)
+        mirror.start(self.conn, job)
         handed = mirror.hand_calls(self.conn, job, budget=50)
-        self.assertEqual(len(handed), n)
+        self.assertEqual(len(handed), len(want))
+        self.assertEqual(mirror.hand_calls(self.conn, job, budget=50), handed)  # in flight
         mirror.record(self.conn, self.token, done=[c["n"] for c in handed], failed=[])
-        self.assertEqual(mirror.plan(self.conn), [])         # tags and notes now agree
+        self.assertEqual((mirror.plan(self.conn), mirror.owed(self.conn, job)), ([], 0))
+
+    def test_a_change_after_the_mirror_began_is_mirrored_in_the_same_run(self):
+        """Plan round 7 (Astra S2): a payment mirrored missing, then matched mid-run (a
+        handover's continuation): the fresh diff owes the corrective calls; the run reaches
+        `post` only when it is empty."""
+        import mirror
+        pid = self.payment(1)
+        job = self.job_id
+        mirror.start(self.conn, job)
+        calls = mirror.hand_calls(self.conn, job, budget=50)
+        mirror.record(self.conn, self.token, done=[c["n"] for c in calls], failed=[])
+        self.assertEqual(mirror.owed(self.conn, job), 0)
+        self.machine_match(pid, self.doc(document_number="INV-1"), self.token)
+        self.assertGreater(mirror.owed(self.conn, job), 0)
+        fix = mirror.hand_calls(self.conn, job, budget=50)
+        self.assertEqual(sorted(c["tool"] for c in fix),
+                         ["add_note", "tag_transaction", "untag_transaction"])
+        mirror.record(self.conn, self.token, done=[c["n"] for c in fix], failed=[])
+        self.assertEqual(mirror.owed(self.conn, job), 0)
 
     def test_a_failed_write_is_kept_for_the_end_message_and_retried_next_run(self):
         import mirror
@@ -1772,7 +1804,7 @@ class Mirror(StoreCase):
         calls = mirror.hand_calls(self.conn, job, budget=50)
         mirror.record(self.conn, self.token, done=[],
                       failed=[{"n": c["n"], "error": "refused: stale generation"}
-                              for c in calls])
+                              for c in calls])          # not retried this run: owed is 0
         self.assertEqual(mirror.owed(self.conn, job), 0)
         self.assertTrue(mirror.failed_lines(self.conn, job))
         self.assertTrue(mirror.plan(self.conn))              # still owed: the next run writes it
@@ -1915,36 +1947,49 @@ def plan(conn) -> list:
     return calls
 
 
-def start(conn, job_id) -> int:
+def _key(call) -> str:
+    return db.canonical([call["tool"], call["args"]])
+
+
+def start(conn, job_id) -> None:
+    """§2.4: one log line when the run's mirror phase starts, so a restart inside it can be
+    placed. Nothing is frozen (plan round 7): every hand-out diffs the store afresh."""
     with db.tx(conn):
-        have = conn.execute("SELECT count(*) FROM run_mirror WHERE job_id=?",
-                            (job_id,)).fetchone()[0]
-        if have or conn.execute("SELECT mirror_at FROM runs WHERE job_id=?",
-                                (job_id,)).fetchone()[0]:
-            return have
-        calls = plan(conn)
-        for n, c in enumerate(calls, 1):
-            conn.execute("INSERT INTO run_mirror(job_id, n, tool, args_json, pids_json, state)"
-                         " VALUES (?,?,?,?,?, 'owed')", (job_id, n, c["tool"],
-                                                         db.canonical(c["args"]),
-                                                         json.dumps(c["pids"])))
-        rows = len({p for c in calls for p in c["pids"]})
+        if conn.execute("SELECT mirror_at FROM runs WHERE job_id=?", (job_id,)).fetchone()[0]:
+            return
+        rows = len({p for c in plan(conn) for p in c["pids"]})
         conn.execute("UPDATE runs SET mirror_at=? WHERE job_id=?", (db.now(), job_id))
-    # §2.4: one line when the mirror phase starts, so a restart inside it can be placed
     print(f"mirror: start job={job_id} rows={rows}", file=sys.stderr, flush=True)
-    return len(calls)
+
+
+def _fresh(conn, job_id) -> list:
+    """THE mirror's owed calls, computed now (plan round 7, Astra S2, generalized — no frozen
+    plan, no invalidation hook): plan() over the current store against the export tags and
+    mirror_note, minus the calls this run has in flight (handed, not yet acknowledged) and
+    the ones bank-feed refused this run (retried at the next run, §2.4)."""
+    held = {r["key"] for r in conn.execute(
+        "SELECT args_json AS key FROM run_mirror WHERE job_id=? AND state IN ('handed',"
+        " 'failed')", (job_id,))}
+    return [c for c in plan(conn) if _key(c) not in held]
 
 
 def hand_calls(conn, job_id, budget) -> list:
+    """The next calls: the in-flight ones first (a restart between the bank writes and
+    record_mirror re-hands them, D9), then fresh ones, up to `budget`."""
     with db.tx(conn):
-        rows = conn.execute("SELECT n, tool, args_json FROM run_mirror WHERE job_id=? AND"
-                            " state IN ('owed', 'handed') ORDER BY n LIMIT ?",
-                            (job_id, max(0, int(budget)))).fetchall()
-        for r in rows:
-            conn.execute("UPDATE run_mirror SET state='handed' WHERE job_id=? AND n=?",
-                         (job_id, r["n"]))
-    return [{"n": r["n"], "tool": r["tool"], "args": json.loads(r["args_json"])}
-            for r in rows]
+        out = [{"n": r["n"], "tool": r["tool"], "args": json.loads(r["args_json"])[1]}
+               for r in conn.execute("SELECT n, tool, args_json FROM run_mirror WHERE job_id=?"
+                                     " AND state='handed' ORDER BY n", (job_id,))]
+        n = conn.execute("SELECT coalesce(max(n), 0) FROM run_mirror WHERE job_id=?",
+                         (job_id,)).fetchone()[0]
+        for c in _fresh(conn, job_id)[:max(0, int(budget) - len(out))]:
+            n += 1
+            # args_json holds the call's canonical key, so _fresh can tell it is in flight
+            conn.execute("INSERT INTO run_mirror(job_id, n, tool, args_json, pids_json, state)"
+                         " VALUES (?,?,?,?,?, 'handed')", (job_id, n, c["tool"], _key(c),
+                                                          json.dumps(c["pids"])))
+            out.append({"n": n, "tool": c["tool"], "args": c["args"]})
+    return out[:max(0, int(budget))]
 
 
 def record(conn, token, done, failed) -> dict:
@@ -1957,16 +2002,16 @@ def record(conn, token, done, failed) -> dict:
                              "'handed'", (job_id, n)).fetchone()
             if r is None:
                 continue                      # already recorded, or never handed: nothing
-            args, pids = json.loads(r["args_json"]), json.loads(r["pids_json"])
-            for pid in pids:
+            tool, args = json.loads(r["args_json"])
+            for pid in json.loads(r["pids_json"]):
                 p = lineage.projection(conn, pid)
                 tags = set(json.loads(p["observed_tags_json"] or "[]"))
-                if r["tool"] == "tag_transaction":
+                if tool == "tag_transaction":
                     tags |= set(args["tags"])
-                elif r["tool"] == "untag_transaction":
+                elif tool == "untag_transaction":
                     tags -= set(args["tags"])
                 sets = ("observed_tags_json=?", json.dumps(sorted(tags))) \
-                    if r["tool"] != "add_note" else ("mirror_note=?", args["note"])
+                    if tool != "add_note" else ("mirror_note=?", args["note"])
                 conn.execute(f"UPDATE projections SET {sets[0]}, last_error=NULL WHERE pid=?",
                              (sets[1], pid))
             conn.execute("UPDATE run_mirror SET state='done' WHERE job_id=? AND n=?",
@@ -1983,15 +2028,15 @@ def record(conn, token, done, failed) -> dict:
                 conn.execute("UPDATE projections SET last_error=? WHERE pid=?", (err, pid))
         decide.note_progress(conn, token)
         left = owed(conn, job_id)
-        if left == 0:
-            conn.execute("UPDATE runs SET mirrored_at=coalesce(mirrored_at, ?) WHERE job_id=?",
-                         (db.now(), job_id))
     return {"recorded": len(done or []) + len(failed or []), "owed": left}
 
 
 def owed(conn, job_id) -> int:
-    return conn.execute("SELECT count(*) FROM run_mirror WHERE job_id=? AND state IN"
-                        " ('owed', 'handed')", (job_id,)).fetchone()[0]
+    """In flight plus a FRESH diff: 0 only when the bank agrees with the store as it is now,
+    whatever changed since the mirror phase began (a handover, a tap)."""
+    inflight = conn.execute("SELECT count(*) FROM run_mirror WHERE job_id=? AND"
+                            " state='handed'", (job_id,)).fetchone()[0]
+    return inflight + len(_fresh(conn, job_id))
 
 
 def failed_lines(conn, job_id) -> list:
@@ -2154,6 +2199,8 @@ class Work(StoreCase):
         self.file_later(self.doc(document_date="2026-09-02"))     # a competitor, unreviewed
         self.run_claim(job_id=self.job_id)                        # the same job, a new batch
         self.assertEqual(self.listed(), [pid])                    # still owed (per payment)
+        unit = loop.vendor_unit(self.conn, self.job_id)           # handed out: now seen
+        self.assertEqual([p["pid"] for p in unit["payments"]], [pid])
         out = decide.decide(self.conn, self.token, [{
             "pid": pid, "outcome": "match", "doc_id": a, "document_date": "2026-09-01",
             "expected_revision": self.rev(pid)}])                  # kept: writes nothing
@@ -2220,7 +2267,7 @@ class Work(StoreCase):
         self.assertIsNone(loop.exact_fit(self.conn, pid, row, "Adobe", cands))   # two fit
         p = lineage.projection(self.conn, pid)
         self.assertTrue(loop._handover_fits(self.conn, pid, p, row, [ninth]))
-        self.assertEqual(len(loop.handed_candidates(cands, None)), loop.CANDIDATES_MAX)
+        self.assertEqual(len(loop.handed_candidates(cands, [])), loop.CANDIDATES_MAX)
         self.assertTrue(first)
 
     def test_a_trigger_beyond_the_cap_is_handed_out_and_only_then_considered(self):
@@ -2938,10 +2985,48 @@ class Cards(StoreCase):
         import cards
         p = self.pay()
         d = self.propose(p)
+        m = self.pay("Twilio")                                   # counted, not displayed
         rid = self.c(cards.compose_end, self.job_id, scheduled=False)
-        st = self.conn.execute("SELECT item_state FROM render_items WHERE render_id=? AND"
-                               " pid=?", (rid, p)).fetchone()[0]
-        self.assertEqual(st, f"proposed:{d}")
+        st = dict(self.conn.execute("SELECT pid, item_state FROM render_states WHERE"
+                                    " render_id=?", (rid,)).fetchall())
+        self.assertEqual(st, {p: f"proposed:{d}", m: "missing"})
+        bound = [r[0] for r in self.conn.execute("SELECT pid FROM render_items WHERE"
+                                                 " render_id=?", (rid,))]
+        self.assertEqual(bound, [p])                             # only what it displays
+
+    def assert_binds_exactly_what_it_shows(self, rid):
+        """Plan round 7: every bound payment's line is in the deposited text, and the
+        rendering binds nothing else."""
+        r, scope = self.rendering(rid)
+        bound = {r2[0] for r2 in self.conn.execute(
+            "SELECT pid FROM render_items WHERE render_id=?", (rid,))}
+        self.assertEqual(bound, {int(k) for k in scope["bound_lines"]})
+        lines = r["text"].split("\n")
+        for pid, line in scope["bound_lines"].items():
+            self.assertIn(line, lines, pid)
+        import views
+        self.assertTrue(views.fits_proposal(r["text"]))
+
+    def test_every_card_kind_binds_only_displayed_payments_when_oversized(self):
+        import cards, work
+        vendor = "Ab*c_d [e] (f) !g #h ~i -j `k` |l| <m> " + "x" * 21     # 60 chars
+        pids = [self.pay(vendor, 100 + i, "2026-%02d-%02d" % (7 + i % 3, i % 28 + 1))
+                for i in range(30)]
+        self.granted(lambda c, grant: work.leave_missing_in_tx(c, pids[1:25], grant=grant))
+        for i in range(40):                                      # 40 long proposals
+            q = self.pay(vendor[:59] + str(i % 10), 5000 + i)
+            self.propose(q, amount_minor=5000 + i, document_number="N" * 40 + str(i))
+        end = self.c(cards.compose_end, self.job_id, scheduled=False)
+        self.assert_binds_exactly_what_it_shows(end)                       # end message
+        self.assert_binds_exactly_what_it_shows(
+            self.c(cards.compose_open, "2026-Q3"))                           # open-items
+        order = self.rendering(end)[1]["order"]
+        k = next(i for i, o in enumerate(order) if "v" in o and o["v"] == vendor)
+        first = self.c(cards.card, end, k)
+        pages = self.rendering(first)[1]["pages"]
+        for pg in range(1, len(pages) + 1):                                 # vendor pages
+            self.assert_binds_exactly_what_it_shows(self.c(cards.card, end, k, page=pg))
+        self.assert_binds_exactly_what_it_shows(self.c(cards.card, end, 0))  # a Review card
 
     def test_the_ready_notice_and_the_all_answered_card(self):
         import cards
@@ -2982,7 +3067,7 @@ def seen_state(conn, pid, st) -> bool:
     tap's card has no delivery callback (#1302 posts it after the tap's receipt), so a posted
     one counts."""
     return conn.execute(
-        "SELECT 1 FROM render_items i JOIN renders r ON r.render_id=i.render_id WHERE"
+        "SELECT 1 FROM render_states i JOIN renders r ON r.render_id=i.render_id WHERE"
         " i.pid=? AND i.item_state=? AND (r.delivered_at IS NOT NULL OR (r.kind IN"
         " ('review', 'vendor-page') AND r.posted_seq IS NOT NULL)) LIMIT 1",
         (pid, st)).fetchone() is not None
@@ -2998,37 +3083,74 @@ def never_set(conn, vendor) -> list:
                   and row["status"] == "BOOK")
 
 
-def _store(conn, kind, lines, scope, items) -> str:
-    """One rendering: tagged line 1 (binding V2), fitted to BODY_LIMIT, the S7 grammar
-    fields, and render_items with revisions and item states (§1 "new state")."""
+class Undisplayed(RuntimeError):
+    """A composer asked to bind a payment its fitted text does not display: a bug in that
+    composer's pagination or trimming, never a deposit."""
+
+
+def _store(conn, kind, lines, scope, bound, states) -> str:
+    """One rendering (plan round 7: a rendering binds exactly the payments whose lines appear
+    in its final deposited text). `lines` are the FINAL lines (escaped fields, suffixes such
+    as "· left missing"); the tag ends line 1 (binding V2). `bound` maps each payment the
+    rendering binds to the index of its line; `states` maps every payment it reports
+    (displayed or counted) to its item_state. If the fit (views.fit_lines) would print a
+    bound payment's line less than whole, nothing is stored: Undisplayed."""
     rid = f"r{db.next_seq(conn)}"
-    text = "\n".join(views.fit_lines(lines, tag=views.tag_for(rid))[0])
+    out, whole = views.fit_lines(lines, tag=views.tag_for(rid))
+    late = [pid for pid, i in bound.items() if i >= whole]
+    if late:
+        raise Undisplayed(f"{kind} would bind payments {late} whose lines do not fit")
+    text = "\n".join(out)
     full = {"names": {}, "refs": {}, "proposed": [], "offers": [], "next": None,
-            "walk": None, "pid": None, **scope}
+            "walk": None, "pid": None, **scope,
+            "bound_lines": {str(pid): out[i] for pid, i in bound.items()}}
     full.setdefault("review_of", rid)
     conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                  " membership_json) VALUES (?,?,?,?,?,?)",
-                 (rid, kind, db.canonical(full), db.now(), text,
-                  json.dumps([p for p, _ in items])))
-    for pid, st in items:
+                 (rid, kind, db.canonical(full), db.now(), text, json.dumps(sorted(bound))))
+    for pid in bound:
         rev = conn.execute("SELECT revision FROM projections WHERE pid=?", (pid,)).fetchone()[0]
         mrevs = {str(r[0]): r[1] for r in conn.execute(
             "SELECT match_id, revision FROM match_state WHERE pid=? AND state IN ('matched',"
             " 'proposed', 'conflicted')", (pid,))}
         conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
-                     " match_revisions_json, item_state) VALUES (?,?,?,?,?)",
-                     (rid, pid, rev, db.canonical(mrevs), st))
+                     " match_revisions_json) VALUES (?,?,?,?)",
+                     (rid, pid, rev, db.canonical(mrevs)))
+    for pid, st in states.items():
+        conn.execute("INSERT INTO render_states(render_id, pid, item_state) VALUES (?,?,?)",
+                     (rid, pid, st))
     return rid
 
 
-def _pages(conn, ds) -> list:
-    """Greedy pages of ≤ PAGE_LINES payments whose card fits BODY_LIMIT (r11)."""
+TAG_WORST = " \u00b7 " + "9" * 18        # views.tag_for: the longest render id (r\d{1,18})
+
+
+def _page_lines(conn, vendor, ds, i, n, p, pages, link) -> list:
+    """A vendor page's FINAL lines — what _store fits and what _pages measures (one
+    function, so the measure is the text)."""
+    head = f"Card {i} of {n} · missing invoices · {views.field(vendor)}"
+    if pages > 1:
+        head += f" · page {p} of {pages}"
+    body = [views.headline(d) + (" · left missing" if d["search_state"] == "accepted-missing"
+                                  else "") for d in ds]
+    return [head] + body + ([views.field(link, views.LINK_MAX)] if link else [])
+
+
+def _pages(conn, vendor, ds, link) -> list:
+    """Greedy pages of ≤ PAGE_LINES payments, each measured on its COMPLETE final text: the
+    page's real lines (_page_lines: escaped vendor name, "· left missing" suffixes, the
+    link) with the worst-case header numbers and the worst-case rendering tag (plan round 7,
+    Astra S1: a 60-character punctuated vendor name and 24 suffixes overflowed a page
+    measured without them, and its 25th payment was bound but cut)."""
+    def fits(trial):
+        lines = _page_lines(conn, vendor, trial, 99, 99, 99, 99, link)
+        lines[0] += TAG_WORST
+        return views.utf16_len("\n".join(lines)) <= views.BODY_LIMIT \
+            and views.fits_proposal("\n".join(lines))
     pages, cur = [], []
     for d in ds:
         trial = cur + [d]
-        lines = ["Card 99 of 99 · missing invoices · " + views.field(d["vendor"]),
-                 "page 99 of 99"] + [views.headline(x) for x in trial]
-        if cur and (len(trial) > PAGE_LINES or not views.fits_proposal("\n".join(lines))):
+        if cur and (len(trial) > PAGE_LINES or not fits(trial)):
             pages.append([x["pid"] for x in cur])
             cur = [d]
         else:
@@ -3066,7 +3188,12 @@ def _unanswered(conn, vendor, only=None) -> list:
     Review shows them."`. [Confirm all] is then left out (§1).
   - It records `scope["proposed"]` (the listed pids with a chosen document: what Confirm all
     commits) and `scope["order"]`.
-  - It records `render_items` for every listed proposal and every missing pid in the order.
+  - It binds (`render_items`) exactly the proposal lines that fit, each with its line index,
+    and reports (`render_states`) every proposal and every missing payment it counts. The
+    trailing lines are dropped BEFORE `_store`, measured the way `_pages` measures (the final
+    lines plus the worst-case tag), so `_store` never meets an overflow. A Review proposal
+    card binds its one payment at line 1 (its headline); its evidence lines may be clipped,
+    never line 1. The open-items card is the same composer.
 
   `buttons(conn, r)` returns the keyed `verdict` calls of the rules above, with `get_package`
   last as `("Get package", "get_package", {"quarter": scope["quarter"]}, None)`. `deposit_of`
@@ -3930,9 +4057,14 @@ transaction that writes. In order:
    incomplete").
 6. **`mirror`** (skipped when the gate refuses writes; the end message then says so):
    - `mirror.start` (once; it logs `mirror: start job=… rows=…`);
-   - then `{"unit": "mirror", "calls": mirror.hand_calls(job_id, CALLS_HARD - calls_made)}`;
+   - then `{"unit": "mirror", "calls": mirror.hand_calls(job_id, CALLS_HARD - calls_made)}`,
+     each hand-out a fresh diff of the store as it is now;
    - a budget below 1 → `end-batch`;
-   - done when `mirror.owed == 0`.
+   - the cursor goes on to `post` only when `mirror.owed == 0` on a fresh diff, re-checked at
+     every `job_next`. A handover's continuation or a tap that changes a payment after the
+     mirror began is therefore mirrored in the same run (plan round 7). Any vendor work it
+     reopened (Task 6's `take_handovers`) comes first, because the cursor checks the units
+     in order at every call.
 7. **Posts.** Each is `{"unit": "view", "render_id"}` (the model calls `show_view(render_id)`
    and, on its receipt, `mark_rendering_delivered`). An alerts-only message is `{"unit":
    "post", "render_ids"}`. Each post is offered at most `OFFER_MAX = 2` times (S7 §5,
@@ -5778,3 +5910,14 @@ after its second finding.
 | Terra S2: the sim never runs the plain fallback | Task 16 (sim rules): hinted when the vendor has a hint, then the plain search whenever the unit is still uncovered and `searches.plain` is false. Gmail's fake tells hinted searches (by sender) from plain ones (by vendor and window). Pinned end to end: `test_a_stale_hint_falls_back_to_the_plain_search` (the hinted search finds nothing, the plain one the invoice, the payment matched, the hint replaced). |
 | Terra S2: the e2e is 9 payments with no batch bound | Task 16: `RealisticQuarter.test_sixty_payments_finish_within_seven_batches`. A 60-payment fixture of §5's shape (18 vendors: recurring, FX, tax/fees, revenue, `exact_fit`, nothing-found, one 0.00 and one PDNG) runs through sim_job with calls_made counted per tool call. It asserts completion, no partial, ≤ 7 batches and every payment exactly once. The dollar cost is not measurable offline; PLAY measures it (§6.7). |
 
+
+## Plan round 7 dispositions
+
+Astra `gpt-6-astra` medium: DO NOT SHIP (2 S1, 1 S2). Terra `gpt-5.6-terra` medium: SHIP. All
+three were accepted and folded; the first and third were generalized as asked.
+
+| finding | disposition |
+|---|---|
+| Astra S1: a vendor page bound a payment its fitted text cut off | **Rule for every card kind** (Tasks 1, 7): a rendering binds exactly the payments whose lines appear in its final deposited text. `_store(conn, kind, lines, scope, bound, states)` takes the final lines and each bound payment's line index. If `views.fit_lines` would print a bound line less than whole, it raises `Undisplayed` and stores nothing. `render_items` (binding) holds only displayed payments. The states a rendering reports, displayed or only counted (an end message's "4 missing"), move to a new `render_states` table read by `seen_state`, replacing round 1's `render_items.item_state` column. `_pages` measures each page on its complete final lines (`_page_lines`: escaped vendor name, "· left missing" suffixes, link, worst-case header and tag), the same function `_store` renders. End message and open-items drop trailing proposal lines before `_store`, measured the same way. A Review card binds its one payment at its headline line. Pinned: `test_every_card_kind_binds_only_displayed_payments_when_oversized`, an oversized case per kind (a 60-character punctuated vendor, 24 left-missing suffixes, 40 long proposals) checked by `assert_binds_exactly_what_it_shows`; and `test_item_states_are_recorded_with_the_rendering` (a counted missing payment is reported, not bound). |
+| Astra S1: two Task 6 tests contradicted round 6 | `handed_candidates(cands, [])`, not `None` (checked: the function from the plan gives 8 with `[]` and raises the reported TypeError with `None`). The competitor test hands out the vendor unit before the no-op decision, so `handed_upto` covers the trigger. Astra reported both passing after these corrections. They were not run here: they need Tasks 1–6 built. |
+| Astra S2: a mid-run handover left the mirror stale behind a frozen plan | **Generalized** (Tasks 1, 5, 10, D9): no frozen plan and no invalidation hook. `mirror.hand_calls` re-hands in-flight calls, then a FRESH `plan()` over the current store against the export tags and `mirror_note`, minus this run's in-flight and refused calls. `mirror.owed` is in-flight plus that fresh diff. The cursor reaches `post` only when it is 0, re-checked at every `job_next`. `run_mirror` keeps only handed / done / failed acknowledgements. Pinned: `test_a_change_after_the_mirror_began_is_mirrored_in_the_same_run` (mirrored missing, then matched: owed > 0, the untag/tag/note calls are handed, then owed 0). **Run:** Task 5's `mirror.py` and all seven of its tests, copied from the plan into a disposable worktree of 26b68ee (Task 1's columns and the `run_claim` helper added there; `job.require_fresh` stubbed, as Task 3 deletes it), pass: `Ran 7 tests … OK`. |
