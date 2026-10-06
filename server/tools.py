@@ -483,8 +483,10 @@ def t_ask_state(args):
 
 
 @register("record_filing",
-          "The job's filing unit is done (each attachment was filed with ingest_document and "
-          "its source_ref, and Gmail's probe recorded).",
+          "The job's filing is done: every attachment of your own mail is filed "
+          "(ingest_document with its source_ref, at most the unit's max_files per filing "
+          "unit) and Gmail's probe recorded. Until then call job_next: it hands filing "
+          "again.",
           obj({"pass_token": TOKEN}, ("pass_token",)))
 def t_record_filing(args):
     import loop

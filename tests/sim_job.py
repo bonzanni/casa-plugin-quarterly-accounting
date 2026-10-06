@@ -9,8 +9,11 @@ driver makes in a turn is counted into `calls_made` (a new turn — a claim — 
             (bank_sync with the unit's acq), check_setup
   snapshot  export_history -> import_ledger_export(acq) -> each erase candidate:
             get_transaction; "no transaction #N" -> record_not_found
-  filing    one search of the operator's own mail (nothing found), record_probe(gmail, ok)
-            — failed when Gmail.down — then record_filing
+  filing    one search of the operator's own mail, record_probe(gmail, ok) — failed when
+            Gmail.down — then at most the unit's `max_files` attachments not in `filed_refs`
+            filed, newest first (download, Read, ingest_document with the reading: amount,
+            currency, date, issuer, number; no vendor), and record_filing only when none is
+            left unfiled (d2: the server re-hands `filing` until then)
   vendor    the skill's search rule (Task 16): only while a payment is uncovered (no exact
             fit, no unheld candidate), the hinted search (a learned hint, not yet run this
             run), then the plain one (still uncovered, not yet run); each message found
@@ -89,14 +92,28 @@ class Gmail:
     (`from:<sender> …`) finds the messages whose sender is exactly that address; a plain
     search (`<vendor> invoice after:… before:…`) finds the vendor's messages; both only
     within the query's `after:`/`before:` dates. The operator's own-mail search
-    (`from:me to:me …`) finds nothing. `down`: every search fails (the probe records
-    ok=false)."""
+    (`from:me to:me …`) finds the operator's own mail (`own`), newest first. `down`: every
+    search fails (the probe records ok=false)."""
 
     def __init__(self, test):
         self.test = test
         self.searches = []
         self.messages = []
+        self.own_mail = []
         self.down = False
+
+    def own(self, amount_minor, currency="EUR", day="2026-07-05", number=None,
+            issuer="Zapier") -> str:
+        """One self-addressed mail with an invoice attachment (the operator forwarding a
+        document to themselves). Its ref, <message id>:<attachment id>."""
+        k = len(self.own_mail) + 1
+        number = number or f"OWN-{k:03d}"
+        path = self.test.publish(f"own-{number}.pdf", b"%PDF-1.4 own " + number.encode() + b"\n")
+        ref = f"own-msg-{k:03d}:att-1"
+        self.own_mail.append({"ref": ref, "path": path, "amount_minor": amount_minor,
+                              "currency": currency, "date": day, "number": number,
+                              "issuer": issuer, "seq": k})
+        return ref
 
     def invoice(self, vendor, amount_minor, currency, day, number, sender=None,
                 kind="invoice", sent=False) -> None:
@@ -115,7 +132,7 @@ class Gmail:
             return None
         q = query.lower()
         if q.startswith("from:me to:me"):
-            return []
+            return sorted(self.own_mail, key=lambda m: -m["seq"])      # newest first
         after = re.search(r"after:(\d{4}-\d{2}-\d{2})", q)
         before = re.search(r"before:(\d{4}-\d{2}-\d{2})", q)
         hint = re.match(r"from:(\S+)", q)
@@ -568,13 +585,27 @@ class JobDriver:
         return None
 
     def _filing(self, u, token):
+        """The skill's filing slice (d2): the search and its probe, then at most
+        `max_files` attachments not in `filed_refs` filed, each downloaded and read once,
+        with the reading (no vendor: own mail is no vendor's); record_filing only when none
+        is left unfiled."""
         self.calls += 1
         found = self.gmail.search_emails("from:me to:me has:attachment newer_than:8d")
         self._tool("record_probe", {"pass_token": token, "kind": "gmail",
                                     "ok": found is not None,
                                     **({"detail": "Gmail search failed"} if found is None
                                        else {})})
-        self._tool("record_filing", {"pass_token": token})
+        todo = [m for m in found or () if m["ref"] not in u["filed_refs"]]
+        for m in todo[:u.get("max_files", len(todo))]:
+            self.calls += 2                               # download_attachment, Read
+            self._tool("ingest_document", {
+                "source_path": m["path"], "kind": "invoice", "source": "manual-email",
+                "extraction_author": "specialist", "source_ref": m["ref"],
+                "amount_minor": m["amount_minor"], "currency": m["currency"],
+                "document_date": m["date"], "issuer": m["issuer"],
+                "document_number": m["number"], "pass_token": token})
+        if len(todo) <= u.get("max_files", len(todo)):
+            self._tool("record_filing", {"pass_token": token})
         return None
 
     def _vendor(self, u, token):

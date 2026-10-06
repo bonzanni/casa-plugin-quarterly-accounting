@@ -43,7 +43,9 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              # S7: the desk's and the units' answer fields
              "render_ids", "casa_delivery", "package_id",
              # the simple loop's vendor unit fields (§2.2)
-             "exact_fit", "search_window", "vendor_queries"}
+             "exact_fit", "search_window", "vendor_queries",
+             # d2: the filing unit's slice size
+             "max_files"}
 # §15: tools that left the surface in S7 (their functions stay server-side).
 REMOVED_S7 = ("job_report", "apply_reply", "confirm_match", "reject_match", "set_exemption",
               "stop_chasing", "set_watermark", "set_package_name")
@@ -404,6 +406,32 @@ class TestJob(TempEnv):
                        "`record_filing(pass_token)`"):
             self.assertIn(phrase, f, phrase)
         self.assertLess(f.index('kind="gmail"'), f.index("`record_filing("))
+
+    READING = "amount_minor, currency, document_date, issuer, document_number, pass_token)`"
+
+    def test_the_filing_is_sliced_and_records_filing_only_when_drained(self):
+        """d2 (Astra S1): at most `max_files` per hand-out; record_filing only when every
+        attachment is filed — `filing` comes again until then (the job_next checkpoint)."""
+        f = flat(self.units("filing", "### `vendor`"))
+        self.assertIn("newest first, at most `max_files`;", f)
+        self.assertIn("When all are filed: `record_filing(pass_token)`; until then `filing` "
+                      "comes again.", f)
+        self.assertLess(f.index("at most `max_files`"), f.index("`record_filing("))
+
+    def test_own_mail_and_vendor_filing_pass_the_reading(self):
+        """d2 (Astra S2): the model reads each document and passes amount, currency, date,
+        issuer and number — own mail with no vendor (a candidate, never an exact_fit), the
+        vendor search's filing with the unit's vendor."""
+        f = flat(self.units("filing", "### `vendor`"))
+        self.assertIn("read each and pass its fields: `ingest_document(source_path, kind, "
+                      'source="manual-email", extraction_author="specialist", '
+                      "source_ref=<message id>:<attachment id>, " + self.READING, f)
+        self.assertNotIn("vendor=", f)
+        v = flat(self.vendor())
+        self.assertIn("**File** every plausible invoice found, reading each once: "
+                      '`ingest_document(source_path, kind, source="gmail", '
+                      'extraction_author="specialist", source_ref=<message id>, '
+                      "vendor=<the unit's vendor>, " + self.READING, v)
 
     def vendor(self):
         return self.units("vendor", "### `mirror`")

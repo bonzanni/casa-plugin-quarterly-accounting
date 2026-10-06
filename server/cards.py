@@ -386,9 +386,9 @@ def _ready_scope(conn, quarters) -> dict:
             "ready_sigs": {q: loop.completion_sig(conn, q) for q in qs}}
 
 
-def _handover(conn, job_id, docs, quarter, tail, ready, sent=None) -> str:
-    """§1 "A missing invoice the operator has" (§2.5): one line per handed document — what
-    the continuation changed — and the proposals among them to confirm."""
+def _receipts(conn, docs) -> tuple:
+    """§2.5, what the handed documents changed: ("Filed." lines — one per document paired
+    or fitting no payment yet —, the proposed payments holding one of them)."""
     head, props = [], []
     for doc in dict.fromkeys(docs):
         hs = matches.holders(conn, doc)
@@ -407,15 +407,30 @@ def _handover(conn, job_id, docs, quarter, tail, ready, sent=None) -> str:
             continue
         head.append("Filed. No payment fits it yet — it's matched when one does.")
     props.sort(key=_line_key)
-    # every handed document is accounted for (review round 1): the "Filed." lines that fit
-    # whole — leaving room for the proposals' closing line and the tail — then one count
+    return head, props
 
+
+def _fit_receipts(lines, before, after) -> list:
+    """Every handed document accounted for (review round 1): the "Filed." lines that fit
+    whole between `before` and `after`, then one count of the rest."""
     def more(left):
         return f"… and {left} more filed."
-    room = (["To confirm:", f"… and {len(props)} more to confirm — Review shows them."]
+    k = _fit_count(before, lines, more, after)
+    return lines[:k] + ([more(len(lines) - k)] if k < len(lines) else [])
+
+
+def _confirm_room(props) -> list:
+    """The lines a message's proposals need at the least: their heading and closing line."""
+    return (["To confirm:", f"… and {len(props)} more to confirm — Review shows them."]
             if props else [])
-    k = _fit_count([], head, more, room + list(tail))
-    head = head[:k] + ([more(len(head) - k)] if k < len(head) else [])
+
+
+def _handover(conn, job_id, docs, quarter, tail, ready, sent=None) -> str:
+    """§1 "A missing invoice the operator has" (§2.5), a standalone continuation (d2: a run
+    whose only request is the handover): one line per handed document — what the
+    continuation changed — and the proposals among them to confirm."""
+    head, props = _receipts(conn, docs)
+    head = _fit_receipts(head, [], _confirm_room(props) + list(tail))
     return _summary(conn, "end", quarter, head, props, [], tail,
                     {d["pid"]: item_state(d) for d in props}, scheduled=False,
                     extra_scope={"job_id": job_id, **(sent or {}),
@@ -423,7 +438,7 @@ def _handover(conn, job_id, docs, quarter, tail, ready, sent=None) -> str:
 
 
 def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), ready=(),
-                alerts=(), stopped=None):
+                alerts=(), stopped=None, standalone=True):
     """The run's one end message (kind 'end', §1), or None when a scheduled run has nothing
     new and no extra line (rev 17: "only if it holds an item in a state no delivered
     message showed"). `extra`: failure lines, mirror failures, the partial line — on a
@@ -433,7 +448,10 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     completion (compose_ready). `alerts`: the ids of the alerts `extra` prints, marked sent
     when the message is delivered (scope["alerts"], D10). `stopped`: an operator run whose
     pass stopped — its stop line heads the message in place of "checked" (the bank was not
-    worked), whatever its alert's state (review round 1)."""
+    worked), whatever its alert's state (review round 1). `standalone` (d2, Astra S1): the
+    run's only request was the handover — its message shows only what the handed documents
+    changed; otherwise (a check, scheduled or the operator's, that a handover joined) the
+    full message, the handover's "Filed." receipt lines added after its head."""
     st = state(conn)
     q = main_quarter(conn, job_id)
     open_missing = [d for ds in st["missing"].values() for d in ds if not _answered(d)]
@@ -441,10 +459,11 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     tail = [_ready_line(r, q) for r in ready] + list(extra)
     sent = {"alerts": sorted(alerts)} if alerts else {}
     if stopped and not scheduled:
-        tail = [stopped] + tail if handover_docs else tail
+        tail = [stopped] + tail if handover_docs and standalone else tail
         extra = [stopped] + list(extra)
-    if handover_docs:
+    if handover_docs and standalone:
         return _handover(conn, job_id, handover_docs, q, tail, ready, sent)
+    receipts = _receipts(conn, handover_docs)[0] if handover_docs else []
     reported = {d["pid"]: item_state(d) for d in st["proposals"]}
     reported.update({d["pid"]: "missing" for ds in st["missing"].values() for d in ds})
     extra_scope = {"job_id": job_id, **sent, **(_ready_scope(conn, ready) if ready else {})}
@@ -454,24 +473,27 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         new_miss = [d for d in open_missing if not seen_state(conn, d["pid"], "missing")]
         if not new_props and not new_miss:
             if ready:
-                return compose_ready(conn, ready, extra, alerts=alerts)
-            return None
+                return compose_ready(conn, ready, extra, alerts=alerts, receipts=receipts)
+            if not receipts:
+                return None
         earlier = len(st["proposals"]) + len(open_missing) - len(new_props) - len(new_miss)
         head = [f"{_qn(q)} · new: {len(new_props)} to confirm · {len(new_miss)} missing"]
         if earlier:
             head.append(f"{_s(earlier, 'earlier item')} still open")
+        head += _fit_receipts(receipts, head, _confirm_room(new_props) + tail)
         return _summary(conn, "end", q, head, new_props, _vendor_items(new_miss), tail,
                         reported, scheduled=True, extra_scope=extra_scope)
     c = st["counts"].get(q, collections.Counter())
     n = sum(c.values())
     if not st["proposals"] and not open_missing:
         if ready:
-            return compose_ready(conn, ready, extra, alerts=alerts)
+            return compose_ready(conn, ready, extra, alerts=alerts, receipts=receipts)
         if not c["pending"]:
             first = ([stopped] if stopped else
                      [f"{_qn(q)} checked · {_s(n, 'payment')} · all accounted for."])
-            return _summary(conn, "end", q, first, [], [],
-                            list(extra[1:] if stopped else extra), reported,
+            rest = list(extra[1:] if stopped else extra)
+            first += _fit_receipts(receipts, first, rest)
+            return _summary(conn, "end", q, first, [], [], rest, reported,
                             scheduled=False, extra_scope=extra_scope)
     earlier = []
     for eq in sorted(st["counts"]):
@@ -482,6 +504,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         if a or b:
             earlier.append(f"{_qn(eq, q)} · still open: {a} to confirm · {b} missing")
     head = [stopped or f"{_qn(q)} checked · {_s(n, 'payment')}", _counts_line(c)]
+    head += _fit_receipts(receipts, head, _confirm_room(st["proposals"]) + earlier + tail)
     return _summary(conn, "end", q, head, st["proposals"], _vendor_items(open_missing),
                     earlier + tail, reported, scheduled=False, extra_scope=extra_scope)
 
@@ -501,9 +524,10 @@ def compose_open(conn, quarter, *, scheduled=False) -> str:
                     _vendor_items(open_missing), [], reported, scheduled=scheduled)
 
 
-def compose_ready(conn, quarters: list, extra=(), alerts=()) -> str:
+def compose_ready(conn, quarters: list, extra=(), alerts=(), receipts=()) -> str:
     """The "package ready" notice (§1, D19): the latest owed quarter heads it with [Get
-    package]; each earlier one is a line; then `extra`. Delivery records each completion
+    package]; `receipts` (d2: the "Filed." lines of a handover the completing check took);
+    each earlier quarter is a line; then `extra`. Delivery records each completion
     (`ready_sigs`, views.mark_rendering_delivered)."""
     qs = sorted(set(quarters))
     latest = qs[-1]
@@ -514,7 +538,8 @@ def compose_ready(conn, quarters: list, extra=(), alerts=()) -> str:
         k = sum(1 for _, _, row in loop.in_scope(conn)
                 if dates.quarter_of(dates.effective_date(row)) == latest)
         head = f"{_qn(latest)} complete · {k} of {k} accounted for · package ready"
-    lines = [head] + [_ready_line(q, latest) for q in qs[:-1]] + list(extra)
+    after = [_ready_line(q, latest) for q in qs[:-1]] + list(extra)
+    lines = [head] + _fit_receipts(list(receipts), [head], after) + after
     return _store(conn, "ready", lines, {"quarter": latest, "order": [],
                                          **({"alerts": sorted(alerts)} if alerts else {}),
                                          **_ready_scope(conn, qs)}, {}, {})

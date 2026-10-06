@@ -146,7 +146,8 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 # (re)installed under the held name, never beside it as a second copy no
                 # row names (fix wave F)
                 _install(data, sha, "." + existing["ext"])
-                _operator_ref(conn, source, source_ref, existing[0])
+                if _operator_ref(conn, source, source_ref, existing[0]) and token is not None:
+                    decide.note_progress(conn, token)   # d2: a newly filed ref is progress
                 if vendor is not None:
                     # a vendor group that found it again names it, where none was recorded
                     conn.execute("UPDATE documents SET vendor=? WHERE doc_id=? AND vendor IS"
@@ -173,13 +174,18 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                     "collisions": collisions(conn, doc_id)}
 
 
-def _operator_ref(conn, source, source_ref, doc_id) -> None:
+def _operator_ref(conn, source, source_ref, doc_id) -> bool:
     """Issue #24 (D5): a file the operator supplied, filed — by its own ref (an
     attachment of a self-addressed mail, a Telegram file), also when its bytes were
-    already held — so a pass's capped filing skips it next time."""
+    already held — so a pass's capped filing skips it next time. True when the ref is
+    new (d2: filing it persisted work)."""
     if source in ("manual-email", "manual-telegram") and source_ref:
+        new = conn.execute("SELECT 1 FROM operator_refs WHERE ref=?",
+                           (source_ref,)).fetchone() is None
         conn.execute("INSERT OR REPLACE INTO operator_refs(ref, source, doc_id, filed_at)"
                      " VALUES (?,?,?,?)", (source_ref, source, doc_id, db.now()))
+        return new
+    return False
 
 
 def _doc(conn, doc_id):

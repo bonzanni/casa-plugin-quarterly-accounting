@@ -381,6 +381,12 @@ def completion_sig(conn, quarter) -> str:
 CALLS_SOFT = 65          # §2.2: hand out payments while calls_made < about 65 (Casa: 80)
 CALLS_HARD = 75          # a mirror unit never carries the batch past this many calls
 OFFER_MAX = 2            # S7 §5: one rendering is handed out at most this often per run
+FILING_SLICE = 8         # d2 (Astra S1): own-mail files filed per `filing` hand-out, at most
+# a slice's calls: per file its message lookup (get_email / list_attachments), download,
+# Read and ingest_document; the search, its gmail probe and the job_next checkpoint. A slice
+# is handed only while it fits under CALLS_HARD, so Casa (80 calls) never cuts a batch
+# before the model reports its progress
+FILING_CALLS = 4 * FILING_SLICE + 3
 WORDS = {"probes": "Reading the bank", "snapshot": "Importing the bank read",
          "filing": "Filing your own emailed documents", "vendor": "Matching invoices",
          "mirror": "Updating the bank ledger", "post": "Posting the result",
@@ -566,9 +572,14 @@ def _choose(conn, token, job_id, calls_made, logs) -> dict:
     p = run_pass(conn, run)
     if p is not None:
         if run["filed_at"] is None:
-            if calls_made >= CALLS_SOFT:
-                return {"unit": "end-batch"}            # as vendor work does (§2.2)
-            return {"unit": "filing", "filed_refs": work.filed_refs(conn),
+            # d2 (Astra S1): own mail is filed in slices of at most FILING_SLICE files, the
+            # model checkpointing with job_next after each; `filing` is handed again until
+            # record_filing says the attachments are drained. Each filed document marks the
+            # batch progressed, so a document-heavy filing reports progress every batch
+            if calls_made + FILING_CALLS > CALLS_HARD:
+                return {"unit": "end-batch"}
+            return {"unit": "filing", "max_files": FILING_SLICE,
+                    "filed_refs": work.filed_refs(conn),
                     "handover_docs": run_handover_docs(conn, job_id)}
         if run["listed_at"] is None:
             build_work_in_tx(conn, job_id, run_handover_docs(conn, job_id))
@@ -664,7 +675,8 @@ def _offer(conn, render_id, job_id) -> None:
 
 
 def record_filing(conn, token) -> dict:
-    """The filing unit is done (§2 step 1): runs.filed_at; the batch progressed."""
+    """The filing is done — the model filed its own mail's attachments to the last, slice by
+    slice (d2) — (§2 step 1): runs.filed_at; the batch progressed."""
     import decide
     import job
     with db.tx(conn):
@@ -789,7 +801,17 @@ def run_message(conn, job_id, run):
     extra = alert_lines + _gate_lines(conn, run) + partial_lines(conn, job_id)
     return cards.compose_end(conn, job_id, scheduled=scheduled,
                              handover_docs=run_handover_docs(conn, job_id), extra=extra,
-                             ready=owed, alerts=alert_ids, stopped=stopped)
+                             ready=owed, alerts=alert_ids, stopped=stopped,
+                             standalone=_handover_only(conn, job_id))
+
+
+def _handover_only(conn, job_id) -> bool:
+    """d2 (Astra S1): a standalone continuation — every request the run's pass took is a
+    handover (a run's first claim with nothing queued records its implicit check, job.claim,
+    so a check, scheduled or the operator's, is always among a checking run's requests)."""
+    kinds = {r[0] for r in conn.execute("SELECT w.kind FROM work_requests w JOIN runs u ON"
+                                        " u.pass_id=w.pass_id WHERE u.job_id=?", (job_id,))}
+    return kinds == {"handover"}
 
 
 def _stop_line(conn, run) -> tuple:

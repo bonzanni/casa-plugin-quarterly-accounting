@@ -1,0 +1,225 @@
+"""Diff round d2 (Astra, 26b68ee..3d9f262), the three accepted findings, each reproduced
+through the real surface (qa_server.TOOLS, a real bank-feed):
+- Astra S1a: own-mail filing is handed in slices of at most loop.FILING_SLICE files; the
+  model checkpoints with job_next(calls_made) after each, so no batch is cut at Casa's 80
+  calls without a progress report, and record_filing comes only once the attachments are
+  drained;
+- Astra S1b: a handover that joins an operator check keeps the check's full summary and
+  Review order, the handover's receipt line added; the handover-only rendering is for a
+  standalone continuation;
+- Astra S2: own-mail filing passes the reading (amount, currency, date, issuer, number),
+  so the document is a candidate and is matched in the same run."""
+from tests._base import StoreCase
+from tests.sim_job import JobDriver
+import db                     # server/ is on sys.path once tests._base is imported
+
+CASA_CALLS = 80               # Casa ends a batch at this many tool calls
+
+
+class OwnMailFilingIsSliced(StoreCase):
+    """Astra d2 S1a: 83 own-mail attachments, each downloaded, read and filed."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        self.drv = JobDriver(self, payments=2)          # Zapier EUR 10.00 and 20.00
+
+    def test_83_attachments_file_across_batches_each_reporting_progress(self):
+        import loop
+        g = self.drv.gmail
+        g.own(1000, day="2026-07-05", number="ZAP-1")      # the two that fit
+        g.own(2000, day="2026-08-05", number="ZAP-2")
+        for i in range(81):
+            g.own(70000 + i, day="2026-07-20")
+        units = self.drv.run_job("d2d2d2d2-a1")
+        # Casa never cut a batch: every batch ended at or under its 80 calls
+        self.assertLessEqual(max(self.drv.batch_calls), CASA_CALLS, self.drv.batch_calls)
+        ends = [u for u in units if u["unit"] in ("end-batch", "complete")]
+        self.assertGreaterEqual(len(ends), 4)               # 83 files need several batches
+        self.assertEqual(len(ends), len(self.drv.batch_calls))
+        for u in ends:                                       # progress in EVERY batch
+            self.assertTrue(u["report"], u)
+            self.assertTrue(u["progress"]["progressed"], u)
+        filing = [u for u in units if u["unit"] == "filing"]
+        self.assertTrue(all(u["max_files"] == loop.FILING_SLICE <= 8 for u in filing))
+        self.assertEqual(len(filing), -(-83 // loop.FILING_SLICE))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM documents").fetchone()[0], 83)
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM operator_refs WHERE source='manual-email'").fetchone()[0], 83)
+        # the quarter completes: both payments matched to their own-mail invoices
+        self.assertEqual(dict(self.conn.execute(
+            "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
+            {"matched": 2})
+        run = self.conn.execute("SELECT * FROM runs WHERE job_id='d2d2d2d2-a1'").fetchone()
+        self.assertIsNotNone(run["completed_at"])
+        self.assertFalse(run["partial"])
+        self.assertTrue(loop.complete(self.conn, "2026-Q3"))
+
+    def test_filing_is_done_only_on_record_filing(self):
+        """The server re-hands `filing` while the model has not reported the attachments
+        drained (record_filing)."""
+        import job
+        g = self.drv.gmail
+        for i in range(10):
+            g.own(70000 + i)
+        self.drv.claim("d2d2d2d2-a2")
+        seen = []
+        for _ in range(12):
+            u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
+            self.drv.calls += 1
+            if u["unit"] == "filing":
+                seen.append(len(u["filed_refs"]))
+                filed_at = self.conn.execute("SELECT filed_at FROM runs WHERE"
+                                             " job_id='d2d2d2d2-a2'").fetchone()[0]
+                self.assertIsNone(filed_at)                 # not drained yet
+            if u["unit"] == "vendor":
+                break
+            if u["unit"] == "end-batch":                    # a fresh batch (turn)
+                self.drv.claim("d2d2d2d2-a2")
+                continue
+            self.drv.do(u, self.drv.token)
+        self.assertEqual(seen, [0, 8])                      # two slices: 8, then 2
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT filed_at FROM runs WHERE job_id='d2d2d2d2-a2'").fetchone()[0])
+
+    def test_filed_refs_hold_every_ref_of_the_filing_window(self):
+        """With more files than the old 60-ref cap, the filing still drains: filed_refs
+        lists each ref filed in the window, so no filed attachment is handed again."""
+        import work
+        g = self.drv.gmail
+        for i in range(83):
+            g.own(70000 + i)
+        self.drv.run_job("d2d2d2d2-a3")
+        refs = work.filed_refs(self.conn)
+        self.assertEqual(len(refs), 83)
+        self.assertEqual(len(set(refs)), 83)
+
+
+    def test_a_new_ref_for_bytes_already_held_is_progress(self):
+        """A slice whose attachments are all copies of held files still persisted work —
+        their refs — so its batch reports progress; a ref filed again does not."""
+        import job
+        self.drv.claim("d2d2d2d2-a4")
+        for _ in range(10):
+            u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
+            if u["unit"] == "filing":
+                break
+            self.drv.do(u, self.drv.token)
+        self.assertEqual(u["unit"], "filing")
+        for ref, expect in (("m1:a1", 1), ("m2:a1", 1), ("m2:a1", 0)):
+            with db.tx(self.conn):
+                self.conn.execute("UPDATE claims SET progressed=0 WHERE gen=?",
+                                  (self.drv.token,))
+            path = self.publish("same.pdf", b"%PDF-1.4 the same bytes")
+            self.drv._tool("ingest_document", dict(
+                source_path=path, kind="invoice", source="manual-email",
+                extraction_author="specialist", source_ref=ref, pass_token=self.drv.token))
+            self.assertEqual(self.conn.execute("SELECT progressed FROM claims WHERE gen=?",
+                                               (self.drv.token,)).fetchone()[0], expect, ref)
+
+
+class HandoverJoiningACheck(StoreCase):
+    """Astra d2 S1b: an operator check with two booked payments; a EUR 10 invoice handed
+    over before the end message is composed."""
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        self.drv = JobDriver(self, payments=2)          # Zapier EUR 10.00 and 20.00
+
+    def hand_over_during(self, jid, at="vendor", started="operator"):
+        import job
+        self.drv.claim(jid, started)
+        for _ in range(40):
+            u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
+            self.drv.calls += 1
+            if u["unit"] == at:
+                break
+            self.drv.do(u, self.drv.token)
+        else:
+            self.fail(f"{at} was never handed out")
+        path = self.publish("handover.pdf", b"%PDF-1.4 invoice Zapier EUR 10.00",
+                            producer="telegram")
+        doc = self.drv._tool("ingest_document", dict(
+            source_path=path, kind="invoice", source="manual-telegram",
+            extraction_author="desk", counterparty="Zapier", issuer="Zapier",
+            amount_minor=1000, currency="EUR", document_date="2026-07-05",
+            document_number="ZAP-HAND"))
+        self.drv._tool("request_work", dict(kind="handover", trigger="operator",
+                                            doc_ids=[doc["doc_id"]]))
+        self.drv.do(u, self.drv.token)
+        self.drv._loop(jid)
+        return self.drv.posted_end(jid)
+
+    def test_astras_sequence_keeps_the_counts_review_and_receipt(self):
+        end = self.hand_over_during("d2d2d2d2-b1")
+        self.assertEqual(dict(self.conn.execute(
+            "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
+            {"matched": 1, "open": 1})
+        lines = end["text"].split("\n")
+        self.assertTrue(lines[0].startswith("Q3 checked · 2 payments"), lines)
+        self.assertIn("1 matched · 0 need no invoice · 0 to confirm · 1 missing", lines)
+        (receipt,) = [ln for ln in lines if ln.startswith("Filed. ")]
+        self.assertTrue(receipt.startswith("Filed. Paired with Zapier · 5 Jul · EUR 10.00"))
+        self.assertEqual([b["label"] for b in end["buttons"]], ["Review 1", "Get package"])
+        # the Review order is the check's: the missing payment's vendor
+        rid = self.conn.execute("SELECT end_render_id FROM runs WHERE job_id='d2d2d2d2-b1'"
+                                ).fetchone()[0]
+        import json
+        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                             " render_id=?", (rid,)).fetchone()[0])
+        missing = self.conn.execute("SELECT pid FROM projections WHERE status='open'"
+                                    ).fetchone()[0]
+        self.assertEqual(scope["order"], [{"v": "Zapier", "pids": [missing]}])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE"
+                                           " delivered_at IS NOT NULL").fetchone()[0], 1)
+
+    def test_a_check_whose_handover_answers_everything_says_so_with_the_receipt(self):
+        """The quarter completes in the check that took the handover: the ready notice,
+        with the receipt line."""
+        self.drv.gmail.invoice("Zapier", 2000, "EUR", "2026-08-05", "ZAP-2")
+        end = self.hand_over_during("d2d2d2d2-b2")
+        self.assertEqual(dict(self.conn.execute(
+            "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
+            {"matched": 2})
+        self.assertIn("Q3 complete · 2 of 2 accounted for · package ready", end["text"])
+        self.assertIn("Filed. Paired with Zapier · 5 Jul · EUR 10.00", end["text"])
+
+    def test_a_standalone_continuation_keeps_the_handover_only_message(self):
+        """A run whose only request is the handover shows only what it changed."""
+        self.drv.run_job("d2d2d2d2-b3")                        # both missing, shown
+        path = self.publish("handover.pdf", b"%PDF-1.4 invoice Zapier EUR 10.00",
+                            producer="telegram")
+        doc = self.drv._tool("ingest_document", dict(
+            source_path=path, kind="invoice", source="manual-telegram",
+            extraction_author="desk", issuer="Zapier", amount_minor=1000, currency="EUR",
+            document_date="2026-07-05", document_number="ZAP-HAND"))
+        self.drv._tool("request_work", dict(kind="handover", trigger="operator",
+                                            doc_ids=[doc["doc_id"]]))
+        self.drv.run_job("d2d2d2d2-b4")
+        end = self.drv.posted_end("d2d2d2d2-b4")
+        self.assertTrue(end["text"].split("\n")[0].startswith(
+            "Filed. Paired with Zapier · 5 Jul · EUR 10.00"))
+        self.assertNotIn("checked", end["text"])
+        self.assertEqual([b["label"] for b in end["buttons"]], ["Get package"])
+
+
+class OwnMailInvoiceIsACandidate(StoreCase):
+    """Astra d2 S2: an own-mail invoice filed with its reading is matched in the run."""
+
+    def test_an_own_mail_invoice_is_matched_in_the_same_run(self):
+        self.bind()
+        drv = JobDriver(self, payments=1)                    # Zapier EUR 10.00, 5 Jul
+        drv.gmail.own(1000, day="2026-07-05", number="ZAP-OWN", issuer="Zapier")
+        units = drv.run_job("d2d2d2d2-c1")
+        doc = self.conn.execute("SELECT * FROM documents").fetchone()
+        self.assertEqual((doc["amount_minor"], doc["currency"], doc["document_date"],
+                          doc["issuer"], doc["document_number"], doc["vendor"]),
+                         (1000, "EUR", "2026-07-05", "Zapier", "ZAP-OWN", None))
+        (v,) = [u for u in units if u["unit"] == "vendor"]
+        pay = v["payments"][0]
+        self.assertEqual([c["doc_id"] for c in pay["candidates"]], [doc["doc_id"]])
+        self.assertIsNone(pay["exact_fit"])                  # vendorless: never exact_fit
+        self.assertEqual(self.conn.execute("SELECT status FROM projections").fetchone()[0],
+                         "matched")
+        self.assertEqual(drv.gmail.searches[1:], [])         # no vendor search was needed

@@ -47,22 +47,22 @@ verdict gets "Reply in the main chat on the message, or tap its buttons."
 
 ### `probes`
 
-The unit carries `acq` (this bank read's number).
+The unit carries `acq`, the bank read.
 1. If bank-feed's tools are not visible to you, `record_probe(pass_token, kind="bank_tools",
    ok=false)` and call `job_next`; otherwise record it `ok=true`.
 2. `list_accounts`, then `record_probe(pass_token, kind="bank_accounts", ok=true,
-   data={"accounts": [{account_id, category, label}, …]})` — before the sync and the
-   ledger probe: it is what binds the account.
+   data={"accounts": [{account_id, category, label}, …]})` — before the sync: it binds
+   the account.
 3. `sync`, then `record_probe(pass_token, kind="bank_sync", ok=…, detail=…, acq=<the unit's acq>, data={"queue": {"workable": <n>, "parked": <n>}})`
-   from that sync's actual outcome (ok=false with its error if it failed); the counts are
-   the sync's `Queue:` line. tx-classifier may classify on the sync's trailer in this
-   session: never wait for it, and never classify or apply rules yourself.
+   from that sync's outcome (ok=false with its error if it failed); the counts are
+   the sync's `Queue:` line. tx-classifier may classify on the sync's trailer: never
+   wait for it, and never classify or apply rules yourself.
 4. `list_backups` once. From that ONE answer: `record_probe(pass_token, kind="ledger",
    ok=true, data={"generation": <Restore generation>, "registered": {<workflow>: <backup id>, …},
    "instance": <the "Ledger instance:" id>, "missing": [<each workflow it marks FILE MISSING>]})`.
    Read each value by its label (bank-feed may prepend sentences); `missing` is `[]` when no
    workflow is marked "(FILE MISSING — this workflow's next write mints a new restore point)".
-5. `check_setup()`. Then `job_next`: the server decides whether the pass can run.
+5. `check_setup()`; the server decides whether the pass can run.
 
 ### `snapshot`
 
@@ -74,13 +74,14 @@ it answers `no transaction #N`, `record_not_found(pass_token, pid, snapshot_id=<
 
 ### `filing`
 
-One `search_emails` for your own recent mail with attachments (`from:me to:me
-has:attachment newer_than:8d`). Record what it did: `record_probe(pass_token, kind="gmail",
-ok=…, detail=…)`; with no Gmail tools at all, no search:
-`record_probe(pass_token, kind="gmail", ok=false, absent=true)`. Skip every file whose ref
-is in `filed_refs`. File each other attachment once, newest first:
-`ingest_document(source_path, kind=<your reading>, source="manual-email", extraction_author="specialist", source_ref=<message id>:<attachment id>, pass_token)`
-— no `vendor`: your own mail is no vendor's. Then `record_filing(pass_token)`.
+Once per turn: `search_emails` (`from:me to:me has:attachment newer_than:8d`), then
+`record_probe(pass_token, kind="gmail", ok=…, detail=…)`; no Gmail tools: no search,
+`record_probe(pass_token, kind="gmail", ok=false, absent=true)`. Skip every file
+whose ref is in `filed_refs`. File each other attachment once, newest first, at most
+`max_files`; read each and pass its fields:
+`ingest_document(source_path, kind, source="manual-email", extraction_author="specialist", source_ref=<message id>:<attachment id>, amount_minor, currency, document_date, issuer, document_number, pass_token)`
+— no `vendor`: your own mail is no vendor's. When all are filed:
+`record_filing(pass_token)`; until then `filing` comes again.
 
 ### `vendor`
 
@@ -91,7 +92,7 @@ One vendor's payments, each with its `revision`, the filed documents that could 
    and `Read` the path it names. A payment whose `exact_fit` you accept, having read both
    sides, needs no search.
 2. **Search the vendor's mail once per run** for the payments nothing filed fits, over the
-   `search_window` dates; `searches` and `vendor_queries` say what this run already did.
+   `search_window` dates; `searches` and `vendor_queries` are this run's searches so far.
    With a learned hint and `searches.hinted` false: the hinted search
    (`from:<hint_sender>` and the `hint_subject` words). With no hint, or when the hinted
    search leaves ANY payment uncovered, and `searches.plain` is false:
@@ -99,7 +100,7 @@ One vendor's payments, each with its `revision`, the filed documents that could 
    still uncovered, until found or out of ideas. Record each:
    `record_search(pids=[the payments it was for], search="hinted", queries=[…], found_candidate=…, pass_token)`
    (`search="plain"`, `search="payment"`).
-3. **File** every plausible invoice found:
+3. **File** every plausible invoice found, reading each once:
    `ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<message id>, vendor=<the unit's vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`.
 4. **Decide the vendor's payments in ONE call:** `decide(pass_token, entries=[…])`, one
    entry per payment:
@@ -107,18 +108,18 @@ One vendor's payments, each with its `revision`, the filed documents that could 
      **certain**, having read both sides: the vendor or issuer, the number, exactly the
      payment's amount in the same currency, the date;
    - `"propose"` on any doubt, and always for another currency (`alternatives`: up to 3
-     other doc ids when several fit);
+     other doc ids);
    - `"missing"` with a `reason` when nothing fits. Never "no invoice needed": that is the
      operator's.
    `document_date` is the date printed on the document you opened: its issue date, not a
    due, delivery or email date. The server enforces the floor; no date window.
    Re-decide only the refused entries. A payment that
-   `holds` a document and now has another fit: `match` the same document, or `propose` the
-   right one with the other as an alternative.
+   `holds` a document and now has another fit: `match` it again, or `propose` the right
+   one, the other as an alternative.
 5. **Save what worked:** when a vendor search found an invoice,
    `upsert_counterparty(name=<vendor>, hint_sender=<the sender address>, hint_subject=<a subject pattern>, pass_token)`.
 
-A vendor whose invoices live behind a login: once, research the deepest link to its invoice
+A vendor whose invoices sit behind a login: once, research the deepest link to its invoice
 list and `upsert_counterparty(name, patterns=[bank text], source="portal", document_link=…, pass_token)`.
 
 ### `mirror`
