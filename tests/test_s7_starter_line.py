@@ -2,7 +2,8 @@
 """#45 (Casa starter line, contract drive-runs/2026-10-04/quart-starter-line-spec.md): Casa
 v0.344.31 writes, on the line right after the first `Job id:` of a job's launch prompt and
 brief, exactly `Started by: operator`, `Started by: scheduled` or `Started by: agent`. The
-job model copies it into the first token-less job_next(job_id, started_by). It feeds only
+job model copies it into the first token-less job_next(job_id, started_by); a copy of the
+bare value (`operator`) counts as its line. It feeds only
 §4.1's implicit check: `operator` records trigger operator; `scheduled`, `agent`, anything
 else and absence record trigger cron, as before. A queued ask is never changed, and a later
 claim ignores the value."""
@@ -46,11 +47,28 @@ class StarterLine(StoreCase):
                 self._claim(value)
                 self.assertEqual(_requests(self.conn), [("check", "operator")])
 
+    def test_the_bare_value_counts_as_its_line(self):
+        """Live 2026-10-07 (binding run): the job model copied only the value — the first
+        job_next sent started_by "operator" — and the run was recorded `scheduled`. Model
+        copy varies between sessions (the main run sent the full line), so the bare value
+        maps as its line does: the run's starter AND the implicit check's trigger."""
+        for value, starter, trigger in (("operator", "operator", "operator"),
+                                        (" operator\r\n", "operator", "operator"),
+                                        ("scheduled", "scheduled", "cron"),
+                                        ("agent", "scheduled", "cron")):
+            with self.subTest(value=repr(value)):
+                self.setUp()
+                self._claim(value)
+                self.assertEqual(_requests(self.conn), [("check", trigger)])
+                self.assertEqual(self.conn.execute(
+                    "SELECT started_by FROM runs WHERE job_id=?", (A,)).fetchone()[0], starter)
+
     def test_near_misses_and_absence_keep_todays_cron_check(self):
         for value in (None, "", "Started by: Operator", "started by: operator",
                       "Started by:  operator", "Started by:operator",
                       "Started by: operator\nx", "Started by: operator\r\nx",
-                      "operator", "Started by: operator.", 1, ["Started by: operator"]):
+                      "Started by: operator.", 1, ["Started by: operator"],
+                      "Operator", "operator.", "by: operator", "operator x", "op"):
             with self.subTest(value=repr(value)):
                 self.setUp()
                 self._claim(value)

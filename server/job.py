@@ -41,14 +41,17 @@ def check_claim(conn, token) -> None:
 # #45: the line Casa (0.344.31 on) writes right after the first `Job id:` of the job's launch
 # prompt and brief, as the job model copies it. Only §4.1's implicit check reads it: the
 # trigger it records. `scheduled` and `agent` keep today's cron; anything else, and no line
-# (an older Casa), is "Casa did not say" — today's cron too.
+# (an older Casa), is "Casa did not say" — today's cron too. The job model sometimes copies
+# only the value (live 2026-10-07: "operator"), so the bare value counts as its line.
 STARTED_BY = {"Started by: operator": "operator", "Started by: scheduled": "cron",
-              "Started by: agent": "cron"}
+              "Started by: agent": "cron", "operator": "operator", "scheduled": "cron",
+              "agent": "cron"}
 
 
 def starter_trigger(started_by) -> str:
-    """The implicit check's trigger for the copied starter line: surrounding whitespace
-    (CR and LF included) stripped, then an exact match; otherwise cron."""
+    """The implicit check's trigger for the copied starter line, or its bare value:
+    surrounding whitespace (CR and LF included) stripped, then an exact match; otherwise
+    cron."""
     if not isinstance(started_by, str):
         return "cron"
     return STARTED_BY.get(started_by.strip(), "cron")
