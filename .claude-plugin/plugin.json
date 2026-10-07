@@ -1,6 +1,6 @@
 {
   "name": "quarterly-accounting",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Quarterly accounting preparation: matches every business-account transaction to the document it needs, mirrors the decisions into bank-feed as acct:: tags and notes, answers from its own store, and builds a quarter's zip on request.",
   "author": {
     "name": "Nicola Bonzanni"
@@ -11,11 +11,12 @@
         "name": "work",
         "skill": "quarterly-job",
         "title": "Accounting check",
-        "summary": "Checks the bank and Gmail, judges documents, prepares packages",
-        "batches": "unlimited",
+        "summary": "Checks the bank and Gmail, matches invoices, keeps the bank ledger's notes current",
+        "batches": 20,
         "turnsPerBatch": 80,
         "session": "fresh",
-        "host": "specialist"
+        "host": "specialist",
+        "quietWhenScheduled": true
       }
     ],
     "resultContract": {
@@ -30,9 +31,6 @@
         "bind_account": {
           "result": "safe"
         },
-        "build_quarterly_package": {
-          "result": "safe"
-        },
         "build_review": {
           "result": "safe"
         },
@@ -42,8 +40,21 @@
         "check_setup": {
           "result": "safe"
         },
+        "decide": {
+          "result": "safe"
+        },
         "get_counterparty": {
           "result": "safe"
+        },
+        "get_package": {
+          "result": "capability",
+          "provides": [
+            "package"
+          ],
+          "delivers": {
+            "package": "operator_file"
+          },
+          "filename": true
         },
         "import_ledger_export": {
           "result": "safe"
@@ -55,9 +66,6 @@
           "result": "safe"
         },
         "job_status": {
-          "result": "safe"
-        },
-        "list_projections": {
           "result": "safe"
         },
         "list_quarter_state": {
@@ -118,13 +126,16 @@
         "record_delivery": {
           "result": "safe"
         },
-        "record_filing": {
-          "result": "safe"
-        },
         "record_match": {
           "result": "safe"
         },
-        "record_observation": {
+        "record_missing": {
+          "result": "safe"
+        },
+        "record_mirror": {
+          "result": "safe"
+        },
+        "record_not_found": {
           "result": "safe"
         },
         "record_probe": {
@@ -136,13 +147,13 @@
         "relabel_match": {
           "result": "safe"
         },
-        "request_package": {
-          "result": "safe"
-        },
         "request_work": {
           "result": "safe"
         },
         "reset_store": {
+          "result": "safe"
+        },
+        "set_aside": {
           "result": "safe"
         },
         "set_expectation": {
@@ -175,16 +186,16 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__apply_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__ask_state",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__bind_account",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__build_quarterly_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__build_review",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__cancel_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__check_setup",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__decide",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__get_counterparty",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__get_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__import_ledger_export",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__ingest_document",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_next",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_status",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__list_projections",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_quarter_state",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_unmatched_documents",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__mark_irrelevant",
@@ -196,13 +207,14 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__propose_reading",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__read_document",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_delivery",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__record_filing",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__set_aside",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_match",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__record_observation",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__record_missing",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__record_mirror",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__record_not_found",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_probe",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__record_search",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__relabel_match",
-      "mcp__plugin_quarterly-accounting_quarterly-accounting__request_package",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__request_work",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__reset_store",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__set_expectation",

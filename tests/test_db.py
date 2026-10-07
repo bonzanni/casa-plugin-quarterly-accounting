@@ -16,10 +16,12 @@ class TestSchema(TempEnv):
         names = {r[0] for r in c2.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
         for t in ("meta", "counters", "binding", "pass_marker", "passes", "probes",
                   "documents", "document_status", "counterparties", "chain_overrides",
-                  "snapshots", "bank_rows", "projections", "aliases", "cursor", "matches",
+                  "snapshots", "bank_rows", "projections", "aliases", "matches",
                   "log", "match_state", "residue", "renders", "render_items", "shown",
                   "packages", "deliveries", "delivered_rows", "alerts"):
             self.assertIn(t, names, t)
+        for t in ("cursor", "credits", "pass_steps", "package_requests"):  # removed-name: asserted absent
+            self.assertNotIn(t, names, t)
         self.assertEqual(c1.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
         self.assertEqual(c1.execute("PRAGMA journal_mode").fetchone()[0], "wal")
@@ -56,7 +58,7 @@ class TestSchema(TempEnv):
     def _assert_current_behaviour(self, c, old_seq: int, deliveries=1, first_sent=False):
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
                          .fetchone()[0], str(db.SCHEMA_VERSION))
-        self.assertEqual(db.SCHEMA_VERSION, 11)
+        self.assertEqual(db.SCHEMA_VERSION, 14)
         # the migrated store has every column and index a fresh store has
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
@@ -88,19 +90,14 @@ class TestSchema(TempEnv):
         import views
         views.mark_rendering_delivered(c, "r-new")
         self.assertEqual(db.last_delivered(c)["render_id"], "r-new")
-        # fix E2: every migrated lineage is non-fresh until the sweep re-reads it
+        # fix E2: every migrated lineage is non-fresh until the next import observes it
         import lineage
         p = lineage.projection(c, 1)
         self.assertEqual(p["class_tags_json"], '["software"]')
-        self.assertEqual((p["class_observed_snapshot"], p["observed_revision"]), (None, None))
-        # issue #1: a migrated lineage has no note confirmation, so it is read once
-        self.assertEqual(tuple(p[k] for k in ("export_tag_revision", "note_seen_seq",
-                                              "note_seen_rev", "note_seen_at",
-                                              "note_issued_at", "read_snapshot")),
-                         (None,) * 6)
-        # issue #14: the store's epoch is the upgrade; no issue of an unknown revision
-        self.assertEqual((p["note_issued_seq"], p["note_other_issued_at"]), (None, None))
-        self.assertIsNotNone(db.epoch(c))
+        self.assertEqual((p["class_observed_snapshot"], p["export_tag_revision"]), (None, None))
+        # simple loop §4: the sweep's note epoch went with the sweep
+        self.assertIsNone(c.execute("SELECT value FROM meta WHERE key='store_epoch_at'")  # removed-name: asserted absent
+                          .fetchone())
         self.assertFalse(lineage.is_fresh(c, p))
         # fix E4/E5: a package built before the migration names no import, so its
         # first send is refused (build it again); the unsent send is not revoked yet
@@ -125,7 +122,7 @@ class TestSchema(TempEnv):
         c2 = db.open_store()                               # idempotent: a second open migrates nothing
         self.addCleanup(c2.close)
         self.assertEqual(c2.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "11")
+                         .fetchone()[0], "14")
 
     def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
         # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
@@ -148,7 +145,7 @@ class TestSchema(TempEnv):
         # and a resend could reuse the outbox name of an earlier send of the same bytes
         from tests.schema_history import DDL_V3
         self.assertIn("class_observed_snapshot", DDL_V3)
-        self.assertNotIn("pass_steps", DDL_V3)
+        self.assertNotIn("pass_steps", DDL_V3)  # removed-name: schema history
         old = self._released_store(DDL_V3, 3)
         old.execute("UPDATE renders SET delivered_seq=0 WHERE render_id='r-old'")
         old.execute("UPDATE deliveries SET status='uncertain'")
@@ -164,18 +161,14 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self._assert_current_behaviour(c, old_seq=0, deliveries=2, first_sent=True)
-        # Task 1 (S2, schema 10): the migration closes this live delegation pass
-        # (close_delegation_pass_on_upgrade) — its marker goes dead, and its own row
-        # is ended `interrupted`; its reply still defaults
+        # Task 1 (S2, schema 10): the migration closes this live delegation pass — its
+        # marker goes dead, and its own row is ended `interrupted`; its reply still defaults
         m = c.execute("SELECT * FROM pass_marker").fetchone()
-        self.assertEqual((m["generation"], m["live"], m["claimed_step"], m["lease_at"]),
-                         (5, 0, None, None))
+        self.assertEqual((m["generation"], m["live"], m["lease_at"]), (5, 0, None))
         self.assertEqual(c.execute("SELECT outcome FROM passes WHERE pass_id='p5'").fetchone()[0],
                          "interrupted")
         self.assertEqual(c.execute("SELECT reply FROM passes WHERE pass_id='p5'").fetchone()[0],
                          "telegram")
-        self.assertEqual(c.execute("SELECT count(*) FROM pass_steps").fetchone()[0], 0)
-        self.assertEqual(c.execute("SELECT count(*) FROM package_requests").fetchone()[0], 0)
         # two sends that shared one outbox name: the newest keeps it, the older is
         # renamed out of the way, and from now on no two deliveries share a path
         paths = [r[0] for r in c.execute("SELECT staged_path FROM deliveries"
@@ -190,8 +183,8 @@ class TestSchema(TempEnv):
     def test_a_v0_2_0_schema_4_store_migrates_to_current_keeping_its_data(self):
         # schema 4 as v0.2.0 shipped it (e79f77d): the import did not observe tags
         from tests.schema_history import DDL_V4
-        self.assertIn("pass_steps", DDL_V4)
-        self.assertNotIn("note_seen_seq", DDL_V4)
+        self.assertIn("pass_steps", DDL_V4)  # removed-name: schema history
+        self.assertNotIn("note_seen_seq", DDL_V4)  # removed-name: schema history
         old = self._released_store(DDL_V4, 4)
         old.execute("UPDATE renders SET delivered_seq=0 WHERE render_id='r-old'")
         old.close()
@@ -200,45 +193,31 @@ class TestSchema(TempEnv):
         self._assert_current_behaviour(c, old_seq=0)
 
     def test_a_v0_3_5_schema_5_store_migrates_to_current_keeping_its_data(self):
-        # schema 5 as v0.3.5 shipped it (7cd8eda). Issue #14: an issue of unknown revision
-        # is an "other" one, and the upgrade is the store's epoch. Issue #15: a request an
-        # older version left buildable without its check goes back to `queued`, and a
-        # package remembers the request it was built for
+        # schema 5 as v0.3.5 shipped it (7cd8eda), with package requests in every state:
+        # simple loop §4 drops the requests (12), and the package built for one is a
+        # package like any other, whose first send needs the latest import (checked by
+        # _assert_current_behaviour)
         from tests.schema_history import DDL_V5
-        self.assertIn("note_seen_seq", DDL_V5)
-        self.assertNotIn("note_issued_seq", DDL_V5)
+        self.assertIn("note_seen_seq", DDL_V5)  # removed-name: schema history
+        self.assertNotIn("note_issued_seq", DDL_V5)  # removed-name: schema history
         old = self._released_store(DDL_V5, 5)
         old.execute("UPDATE renders SET delivered_seq=0 WHERE render_id='r-old'")
         for rid, state, pkg, tok in ((1, "built", 1, 7), (2, "snapshot-done", None, 8),
                                      (3, "staged", None, 9), (4, "delivered", None, None),
                                      (5, "snapshot", None, None)):
-            old.execute("INSERT INTO package_requests(request_id, quarter, channel, pass_id,"
+            old.execute("INSERT INTO package_requests(request_id, quarter, channel, pass_id,"  # removed-name: schema history
                         " package_id, token, lease_at, state, created_at, updated_at) VALUES"
                         " (?, '2026-Q3', 'telegram', 'p', ?, ?, ?, ?, 'x', 'x')",
                         (rid, pkg, tok, "2026-09-03T00:00:00Z" if tok else None, state))
-        old.execute("INSERT INTO projections(dest_row_id, admitted_at, note_issued_at) VALUES"
+        old.execute("INSERT INTO projections(dest_row_id, admitted_at, note_issued_at) VALUES"  # removed-name: schema history
                     " (2, '2026-09-01T00:00:00Z', '2026-09-02T10:00:00Z')")
         old.close()
         c = db.open_store()
         self.addCleanup(c.close)
         self._assert_current_behaviour(c, old_seq=0)
-        reqs = {r["request_id"]: dict(r) for r in c.execute("SELECT * FROM package_requests")}
-        self.assertEqual({k: (v["state"], v["package_id"], v["token"], v["lease_at"])
-                          for k, v in reqs.items()},
-                         {1: ("queued", None, None, None), 2: ("queued", None, None, None),
-                          3: ("staged", None, 9, "2026-09-03T00:00:00Z"),
-                          4: ("delivered", None, None, None), 5: ("snapshot", None, None, None)})
-        self.assertEqual(c.execute("SELECT request_id FROM packages WHERE package_id=1")
-                         .fetchone()[0], 1)
-        # the old build is never sent as a first send: its request went back to its check
-        import delivery
-        with self.assertRaises(db.Refusal) as cm:
-            delivery.stage_for_delivery(c, channel="telegram", package_id=1, package_token=7)
-        self.assertIn("no longer the one its request will send", str(cm.exception))
-        import lineage
-        p2 = lineage.projection(c, 2)
-        self.assertEqual((p2["note_issued_seq"], p2["note_other_issued_at"]),
-                         (None, "2026-09-02T10:00:00Z"))
+        self.assertEqual(c.execute("SELECT count(*) FROM sqlite_master WHERE"
+                                   " name='package_requests'").fetchone()[0], 0)  # removed-name: asserted absent
+        self.assertNotIn("request_id", {r[1] for r in c.execute("PRAGMA table_info(packages)")})
         self.assertEqual(c.execute("SELECT as_built FROM deliveries").fetchone()[0], 0)
 
     def test_a_v0_5_0_schema_6_store_migrates_with_every_document_date_unread(self):
@@ -257,7 +236,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "11")
+                         .fetchone()[0], "14")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -266,7 +245,6 @@ class TestSchema(TempEnv):
         self.assertEqual(cols(c), cols(fresh))
         self.assertEqual(tuple(c.execute("SELECT document_date, date_read_at FROM documents")
                                .fetchone()), ("2026-05-20", None))
-        self.assertIsNotNone(db.epoch(c))
 
     def test_a_v0_6_0_schema_7_store_migrates_with_no_operator_refs(self):
         # schema 7 as v0.6.0 shipped it (847cee7). Issue #24 (D5): no earlier version kept
@@ -279,7 +257,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "11")
+                         .fetchone()[0], "14")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):
@@ -290,7 +268,6 @@ class TestSchema(TempEnv):
         cols = lambda conn: sorted(r[1] for r in conn.execute("PRAGMA table_info(operator_refs)"))
         self.assertEqual(cols(c), cols(fresh))
         self.assertEqual(c.execute("SELECT COUNT(*) FROM operator_refs").fetchone()[0], 0)
-        self.assertIsNotNone(db.epoch(c))
 
     def test_a_v0_7_0_schema_8_store_migrates_with_no_exchange_rates(self):
         # schema 8 as v0.7.0 shipped it (7406c98). Issue #35: the rows carry no rate until
@@ -302,7 +279,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self.assertEqual(c.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "11")
+                         .fetchone()[0], "14")
         fresh = sqlite3.connect(":memory:")
         self.addCleanup(fresh.close)
         for stmt in db._statements(db.DDL):

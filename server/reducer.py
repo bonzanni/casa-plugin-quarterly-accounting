@@ -52,6 +52,7 @@ class Inputs:
     last_known_kind: str | None
     doc_kinds: dict
     portal: bool
+    unknown_docs: frozenset = frozenset()   # Q2 run 1: documents of unknown amount
 
 
 @dataclass(frozen=True)
@@ -64,21 +65,6 @@ class Reduction:
 
 def _fp(cand: F.Cand) -> dict:
     return json.loads(cand.fp) if cand.fp else {"facts": None, "kind": None}
-
-
-def effective_kind(inp: Inputs) -> str | None:
-    """While the expectation is unknown, the last known kind stands in:
-    a pairing keeps the kind verdict it had (round-42 finding)."""
-    return inp.expectation.kind if not inp.expectation.unknown else inp.last_known_kind
-
-
-def kind_verdict(cand: F.Cand, inp: Inputs) -> str:
-    kind = effective_kind(inp)
-    if inp.doc_kinds.get(cand.doc_id) != kind:
-        return "mismatch"            # no confirmation cures it
-    if _fp(cand)["kind"] != kind:
-        return "stale"               # confirming against the new expectation cures it
-    return "ok"
 
 
 def _row_ok(cand: F.Cand, inp: Inputs) -> bool:
@@ -94,8 +80,6 @@ def _with_portal(tags: set, inp: Inputs) -> frozenset:
 def reduce(inp: Inputs) -> Reduction:
     exp = inp.expectation
     reasons: list[str] = []
-    if exp.unknown:
-        reasons.append("classification-conflict" if exp.conflict else "unclassified")
     if inp.fold.conflicted_ids():
         reasons.append("conflicted")
     # step 0 — ended
@@ -111,15 +95,9 @@ def reduce(inp: Inputs) -> Reduction:
     op = inp.fold.operator_current()
     if op is not None:
         # step 3 — validity of the current operator pairing
-        verdict = kind_verdict(op, inp)
-        row_ok = _row_ok(op, inp)
-        if not row_ok:
+        ok = _row_ok(op, inp)
+        if not ok:
             reasons.append("facts-changed")
-        if verdict == "mismatch":
-            reasons.append("kind-mismatch")
-        elif verdict == "stale":
-            reasons.append("kind-changed")
-        ok = row_ok and verdict == "ok"
         tag = "acct::matched" if ok else "acct::proposed"
         return Reduction(_with_portal({tag}, inp), "matched" if ok else "proposed",
                          op.match_id, tuple(reasons))
@@ -128,18 +106,23 @@ def reduce(inp: Inputs) -> Reduction:
     if len(ms) == 1 and ms[0].state in F.ACTIVE:
         m = ms[0]
         # step 5 — validity of the current machine pairing
-        verdict = kind_verdict(m, inp)
         row_ok = _row_ok(m, inp)
         if not row_ok:
             reasons.append("facts-changed")
-        if verdict == "stale":
-            reasons.append("kind-changed")
-        elif verdict == "mismatch":
-            reasons.append("kind-mismatch")
-        ok = m.state == "matched" and row_ok and verdict == "ok"
+        # f1 (Terra/Astra S1): the document's readings disagreed after the job matched it —
+        # the job never matches an unknown amount, so its match shows as a proposal
+        amount_ok = m.doc_id not in inp.unknown_docs
+        if not amount_ok:
+            reasons.append("amount-unknown")
+        ok = m.state == "matched" and row_ok and amount_ok
         tag = "acct::matched" if ok else "acct::proposed"
         return Reduction(_with_portal({tag}, inp), "matched" if ok else "proposed",
                          m.match_id, tuple(reasons))
+    if len(ms) > 1:
+        # D3: a set of machine candidates (fold._normalize made them all conflicted) is one
+        # proposal awaiting the operator's pick — "to confirm", never "missing"
+        return Reduction(_with_portal({"acct::proposed"}, inp), "proposed", None,
+                         tuple(reasons))
     # step 6 — expectation, for a lineage with no current pairing
     if exp.kind == "none":
         return Reduction(_with_portal({"acct::no-document-expected"}, inp), "no-document",

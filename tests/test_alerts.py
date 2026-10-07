@@ -8,18 +8,33 @@ import passes  # noqa: E402
 import views  # noqa: E402
 
 
+def gmail_failed(case, token, detail=""):
+    """Gmail's probe failed, on its third run in a row (D10: the line is said once the
+    streak reaches alerts.GMAIL_RUNS runs; simple loop Task 10)."""
+    import alerts
+    passes.record_probe(case.conn, token, "gmail", False, detail)
+    with db.tx(case.conn):
+        case.conn.execute("UPDATE probes SET fail_runs=? WHERE kind='gmail'",
+                          (alerts.GMAIL_RUNS,))
+
+
 class TestAlerts(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
 
     def finish(self, token):
-        return passes.end_pass(self.conn, token, "complete", {})["speak"]
+        return self.end_and_speak()
 
     def test_a_quiet_pass_says_nothing(self):
         self.assertIsNone(self.finish(self.pass_()))
 
     def test_gmail_failure_speaks_once_per_occurrence(self):
+        """D10: said once the probe failed on GMAIL_RUNS runs in a row, once per streak."""
+        for _ in range(2):
+            t = self.pass_()
+            passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
+            self.assertIsNone(self.finish(t))                  # under the threshold
         t = self.pass_()
         passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
         speak = self.finish(t)
@@ -27,22 +42,28 @@ class TestAlerts(StoreCase):
         views.mark_rendering_delivered(self.conn, speak["render_id"])
         t = self.pass_()
         passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
-        self.assertIsNone(self.finish(t))                      # same occurrence: silent
+        self.assertIsNone(self.finish(t))                      # same streak: silent
         t = self.pass_()
         passes.record_probe(self.conn, t, "gmail", True)
         self.assertIsNone(self.finish(t))                      # no "all better" message
+        for _ in range(2):
+            t = self.pass_()
+            passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
+            self.assertIsNone(self.finish(t))
         t = self.pass_()
         passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
-        self.assertIsNotNone(self.finish(t))                   # a new occurrence
+        self.assertIsNotNone(self.finish(t))                   # a new streak
+
+    def stale_sync(self):
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
+                              " bank_through) VALUES ('p', 'x', 0, 0, '2026-01-02')")
 
     def test_an_undelivered_alert_is_offered_again(self):
-        t = self.pass_()
-        passes.record_probe(self.conn, t, "bank_sync", False, "consent expired")
-        first = self.finish(t)
-        self.assertIn("re-authorise", first["text"].lower())
-        t = self.pass_()
-        passes.record_probe(self.conn, t, "bank_sync", False, "consent expired")
-        self.assertIsNotNone(self.finish(t))                   # the first send never landed
+        self.stale_sync()
+        first = self.finish(self.pass_())
+        self.assertIn("Bank not synced since 2 Jan · bank-feed needs attention", first["text"])
+        self.assertIsNotNone(self.finish(self.pass_()))        # the first send never landed
 
     def test_bound_account_gone(self):
         t = self.pass_(accounts=[{"account_id": "other", "category": "company", "label": "X"}])
@@ -50,10 +71,11 @@ class TestAlerts(StoreCase):
 
     def test_empty_detail_omits_the_parenthetical(self):
         t = self.pass_()
-        passes.record_probe(self.conn, t, "bank_sync", False)          # no detail string
+        gmail_failed(self, t)                                  # no detail string
         text = self.finish(t)["text"]
         self.assertNotIn("()", text)
-        self.assertIn("The bank connection stopped — new payments aren't coming in.", text)
+        self.assertIn("Gmail stopped letting me in — invoices aren't being searched.",
+                      " ".join(text.split()))
 
     def test_delivered_quarter_changed_names_package_and_rows_once(self):
         self.row(1, counterparty="Adobe", amount_minor=5445, booking_date="2026-07-14")
@@ -105,7 +127,7 @@ class TestAlertBatching(StoreCase):
                                               "change": "corrected"})))
 
     def finish(self):
-        return passes.end_pass(self.conn, self.pass_(), "complete", {})["speak"]
+        return self.end_and_speak()
 
     def test_every_rendering_fits_and_every_occurrence_is_said_once(self):
         said, renders = {}, 0
@@ -141,8 +163,8 @@ class TestAlertBatching(StoreCase):
         views.mark_rendering_delivered(self.conn, first["render_id"])
         rest = self.finish()
         t = self.pass_()
-        passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
-        joined = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        gmail_failed(self, t, "invalid_grant")
+        joined = self.end_and_speak()
         self.assertNotEqual(joined["render_id"], rest["render_id"])
         self.assertIn("Gmail", joined["text"])
         self.assertLessEqual(views.utf16_len(joined["text"]), views.BODY_LIMIT)
@@ -158,8 +180,8 @@ class TestUnboundedDetail(StoreCase):
 
     def check(self, detail):
         t = self.pass_()
-        passes.record_probe(self.conn, t, "gmail", False, detail)
-        speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        gmail_failed(self, t, detail)
+        speak = self.end_and_speak()
         self.assertLessEqual(views.utf16_len(speak["text"]), views.BODY_LIMIT)
         flat = speak["text"].replace("\n", " ")
         self.assertTrue(flat.startswith("Gmail stopped letting me in ("), flat[:80])
@@ -188,14 +210,14 @@ class TestOversizedParkedRendering(StoreCase):
 
     def test_an_oversized_parked_rendering_is_recomposed(self):
         t = self.pass_()
-        passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
-        first = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        gmail_failed(self, t, "invalid_grant")
+        first = self.end_and_speak()
         with db.tx(self.conn):                  # what pre-fix code could have saved
             self.conn.execute("UPDATE renders SET text=? WHERE render_id=?",
                               ("x" * 5000, first["render_id"]))
         t = self.pass_()
-        passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
-        again = passes.end_pass(self.conn, t, "complete", {})["speak"]
+        gmail_failed(self, t, "invalid_grant")
+        again = self.end_and_speak()
         self.assertNotEqual(again["render_id"], first["render_id"])
         self.assertLessEqual(views.utf16_len(again["text"]), views.BODY_LIMIT)
         self.assertIn("Gmail", again["text"])
@@ -216,7 +238,7 @@ class TestAlertRace(StoreCase):
 
     def test_two_processes_do_not_double_render_the_same_occurrence(self):
         t = self.pass_()
-        passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
+        gmail_failed(self, t, "invalid_grant")
         path = str(self.data / db.DB_NAME)
         ctx = multiprocessing.get_context("spawn")
         barrier = ctx.Barrier(2)

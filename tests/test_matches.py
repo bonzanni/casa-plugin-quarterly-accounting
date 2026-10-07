@@ -56,20 +56,6 @@ class TestMachineWrites(Base):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM residue WHERE reason='exempt-doc'")
                          .fetchone()[0], 1)
 
-    def test_unknown_none_and_wrong_kind_are_refused(self):
-        self.classify(self.pid, set())
-        self.settle(self.pid)
-        with self.assertRaises(db.Refusal):
-            self.auto(doc_id=self.doc())
-        self.classify(self.pid, {"internal-transfer"})
-        self.settle(self.pid)
-        with self.assertRaises(db.Refusal):
-            self.auto(doc_id=self.doc())
-        self.classify(self.pid, {"software"})
-        self.settle(self.pid)
-        with self.assertRaises(db.Refusal):
-            self.auto(doc_id=self.doc(kind="payslip"))
-
     def test_a_stale_row_snapshot_is_refused(self):
         snap = dict(self.snapshot(self.pid), amount_minor=9000)
         with self.assertRaises(db.Refusal):
@@ -83,23 +69,15 @@ class TestMachineWrites(Base):
         with self.assertRaises(db.Refusal):
             self.auto(doc_id=self.doc())
 
-    def test_issuer_number_collision_refuses_acceptance_but_allows_a_proposal(self):
-        a = self.doc(document_number="X-9")
-        self.doc(document_number="X-9", sha256="f" * 64)
-        with self.assertRaises(db.Refusal):
-            self.auto(doc_id=a)
-        self.assertEqual(self.auto(doc_id=a, kind="propose")["state"], "proposed")
-
-    def test_resolves_must_name_exactly_the_conflicted_set(self):
+    def test_a_machine_redecision_replaces_its_own_pairing(self):
+        # design rev 17 §2.2: what the payment holds by the machine is replaced by its own
+        # re-decision (the server computes `resolves`), never collides with it
         a = self.auto(doc_id=self.doc())["match_id"]
-        b = self.auto(doc_id=self.doc())["match_id"]           # collision: both conflicted
-        self.assertEqual((self.state(a), self.state(b)), ("conflicted", "conflicted"))
-        c_doc = self.doc()
-        with self.assertRaises(db.Refusal):
-            self.auto(doc_id=c_doc, kind="propose", resolves=[a])
-        r = self.auto(doc_id=c_doc, kind="propose", resolves=[a, b])
-        self.assertEqual((self.state(a), self.state(b), r["state"]),
-                         ("rejected", "rejected", "proposed"))
+        b = self.auto(doc_id=self.doc())["match_id"]
+        self.assertEqual((self.state(a), self.state(b)), ("rejected", "matched"))
+        r = self.auto(doc_id=self.doc(), kind="propose")
+        self.assertEqual((self.state(b), r["state"], r["status"]),
+                         ("rejected", "proposed", "proposed"))
 
     def test_a_machine_write_on_the_operators_own_pairing_is_refused(self):
         d = self.doc()
@@ -112,15 +90,16 @@ class TestMachineWrites(Base):
                                            " match_id=?", (mid,)).fetchone()[:],
                          ("matched", "operator"))
 
-    def test_resolves_after_the_operator_confirmed_one_is_refused_whole(self):
-        a = self.auto(doc_id=self.doc())["match_id"]
+    def test_a_machine_write_after_the_operator_confirmed_is_refused_whole(self):
         b = self.auto(doc_id=self.doc())["match_id"]
         rid = self.show(self.pid)
         self.granted(matches.confirm_in_tx, match_id=b, expected_revision=self.rev(match_id=b),
                      render_id=rid)
-        with self.assertRaises(db.Refusal):
-            self.auto(doc_id=self.doc(), kind="propose", resolves=[a, b])
+        seq = self.conn.execute("SELECT max(seq) FROM log").fetchone()[0]
+        with self.assertRaisesRegex(db.Refusal, "never reopened"):
+            self.auto(doc_id=self.doc(), kind="propose")
         self.assertEqual(self.state(b), "matched")
+        self.assertEqual(self.conn.execute("SELECT max(seq) FROM log").fetchone()[0], seq)
 
 
 class TestOperatorWrites(Base):
@@ -189,56 +168,12 @@ class TestOperatorWrites(Base):
                                                  " author='operator' ORDER BY seq", (self.pid,))]
         self.assertEqual(kinds, ["exempt", "lift", "pair"])
 
-    def test_kind_guard_is_evaluated_after_the_lift_and_rolls_back_whole(self):
-        self.classify(self.pid, {"transport", "fuel"})
-        self.settle(self.pid)
-        rid = self.show(self.pid)
-        self.granted(matches.set_exemption_in_tx, pid=self.pid, exempt=True,
-                     expected_revision=self.rev(self.pid), render_id=rid)
-        kb.upsert_counterparty(self.conn, "Adobe")
-        kb.set_expectation(self.conn, scope_type="counterparty", scope="Adobe", kind="none",
-                           author="specialist")
-        rid = self.show(self.pid)
-        with self.assertRaises(db.Refusal) as caught:
-            self.operator_pair(pid=self.pid, doc_id=self.doc(),
-                               expected_revision=self.rev(self.pid), render_id=rid)
-        self.assertIn("Adobe", str(caught.exception))
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE kind='lift'")
-                         .fetchone()[0], 0)
-
-    def test_confirm_refuses_a_wrong_kind_until_the_kind_is_corrected_and_reshown(self):
-        # round-27/28: no confirmation cures a kind mismatch; correcting the
-        # document's kind moves the item, so the old shown revision is stale.
-        slip = self.doc(kind="payslip")
-        self.classify(self.pid, {"income", "salary"})
-        self.settle(self.pid)
-        rid = self.show(self.pid)
-        mid = self.operator_pair(pid=self.pid, doc_id=slip, expected_revision=self.rev(self.pid),
-                                 render_id=rid)["match_id"]
-        self.classify(self.pid, {"software"})              # the classifier now wants an invoice
-        self.assertEqual(self.settle(self.pid).status, "proposed")   # shown, not retired
-        rid = self.show(self.pid)
-        shown = self.rev(match_id=mid)
-        with self.assertRaises(db.Refusal) as caught:
-            self.granted(matches.confirm_in_tx, match_id=mid, expected_revision=shown,
-                         render_id=rid)
-        self.assertNotIsInstance(caught.exception, authorship.Stale)
-        self.assertIn("payslip", str(caught.exception))
-        documents.update_document_metadata(self.conn, slip, kind="invoice")
-        with self.assertRaises(authorship.Stale):
-            self.granted(matches.confirm_in_tx, match_id=mid, expected_revision=shown,
-                         render_id=rid)
-        rid = self.show(self.pid)
-        r = self.granted(matches.confirm_in_tx, match_id=mid,
-                         expected_revision=self.rev(match_id=mid), render_id=rid)
-        self.assertEqual(r["status"], "matched")
-
     def test_unpairing_a_conflicted_candidate_leaves_the_accepted_pairing(self):
         p_doc, q_doc = self.doc(), self.doc()
+        q = self.auto(doc_id=q_doc, kind="propose")["match_id"]
         rid = self.show(self.pid)
         p = self.operator_pair(pid=self.pid, doc_id=p_doc, expected_revision=self.rev(self.pid),
-                               render_id=rid)["match_id"]
-        q = self.auto(doc_id=q_doc, kind="propose")["match_id"]  # lands conflicted beside P
+                               render_id=rid)["match_id"]       # sets Q aside beside P
         self.assertEqual(self.state(q), "conflicted")
         rid = self.show(self.pid)
         self.granted(matches.reject_in_tx, match_id=q, expected_revision=self.rev(match_id=q),
@@ -247,17 +182,37 @@ class TestOperatorWrites(Base):
 
     def test_confirming_a_conflicted_candidate_whose_document_moved_is_refused(self):
         d = self.doc()
-        a = self.auto(doc_id=d)["match_id"]
-        self.auto(doc_id=self.doc())                            # a and b collide
+        a = self.machine_entry(self.pid, d)                     # a joint machine set:
+        self.machine_entry(self.pid, self.doc())                # a and b both conflicted
+        self.assertEqual(self.state(a), "conflicted")
         self.row(2)
         other = self.lineage_for(2)
         self.classify(other, {"software"})
         self.settle(other)
-        self.auto(pid=other, doc_id=d)                          # d is free (a conflicted) -> active on other
+        # d then paired with another payment (the floor refuses this write as taken now;
+        # a pre-floor store or a merge can still hold it)
+        moved = self.machine_entry(other, d)
+        self.assertEqual(self.state(moved), "matched")
         rid = self.show(self.pid)
-        with self.assertRaises(db.Refusal):
+        with self.assertRaisesRegex(db.Refusal, "since been paired"):
             self.granted(matches.confirm_in_tx, match_id=a, expected_revision=self.rev(match_id=a),
                          render_id=rid)
+
+    def test_confirming_a_document_another_proposal_names_as_an_alternative_is_allowed(self):
+        """Rev 18.4 §R18.4 (r2 Astra S1 #2): P2's live proposal names B only as an
+        alternative, which holds nothing — P1's own pairing of B is confirmed."""
+        self.row(2)
+        p2 = self.lineage_for(2)
+        self.classify(p2, {"software"})
+        self.settle(p2)
+        b = self.doc()
+        self.auto(pid=p2, doc_id=self.doc(), kind="propose", alternatives=[b])
+        self.assertEqual(matches.holders(self.conn, b), [])
+        mine = self.auto(doc_id=b, kind="propose")["match_id"]
+        rid = self.show(self.pid)
+        self.granted(matches.confirm_in_tx, match_id=mine,
+                     expected_revision=self.rev(match_id=mine), render_id=rid)
+        self.assertEqual(self.state(mine), "matched")
 
     def test_exemption_rejects_the_pairing_and_says_so(self):
         mid = self.auto(doc_id=self.doc(), kind="propose")["match_id"]
@@ -293,15 +248,15 @@ class TestRace(Base):
         results = [q.get(timeout=60) for _ in procs]
         for p in procs:
             p.join(60)
-        self.assertEqual(sorted(r[0] for r in results), ["ok", "ok"], results)
-        self.assertEqual(sorted(r[2] for r in results), ["conflicted", "matched"])
-        loser = next(r[1] for r in results if r[2] == "conflicted")
-        winner = next(r[1] for r in results if r[2] == "matched")
-        seq = dict(self.conn.execute("SELECT match_id, max(seq) FROM log WHERE kind IN"
-                                     " ('pair','propose') GROUP BY match_id").fetchall())
-        self.assertGreater(seq[loser], seq[winner])       # the later-serialized write loses
-        self.assertEqual(self.conn.execute("SELECT cause FROM log WHERE kind='retire' AND"
-                                           " match_id=?", (loser,)).fetchone()[0], "occupied")
+        # design rev 17 §2 "The floor": the later-serialized write finds the document taken
+        # and is refused whole; it never lands conflicted beside the winner
+        self.assertEqual(sorted(r[0] for r in results), ["error", "ok"], results)
+        err = next(r for r in results if r[0] == "error")
+        self.assertEqual(err[1], "Refusal", results)
+        self.assertIn(f"document #{d} is taken", err[2])
+        self.assertEqual(next(r[2] for r in results if r[0] == "ok"), "matched")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE kind='pair'")
+                         .fetchone()[0], 1)
 
     def test_two_processes_same_revision_different_documents_one_wins(self):
         # round C1 (Astra S2): the machine CAS guard (`_machine`'s revision check) is what
@@ -370,7 +325,7 @@ class TestFixRound1(Base):
         irrelevant = self.doc()
         with db.tx(self.conn):
             self.conn.execute("UPDATE documents SET irrelevant=1 WHERE doc_id=?", (irrelevant,))
-        for bad in (99999, irrelevant, self.doc(kind="payslip")):
+        for bad in (99999, irrelevant):       # a payslip is a real document now (kind gate gone)
             for _ in range(2):
                 with self.assertRaises(db.Refusal):
                     self.auto(doc_id=bad)

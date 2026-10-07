@@ -1,12 +1,12 @@
 # server/alerts.py
 """The only things this plugin ever says unprompted (spec §"When the plugin
 may speak first"): collection stopped working, a delivered quarter changed
-underneath, and what a package request the operator made came to when no
-turn was there to say it (package notices: it stopped, the bank could not be
-read, its send was taken back or revoked, its send may not have arrived or
-did not go out). Once per occurrence, never repeated while the condition
+underneath, what became of a package send when no turn was there to say it
+(package notices: it could not be sent, it was taken back or revoked, it may
+not have arrived or did not go out), and a bank-ledger write bank-feed refused (d1:
+keyed by the payment and the write's payload). Once per occurrence, never repeated while the condition
 persists, never escalated, no "all better". An occurrence is keyed by the
-moment the condition began (a package notice: by its request or delivery),
+moment the condition began (a package notice: by its delivery),
 so a condition that clears and recurs is new. An alert counts as said only
 when its rendering was DELIVERED (mark_rendering_delivered sets sent_at); a
 send that failed is offered again."""
@@ -32,28 +32,112 @@ COLLECTION = {
 GMAIL_ABSENT = "Gmail isn't connected for the finance specialist — invoices aren't being searched."
 
 
+GMAIL_RUNS = 3              # D10: Gmail's probe failed on this many runs in a row
+SYNC_STALE_DAYS = 7         # D10: the last successful bank sync is older than this
+STALE_SYNC = "Bank not synced since {day} · bank-feed needs attention"
+STOPPED = "Accounting check stopped: {reason}."
+
+
 def evaluate(conn) -> None:
-    for kind in COLLECTION:
-        p = conn.execute("SELECT * FROM probes WHERE kind=?", (kind,)).fetchone()
-        if p is None or p["ok"] or not p["failing_since"]:
-            continue
-        detail = {"detail": p["detail"] or ""}
-        if json.loads(p["data_json"] or "{}").get("absent"):
+    """The failures that need the operator (simple loop §1, D10), each said once per
+    streak — its occurrence key names the streak, so it repeats only after a success ended
+    it and a new one passed the threshold:
+    - bank_sync: the store's last successful sync (max snapshots.bank_through) is more than
+      SYNC_STALE_DAYS old — keyed by that date;
+    - gmail: the probe failed on GMAIL_RUNS runs in a row (probes.fail_runs) — keyed by the
+      streak's start (failing_since);
+    - bound_account: gone from bank-feed (as before)."""
+    import datetime as _dt
+    through = conn.execute("SELECT max(bank_through) FROM snapshots").fetchone()[0]
+    if through is not None and (dates.parse_day(db.now()[:10])
+                                - dates.parse_day(through)) > _dt.timedelta(days=SYNC_STALE_DAYS):
+        conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
+                     " VALUES ('bank_sync', ?, ?, ?)",
+                     (f"bank_sync:stale:{through}", db.canonical({"since": through}), db.now()))
+    g = conn.execute("SELECT * FROM probes WHERE kind='gmail'").fetchone()
+    if g is not None and not g["ok"] and g["failing_since"] and g["fail_runs"] >= GMAIL_RUNS:
+        detail = {"detail": g["detail"] or ""}
+        if json.loads(g["data_json"] or "{}").get("absent"):
             detail["absent"] = True
         conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
-                     " VALUES (?,?,?,?)", (kind, f"{kind}:{p['failing_since']}",
-                                          db.canonical(detail), db.now()))
+                     " VALUES ('gmail', ?, ?, ?)", (f"gmail:{g['failing_since']}",
+                                                    db.canonical(detail), db.now()))
+    p = conn.execute("SELECT * FROM probes WHERE kind='bound_account'").fetchone()
+    if p is not None and not p["ok"] and p["failing_since"]:
+        conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
+                     " VALUES ('bound_account', ?, ?, ?)",
+                     (f"bound_account:{p['failing_since']}",
+                      db.canonical({"detail": p["detail"] or ""}), db.now()))
 
 
-# The package notices (issue #2): what a continuation owes the operator about a
-# package they asked for. `package-uncertain` and `package-send-failed` offer the
+def raise_stop(conn, reason: str) -> int:
+    """A run's pass stopped (simple loop §2 step 1: no bank-feed tools, setup or the bank
+    gate refuses): said once per streak of its reason (D10) — the streak is keyed by the
+    latest pass that imported, so a pass that reads the bank again ends it and the next
+    stop is said again. Inside the caller's tx."""
+    last = conn.execute("SELECT pass_id FROM snapshots ORDER BY snapshot_id DESC LIMIT 1"
+                        ).fetchone()
+    since = (last[0] if last is not None else None) or "none"
+    key = f"stop:{' '.join(str(reason).split())[:400]}:{since}"
+    conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
+                 " VALUES ('run-stopped', ?, ?, ?)",
+                 (key, db.canonical({"reason": views.clip(str(reason), DETAIL_MAX)}), db.now()))
+    return conn.execute("SELECT alert_id FROM alerts WHERE occurrence_key=?", (key,)).fetchone()[0]
+
+
+MIRROR_FAILED = ("{n} bank-ledger update{s} did not go through — tried again at the next "
+                 "check.")
+
+
+def raise_incomplete(conn, streak_start, lines) -> None:
+    """Rule 5 on scheduled runs that keep leaving work incomplete (e2, Astra S2; BRAIN's
+    R2 ruling): the current "search incomplete" lines, said ONCE per streak — keyed by the
+    streak's first run. Inside the caller's tx."""
+    conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
+                 " VALUES ('run-incomplete', ?, ?, ?)",
+                 (f"incomplete:{streak_start}", db.canonical({"lines": list(lines)[:4]}),
+                  db.now()))
+
+
+def _ids(unit) -> list:
+    """A unit's alert ids: one, or a tuple of them (the refused mirror writes' one line)."""
+    return list(unit[0]) if isinstance(unit[0], tuple) else [unit[0]]
+
+
+LINES_BUDGET = 1500         # UTF-16 units of alert lines one run message carries
+
+
+def pending_lines(conn, budget=LINES_BUDGET, said=()) -> tuple:
+    """(lines, alert ids): the undelivered alerts as the lines the run's one message
+    carries (simple loop §1: "the line joins the end message when there is one") — whole
+    occurrences in print order while they fit `budget` (the first always), so the message
+    stays within its limit; the rest wait for the next run's message. The ids go into that
+    message's scope["alerts"], so its delivery marks exactly them sent (D10). Inside the
+    caller's transaction; evaluate() first. `said`: alert ids the message already says in
+    its own words (an operator run's stop line): bound, with no line of their own."""
+    assert conn.in_transaction
+    evaluate(conn)
+    said = [a for a in said]
+    rows = [r for r in conn.execute("SELECT * FROM alerts WHERE sent_at IS NULL ORDER BY"
+                                    " alert_id").fetchall() if r["alert_id"] not in said]
+    if not rows:
+        return [], sorted(said)
+    units = _units(conn, rows)
+    chosen = []
+    for u in units:
+        trial = chosen + [u]
+        if chosen and views.utf16_len("\n".join(_lines(trial)[0])) > budget:
+            break
+        chosen = trial
+    return _lines(chosen)[0], sorted([i for u in chosen for i in _ids(u)] + said)
+
+
+# The package notices (issue #2): what the operator is owed about a package send. `package-uncertain` and `package-send-failed` offer the
 # package, so "send it again" binds to the rendering that printed them (D3).
 PACKAGE = {
-    "package-stopped": "I couldn't build the {quarter} package: {reason}.",
-    # a BUILT package that could not be posted (Casa refused the deposit, or it is over
-    # Telegram's limit): no Casa code reaches the operator (final fix wave T11-d)
+    # raised only by MIGRATIONS[11] since the simple loop (schema 12): a package an older
+    # version was asked for and had not sent, and an unsaid stopped / bank-unread notice
     "package-not-sent": "I couldn't send the {quarter} package{why} — ask again when you want it.",
-    "package-failed": "I couldn't read the bank for the {quarter} package — ask for it again.",
     "package-revoked": "The bank was re-read before I could send the {quarter} package — ask "
                        "for it again and I'll rebuild it.",
     "package-send-failed": "The {quarter} package didn't go out. Say \"send it again\" and "
@@ -83,15 +167,6 @@ def raise_package(conn, kind: str, key: str, *, quarter: str, reason: str = "",
     return conn.execute("SELECT alert_id FROM alerts WHERE occurrence_key=?", (key,)).fetchone()[0]
 
 
-def pass_notices(conn, pass_id) -> list:
-    """The undelivered package notices raised during `pass_id` (by its import's
-    revocations, say): the ones its end_pass, or the begin_pass that reclaims it,
-    must carry."""
-    return [r[0] for r in conn.execute(
-        "SELECT alert_id FROM alerts WHERE sent_at IS NULL AND kind LIKE 'package-%' AND"
-        " json_extract(detail, '$.pass_id')=? ORDER BY alert_id", (pass_id,))]
-
-
 def _musts(must) -> set:
     if must is None:
         return set()
@@ -111,18 +186,32 @@ DETAIL_MAX = 300
 
 def _units(conn, rows) -> list:
     """One unit per occurrence, in the order a rendering prints them: the
-    collection alerts, then the package notices, then each package's changes. A
-    unit is (alert_id, (package, quarter) or None, its wrapped lines)."""
+    collection alerts, then the refused mirror writes (ONE unit for all of them, d1), then
+    the package notices, then each package's changes. A unit is (alert_id — a tuple of
+    them for the mirror's —, (package, quarter) or None, its wrapped lines)."""
     import delivery
     out = []
     for a in rows:
         if a["kind"] in COLLECTION:
             c = json.loads(a["detail"])
-            detail = views.field(c["detail"] or "", DETAIL_MAX)
-            paren = f" ({detail})" if detail else ""
-            text = (GMAIL_ABSENT if a["kind"] == "gmail" and c.get("absent")
-                    else COLLECTION[a["kind"]].format(paren=paren))
+            if a["kind"] == "bank_sync" and c.get("since"):
+                text = STALE_SYNC.format(day=dates.short_day(c["since"]))
+            else:
+                detail = views.field(c.get("detail") or "", DETAIL_MAX)
+                paren = f" ({detail})" if detail else ""
+                text = (GMAIL_ABSENT if a["kind"] == "gmail" and c.get("absent")
+                        else COLLECTION[a["kind"]].format(paren=paren))
             out.append((a["alert_id"], None, views._wrap(text)))
+        elif a["kind"] == "run-stopped":
+            reason = views.field(json.loads(a["detail"]).get("reason", "").rstrip(". "), 300)
+            out.append((a["alert_id"], None, views._wrap(STOPPED.format(reason=reason))))
+        elif a["kind"] == "run-incomplete":
+            out.append((a["alert_id"], None, [w for line in json.loads(a["detail"])["lines"]
+                                              for w in views._wrap(views.clip(line, 300))]))
+    failed = tuple(a["alert_id"] for a in rows if a["kind"] == "mirror-failed")
+    if failed:                  # d1: every refused mirror write pending, said as one line
+        out.append((failed, None, views._wrap(MIRROR_FAILED.format(
+            n=len(failed), s="" if len(failed) == 1 else "s"))))
     for a in rows:
         if a["kind"] in PACKAGE or a["kind"] == "package-uncertain":
             c = json.loads(a["detail"])
@@ -191,7 +280,8 @@ def _render(units, partial: bool) -> tuple:
     lines, owners = _lines(units)
     out, whole = views.fit_lines(lines, MORE_CLOSING, always_close=partial)
     cut = {o for o in owners[whole:] if o is not None}
-    return "\n".join(out), [u[0] for u in units if u[0] not in cut], whole == len(lines)
+    return ("\n".join(out), [i for u in units if u[0] not in cut for i in _ids(u)],
+            whole == len(lines))
 
 
 def _batch(units, must=None) -> tuple:
@@ -202,7 +292,7 @@ def _batch(units, must=None) -> tuple:
     always in its rendering; the others follow in print order while they fit, and what
     does not fit waits for a later rendering."""
     order = {u[0]: i for i, u in enumerate(units)}
-    first = [u for u in units if u[0] in _musts(must)] or units[:1]
+    first = [u for u in units if set(_ids(u)) & _musts(must)] or units[:1]
     chosen = list(first)
     for u in units:
         if u in chosen:

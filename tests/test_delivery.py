@@ -11,11 +11,20 @@ import db  # noqa: E402
 import delivery  # noqa: E402
 
 
+def posted_first(conn, delivery_id) -> None:
+    """r3 #2: record_delivery(delivered) is refused for a package send never posted. These
+    tests stage and record directly; in S7 the one way out is post_package, whose
+    transaction marks the send posted before its deposit — written here, exactly."""
+    with db.tx(conn):
+        conn.execute("UPDATE deliveries SET posted_at=coalesce(posted_at, ?) WHERE"
+                     " delivery_id=?", (db.now(), delivery_id))
+
+
 def _record(conn, **kw):
-    """record_delivery, after the post a delivered outcome needs (r3 #2): these tests stage
-    and record directly; in S7 the send between them is post_package, which marks it."""
-    from tests import legacy_tools
-    legacy_tools.posted_first("record_delivery", kw)
+    """record_delivery, after the post a delivered outcome needs (r3 #2)."""
+    did = kw.get("delivery_id")
+    if kw.get("outcome") == "delivered" and isinstance(did, int) and not isinstance(did, bool):
+        posted_first(conn, did)
     return delivery.record_delivery(conn, **kw)
 import ledger  # noqa: E402
 import package  # noqa: E402
@@ -32,7 +41,7 @@ class Base(StoreCase):
         self.pid = self.lineage_for(1)
         self.classify(self.pid, {"software"})
         self.settle(self.pid)
-        self.pkg = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        self.pkg = package.build_quarterly_package(self.conn, "2026-Q3")
 
 
 class TestTelegram(Base):
@@ -130,7 +139,7 @@ class TestTelegram(Base):
         old = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
         _record(self.conn, delivery_id=old["delivery_id"], outcome="delivered")
-        newer = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        newer = package.build_quarterly_package(self.conn, "2026-Q3")
         for outcome in ("uncertain", "failed"):
             d = delivery.stage_for_delivery(self.conn, channel="telegram",
                                             package_id=newer["package_id"])
@@ -197,7 +206,7 @@ class TestCustody(Base):
         del db.custody_lock
         self.addCleanup(setattr, db, "custody_lock", saved)
         with self.assertRaises(AttributeError):
-            package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+            package.build_quarterly_package(self.conn, "2026-Q3")
 
 
 class TestNoEmail(Base):
@@ -243,7 +252,7 @@ class TestResendTarget(Base):
     def test_the_offered_uncertain_package_not_a_newer_delivered_one(self):
         a = self.pkg
         self.send(a["package_id"], "uncertain")
-        b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        b = package.build_quarterly_package(self.conn, "2026-Q3")
         self.send(b["package_id"], "delivered")
         text = self.shown()
         self.assertIn(views.field(a["filename"]), text)
@@ -259,7 +268,7 @@ class TestResendTarget(Base):
         a = self.pkg
         self.send(a["package_id"], "uncertain")
         sheet_a = views.build_review(self.conn, view="status", quarter="2026-Q3")
-        b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        b = package.build_quarterly_package(self.conn, "2026-Q3")
         self.send(b["package_id"], "uncertain")
         sheet_b = views.build_review(self.conn, view="status", quarter="2026-Q3")
         self.assertIn(views.field(b["filename"]), sheet_b["text"])
@@ -279,7 +288,7 @@ class TestResendTarget(Base):
 
     def test_two_offered_asks_which_by_the_names(self):
         a = self.pkg
-        b = package.build_quarterly_package(self.conn, "2026-Q3", bound=False)
+        b = package.build_quarterly_package(self.conn, "2026-Q3")
         self.send(a["package_id"], "uncertain")
         self.send(b["package_id"], "uncertain")
         self.shown()
@@ -401,5 +410,161 @@ class TestOutboxNames(Base):
         self.assertTrue(os.path.exists(first["path"]))
 
 
+class TestOfferIsExactlyStaging(StoreCase):
+    """THE pin: over every state combination, a package is offered exactly when
+    stage_for_delivery(resend=True) would stage it."""
+    def setUp(self):
+        super().setUp()
+        import package as _package
+        self._package = _package
+        self.bind()
+        self.pass_()
+        self.row(1)
+        pid = self.lineage_for(1)
+        self.classify(pid, {"software"})
+        self.settle(pid)
+        self.end_live_pass()
+
+    def snapshot(self):
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
+                              " VALUES ('p-x', ?, 0, 0)", (db.now(),))
+
+    def delivery(self, pkg, status, revoked=False):
+        with db.tx(self.conn):
+            n = self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]
+            return self.conn.execute(
+                "INSERT INTO deliveries(package_id, channel, staged_path, status, created_at,"
+                " settled_at, revoked_at, lease_at) VALUES (?, 'telegram', ?, ?, ?, ?, ?, ?)",
+                (pkg, f"/gone/{n}.zip", status, db.now(),
+                 None if status == "staged" else db.now(),
+                 db.now() if revoked else None, db.now())).lastrowid
+
+    def test_offered_exactly_when_staging_succeeds(self):
+        import itertools
+        combos = itertools.product(("uncertain", "failed", "staged", "delivered"),
+                                   ("current", "newer"), (False, True), (False, True))
+        seen = 0
+        for latest, snap, came, revoked in combos:
+            where = (latest, snap, came, revoked)
+            self.snapshot()
+            pkg = self._package.build_quarterly_package(self.conn, "2026-Q3")["package_id"]
+            if came:
+                self.delivery(pkg, "delivered")
+            self.delivery(pkg, latest, revoked=revoked)
+            if snap == "newer":
+                self.snapshot()
+            offered = pkg in {p for p, _, _ in delivery.offerable(self.conn)}
+            why = delivery.resend_refusal(self.conn, pkg)
+            # and the predicate itself: owed only when nothing arrived, the latest send
+            # is settled (not in flight) and not revoked, and — unless it may have
+            # arrived (uncertain) — the bank has not changed since the build
+            owed = (not came and latest in ("uncertain", "failed") and not revoked
+                    and (latest == "uncertain" or snap == "current"))
+            self.assertEqual(why is None, owed, where)
+            try:
+                delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg,
+                                            resend=True)
+                staged, refusal = True, None
+            except db.Refusal as exc:
+                staged, refusal = False, str(exc)
+            self.assertEqual(offered, staged, where)
+            self.assertEqual(why is None, staged, where)
+            if not staged:
+                self.assertEqual(refusal, why, where)
+            seen += 1
+        self.assertEqual(seen, 32)
+
+    def test_an_ineligible_resend_is_refused_before_any_byte_is_written(self):
+        pkg = self._package.build_quarterly_package(self.conn, "2026-Q3")["package_id"]
+        self.delivery(pkg, "delivered")
+        written = []
+        with mock.patch.object(delivery, "_to_outbox",
+                               lambda path, data: written.append(path)):
+            with self.assertRaises(db.Refusal):
+                delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg,
+                                            resend=True)
+        self.assertEqual(written, [])
+
+    def test_the_predicate_binds_in_the_committing_transaction(self):
+        # the package arrives while the resend's copy is being written: nothing is staged
+        pkg = self._package.build_quarterly_package(self.conn, "2026-Q3")["package_id"]
+        self.delivery(pkg, "uncertain")
+        real = delivery._to_outbox
+        other = db.open_store()
+        self.addCleanup(other.close)
+
+        def write_then_arrive(path, data):
+            out = real(path, data)
+            with db.tx(other):
+                other.execute("UPDATE deliveries SET status='delivered' WHERE package_id=?",
+                              (pkg,))
+            return out
+        with mock.patch.object(delivery, "_to_outbox", write_then_arrive):
+            with self.assertRaises(db.Refusal) as cm:
+                delivery.stage_for_delivery(self.conn, channel="telegram", package_id=pkg,
+                                            resend=True)
+        self.assertIn("did arrive", str(cm.exception))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries WHERE"
+                                           " status='staged'").fetchone()[0], 0)
+        self.assertEqual(os.listdir(self.outbox), [])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestKeptDeliveryGuards(StoreCase):
+    """Ported request-free from test_package_requests (Task 11 review): the delivery guards
+    the package requests' tests used to pin."""
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        self.pass_()
+        self.row(1)
+        self.pid = self.lineage_for(1)
+        self.classify(self.pid, {"software"})
+        self.settle(self.pid)
+        self.end_live_pass()
+
+    def test_a_recovered_send_takes_only_the_evidence_of_its_delivery(self):
+        import job
+        did = self.staged_package(lapsed=True)
+        job.claim(self.conn, "abcdef01-0000-4000-8000-0000000000aa")   # recovers it
+        r = self.conn.execute("SELECT status, withdrawn_at FROM deliveries WHERE"
+                              " delivery_id=?", (did,)).fetchone()
+        self.assertEqual(r["status"], "uncertain")
+        self.assertIsNotNone(r["withdrawn_at"])
+        for late in ("failed", "uncertain"):
+            with self.assertRaises(db.Refusal) as cm:
+                delivery.record_delivery(self.conn, delivery_id=did, outcome=late)
+            self.assertIn("taken back before it was recorded", str(cm.exception))
+            self.assertEqual(self.conn.execute("SELECT status FROM deliveries WHERE"
+                                               " delivery_id=?", (did,)).fetchone()[0],
+                             "uncertain")
+        posted_first(self.conn, did)                  # it had been posted: evidence wins
+        self.assertEqual(delivery.record_delivery(self.conn, delivery_id=did,
+                                                  outcome="delivered")["status"], "delivered")
+
+    def test_a_late_delivery_says_what_changed_since_the_build(self):
+        did = self.staged_package()
+        posted_first(self.conn, did)
+        self.row(1, amount_minor=12345)                       # the bank corrected it since
+        out = delivery.record_delivery(self.conn, delivery_id=did, outcome="delivered")
+        self.assertIn("speak", out)
+        self.assertIn("corrected by the bank", out["speak"]["text"])
+
+    def test_an_import_that_revokes_an_unsent_first_send_says_so(self):
+        did = self.staged_package()
+        pkg = self.conn.execute("SELECT package_id FROM deliveries WHERE delivery_id=?",
+                                (did,)).fetchone()[0]
+        with db.tx(self.conn):
+            sid = self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows,"
+                                    " max_row_id) VALUES (NULL, ?, 0, 0)",
+                                    (db.now(),)).lastrowid
+            revoked = delivery.revoke_superseded_first_sends(self.conn, sid)
+        self.assertEqual([r["delivery_id"] for r in revoked], [did])
+        import json
+        notes = [json.loads(r[0]) for r in self.conn.execute(
+            "SELECT detail FROM alerts WHERE kind='package-revoked' AND sent_at IS NULL")]
+        self.assertEqual([n["package_id"] for n in notes], [pkg])

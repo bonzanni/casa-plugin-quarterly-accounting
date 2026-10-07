@@ -74,12 +74,11 @@ class _Q3(StoreCase):
         tok = token or self._fixture_token
         args = dict(pid=pid, doc_id=doc, author="auto", expected_revision=d["revision"],
                     row_digest=d["row_digest"], document_date=w["date"], labels=["guessed"],
-                    resolves=d["candidate_ids"], pass_token=tok)
+                    pass_token=tok)
         out = call("record_match", **args)
         d = call("list_quarter_state", pid=pid)["item"]
         if d["candidate_ids"]:
-            args.update(expected_revision=d["revision"], row_digest=d["row_digest"],
-                        resolves=d["candidate_ids"])
+            args.update(expected_revision=d["revision"], row_digest=d["row_digest"])
             out = call("record_match", **args)
         assert desc is not None
         return out
@@ -149,30 +148,6 @@ class OldSheetQuote(_Q3):
 
     def test_the_x_one_is_wrong_on_the_old_sheet_commits_nothing(self):
         self._named("the Zapier one is wrong")
-
-    def test_live_job_old_quote(self):
-        """The reviewer's job-driven run (review_job_binding.py), verbatim in shape."""
-        import job
-        import work
-        self.drive("aaaaaaaa-1", stop_before="judge")
-        tok = self._job_driver.token
-        self.assertIsNone(job.fresh_reason(self.conn))
-        pid = self.conn.execute("SELECT pid FROM projections WHERE ended IS NULL ORDER BY pid"
-                                " LIMIT 1").fetchone()[0]
-        first = self.repair(pid, "FIRST", token=tok)
-        with FakeBroker() as b:
-            old = call("show_view", view="check", quarter="2026-Q3")
-            quote = b.proposal()["text"]
-            call("mark_rendering_delivered", render_id=old["render_id"])
-            second = self.repair(pid, "SECOND", token=tok)
-            newer = call("show_view", view="check", quarter="2026-Q3")
-            call("mark_rendering_delivered", render_id=newer["render_id"])
-            out = call("propose_reading", text="all good", quoted=quote)
-        self.assertIsNone(out["reading"])
-        self.assertEqual(self.readings(), 0)
-        self.assertEqual([self.operator_rows(first["match_id"]),
-                          self.operator_rows(second["match_id"])], [0, 0])
-        self.assertIsNotNone(work.describe(self.conn, pid)["current"])
 
 
 class MergedSurvivor(StoreCase):
@@ -359,23 +334,19 @@ class ContinuedPages(StoreCase):
         self.addCleanup(cm.__exit__, None, None, None)
         import views
         self.patch(views, "BODY_LIMIT", 200)
-        import matches
         import work
         self.row(1, counterparty="Adobe", amount_minor=5445, booking_date="2026-09-14",
                  value_date="2026-09-14")
         self.pid = self.lineage_for(1)
         self.classify(self.pid, {"software"})
         self.settle(self.pid)
-        self.handed(self.pid)
         work.record_search(self.conn, pid=self.pid, token=self.token, queries=["Adobe"])
         self.docs = []
         for i in range(2):
             did = self.doc(counterparty="Adobe", issuer="Adobe", document_number="CANDIDATE%02d"
                            % i + "X" * 40, document_date="2026-09-14", amount_minor=5445)
             self.docs.append(did)
-            matches.record_match(self.conn, pid=self.pid, doc_id=did, author="auto",
-                                 expected_revision=self.rev(self.pid), token=self.token,
-                                 row_snapshot=self.snapshot(self.pid))
+            self.machine_entry(self.pid, did)      # a joint machine set: two candidates
         self.assertEqual(len(work.describe(self.conn, self.pid)["candidates"]), 2)
 
     def propose(self, text, quoted=None):
@@ -531,21 +502,7 @@ class LegacyReceipt(StoreCase):
         self.assertEqual(c.execute("SELECT count(*) FROM deliveries WHERE posted_at IS NOT"
                                    " NULL").fetchone()[0], 0)
 
-    def test_a_fresh_unposted_s7_send_still_refuses(self):
-        import asks
-        import db
-        import delivery
-        asks.request_package(self.conn, "2026-Q3")
-        did, tok = self.drive_to_staged("aaaaaaaa-1")
-        with self.assertRaises(db.Refusal):
-            delivery.record_delivery(self.conn, delivery_id=did, outcome="delivered",
-                                     package_token=tok)
-        self.assertEqual(self.delivered(self.conn), 0)
 
-
-# ---------------------------------------------------------------------------------------
-# Red cases 7, 8, 11, 13, 15 — R1 quote matching, V2 tags, V3 same facts
-# ---------------------------------------------------------------------------------------
 class _Long(StoreCase):
     """Fifteen vendors with long document numbers (review_d2.py quote_cycle)."""
     N = 15
@@ -701,7 +658,8 @@ class SameFactsLegacy(_Q3):
                                db.next_seq(self.conn)))
             for it in self.conn.execute("SELECT * FROM render_items WHERE render_id=?",
                                         (f["render_id"],)).fetchall():
-                self.conn.execute("INSERT INTO render_items VALUES (?,?,?,?)",
+                self.conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
+                                  " match_revisions_json) VALUES (?,?,?,?)",
                                   (rid2, it["pid"], it["projection_revision"],
                                    it["match_revisions_json"]))
         quote = self.text_of(f["render_id"])
@@ -1027,7 +985,7 @@ class LegacyFields(_Q3):
                               (db.canonical(old), rid))
 
     def _migrated(self):
-        """The store copied into the v10 schema and opened (10 -> 11), as
+        """The store copied into the v10 schema and opened (10 -> 12), as
         review_migrated_sheet.py does."""
         import db
         import tools
@@ -1038,7 +996,12 @@ class LegacyFields(_Q3):
         tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'"
                                           " AND name NOT LIKE 'sqlite_%'")]
         for table in tables:
-            cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
+            # the columns both schemas have: schema 12 dropped the machinery v10 carried
+            # (a dropped table copies nothing; a dropped column keeps v10's default)
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})") if r[1] in have]
+            if not cols:
+                continue
             names = ",".join(cols)
             rows = self.conn.execute(f"SELECT {names} FROM {table}").fetchall()
             c.execute(f"DELETE FROM {table}")

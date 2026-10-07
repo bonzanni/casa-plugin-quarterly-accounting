@@ -15,23 +15,35 @@ class Surface(StoreCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         import qa_server, tools  # noqa: F401
-        for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work",
-                     "job_report"):                     # S7 §9: the relay is deleted
+        for gone in ("begin_pass", "end_pass", "continue_pass", "record_step", "more_work",  # removed-name: asserted absent
+                     "job_report",                      # S7 §9: the relay is deleted
+                     "request_package", "build_quarterly_package",  # removed-name: asserted absent
+                     "list_projections", "record_observation"):     # removed-name: asserted absent
             self.assertNotIn(gone, qa_server.TOOLS)
-        for new in ("job_next", "job_status", "request_work",
-                    "request_package", "record_filing"):
+        for new in ("job_next", "job_status", "request_work", "set_aside"):
             self.assertIn(new, qa_server.TOOLS)
 
     def test_the_job_declaration_is_verbatim(self):
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
         self.assertEqual(m["casa"]["jobs"], [{
             "name": "work", "skill": "quarterly-job", "title": "Accounting check",
-            "summary": "Checks the bank and Gmail, judges documents, prepares packages",
-            "batches": "unlimited", "turnsPerBatch": 80, "session": "fresh",
-            "host": "specialist"}])
-        self.assertEqual(m["version"], "0.10.0")
+            "summary": "Checks the bank and Gmail, matches invoices, keeps the bank ledger's "
+                       "notes current",
+            "batches": 20, "turnsPerBatch": 80, "session": "fresh",
+            "host": "specialist", "quietWhenScheduled": True}])
+        self.assertEqual(m["version"], "0.11.0")
         import job                  # the batch budget and the batch window's claim count
         self.assertEqual(job.TURNS_PER_BATCH, m["casa"]["jobs"][0]["turnsPerBatch"])
+
+    def test_the_readme_and_changelog_name_the_casa_floor(self):
+        for f in ("README.md", "CHANGELOG.md"):
+            text = (ROOT / f).read_text()
+            self.assertIn("#1301, #1302 and #1303", text, f)
+            self.assertIn("v0.344.39", text, f)
+            self.assertIn("quietWhenScheduled", text, f)
+        log = (ROOT / "CHANGELOG.md").read_text()
+        self.assertNotIn("never released", log)
+        self.assertIn("## 0.10.0", log)
 
     def test_gmail_absent_says_not_connected_not_reauthorise(self):
         import alerts, passes, views
@@ -44,14 +56,14 @@ class Surface(StoreCase):
     def test_a_waived_freshness_window_is_disclosed(self):
         import views
         tok = self.pass_("cron")
-        self.end_with_counts(tok, "complete", {"read_age_min": 75})
+        self.end_live_pass("complete", {"read_age_min": 75})
         self.assertIn("bank read from 75 minutes",
                       views.build_review(self.conn, view="status")["text"])
 
     def test_payments_awaiting_classification_are_said(self):
         import views
         tok = self.pass_("cron")
-        self.end_with_counts(tok, "complete", {"awaiting_classification": 3})
+        self.end_live_pass("complete", {"awaiting_classification": 3})
         self.assertIn("3 payments still await classification",
                       views.build_review(self.conn, view="status")["text"])
 
@@ -71,7 +83,7 @@ class SurfaceBound(StoreCase):
     def test_the_notes_lead_the_bound_status_sheet(self):
         import asks, db, views
         tok = self.pass_("cron")
-        self.end_with_counts(tok, "complete", {"read_age_min": 75,
+        self.end_live_pass("complete", {"read_age_min": 75,
                                                "awaiting_classification": 1})
         t0 = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
         with self.patch_clock(t0):
@@ -89,6 +101,7 @@ class SurfaceBound(StoreCase):
         import alerts, passes
         tok = self.pass_("cron")
         passes.record_probe(self.conn, tok, "gmail", False, absent=True)
+        self.streak()
         speak = alerts.pending_rendering(self.conn)
         self.assertIn("Gmail isn't connected for the finance specialist — invoices aren't "
                       "being searched.", " ".join(speak["text"].split()))
@@ -97,7 +110,16 @@ class SurfaceBound(StoreCase):
         tok = self.pass_("cron")
         passes.record_probe(self.conn, tok, "gmail", True)
         passes.record_probe(self.conn, tok, "gmail", False, "token expired")
+        self.streak()
         self.assertIn("Re-authorise Gmail", alerts.pending_rendering(self.conn)["text"])
+
+    def streak(self):
+        """D10 (Task 10): the Gmail line is said once the probe failed on
+        alerts.GMAIL_RUNS runs in a row."""
+        import alerts, db
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE probes SET fail_runs=? WHERE kind='gmail'",
+                              (alerts.GMAIL_RUNS,))
 
 
 class ToolLayer(StoreCase):
@@ -147,58 +169,16 @@ class ToolLayer(StoreCase):
         self.assertEqual(first["unit"], "probes")
         self.assertTrue(self.call("job_next").startswith("refused: "))
 
-    def test_request_package_returns_its_start(self):
-        out = self.call("request_package", quarter="Q3 2026")
-        self.assertEqual(out["status"], "asked")
-        self.assertEqual(out["start_job"]["job"], "quarterly-accounting:work")
-
-    def test_the_descriptions_carry_the_echo_and_the_call_again(self):
+    def test_the_descriptions_say_keep_going_and_never_a_claim(self):
         import qa_server, tools  # noqa: F401
         nxt = " ".join(qa_server.TOOLS["job_next"]["description"].split())
-        self.assertIn("echo the judge unit's `judgment` and `after`", nxt)
+        self.assertIn("then after each unit job_next(pass_token=…)", nxt)
+        self.assertIn("keep going until `complete`; Casa ends the turn when its batch is "
+                      "full, and an unfinished unit comes again", nxt)
+        self.assertIn("`report` → report_job_progress with its `progress` verbatim, then "
+                      "job_next", nxt)
         status = " ".join(qa_server.TOOLS["job_status"]["description"].split())
         self.assertIn("never a claim", status)
-
-
-class SupersededJudgeAnswer(StoreCase):
-    """Fix round 1 (Task 12 review, I1): a judge answer travels only with the pass_token of
-    the turn that judged. `job_next(job_id=…, judged=…)` is refused BEFORE claiming, so a
-    superseded turn cannot launder its answer through a fresh claim's token."""
-    B = "bbbbbbbb-2"
-
-    call = ToolLayer.call
-
-    def setUp(self):
-        super().setUp()
-        from tests.test_tools import _fresh_conn
-        _fresh_conn(self)._CONN = self.conn
-        self.bind()
-        from tests.sim_job import JobDriver
-        self.drv = JobDriver(self)
-
-    def test_judged_without_a_pass_token_is_refused_before_the_claim(self):
-        import asks, job
-        asks.request_work(self.conn, "check", "operator")
-        u = self.drv.run_until(A_JOB, "judge")
-        t1 = self.drv.token
-        judged = self.drv.do(u, t1)
-        job.claim(self.conn, self.B)                     # another job takes the pass
-        self.assertTrue(self.call("job_next", pass_token=t1, judged=judged)
-                        .startswith("refused: "))
-        gen = self.conn.execute("SELECT max(gen) FROM claims").fetchone()[0]
-        marker = self.conn.execute("SELECT generation FROM pass_marker").fetchone()[0]
-        out = self.call("job_next", job_id=A_JOB, judged=judged)
-        self.assertEqual(out, "refused: judged goes with the pass_token of the turn that "
-                              "judged: call job_next(job_id=…) without it")
-        self.assertEqual(self.conn.execute("SELECT max(gen) FROM claims").fetchone()[0], gen)
-        self.assertEqual(self.conn.execute("SELECT generation FROM pass_marker")
-                         .fetchone()[0], marker)
-        row = self.conn.execute("SELECT finished_at FROM pass_steps WHERE step='judge'"
-                                " ORDER BY rowid DESC LIMIT 1").fetchone()
-        self.assertIsNone(row["finished_at"])
-        # the same call without `judged` is a plain claim, and hands the judge step out again
-        again = self.call("job_next", job_id=A_JOB)
-        self.assertGreater(again["pass_token"], gen)
 
 
 class RefusalsNameNoRemovedTool(StoreCase):
@@ -211,43 +191,3 @@ class RefusalsNameNoRemovedTool(StoreCase):
                                         ledger_instance="whatever")
         self.assertEqual(str(cm.exception), "an import belongs to a pass: pass the "
                                             "pass_token job_next handed out")
-
-
-class ReportOrder(StoreCase):
-    """Carry (Task 10): the operator's reply binds to the LAST delivered rendering, so
-    the job posts every handover and stop page before a status view (S7 §5: the status
-    sheet only when nothing else is owed)."""
-    def test_status_views_come_last(self):
-        import asks, db, job, views
-        with db.tx(self.conn):
-            for kind, trigger, outcome in (("check", "operator", "complete"),
-                                           ("handover", "operator", "complete"),
-                                           ("check", "cron", "stopped")):
-                self.conn.execute(
-                    "INSERT INTO work_requests(kind, trigger, doc_ids_json, created_seq,"
-                    " created_at, state, outcome) VALUES (?,?,?,?,?, 'done', ?)",
-                    (kind, trigger, "[999]" if kind == "handover" else "[]",
-                     db.next_seq(self.conn), db.now(), outcome))
-        tok = job.claim(self.conn, "aaaaaaaa-1")
-        units = []
-        for _ in range(4):
-            u = job.next_unit(self.conn, tok)
-            units.append(u)
-            if u["unit"] == "complete" or u["unit"] == "view":
-                break
-            for rid in u["render_ids"]:
-                views.mark_rendering_delivered(self.conn, rid)
-        handed = [r for u in units if u["unit"] == "post" for r in u["render_ids"]]
-        handed += [u["render_id"] for u in units if u["unit"] == "view"]
-        kinds = [self.conn.execute("SELECT kind FROM renders WHERE render_id=?",
-                                   (r,)).fetchone()[0] for r in handed]
-        self.assertEqual(kinds, ["handover", "job-stop", "status"])
-        self.assertIn(asks.NOT_FOUND, self.render_text(handed[0]))
-
-    def test_the_not_found_line_offers_no_resend(self):
-        import asks, reply
-        self.assertNotIn("send it again", asks.NOT_FOUND)
-        for clause in reply._clauses(asks.NOT_FOUND):
-            self.assertEqual(reply._parse(clause), (None, None), clause)
-        self.assertEqual(asks.NOT_FOUND, "I can't find that document in what I've filed — "
-                                         "please send the file once more.")

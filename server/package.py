@@ -12,7 +12,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-import json
 import os
 import re
 import secrets
@@ -32,6 +31,9 @@ COLUMNS = ("date", "amount", "currency", "direction", "counterparty", "vendor", 
 STATUS = {"matched": "MATCHED", "proposed": "UNCONFIRMED", "open": "MISSING",
           "optional": "OPTIONAL-MISSING", "no-document": "NO-DOCUMENT", "exempt": "NO-DOCUMENT",
           "ineligible": "UNTRACKED"}
+# simple loop D18: a line not documented yet — the caption's "open" count (a pending row
+# is not documented)
+OPEN = ("UNCONFIRMED", "MISSING", "UNCLASSIFIED", "PENDING")
 xml_safe = xlsx.xml_safe
 deterministic_zip = xlsx.zip_files
 
@@ -89,6 +91,7 @@ def _undated(named: dict, docs: dict) -> list:
 
 
 def _freeze(conn, quarter: str) -> dict:
+    import matches
     start, end = dates.quarter_bounds(quarter)
     conn.execute("BEGIN")                 # one consistent WAL read snapshot for the whole build
     try:
@@ -109,17 +112,26 @@ def _freeze(conn, quarter: str) -> dict:
                     row = conn.execute("SELECT * FROM documents WHERE doc_id=?",
                                        (c["document"]["doc_id"],)).fetchone()
                     docs[c["match_id"]] = dict(row)
+                if d["status"] == "proposed" and d["current"]:
+                    # D3 (shape c): a proposal's alternatives ship set aside with its
+                    # chosen document, keyed -doc_id (ints: the render's sort still sorts)
+                    held = {doc["doc_id"] for doc in docs.values()}
+                    for alt in matches.alternatives(conn, d["current"]["match_id"]):
+                        row = conn.execute("SELECT * FROM documents WHERE doc_id=?",
+                                           (alt,)).fetchone()
+                        if row is not None and alt not in held:
+                            docs[-alt] = dict(row)
             lines.append({"row": r, "d": d, "docs": docs})
         history = [r for r in in_q if r["state"] != "active"]
+        # e4 (Astra S2, rev 18.4 §R18.3): a document is listed under the quarter of its own
+        # date — a Q3 invoice filed in October is Q3's unmatched one — else its filing's
         unmatched = [dict(x) for x in conn.execute(
             "SELECT d.* FROM documents d JOIN document_status s ON s.doc_id=d.doc_id"
-            " WHERE s.status='unmatched' AND d.ingest_quarter=? ORDER BY d.doc_id", (quarter,))]
-        snap = conn.execute("SELECT bank_through FROM snapshots ORDER BY snapshot_id DESC"
-                            " LIMIT 1").fetchone()
-        prev = conn.execute(
-            "SELECT p.* , d.settled_at FROM packages p JOIN deliveries d ON d.package_id="
-            "p.package_id WHERE p.quarter=? AND d.status='delivered' ORDER BY d.settled_at DESC,"
-            " p.package_id DESC LIMIT 1", (quarter,)).fetchone()
+            " WHERE s.status='unmatched' ORDER BY d.doc_id")
+            if (dates.quarter_of(x["document_date"][:10]) if x["document_date"]
+                else x["ingest_quarter"]) == quarter]
+        snap = conn.execute("SELECT bank_through, imported_at FROM snapshots ORDER BY"
+                            " snapshot_id DESC LIMIT 1").fetchone()
         # the import every line's freshness was judged against (round E3, Terra S1)
         # every row's date and amount: notes.md names a successor by them, never by id
         facts = {r["row_id"]: {"date": dates.effective_date(r), "amount_minor": r["amount_minor"],
@@ -127,7 +139,8 @@ def _freeze(conn, quarter: str) -> dict:
         return {"snapshot_id": lineage.latest_import(conn), "facts": facts,
                 "binding": dict(b), "lines": lines, "history": history, "unmatched": unmatched,
                 "bank_through": snap["bank_through"] if snap else None,
-                "prev": dict(prev) if prev else None}
+                # simple loop §1: the package is as of the latest check, and says so
+                "as_of": snap["imported_at"] if snap else None}
     finally:
         conn.execute("COMMIT")
 
@@ -136,7 +149,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     files, used, named, manifest_rows, matched_docs = {}, set(), {}, [], []
     placed = {}                     # doc_id -> the document row, for every file named
     missing, unclassified, nice, unresolved_lines, anomalies = [], [], [], [], []
-    unread = []
+    unread, pending, in_scope, open_ = [], [], 0, 0
     table = [list(COLUMNS)]
     for ln in frozen["lines"]:
         r, d = ln["row"], ln["d"]
@@ -147,21 +160,18 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         # compares against this, so a row shipped unread is not "categorised differently"
         # when its next read finds the kind it already had.
         known_kind = exp["kind"] or (d["last_known_kind"] if d else None)
-        # Classification is reported from the expectation alone (fix wave D, Astra S1):
-        # an unknown expectation is UNCLASSIFIED whether or not a pairing is retained
-        # (round-42 ruling keeps the pairing and its last known kind verdict; spec
-        # ~2742-2744: `UNCLASSIFIED` for a row whose expectation is not yet known). The
-        # retained document still ships in its folder and is named in `document`.
-        unknown = d is not None and exp["kind"] is None \
-            and d["status"] in ("open", "matched", "proposed")
-        if unknown:
-            status = "UNCLASSIFIED"
         # fix E2: a row not observed at the latest import ships no classification and
         # no document as its own — its kind may have changed (spec §Error handling:
         # packaging ships rather than blocking; the caption says how many)
         stale = d is not None and not d["fresh"] and d["status"] not in ("ineligible", "exempt")
         if stale:
             status, exp = "UNCLASSIFIED", {"kind": None, "tier": None}
+        if d is not None and d["pending"] and status != "UNTRACKED":
+            # D18 (plan round 1, Terra S2; Task 9 review ruling): a tracked row the bank has
+            # not booked is PENDING whatever its status — the end message's partition
+            # (cards._bucket, the same describe flag), so the zip, the caption and the
+            # cards agree; set before the MISSING test below
+            status = "PENDING"
         docname, confidence, link, notes, set_aside = "", "", "", [], []
         if not stale and d is not None and d["status"] == "matched" and d["current"]:
             doc = ln["docs"][d["current"]["match_id"]]
@@ -175,8 +185,6 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 notes.append("confirmed by the operator")
             notes += _other_currency(doc, r)
         elif d is not None and ln["docs"]:
-            if unknown and d["status"] == "proposed":
-                notes.append("pairing not yet confirmed")
             for mid, doc in sorted(ln["docs"].items()):
                 notes += _other_currency(doc, r)
                 name = _place("unresolved", doc, used, named, dates.effective_date(r))
@@ -189,7 +197,9 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                     unresolved_lines.append((d, name))
         if d is not None:
             link = d["link"] or ""
-            if stale:
+            if status == "PENDING":
+                pending.append(d)
+            elif stale:
                 unread.append((d, set_aside))
             elif status == "MISSING":
                 missing.append((d, link))
@@ -204,6 +214,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 anomalies.append(f"{_head(d)}: bank-feed's history is broken ({why}).")
             if d["unprojectable"]:
                 anomalies.append(f"{_head(d)}: the bank ledger could not take its tag.")
+        in_scope += status != "UNTRACKED"
+        open_ += status in OPEN
         vendor = d["counterparty"] if d else (r["counterparty"] or "")
         table.append([dates.effective_date(r) or "", f"{r['amount_minor'] // 100}.{r['amount_minor'] % 100:02d}",
                       r["currency"], r["direction"], r["counterparty"] or "", vendor, status,
@@ -227,6 +239,9 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     notes += ["", "## Not yet classified", ""]
     notes += [f"- {_head(d)}" + (f" — holds {name}" if name else "")
               for d, name in unclassified] or ["- none"]
+    if pending:
+        notes += ["", "## Pending at the bank", ""]
+        notes += [f"- {_head(d)} — not yet booked by the bank" for d in pending]
     if unread:
         notes += ["", "## Not seen in the last bank check", ""]
         notes += [f"- {_head(d)}" + (f" — holds {', '.join(names)}, set aside until it is "
@@ -275,7 +290,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     files["notes.md"] = ("\n".join(notes) + "\n").encode("utf-8")
     counts = {"payments": len(frozen["lines"]), "with_documents": len(matched_docs),
               "missing": len(missing), "unclassified": len(unclassified), "unread": len(unread),
-              "undated": len(undated)}
+              "undated": len(undated), "in_scope": in_scope, "pending": len(pending),
+              "open": open_}
     return (deterministic_zip(files), digest, partial,
             {"rows": manifest_rows, "documents": sorted(matched_docs), "counts": counts})
 
@@ -317,143 +333,31 @@ def _reserve(stem: str, stamp: str) -> tuple:
             continue
 
 
-def _caption(quarter, manifest, prev, digest, partial, b, filename, oversize, size,
-             check=None) -> str:
-    c = manifest["counts"]
-    out = [f"Accounting {dates.quarter_label(quarter)} · {c['payments']} payments · "
-           f"{c['with_documents']} with documents"]
-    if prev is not None:
-        when = dates.short_day(prev["settled_at"])
-        if prev["digest"] == digest:
-            out.append(f"Identical to the package from {when}.")
-        else:
-            added = len(set(manifest["documents"]) - set(json.loads(prev["manifest_json"])
-                                                         .get("documents", [])))
-            out.append(f"{added} document{'s' if added != 1 else ''} added since the package "
-                       f"from {when}." if added else f"Changed since the package from {when}.")
-    tail = [f"{c['missing']} still missing"] if c["missing"] else []
-    if c["unclassified"]:
-        tail.append(f"{c['unclassified']} not yet classified")
-    if tail:
-        out.append(", ".join(tail) + " — listed in notes.md.")
-    if c.get("unread"):
-        out.append(f"{c['unread']} not seen in the last bank check, so shipped unclassified "
-                   "— say \"go and check now\", then rebuild.")
-    if c.get("undated"):
-        n = c["undated"]
-        out.append(f"{n} file{'s are' if n != 1 else ' is'} named by a date not yet read from "
-                   "the document — listed in notes.md.")
-    check = check or {}
-    if check.get("gmail") == "down":
-        out.append("The email search couldn't run, so documents emailed since the last check "
-                   "may be missing.")
-    if check.get("unfinished"):
-        n = check["unfinished"]
-        out.append(f"The check couldn't get through {n} payment{'s' if n != 1 else ''} — say "
-                   "\"rebuild it\" to try again.")
-    if partial:
-        out.append("The quarter isn't over yet.")
-    if oversize:
-        out.append(f"Too large for Telegram ({size / 1e6:.1f} MB; the limit is 20 MB) — kept "
-                   "here; notes.md names the largest files.")
-    if not b["package_name_announced"]:
-        import views
-        out.append(f'Files are named "{views.field(filename)}" — say "call the zips <name>" '
-                   'to change that.')
-    return "\n".join(out)
+def caption_line(quarter, as_of, counts) -> str:
+    """§1 (option A, BRAIN 2026-10-06): the package is as of the latest check, and the
+    caption says so; the details live inside the zip. ONE line: "Q3 · as of 6 Oct · 57 of
+    60 documented · 3 open" — `as_of` is the latest import's time, `counts` the render's
+    (`in_scope`: every line not UNTRACKED; `open`: the OPEN statuses)."""
+    n, open_ = counts["in_scope"], counts["open"]
+    when = f"as of {dates.short_day(as_of[:10])}" if as_of else "no bank check yet"
+    return (f"{dates.quarter_label(quarter).split()[0]} · {when}"
+            f" · {n - open_} of {n} documented · {open_} open")
 
 
-def _request_for_build(conn, quarter: str, package_token, request_id=None) -> int:
-    """The package request this build is for: `request_id` (the job's build unit names
-    it) when given, holding `package_token`, open and not yet staged, for this quarter.
-    Refuses otherwise. Returns its id. Ruling F8: every request one job claim hands out
-    holds the same token (the claim's gen), so the token alone names a request only when
-    one buildable request of the quarter holds it — more than one is refused."""
-    import passes
-    if package_token is None:
-        raise db.Refusal("a package is built for a package request: pass the package_token "
-                         "and request_id the job's build unit gave you")
-    if request_id is None:
-        rows = conn.execute("SELECT * FROM package_requests WHERE token=? AND quarter=? AND"
-                            " state='snapshot-done'", (int(package_token), quarter)).fetchall()
-        if len(rows) > 1:
-            raise db.Refusal("pass the request_id the job's build unit gave you")
-        req = rows[0] if rows else conn.execute(
-            "SELECT * FROM package_requests WHERE token=? ORDER BY request_id DESC",
-            (int(package_token),)).fetchone()
-    else:
-        req = conn.execute("SELECT * FROM package_requests WHERE request_id=?",
-                           (int(request_id),)).fetchone()
-    if req is None:
-        raise db.Refusal("this package request has been taken over by a later turn — stop, "
-                         "nothing was written")
-    req = passes.check_package_token(conn, req["request_id"], package_token)
-    if req["quarter"] != quarter:
-        raise db.Refusal(f"this package_token is for the {dates.quarter_label(req['quarter'])} "
-                         "package")
-    # one request builds one package: a second build would unlink the first from its
-    # request, and that package could then be sent outside the send-once rule
-    if req["state"] != "snapshot-done":
-        raise db.Refusal("this package request already built its package — stage it, or ask "
-                         "for the package again for a new one")
-    return req["request_id"]
-
-
-RECHECK = ("the bank was re-read since the check — the check runs again, and the package "
-           "follows it; call job_next")
-
-
-def stale_check(conn, request_id, token) -> bool:
-    """Issue #15 (design D2): a request's check describes the import it ran on. Once a
-    newer import landed, the request goes back to `queued` (committed on its own) and
-    the caller refuses with RECHECK. True when that happened. Only the holder of the
-    request's CURRENT token moves it (code round C1, Astra S1: a superseded holder
-    requeued the request under its successor); anyone else changes nothing."""
-    import passes
-    with db.tx(conn):
-        req = conn.execute("SELECT * FROM package_requests WHERE request_id=?",
-                           (request_id,)).fetchone()
-        if req is None or req["state"] not in ("snapshot-done", "built"):
-            return False
-        if token is None or req["token"] is None or int(token) != req["token"]:
-            return False
-        if req["checked_snapshot"] is not None and \
-                req["checked_snapshot"] == lineage.latest_import(conn):
-            return False
-        passes.requeue(conn, request_id)
-        return True
-
-
-class _Recheck(Exception):
-    def __init__(self, request_id):
-        self.request_id = request_id
-
-
-def build_quarterly_package(conn, quarter: str, package_token=None, *, request_id=None,
-                            bound=True) -> dict:
-    """Build the quarter's zip for package request `request_id`, holding `package_token`.
-    The token is checked before the custody lock (an early refusal) and again in
-    the transaction that registers the zip and links it to the request, so a
-    holder rotated while it waited registers nothing and leaves no zip behind.
-    bound=False builds outside any request (in-process callers and tests only;
-    the tool always binds)."""
+def build_quarterly_package(conn, quarter: str) -> dict:
+    """Build the quarter's zip from the store as it is (get_package; simple loop §1). The
+    custody lock over documents/ and packages/ (db.custody_lock): a build reads held
+    documents' bytes and writes into packages/, which reset_store erases under that lock.
+    Taken BEFORE the freeze transaction, never inside one (lock order: custody, then
+    SQLite)."""
     dates.parse_quarter(quarter)
     if conn.in_transaction:
-        raise RuntimeError("build_quarterly_package opens its own transactions")
-    if bound:
-        request_id = _request_for_build(conn, quarter, package_token, request_id)
-        if stale_check(conn, request_id, package_token):
-            raise db.Refusal(RECHECK)
-    # The custody lock over documents/ and packages/ (db.custody_lock): a build
-    # reads held documents' bytes and writes into packages/, which reset_store
-    # erases under that lock. Taken BEFORE the freeze transaction, never inside
-    # one (lock order: custody, then SQLite).
+        raise RuntimeError("a package build opens its own transactions")
     with db.custody_lock():
-        return _build(conn, quarter, package_token if bound else None, bound,
-                      request_id if bound else None)
+        return _build(conn, quarter)
 
 
-def _build(conn, quarter: str, package_token=None, bound=False, bound_id=None) -> dict:
+def _build(conn, quarter: str) -> dict:
     stamp = db.now()
     today = stamp[:10]
     frozen = _freeze(conn, quarter)
@@ -467,28 +371,15 @@ def _build(conn, quarter: str, package_token=None, bound=False, bound_id=None) -
         data, digest, partial, manifest = _render(
             frozen, quarter, today, [f"{h}: {n / 1e6:.1f} MB" for n, h in sizes])
     b = frozen["binding"]
-    check = None
-    if bound and bound_id is not None:
-        row = conn.execute("SELECT check_json FROM package_requests WHERE request_id=?",
-                           (bound_id,)).fetchone()
-        check = json.loads(row["check_json"]) if row is not None and row["check_json"] else None
     stem = f"{b['package_name']}-{quarter}{'-partial' if partial else ''}-{today}"
     fd, path = _reserve(stem, stamp)
     with os.fdopen(fd, "wb") as f:
         f.write(data)
         f.flush()
         os.fsync(f.fileno())
-    caption = _caption(quarter, manifest, frozen["prev"], digest, partial, b, path.name,
-                       oversize, len(data), check)
+    caption = caption_line(quarter, frozen["as_of"], manifest["counts"])
     try:
         with db.tx(conn):
-            # the binding check: in the transaction that registers and links the zip
-            request_id = (_request_for_build(conn, quarter, package_token, bound_id)
-                          if bound else None)
-            if request_id is not None and conn.execute(
-                    "SELECT checked_snapshot FROM package_requests WHERE request_id=?",
-                    (request_id,)).fetchone()[0] != lineage.latest_import(conn):
-                raise _Recheck(request_id)
             if lineage.latest_import(conn) != frozen["snapshot_id"]:
                 # round E3 (Terra S1): an import landed between the freeze and this
                 # commit, so rows judged fresh may no longer be; never register or hand
@@ -496,24 +387,11 @@ def _build(conn, quarter: str, package_token=None, bound=False, bound_id=None) -
                 raise db.Refusal("the bank was re-read while building — build again")
             pkg_id = conn.execute(
                 "INSERT INTO packages(quarter, filename, path, built_at, partial, digest, size,"
-                " oversize, caption, manifest_json, snapshot_id, request_id)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " oversize, caption, manifest_json, snapshot_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (quarter, path.name, str(path), stamp, int(partial), digest, len(data),
                  int(oversize), caption, db.canonical(manifest),
-                 frozen["snapshot_id"], request_id)).lastrowid
-            if request_id is not None:
-                conn.execute("UPDATE package_requests SET package_id=?, state='built',"
-                             " updated_at=? WHERE request_id=?", (pkg_id, db.now(), request_id))
-                pass_id = conn.execute("SELECT pass_id FROM package_requests WHERE"
-                                       " request_id=?", (request_id,)).fetchone()[0]
-                import job
-                job.credit(conn, package_token, pass_id, f"req:pkg:{request_id}:built")
-    except _Recheck as exc:
-        path.unlink(missing_ok=True)
-        if stale_check(conn, exc.request_id, package_token):
-            raise db.Refusal(RECHECK)
-        raise db.Refusal("this package request has been taken over by a later turn — stop, "
-                         "nothing was written")
+                 frozen["snapshot_id"])).lastrowid
     except BaseException:
         path.unlink(missing_ok=True)       # an unregistered zip is never left to hand out
         raise

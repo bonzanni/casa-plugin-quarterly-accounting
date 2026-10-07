@@ -48,7 +48,8 @@ class TestARejectionSticks(Base):
         for kind in ("propose", "record"):
             with self.assertRaises(db.Refusal) as cm:
                 self.machine(doc, kind)
-            self.assertIn("the operator rejected this pairing", str(cm.exception))
+            self.assertIn(f"the operator rejected document #{doc} for this payment",
+                          str(cm.exception))
 
     def test_a_change_to_the_payment_lifts_it(self):
         doc = self.doc()
@@ -167,7 +168,9 @@ class TestARejectionSticks(Base):
         twin = self.lineage_for(2)
         self.classify(twin, {"software"})
         self.settle(twin)
-        second = self.machine(doc, pid=twin)["match_id"]       # occupied: conflicted
+        # two lineages that each paired `doc` (what a merge brings together): the floor
+        # refuses the second write ("taken"), so it is laid down directly
+        second = self.machine_entry(twin, doc, kind="propose")     # occupied: conflicted
         with db.tx(self.conn):
             ledger.merge(self.conn, self.pid, twin)
             st = lineage.fold_of(self.conn, self.pid)
@@ -244,15 +247,6 @@ class TestARejectionSticks(Base):
             self.conn, self.pid, documents._doc(self.conn, doc),
             R.facts_of(self.snapshot(self.pid)), "invoice", None))
 
-    def test_a_blocked_document_makes_no_payment_judge_due(self):
-        doc = self.doc()
-        self.assertTrue(work.describe(self.conn, self.pid)["fresh"])
-        self.assertIn(self.pid, work.judge_due_state(self.conn))      # it fits: due
-        self.reject(self.machine(doc)["match_id"])
-        self.assertNotIn(self.pid, work.judge_due_state(self.conn))   # rejected: not due
-        self.doc(document_number="OTHER")                              # another that fits
-        self.assertIn(self.pid, work.judge_due_state(self.conn))
-
 
 class TestZeroRows(StoreCase):
     def test_a_zero_amount_wants_its_document_optionally(self):
@@ -311,14 +305,6 @@ class TestTheBanksRate(Base):
         small = {"rate": "1", "unit": "EUR"}                          # 30 -> 30
         self.assertIsNone(fx.screen(small, 30, "EUR", 32, "USD"))
         self.assertIsNotNone(fx.screen(small, 30, "EUR", 33, "USD"))
-
-    def test_judge_due_follows_the_rate(self):
-        # C1 (Astra: mutant survived): a document the rate rules out makes nothing due
-        self.fx_row()
-        self.doc(amount_minor=718, currency="USD", document_date="2026-07-02")
-        self.assertNotIn(self.pid, work.judge_due_state(self.conn))
-        self.doc(amount_minor=1105, currency="USD", document_date="2026-07-02")
-        self.assertIn(self.pid, work.judge_due_state(self.conn))
 
     def test_the_pair_is_kept_only_valid(self):
         self.assertEqual(fx.pair("1.16", "EUR"), ("1.16", "EUR"))

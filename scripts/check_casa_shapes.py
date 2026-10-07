@@ -10,9 +10,21 @@ REQUIRED_KINDS must be present, and every deposit must carry either a display ex
 an explicit `display_skip` reason — the checked count must reach the header's. An empty,
 truncated or thinned file fails.
 
+The simple loop (Task 17, Casa floor v0.344.37+):
+- #1301: the manifest's `work` job is `quietWhenScheduled: true`, judged by Casa's own
+  manifest_jobs (validate_manifest runs it on the real manifest), and a non-boolean value is
+  refused (the gate discriminates a tree without #1301).
+- #1302: a record {"case": "<case>:next…", "tool": "verdict", "receipt", "next"} is a tap's
+  answer. Casa's _receipt_of must read its `next` beside its receipt, and the next card is
+  judged as specialist_desk._post_next_card judges it: proposal_ok against the TAPPED tool's
+  own entry. Counted as `next_card`; never quoted (once posted it is an ordinary proposal).
+- #1303: a record {"case", "tool", "result"} is a capability's refusal: Casa's
+  is_no_link_result must hold for it with nothing deposited, and _receipt_of must read its
+  `receipt`. Counted as `no_post`.
+
     python3 tests/gen_casa_shapes.py OUT.jsonl && CASA_TREE=… CASA_TESTS=… \\
         <Casa's python> scripts/check_casa_shapes.py OUT.jsonl"""
-import importlib.util, json, os, pathlib, subprocess, sys
+import copy, importlib.util, json, os, pathlib, subprocess, sys, types
 
 CASA, CTESTS = os.environ["CASA_TREE"], os.environ["CASA_TESTS"]
 sys.path[:0] = [CASA, CTESTS]
@@ -24,7 +36,7 @@ import tools as casa_tools                                   # noqa: E402
 from channels.tg_richtext import render, render_paged        # noqa: E402
 from plugin_grants import result_contract_map                # noqa: E402
 from plugin_registry import ResolutionResult, ResolvedPlugin # noqa: E402
-from plugin_store import validate_manifest                   # noqa: E402
+from plugin_store import StoreError, manifest_jobs, validate_manifest   # noqa: E402
 from specialist_desk import clip, DESK_QUOTE_CHARS          # noqa: E402
 from test_proposal_slot import _identity                     # noqa: E402
 
@@ -41,6 +53,30 @@ casa_tools._display_name_for_role = lambda role: DISPLAY
 # the kinds that must be judged at least once; and every capability tool the manifest
 # declares must have a deposit judged (read from the manifest: a new one is covered or fails)
 REQUIRED_KINDS = ("operator_proposal", "operator_message", "operator_file")
+# what must be judged at least once: the posted kinds, and a tap's next card (#1302). The
+# quote binding keeps iterating REQUIRED_KINDS: a next card is not quoted here (plan round
+# 4, Astra S1)
+REQUIRED_JUDGED = REQUIRED_KINDS + ("next_card",)
+JOB = "work"
+
+
+def _quiet_job(manifest) -> list:
+    """#1301: the job runs quiet when scheduled — on the manifest Casa accepted, and a
+    non-boolean value refused by Casa's own job reader."""
+    bad = []
+    jobs = {j.get("name"): j for j in manifest_jobs(manifest)}
+    if JOB not in jobs or jobs[JOB].get("quietWhenScheduled") is not True:
+        bad.append((0, f"the {JOB} job is not quietWhenScheduled: true", ""))
+    wrong = copy.deepcopy(manifest)
+    for j in wrong["casa"]["jobs"]:
+        j["quietWhenScheduled"] = "true"
+    try:
+        manifest_jobs(wrong)
+        bad.append((0, "Casa accepted a non-boolean quietWhenScheduled", ""))
+    except StoreError as exc:
+        if "quietWhenScheduled" not in str(exc):
+            bad.append((0, f"a non-boolean quietWhenScheduled refused as {exc}", ""))
+    return bad
 
 
 def _display(rec):
@@ -61,7 +97,7 @@ def main(path) -> int:
         manifest=manifest, manifest_name=NAME)])
     cmap = result_contract_map(res)
     by_wire = {e.wire_name: (rt, e) for rt, e in cmap.tools.items()}
-    bad, n, kinds, judged, checked, skipped = [], 0, {}, [], 0, 0
+    bad, n, kinds, judged, checked, skipped = _quiet_job(manifest), 0, {}, [], 0, 0
     tools_judged = set()
     quotes = []                                              # (n, case, store, quote, rid, raw)
     quoted_kinds = set()
@@ -80,15 +116,45 @@ def main(path) -> int:
                 bad.append((n, "grammar copy disagrees", rec["tool"]))
             continue
         rt, entry = by_wire[rec["tool"]]
+        if "next" in rec:                     # #1302: judged as specialist_desk._post_next_card
+            # Casa reads `next` only beside a non-blank receipt string (_receipt_of)
+            _, nxt = rb._receipt_of(json.dumps({"receipt": rec.get("receipt"),
+                                                "next": rec["next"]}, ensure_ascii=False))
+            if not nxt:
+                bad.append((n, "the next card is not read beside a receipt", rec["case"]))
+                continue
+            call = types.SimpleNamespace(identity=_identity(enforcement_role="finance"),
+                                         entry=entry, tool_use_id=f"t{n}", contract_map=cmap,
+                                         protected={})
+            parsed, why = rb.proposal_ok(nxt, call)
+            if parsed is None:
+                bad.append((n, why or "next refused", rec["case"]))
+            else:
+                kinds["next_card"] = kinds.get("next_card", 0) + 1
+                judged.append(rec["case"])
+            continue
         store = rb.ReferenceStore()
         store.open_call(client_id="c", artifact_id="f" * 64, tool_name=rt,
                         tool_use_id=f"t{n}", identity=_identity(enforcement_role="finance"),
                         provides=tuple(entry.provides), delivers=dict(entry.delivers),
                         contract_map=cmap, protected={}, entry=entry)
+        if "result" in rec:                   # #1303: a capability's no-post refusal
+            call = store.close_call("c", f"t{n}")
+            receipt, _ = rb._receipt_of(json.dumps(rec["result"], ensure_ascii=False))
+            words = rec["result"].get("receipt") if isinstance(rec["result"], dict) else None
+            if not store.is_no_link_result(call, rec["result"]):
+                bad.append((n, "not Casa's no-post shape", rec["case"]))
+            elif not (isinstance(words, str) and words.strip() and receipt == words):
+                bad.append((n, "no receipt Casa reads", rec["case"]))
+            else:
+                kinds["no_post"] = kinds.get("no_post", 0) + 1
+                judged.append(rec["case"])
+            continue
         b = rec["body"]
         ref, err = store.deposit(client_id="c", slot=b["slot"], value=b["value"],
                                  caption=b.get("caption"), label=b.get("label"),
-                                 kind=b.get("kind"), filename=b.get("filename"))
+                                 kind=b.get("kind"), filename=b.get("filename"),
+                                 key=b.get("key"))        # Casa #1312 (floor v0.344.39)
         if err:
             bad.append((n, err, rec["case"]))
             continue
@@ -170,7 +236,7 @@ def main(path) -> int:
         bad.append((0, "cases judged but not declared once", ", ".join(extra[:5])))
     if kinds != head.get("kinds"):
         bad.append((0, f"accepted per kind {kinds} != declared {head.get('kinds')}", ""))
-    for k in REQUIRED_KINDS:
+    for k in REQUIRED_JUDGED:
         if not kinds.get(k):
             bad.append((0, f"no {k} deposit was judged", ""))
     for tool in sorted(by_wire):

@@ -1,9 +1,7 @@
-import datetime as dt
 import json
 import multiprocessing
 import threading
 import unittest
-from unittest import mock
 
 from tests._base import StoreCase
 from tests import _procs
@@ -14,37 +12,23 @@ import version  # noqa: E402
 
 
 class TestPassMarker(StoreCase):
-    def test_second_pass_while_one_is_live_is_busy(self):
-        first = passes.begin_pass(self.conn, "cron")
-        second = passes.begin_pass(self.conn, "operator")
-        self.assertEqual(first["status"], "started")
-        self.assertEqual(second["status"], "busy")
-        self.assertEqual(second["text"], "A check is running — started a minute ago.\n"
-                                         "Ask again in a few minutes.")
-
-    def test_a_stale_marker_is_reclaimed_and_the_old_token_refused_everywhere(self):
-        old = passes.begin_pass(self.conn, "cron")["pass_token"]
-        later = db._clock() + dt.timedelta(seconds=passes.STALE_AFTER_S + 1)
-        with mock.patch.object(db, "_clock", lambda: later):
-            new = passes.begin_pass(self.conn, "operator")
-        self.assertTrue(new["reclaimed"])
-        self.assertNotEqual(old, new["pass_token"])
+    def test_end_pass_releases_the_marker_and_fences_its_token(self):
+        t = self.pass_("cron")
+        self.end_live_pass()
+        self.assertEqual(self.conn.execute("SELECT live FROM pass_marker").fetchone()[0], 0)
         with self.assertRaises(db.Refusal):
             with db.tx(self.conn):
-                passes.check_token(self.conn, old)
+                passes.check_token(self.conn, t)
+        t2 = self.pass_("cron")                     # the next run's pass starts
+        self.assertGreater(t2, t)
         with db.tx(self.conn):
-            passes.check_token(self.conn, new["pass_token"])
+            passes.check_token(self.conn, t2)
             passes.check_token(self.conn, None)       # operator-side writes carry none
-
-    def test_end_pass_releases_the_marker(self):
-        t = passes.begin_pass(self.conn, "cron")["pass_token"]
-        passes.end_pass(self.conn, t, "complete", {"checked": 3})
-        self.assertEqual(passes.begin_pass(self.conn, "cron")["status"], "started")
 
 
 class TestBindingDefaults(StoreCase):
     def test_exactly_one_company_account_binds_silently(self):
-        t = passes.begin_pass(self.conn, "cron")["pass_token"]
+        t = self.pass_("cron")
         passes.record_probe(self.conn, t, "bank_accounts", True, data={"accounts": [
             {"account_id": "p1", "category": "personal", "label": "Privé"},
             {"account_id": "c1", "category": "company", "label": "Voorbeeld BV Zakelijk"}]})
@@ -53,7 +37,7 @@ class TestBindingDefaults(StoreCase):
         self.assertEqual(b["watermark"], __import__("dates").quarter_start(db.now()[:10]))
 
     def test_several_company_accounts_do_not_bind(self):
-        t = passes.begin_pass(self.conn, "cron")["pass_token"]
+        t = self.pass_("cron")
         passes.record_probe(self.conn, t, "bank_accounts", True, data={"accounts": [
             {"account_id": "c1", "category": "company", "label": "A"},
             {"account_id": "c2", "category": "company", "label": "B"}]})
@@ -109,7 +93,7 @@ class TestBankWriteGate(StoreCase):
         with db.tx(self.conn):                       # what a successful import records
             passes.remember_ledger(self.conn, passes.current_pass(self.conn)["pass_id"])
         self._populate()
-        passes.end_pass(self.conn, passes.current_pass(self.conn)["generation"], "complete", {})
+        self.end_live_pass()
         self.pass_(generation=1, registered={})
         g = passes.bank_write_gate(self.conn)
         self.assertFalse(g["allowed"])
@@ -121,7 +105,7 @@ class TestBankWriteGate(StoreCase):
         with db.tx(self.conn):
             passes.remember_ledger(self.conn, passes.current_pass(self.conn)["pass_id"])
         self._populate()
-        passes.end_pass(self.conn, passes.current_pass(self.conn)["generation"], "complete", {})
+        self.end_live_pass()
         # same generation, same ledger instance (self.LEDGER, unchanged) — only the
         # registered workflows cleared, which is not what a restore or an erasure
         # (delete_all_data mints a NEW instance, D4) would leave behind
@@ -153,16 +137,22 @@ class TestBankWriteGate(StoreCase):
         self.pass_(generation=2, registered={})                 # the operator restored
         self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
 
+    def claim_without_probes(self):
+        """A new run's claim (its pass started), before it records any probe."""
+        import job
+        self.end_live_pass()
+        return job.claim(self.conn, "abcdef01-0000-4000-8000-%012x" % id(self),
+                         started_by="Started by: scheduled")
+
     def test_no_ledger_probe_this_pass_is_refused(self):
-        passes.begin_pass(self.conn, "cron")
+        self.claim_without_probes()
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
 
     def test_a_stale_ledger_probe_from_an_earlier_pass_does_not_decide_the_gate(self):
         # fix round 1, M1: a probe row survives (PK on kind) after its pass ends;
         # the gate must require it to belong to THIS pass, not merely be ok.
-        t = self.pass_(generation=0, registered={})
-        passes.end_pass(self.conn, t, "complete", {})
-        passes.begin_pass(self.conn, "cron")            # a new pass, no probes recorded yet
+        self.pass_(generation=0, registered={})
+        self.claim_without_probes()                     # a new pass, no probes recorded yet
         g = passes.bank_write_gate(self.conn)
         self.assertFalse(g["allowed"])
         self.assertIn("list_backups", g["reason"])
@@ -199,13 +189,13 @@ class TestBankWriteGate(StoreCase):
         with db.tx(self.conn):
             passes.remember_ledger(self.conn, passes.current_pass(self.conn)["pass_id"])
         self._populate()
-        passes.end_pass(self.conn, passes.current_pass(self.conn)["generation"], "complete", {})
+        self.end_live_pass()
 
         self.pass_(generation=1, registered={})            # a restore: remembered 0 != seen 1
         g = passes.bank_write_gate(self.conn)
         self.assertFalse(g["allowed"])
         self.assertIn("restored", g["reason"].lower())
-        passes.end_pass(self.conn, passes.current_pass(self.conn)["generation"], "complete", {})
+        self.end_live_pass()
 
         self.pass_(generation=0, registered={})            # generation reverts to match remembered
         g2 = passes.bank_write_gate(self.conn)
@@ -271,7 +261,7 @@ class TestGateConcurrency(StoreCase):
 
 class TestSelfCheck(StoreCase):
     def test_conditions_each_have_their_own_sentence(self):
-        t = passes.begin_pass(self.conn, "cron")["pass_token"]
+        t = self.pass_("cron")
         passes.record_probe(self.conn, t, "bank_tools", False, "tools not visible")
         s = binding.check_setup(self.conn)
         self.assertFalse(s["can_run"])
@@ -307,9 +297,8 @@ class TestReset(StoreCase):
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
                               " VALUES ('SENTINEL-NAME', '[]', 'x')")
-        # fix wave B (Astra S2): a pass trigger is operator data too, and the pass
-        # marker row outlived the wipe of the passes table
-        t0 = passes.begin_pass(self.conn, "operator: check SENTINEL-CLIENT's invoice")["pass_token"]
+        # fix wave B (Astra S2): the pass marker row outlived the wipe of the passes table
+        t0 = self.pass_()
         reader = sqlite3.connect(str(self.data / db.DB_NAME), isolation_level=None)
         reader.execute("BEGIN")
         reader.execute("SELECT COUNT(*) FROM counterparties").fetchone()   # holds a snapshot
@@ -321,11 +310,9 @@ class TestReset(StoreCase):
         self.assertEqual(out["erasure"], "complete")
         for f in self.data.glob(db.DB_NAME + "*"):
             self.assertNotIn(b"SENTINEL-NAME", f.read_bytes(), f.name)
-            self.assertFalse(b"SENTINEL-CLIENT" in f.read_bytes(), f.name)
         self.assertIsNone(self.conn.execute("SELECT * FROM pass_marker").fetchone())
-        started = passes.begin_pass(self.conn, "cron")      # a new pass still starts,
-        self.assertEqual(started["status"], "started")      # on a fresh generation
-        self.assertGreater(started["pass_token"], t0)
+        started = self.pass_("cron")                    # a new run's pass still starts,
+        self.assertGreater(started, t0)                 # on a fresh generation
 
     def test_reset_wipes_to_fresh_and_fences_a_stale_pass(self):
         self.bind()
@@ -342,18 +329,16 @@ class TestReset(StoreCase):
             with db.tx(self.conn):
                 passes.check_token(self.conn, t)
 
-    def test_reset_wipes_the_steps_and_the_package_requests(self):
-        # issue #2: a pass's steps and a package request name a quarter and documents
-        import steps
+    def test_reset_wipes_the_runs_their_claims_and_their_requests(self):
+        # issue #2: a run's requests name documents; its claims and run name the job
         self.bind()
-        self.package_token()
-        t = passes.begin_pass(self.conn, "handover")["pass_token"]
-        steps.start(self.conn, t, "handover", {"doc_ids": [1]})
-        for table in ("pass_steps", "package_requests"):
+        self.pass_()
+        tables = ("claims", "runs", "work_requests", "passes")
+        for table in tables:
             self.assertGreater(self.conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0],
                                0, table)
         self.assertEqual(binding.reset_store(self.conn)["erasure"], "complete")
-        for table in ("pass_steps", "package_requests"):
+        for table in tables:
             self.assertEqual(self.conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0],
                              0, table)
 

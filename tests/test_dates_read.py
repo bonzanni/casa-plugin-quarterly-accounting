@@ -10,7 +10,6 @@ from tests.test_package import Base
 import db  # noqa: E402
 import documents  # noqa: E402
 import matches  # noqa: E402
-import work  # noqa: E402
 
 
 class Dates(Base):
@@ -67,31 +66,12 @@ class TestTheMark(Dates):
             self.assertIsNone(self.read_at(doc), cleared)
 
 
-class TestTheListing(Dates):
-    def test_only_the_quarters_current_pairings_with_an_unread_date_are_listed(self):
-        unread, _ = self.paired(date=None)
-        self.paired(date="2026-07-02")                              # read
-        self.line()                                                  # no pairing
-        prop, _ = self.paired(date=None, how="propose")             # a proposal ships too
-        out = work.list_quarter_state(self.conn, "2026-Q3", unread_dates=True)
-        self.assertEqual([i["pid"] for i in out["dates_unread"]], sorted([unread, prop]))
-        self.assertEqual(out["total"], 2)
-        self.assertFalse(out["dates_unread"][0]["current"]["document"]["date_read"])
-        self.assertEqual(work.list_quarter_state(self.conn, "2026-Q4",
-                                                 unread_dates=True)["total"], 0)
-
-    def test_it_names_one_quarter(self):
-        for kw in ({}, {"triage_only": True, "quarter": "2026-Q3"}):
-            with self.assertRaises(db.Refusal):
-                work.list_quarter_state(self.conn, unread_dates=True, **kw)
-
-
 class TestThePackageSays(Dates):
     def test_a_file_named_by_an_unread_date_is_counted_and_listed(self):
         self.paired(date=None)
         out, z = self.build()
-        self.assertIn("1 file is named by a date not yet read from the document — listed in "
-                      "notes.md.", out["caption"])
+        # simple loop §1: the caption is one line; the count lives in notes.md
+        self.assertNotIn("not yet read", out["caption"])
         notes = z.read("notes.md").decode()
         self.assertIn("## Dates not yet read from the document\n\n- invoices/"
                       "2026-07-02_Adobe_100.01.pdf — named by the date it was filed with", notes)

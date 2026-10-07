@@ -25,7 +25,7 @@ class Base(StoreCase):
         self.token = self.pass_()
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
-                              " bank_through) VALUES ('p', 'x', 0, 0, '2026-09-20')")
+                              " bank_through) VALUES ('p', '2026-09-20T10:00:00Z', 0, 0, '2026-09-20')")
         self.n = 0
 
     def line(self, tags=("software",), **row):
@@ -53,7 +53,7 @@ class Base(StoreCase):
                   row_snapshot=self.snapshot(pid), token=self.token, **kw)
 
     def build(self, q="2026-Q3"):
-        out = package.build_quarterly_package(self.conn, q, bound=False)
+        out = package.build_quarterly_package(self.conn, q)
         z = zipfile.ZipFile(out["path"])
         self.addCleanup(z.close)
         return out, z
@@ -133,48 +133,47 @@ class TestContents(Base):
         kb.upsert_counterparty(self.conn, "Adobe", document_link="https://adobe.example/invoices")
         out, z = self.build()
         st = {r["counterparty"]: r["status"] for r in self.ledger_rows(z)}
-        self.assertEqual(st, {"Adobe": "MISSING", "Mystery": "UNCLASSIFIED",
+        self.assertEqual(st, {"Adobe": "MISSING", "Mystery": "MISSING",
                               "Own account": "NO-DOCUMENT", "Payroll Co": "OPTIONAL-MISSING"})
         notes = z.read("notes.md").decode()
         self.assertLess(notes.index("## Missing"), notes.index("## Not yet classified"))
         self.assertLess(notes.index("## Not yet classified"), notes.index("## Nice to have"))
         self.assertIn("https://adobe.example/invoices", notes)
         self.assertTrue(notes.rstrip().splitlines()[-1].startswith("built "))
-        self.assertIn("1 still missing, 1 not yet classified", out["caption"])
+        # simple loop §1: ONE line, as of the latest check; OPTIONAL-MISSING and
+        # NO-DOCUMENT count as documented
+        self.assertEqual(out["caption"], "Q3 · as of 20 Sep · 2 of 4 documented · 2 open")
         del kbline
 
-    def test_a_retained_pairing_on_an_unknown_expectation_is_reported_unclassified(self):
-        # fix wave D (Astra S1): the round-42 ruling retains the pairing when the
-        # classification is removed; the package must still report the row as not yet
-        # classified (spec ~2742-2744, ~3032) and ship its document in its folder.
+    def test_a_retained_pairing_on_an_unknown_expectation_is_matched(self):
+        # simple loop §2 table: no classification gate. A pairing kept while the
+        # classification is removed is MATCHED and ships its document in its folder;
+        # nothing is "not yet classified" any more.
         pid = self.line()
         self.pair(pid, self.file_doc())
         self.classify(pid, set())
         self.settle(pid)
         out, z = self.build()
         rows = self.ledger_rows(z)
-        self.assertEqual([r["status"] for r in rows], ["UNCLASSIFIED"])
+        self.assertEqual([r["status"] for r in rows], ["MATCHED"])
         self.assertEqual(rows[0]["document"], "invoices/2026-07-02_Adobe_100.00.pdf")
         self.assertIn("invoices/2026-07-02_Adobe_100.00.pdf", z.namelist())
         notes = z.read("notes.md").decode()
         section = notes.split("## Not yet classified")[1].split("##")[0]
-        self.assertEqual(section.strip().splitlines(),
-                         ["- Adobe · EUR 100.00 · 3 Jul — holds "
-                          "invoices/2026-07-02_Adobe_100.00.pdf"])
-        self.assertIn("1 not yet classified", out["caption"])
-        self.assertIn("1 with documents", out["caption"])
+        self.assertEqual(section.strip().splitlines(), ["- none"])
+        self.assertEqual(out["caption"], "Q3 · as of 20 Sep · 1 of 1 documented · 0 open")
 
-    def test_a_retained_unconfirmed_pairing_on_an_unknown_expectation_is_unclassified(self):
+    def test_a_retained_unconfirmed_pairing_on_an_unknown_expectation_is_unconfirmed(self):
         pid = self.line()
         self.pair(pid, self.file_doc(), how="propose")
         self.classify(pid, set())
         self.settle(pid)
         out, z = self.build()
         rows = self.ledger_rows(z)
-        self.assertEqual([r["status"] for r in rows], ["UNCLASSIFIED"])
+        self.assertEqual([r["status"] for r in rows], ["UNCONFIRMED"])
         self.assertEqual(rows[0]["document"], "")
         self.assertTrue(any(n.startswith("unresolved/") for n in z.namelist()))
-        self.assertIn("1 not yet classified", out["caption"])
+        self.assertEqual(out["caption"], "Q3 · as of 20 Sep · 0 of 1 documented · 1 open")
 
     def test_xlsx_cells_equal_the_csv(self):
         pid = self.line()
@@ -272,21 +271,6 @@ class TestNamingAndDeterminism(Base):
         self.assertEqual(pathlib.Path(a["path"]).read_bytes(), pathlib.Path(b["path"]).read_bytes())
         self.assertEqual(a["digest"], b["digest"])
 
-    def test_caption_diffs_against_the_last_delivered_package(self):
-        with mock.patch.object(db, "now", lambda: "2026-10-14T09:00:00Z"):
-            first, _ = self.build()
-        with db.tx(self.conn):
-            self.conn.execute("INSERT INTO deliveries(package_id, channel, staged_path, status,"
-                              " created_at, settled_at) VALUES (?, 'telegram', '/x', 'delivered',"
-                              " 'x', '2026-10-14T09:01:00Z')", (first["package_id"],))
-        with mock.patch.object(db, "now", lambda: "2026-10-15T09:00:00Z"):
-            same, _ = self.build()
-        self.assertIn("Identical to the package from 14 Oct.", same["caption"])
-        self.pair(self.line(), self.file_doc())
-        with mock.patch.object(db, "now", lambda: "2026-10-16T09:00:00Z"):
-            more, _ = self.build()
-        self.assertIn("1 document added since the package from 14 Oct.", more["caption"])
-
     def test_a_change_only_in_notes_is_not_identical(self):
         with mock.patch.object(db, "now", lambda: "2026-10-14T09:00:00Z"):
             first, _ = self.build()
@@ -298,7 +282,7 @@ class TestNamingAndDeterminism(Base):
             self.file_doc(document_number="LOOSE-1")        # filed in Q3, matches nothing
         with mock.patch.object(db, "now", lambda: "2026-10-15T09:00:00Z"):
             again, _ = self.build()
-        self.assertNotIn("Identical", again["caption"])
+        self.assertNotEqual(again["digest"], first["digest"])
 
     def test_an_unchanged_partial_rebuild_on_another_day_is_identical(self):
         # deviation: the dated "Partial quarter" line used to enter the digest
@@ -311,7 +295,7 @@ class TestNamingAndDeterminism(Base):
                               " 'x', '2026-08-14T09:01:00Z')", (first["package_id"],))
         with mock.patch.object(db, "now", lambda: "2026-08-20T09:00:00Z"):
             again, z2 = self.build()
-        self.assertIn("Identical to the package from 14 Aug.", again["caption"])
+        self.assertEqual(again["digest"], first["digest"])
         self.assertTrue(z2.read("notes.md").decode().startswith(
             "Partial quarter — built 2026-08-20"))
         with mock.patch.object(db, "now", lambda: "2026-10-02T09:00:00Z"):
@@ -332,17 +316,13 @@ class TestNamingAndDeterminism(Base):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM packages").fetchone()[0], 1)
         del out
 
-    def test_first_package_names_itself_once(self):
-        out, _ = self.build()
-        self.assertIn('say "call the zips <name>" to change that', out["caption"])
-
     def test_oversize_is_kept_and_explained(self):
         self.pair(self.line(), self.file_doc(body=b"x" * 5000))
         with mock.patch.object(package, "MAX_ZIP_BYTES", 1000):
             out, z = self.build()
         self.assertTrue(out["oversize"])
         self.assertIn("## Too large to send", z.read("notes.md").decode())
-        self.assertIn("20 MB", out["caption"])
+        self.assertNotIn("\n", out["caption"])    # the one line; get_package refuses to send it
 
 
 class TestConcurrentBuilds(Base):
@@ -374,7 +354,7 @@ def _build(path, data_dir, q):
     conn = _db.open_store(path)
     try:
         with mock.patch.object(_db, "now", lambda: "2026-10-14T14:12:10Z"):
-            q.put(_p.build_quarterly_package(conn, "2026-Q3", bound=False))
+            q.put(_p.build_quarterly_package(conn, "2026-Q3"))
     finally:
         conn.close()
 

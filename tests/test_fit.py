@@ -104,7 +104,6 @@ class Base(StoreCase):
                                  expected_revision=self.rev(pid), row_snapshot=self.snapshot(pid),
                                  token=self.token, labels=("guessed",))
         else:
-            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=self.token, queries=[cp])
         return pid
 
@@ -189,7 +188,7 @@ class TestAlertsProperty(Base):
             if rounds < 3:
                 passes.record_probe(self.conn, t, rng.choice(("gmail", "bank_sync")), False,
                                     _word(rng, rng.choice((10, 400, 6000))))
-            speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+            speak = self.end_and_speak()
             if speak is None:
                 break
             text = speak["text"]
@@ -360,7 +359,7 @@ class TestIdentityProperty(Base):
             if shape == "guessed":
                 d = self.doc(counterparty=payee, issuer="I%d" % i,
                              document_number=prefix + "G%d" % i,
-                             document_date="2026-09-02")
+                             document_date="2026-09-02", amount_minor=amount)
                 matches.record_match(
                     self.conn, pid=pid, doc_id=d, author="auto", expected_revision=self.rev(pid),
                     row_snapshot=self.snapshot(pid), token=self.token, labels=("guessed",),
@@ -383,7 +382,7 @@ class TestIdentityProperty(Base):
                 self.candidates(pid, [n for n, _ in specs[:k]], [i for _, i in specs[:k]])
             elif shape == "forced":
                 d = self.doc(counterparty=payee, issuer="Adobe", document_number=forced[i % 6],
-                             document_date="2026-09-02")
+                             document_date="2026-09-02", amount_minor=amount)
                 matches.record_match(
                     self.conn, pid=pid, doc_id=d, author="auto", expected_revision=self.rev(pid),
                     row_snapshot=self.snapshot(pid), token=self.token, labels=("guessed",))
@@ -507,7 +506,7 @@ class TestSeenNameProperty(Base):
                 else:
                     t = self.pass_()
                     passes.record_probe(self.conn, t, "gmail", False, "down %d %d" % (step, _))
-                    speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+                    speak = self.end_and_speak()
                     if speak:
                         views.mark_rendering_delivered(self.conn, speak["render_id"])
                     self.token = self.pass_()

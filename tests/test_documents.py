@@ -114,7 +114,7 @@ class TestCuration(StoreCase):
         documents.update_document_metadata(self.conn, self.doc_id, kind="payslip")
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual(p["revision"], before + 1)
-        self.assertIn("kind-mismatch", p["reasons_json"])
+        self.assertNotIn("kind-mismatch", p["reasons_json"])
 
     def test_a_held_document_cannot_be_marked_irrelevant(self):
         with self.assertRaises(db.Refusal):
@@ -206,8 +206,7 @@ class TestCustodyUnderConcurrency(StoreCase):
         # round B2 (Astra S2): the ingest captured its bytes, waited behind reset's
         # custody lock, then installed them BEFORE its token (fenced by the reset)
         # was refused — reset said "complete" and the bytes were back on disk
-        import passes
-        token = passes.begin_pass(self.conn, "cron")["pass_token"]
+        token = self.pass_("cron")
         path = self.publish("a.pdf", PDF)
 
         def stale_ingest(c):

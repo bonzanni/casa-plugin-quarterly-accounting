@@ -85,6 +85,12 @@ _NAMES = None
 _TAG = ""                   # binding V2: the first-line tag of the rendering being composed
 
 
+def printed_ref(pid):
+    """The generated "ref <hex>" a payment's headline prints under the disambiguation being
+    composed (`named`), or None."""
+    return _NAMES.pids.get(pid) if _NAMES is not None else None
+
+
 def tag_for(render_id: str) -> str:
     """Binding V2: every rendering composed after S7 ends its first line with " · <n>", its
     render id's digits — a separator and digits only, no machinery word — so two post-S7
@@ -336,12 +342,8 @@ def evidence(d: dict, cands=None) -> list:
         name = _docname(doc)
         if "facts-changed" in d["reasons"]:
             out.append("The bank changed this payment after it was paired — still right?")
-        if "kind-mismatch" in d["reasons"]:
-            need = KIND_WORD.get(d["expectation"]["kind"] or "", "different document")
-            out.append(f"Paired with {_a(KIND_WORD.get(doc['kind'], 'document'))}, but this "
-                       f"payment now needs {_a(need)}.")
-        elif "kind-changed" in d["reasons"]:
-            out.append(f"Its category changed since it was paired — still {name}?")
+        if "amount-unknown" in d["reasons"]:
+            out.append("The invoice's amount was read two different ways — check it.")
         labels = cur["labels"]
         if "guessed" not in labels or cur["author"] == "operator":
             # a line that asks for a verdict names what it is asking about (round p7:
@@ -408,7 +410,7 @@ def _tracked(d):
 
 
 def _open_required(d):
-    return _tracked(d) and d["status"] == "open" and d["expectation"]["kind"] is not None
+    return _tracked(d) and d["status"] == "open"
 
 
 def _searched(d):
@@ -432,8 +434,8 @@ def _is_unsearched(d):
 
 
 def _is_unclassified(d):
-    return (_tracked(d) and d["expectation"]["kind"] is None
-            and "classification-conflict" not in d["reasons"])
+    # §2 table: no payment is "not yet classified" any more
+    return False
 
 
 def _is_conflict(d):
@@ -972,6 +974,8 @@ def _item_sentence(d) -> str:
         return "It has left the bank ledger."
     if d["status"] == "matched":
         return f"{_docname(cur['document'])[0].upper() + _docname(cur['document'])[1:]} is filed with it."
+    if d["status"] == "proposed" and cur is None:
+        return "Several documents could fit, and none is picked."   # D3: a joint machine set
     if d["status"] == "proposed":
         return f"Paired with {_docname(cur['document'])}, not confirmed."
     if d["status"] in ("exempt", "no-document"):
@@ -1086,7 +1090,9 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
         raise db.Refusal("after is the cursor a previous page's `next` returned")
     if prev is not None and (not isinstance(prev, str) or not _RENDER_ID.fullmatch(prev)):
         raise db.Refusal("prev is the render id the More button carried")
-    q = quarter or dates.quarter_of(db.now()[:10])
+    import cards
+    # ruling Q2b: after an operator's "check Q2" a view with no quarter is Q2's
+    q = quarter or cards.named_quarter(conn) or dates.quarter_of(db.now()[:10])
     dates.parse_quarter(q)
     # binding V2: the render id is minted before composing — its tag ends line 1, counted
     # inside every page budget (_limit), and this page's `next` names it as `prev` (V1)
@@ -1225,52 +1231,32 @@ def fits_proposal(text: str) -> bool:
     return utf16_len(body) <= BODY_LIMIT and len(body) <= 4000
 
 
-def buttons_for(conn, r, walk=None) -> list:
+def buttons_for(conn, r) -> list:
     """S7 §7.2: the stored calls of a posted rendering `r` (a renders row), in order, at
     most six, at least one, as (label, tool, args, key_spec). A writing button carries
-    key_spec=(action, pid); the caller mints and stores its key."""
+    key_spec=(action, pid, None); the caller mints and stores its key."""
     scope = json.loads(r["scope_json"])
     rid, kind = r["render_id"], r["kind"]
     proposed, nxt = scope.get("proposed") or [], scope.get("next")
     more = [("More", "show_view", dict(nxt), None)] if nxt else []
-    if more and kind == "item" and walk:
-        more[0][2]["walk"] = walk          # page 2 of a One by one item still offers Next
     if kind in SHEET_VIEWS and proposed:
         out = [("All good", "verdict", {"render_id": rid, "action": "all-good"},
-                ("all-good", None)),
-               ("One by one", "show_view", {"view": "item", "pid": proposed[0], "walk": rid},
-                None)] + more
+                ("all-good", None, None)),
+               ("One by one", "show_view", {"view": "item", "pid": proposed[0]}, None)] + more
     elif kind == "item":
         pid = scope.get("pid")
         verdicts = {"proposed": ("right", "wrong", "no-invoice"),
                     "paired": ("wrong", "no-invoice"),
                     "none": ("no-invoice",)}.get(scope.get("item_state"), ())
         words = {"right": "Right", "wrong": "Wrong", "no-invoice": "No invoice needed"}
-        out = [(words[a], "verdict", {"render_id": rid, "action": a, "pid": pid}, (a, pid))
+        out = [(words[a], "verdict", {"render_id": rid, "action": a, "pid": pid},
+                (a, pid, None))
                for a in verdicts]
-        nxt_pid = _walk_next(conn, walk, pid)
-        if nxt_pid is not None:
-            out.append(("Next", "show_view", {"view": "item", "pid": nxt_pid, "walk": walk},
-                        None))
-        out += more
+        out += more        # simple loop §4: the walk's [Next] is deleted (single-use keyboards)
     else:
         out = more or [("What's missing", "show_view", {"view": "missing"}, None),
                        ("Anything to check?", "show_view", {"view": "check"}, None)]
     return (out or [("What's missing", "show_view", {"view": "missing"}, None)])[:6]
-
-
-def _walk_next(conn, walk, pid):
-    """The proposed pid after `pid` on the sheet rendering `walk` (One by one), or None."""
-    if not walk:
-        return None
-    w = conn.execute("SELECT kind, scope_json FROM renders WHERE render_id=?",
-                     (walk,)).fetchone()
-    if w is None or w["kind"] not in SHEET_VIEWS:
-        return None
-    proposed = json.loads(w["scope_json"]).get("proposed") or []
-    if pid in proposed and proposed.index(pid) + 1 < len(proposed):
-        return proposed[proposed.index(pid) + 1]
-    return None
 
 
 def _norm(s: str) -> str:
@@ -1375,12 +1361,15 @@ def _rid_order(rid: str):
 
 def _common_view(rows) -> dict:
     """The show_view arguments of the candidates' common view, else the status view."""
+    import cards
     kinds = {r["kind"] for r in rows}
     scopes = [json.loads(r["scope_json"]) for r in rows]
     quarters = {sc.get("quarter") for sc in scopes}
     pids = {sc.get("pid") for sc in scopes}
     if len(kinds) == 1 and len(quarters) == 1 and len(pids) == 1:
         kind, (q,), (pid,) = next(iter(kinds)), quarters, pids
+        if kind in cards.KINDS:          # simple loop §1: a card recovers as open items
+            return {"view": "open", **({"quarter": q} if q else {})}
         if kind in VIEWS and (kind != "item" or pid is not None):
             out = {"view": kind}
             if q:
@@ -1459,8 +1448,12 @@ def mark_rendering_delivered(conn, render_id: str) -> dict:
         for a in scope.get("alerts", []):
             conn.execute("UPDATE alerts SET sent_at=?, render_id=? WHERE alert_id=?",
                          (now, render_id, a))
+        # simple loop §1 (D19, shape d): a "package ready" notice — or an end message that
+        # carries one — counts as given only once delivered, for the completion composed
+        for q, sig in (scope.get("ready_sigs") or {}).items():
+            conn.execute("INSERT OR IGNORE INTO quarter_notices(quarter) VALUES (?)", (q,))
+            conn.execute("UPDATE quarter_notices SET sig=?, times=times+1, render_id=? WHERE"
+                         " quarter=?", (sig, render_id, q))
         if scope.get("announce_package_name"):
             conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
-        import asks
-        asks.mark_reported(conn, render_id)     # S2 §6.4: consumed only once shown
         return {"render_id": render_id, "delivered_at": now}

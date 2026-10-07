@@ -145,9 +145,11 @@ def check_setup(conn) -> dict:
 _TABLES_TO_WIPE = ("binding", "passes", "probes", "documents", "counterparties",
                    "chain_overrides", "snapshots", "bank_rows", "projections", "aliases",
                    "matches", "log", "match_state", "residue", "renders", "render_items",
-                   "shown", "packages", "deliveries", "delivered_rows", "alerts", "pass_steps",
-                   "package_requests", "operator_refs", "claims", "work_requests", "credits",
-                   "runs", "readings", "render_keys", "account_choices", "post_offers")
+                   "shown", "packages", "deliveries", "delivered_rows", "alerts",
+                   "operator_refs", "claims", "work_requests",
+                   "runs", "readings", "render_keys", "account_choices", "post_offers",
+                   "run_work", "run_mirror", "run_items", "replace_questions", "render_states",
+                   "quarter_notices")
 
 
 ERASE_REPORT_KEEPS = (
@@ -177,9 +179,6 @@ def reset_store(conn) -> dict:
             conn.execute("DELETE FROM sqlite_sequence WHERE name IN (%s)"
                          % ",".join("'%s'" % t for t in _TABLES_TO_WIPE))
             conn.execute("UPDATE counters SET value=0 WHERE name='seq'")
-            # the note texts restart with the sequence: a write handed out before the
-            # reset may still land with a text the new store will issue again (#14)
-            db.set_epoch(conn)
             conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
             # S2 §6.3 (Astra plan-r3 S1): with `claims` empty every old job token is refused
             # (check_claim)
@@ -187,8 +186,9 @@ def reset_store(conn) -> dict:
             # operator data (fix wave B, Astra S2); the monotonic generation that
             # fences a running pass lives in counters, bumped above
             conn.execute("DELETE FROM pass_marker")
-            conn.execute("UPDATE cursor SET last_pid=0, cycle_started_at=NULL,"
-                         " last_cycle_completed_at=NULL")
+            # g2 (Terra S1): a new store identity — Casa #1312's delivery keys of the wiped
+            # store never suppress a message of this one
+            conn.execute("DELETE FROM meta WHERE key='store_id'")
             # A "restored" or "other-ledger" refusal concerned the store just wiped; a
             # dirty-ledger one concerns the ledger, which a store reset does not clean.
             conn.execute("DELETE FROM meta WHERE key='gate_refusal' AND"

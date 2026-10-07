@@ -13,10 +13,9 @@ cursor over an order that never changes (pids, doc_ids)."""
 import json
 import unittest
 
-from tests import _base
 from unittest import mock
 
-from tests.test_continuation import Flow
+from tests.test_ledger import RealLedger
 import budget  # noqa: E402
 import db  # noqa: E402
 import kb  # noqa: E402
@@ -30,7 +29,7 @@ OTHER = "Other Vendor BV"
 HUGE = "X" * 24_000                       # C1 (Astra): one exact bank field over the page
 
 
-class Bounded(Flow):
+class Bounded(RealLedger):
     def setUp(self):
         super().setUp()
         bf = self.bf
@@ -39,7 +38,7 @@ class Bounded(Flow):
                          remittance=HUGE if i == 7 else REMITTANCE[:140])
                   for i in range(N)])
         for r in self.active():
-            self.classify(r["row_id"], "software")
+            self.tag(r["row_id"], "software")
         self.first_pass()
         kb.upsert_counterparty(self.conn, "Adobe " + "x" * 400, patterns=[NAME[:140]],
                                source="email", search_hint="from:adobe.com " * 60,
@@ -48,12 +47,8 @@ class Bounded(Flow):
             self.conn.execute("UPDATE counterparties SET document_link=?",
                               ("https://example.invalid/" + "y" * 30_000,))
         self.t1 = self.begin()
-        self.start(self.t1)
-        self.probe_import(self.t1)
-        self.sweep(self.t1)
         pids = sorted(d["pid"] for d in work.triage(self.conn))
         self.assertEqual(len(pids), N)
-        _base.hand(self.conn, pids)                     # issue #26: handed work only
         for pid in pids:                                # 50 long queries each
             self.call("record_search", pid=pid, pass_token=self.t1,
                       queries=[f"q{j} " + "has:attachment adobe invoice " * 12 for j in range(50)])
@@ -61,53 +56,12 @@ class Bounded(Flow):
         self.huge = next(p for p in pids if work.describe(self.conn, p)["amount_minor"] == 1007)
         self.assertEqual(work.describe(self.conn, self.huge)["row_snapshot"]["remittance"], HUGE)
 
-    def finish(self):
-        tri = self.call("list_quarter_state", triage=True, pass_token=self.t1)
-        out = self.call("record_step", pass_token=self.t1, step="sweep", action="finish",
-                        remaining_in_cycle=0, triage_remaining=tri["remaining"])
-        self.assertTrue(out["finished"], out)
-
     def test_the_items_are_worst_case(self):
         # without the listing shapes, the same items would not fit one answer
-        full = [work.describe(self.conn, pid) for pid in self.pids[:work.TRIAGE_LIMIT]]
+        full = [work.describe(self.conn, pid) for pid in self.pids[:50]]
         self.assertGreater(budget.size(full), 5 * budget.RESULT_LIMIT)
         self.assertGreater(budget.size(work.describe(self.conn, self.huge)),
                            budget.RESULT_LIMIT)
-
-    def test_the_continuation_fits_and_carries_the_token(self):
-        self.finish()
-        text = self.text("continue_pass")
-        self.assertLessEqual(len(text), budget.RESULT_LIMIT)
-        c = json.loads(text)["continue"]
-        self.assertNotEqual(c["pass_token"], self.t1)
-        self.assertEqual(c["next"], "gmail-round")
-        w = c["work"]
-        self.assertEqual(len(w["triage"]) + w["remaining"], w["total"])
-        self.assertEqual(w["total"], N)
-        # worst-case items (every clip at its full length) still fill a chunk (issue #21:
-        # a check's Gmail round comes in chunks; #24: CHUNK_FIRST at the first); the rest
-        # is `remaining`
-        self.assertEqual(len(w["triage"]), work.CHUNK_FIRST)
-        self.assertEqual([d["pid"] for d in w["triage"]], self.pids[:len(w["triage"])])
-        # the new token works: the Gmail round and the end
-        self.call("record_search", pid=w["triage"][0]["pid"], pass_token=c["pass_token"],
-                  incomplete=True)
-        # issue #28: Gmail down — the chunk is not owed its search and judgment
-        self.call("record_probe", pass_token=c["pass_token"], kind="gmail", ok=False)
-        end = self.call("end_pass", pass_token=c["pass_token"], outcome="interrupted",
-                        report={"checked": 0, "total": N, "not_searched": N})
-        self.assertEqual(end["outcome"], "interrupted")
-
-    def test_the_first_chunk_fits_with_every_filed_ref_at_its_longest(self):
-        # issue #24 (D4): filed_refs rides on the first chunk's continuation
-        for i in range(work.FILED_REFS_SHOWN + 3):
-            self.file(source="manual-telegram", source_ref=f"/inbox/{i:03d}" + "r" * 900)
-        self.finish()
-        text = self.text("continue_pass")
-        self.assertLessEqual(len(text), budget.RESULT_LIMIT)
-        c = json.loads(text)["continue"]
-        self.assertEqual((c["next"], len(c["filed_refs"]), len(c["work"]["triage"])),
-                         ("gmail-round", work.FILED_REFS_SHOWN, work.CHUNK_FIRST))
 
     def page(self, after=None, **args):
         text = self.text("list_quarter_state", **args, **({"after": after} if after else {}))
@@ -245,20 +199,6 @@ class Bounded(Flow):
             out = self.text("list_quarter_state", triage=True)
         self.assertTrue(out.startswith("error: Oversized: payment #"), out)
 
-    def test_an_oversized_claim_claims_nothing(self):
-        self.finish()
-        before = self.digest()
-        with mock.patch.object(budget, "RESULT_LIMIT", 200):
-            from tests import legacy_tools
-            out = legacy_tools.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                       "params": {"name": "continue_pass", "arguments": {}}})
-        self.assertTrue(out["result"].get("isError"), out)
-        self.assertIn("nothing was claimed", out["result"]["content"][0]["text"])
-        self.assertEqual(self.digest(), before)         # rolled back: no rotation, no lease
-        c = self.claim()["continue"]
-        self.assertEqual(c["step"], "sweep")
-        self.assertNotEqual(c["pass_token"], self.t1)
-
 
 class TestConstruction(unittest.TestCase):
     """The largest item the clips allow is well under one page: a page never has to
@@ -286,7 +226,6 @@ class TestConstruction(unittest.TestCase):
              "portal": False, "class_observed_at": long, "unprojectable": long, "fresh": True,
              "broken_floor": long, "row_snapshot": {"counterparty": long, "remittance": long}}
         self.assertLessEqual(budget.size(work.listed(d)), budget.PAGE_BUDGET * 3 // 4)
-        self.assertLessEqual(budget.size(work.work_item(d)), budget.PAGE_BUDGET // 8)
 
 
 class TestPage(unittest.TestCase):
@@ -307,140 +246,3 @@ class TestPage(unittest.TestCase):
         self.assertEqual(budget.bounded({"a": ["xxxxx", {"b": "yyyyy"}], "c": "zzzzz", "n": 5},
                                         3, longer={"c": 4}),
                          {"a": ["xx…", {"b": "yy…"}], "c": "zzz…", "n": 5})
-
-
-class TestJudgeDue(Flow):
-    """C3 (refutation defense, Astra): a payment that joined triage behind the
-    cursor, with its document already filed, schedules the judge step."""
-    def test_a_payment_with_a_fitting_filed_document_makes_the_judge_step_due(self):
-        self.seed(3, documents=1)           # the first payment's invoice is filed, unmatched
-        t1 = self.begin()
-        self.start(t1)
-        self.specialist(t1)                 # triage listed, nothing matched
-        c = self.claim()["continue"]
-        self.assertEqual((c["next"], c["judge_due"]), ("gmail-round", 1))
-
-    def test_a_pass_that_swept_is_not_complete_while_a_judgment_is_due(self):
-        # C4 (Astra, Terra): judge_due is taken before the Gmail round; end_pass
-        # re-checks it live
-        self.seed(3, documents=1)
-        t1 = self.begin()
-        self.start(t1)
-        self.specialist(t1)
-        t2 = self.claim()["continue"]["pass_token"]
-        # Gmail down (issue #28: otherwise the handed chunk is owed first)
-        self.call("record_probe", pass_token=t2, kind="gmail", ok=False)
-        out = self.text("end_pass", pass_token=t2, outcome="complete")
-        self.assertTrue(out.startswith("refused: not ended: 1 payment with a filed document"),
-                        out)
-        self.assertEqual(self.call("end_pass", pass_token=t2, outcome="interrupted")["outcome"],
-                         "interrupted")                # any other outcome is unaffected
-
-    def test_after_the_judge_step_complete_is_accepted(self):
-        self.seed(3, documents=1)
-        t1 = self.begin()
-        self.start(t1)
-        self.specialist(t1)
-        t2 = self.worked(self.claim()["continue"])
-        self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
-        self.specialist(t2, step="judge")
-        t3 = self.claim()["continue"]["pass_token"]
-        self.assertEqual(self.call("end_pass", pass_token=t3, outcome="complete")["outcome"],
-                         "complete")
-
-    def test_an_expired_judge_step_waives_nothing(self):
-        # C5 (Terra): only a judge step that finished stops the live check
-        self.seed(3, documents=1)
-        t1 = self.begin()
-        self.start(t1)
-        self.specialist(t1)
-        t2 = self.worked(self.claim()["continue"])
-        self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
-        self.clock.advance(3600)                       # the judge delegation never answers
-        c = self.claim()["continue"]
-        self.assertEqual((c["step"], c["ended"]), ("judge", "expired"))
-        out = self.text("end_pass", pass_token=c["pass_token"], outcome="complete")
-        self.assertTrue(out.startswith("refused: not ended: 1 payment"), out)
-        self.assertIn("End it interrupted", out)            # never a second judge step
-        self.assertEqual(self.call("end_pass", pass_token=c["pass_token"],
-                                   outcome="interrupted")["outcome"], "interrupted")
-
-    def test_a_payment_reopened_during_the_judge_step_keeps_the_pass_from_complete(self):
-        # C6 (Terra): the judge covered only what was due when it started
-        self.seed(3, documents=1)
-        t1 = self.begin()
-        self.start(t1)
-        self.specialist(t1)
-        t2 = self.worked(self.claim()["continue"])
-        self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
-        due = set(work.judge_due_pids(self.conn))
-        self.assertEqual(len(due), 1)
-        # during the judge a second payment's invoice is filed while it is open
-        self.file(amount_minor=1001, document_date="2026-07-06")
-        self.assertEqual(len(work.judge_due_pids(self.conn)), 2)
-        self.specialist(t2, step="judge")                 # finishes without matching
-        t3 = self.claim()["continue"]["pass_token"]
-        out = self.text("end_pass", pass_token=t3, outcome="complete")
-        self.assertTrue(out.startswith("refused: not ended: 1 payment"), out)
-        self.assertIn("End it interrupted", out)
-        self.assertEqual(self.call("end_pass", pass_token=t3, outcome="interrupted")["outcome"],
-                         "interrupted")
-
-    def judge_started(self):
-        self.seed(3, documents=1)
-        t1 = self.begin()
-        self.start(t1)
-        self.specialist(t1)
-        t2 = self.worked(self.claim()["continue"])
-        self.start(t2, step="judge", report={"checked": 3, "total": 3, "not_searched": 0})
-        return t2
-
-    def judge_finished(self, t2):
-        self.specialist(t2, step="judge")                 # finishes without matching
-        return self.claim()["continue"]["pass_token"]
-
-    def test_a_judged_payment_unchanged_is_covered(self):
-        t3 = self.judge_finished(self.judge_started())
-        self.assertEqual(work.judge_due(self.conn), 1)    # judged and declined: covered
-        self.assertEqual(self.call("end_pass", pass_token=t3, outcome="complete")["outcome"],
-                         "complete")
-
-    def test_a_document_corrected_during_a_finished_judge_is_that_judges(self):
-        # C8 ruling: edits to documents and the KB during a judgment are that
-        # judgment's to see, or the next pass's — as before issue #3 (a stated residual)
-        t2 = self.judge_started()
-        doc = self.conn.execute("SELECT doc_id FROM documents").fetchone()[0]
-        self.call("update_document_metadata", doc_id=doc, document_number="CORRECTED",
-                  pass_token=t2)
-        t3 = self.judge_finished(t2)
-        self.assertEqual(self.call("end_pass", pass_token=t3, outcome="complete")["outcome"],
-                         "complete")
-
-    def test_a_payment_changed_during_the_judge_is_not_covered(self):
-        # C7 (Astra): a pairing made and rejected, or any change of the payment,
-        # moves its revision; the judgment saw the payment as it was
-        t2 = self.judge_started()
-        pid = work.judge_due_pids(self.conn)[0]
-        before = work.describe(self.conn, pid)["revision"]
-        kb.set_expectation(self.conn, scope_type="counterparty", scope="Adobe",
-                           kind="invoice", tier="optional", author="specialist", token=t2)
-        self.assertNotEqual(work.describe(self.conn, pid)["revision"], before)
-        t3 = self.judge_finished(t2)
-        out = self.text("end_pass", pass_token=t3, outcome="complete")
-        self.assertTrue(out.startswith("refused: not ended: 1 payment"), out)
-        self.assertIn("End it interrupted", out)
-
-    def test_nothing_fitting_is_not_due(self):
-        self.seed(3, documents=0)
-        self.file(amount_minor=999_999, document_date="2026-07-05")      # no payment's amount
-        t1 = self.begin()
-        self.start(t1)
-        self.specialist(t1)
-        self.assertEqual(self.claim()["continue"]["judge_due"], 0)
-
-    def test_the_single_reread_is_guarded_too(self):
-        self.seed(1)
-        pid = work.triage(self.conn)[0]["pid"]
-        with mock.patch.object(budget, "PAGE_BUDGET", 300):
-            out = self.text("list_quarter_state", pid=pid)
-        self.assertTrue(out.startswith("error: Oversized: payment #"), out)

@@ -12,8 +12,8 @@ class Acquisition(StoreCase):
         super().setUp()
         import job
         self.bind()
-        self.tok = job.claim(self.conn, A)
-        self.pid = self.start_job_pass(self.tok)
+        self.tok = job.claim(self.conn, A)          # the run's pass starts with its claim
+        self.pid = self.conn.execute("SELECT pass_id FROM pass_marker").fetchone()[0]
 
     def probes(self, acq, sync_ok=True):
         import passes
@@ -34,14 +34,14 @@ class Acquisition(StoreCase):
         returns its path, as bank-feed's export_history does."""
         return self.export_csv(rows)
 
-    def handed(self):
-        import db, job
+    def acquire(self):
+        import db, loop
         with db.tx(self.conn):
-            return job.hand_acquisition(self.conn, self.tok, self.pid)
+            return loop.hand_acquisition(self.conn, self.tok, self.pid)
 
     def test_import_needs_its_acquisitions_sync_under_the_same_claim(self):
         import db, ledger
-        acq = self.handed()
+        acq = self.acquire()
         path = self.export([{"row_id": 1}])
         with self.assertRaises(db.Refusal):            # no bank_sync for this acq yet
             ledger.import_ledger_export(self.conn, path=path, token=self.tok,
@@ -53,12 +53,12 @@ class Acquisition(StoreCase):
 
     def test_an_export_is_imported_once(self):
         import db, ledger
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         path = self.export([{"row_id": 1}])
         ledger.import_ledger_export(self.conn, path=path, token=self.tok,
                                     ledger_instance=self.LEDGER, acq=acq)
-        acq2 = self.handed()
+        acq2 = self.acquire()
         self.probes(acq2)
         with self.assertRaises(db.Refusal):
             ledger.import_ledger_export(self.conn, path=path, token=self.tok,
@@ -66,9 +66,9 @@ class Acquisition(StoreCase):
 
     def test_a_superseded_acquisition_is_refused(self):
         import db, ledger
-        acq1 = self.handed()
+        acq1 = self.acquire()
         self.probes(acq1)
-        acq2 = self.handed()                            # re-handed in the same claim
+        acq2 = self.acquire()                            # re-handed in the same claim
         path = self.export([{"row_id": 1}])
         with self.assertRaises(db.Refusal):
             ledger.import_ledger_export(self.conn, path=path, token=self.tok,
@@ -76,7 +76,7 @@ class Acquisition(StoreCase):
 
     def test_another_claims_acquisition_is_refused(self):
         import db, job, ledger
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         self.tok = job.claim(self.conn, A)              # the turn ended; a new turn
         path = self.export([{"row_id": 1}])
@@ -92,13 +92,13 @@ class Acquisition(StoreCase):
         return str(cm.exception)
 
     def test_a_sync_not_naming_this_acquisition_is_refused(self):
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(None)                               # a sync, but not this read's
         self.assertIn("record this bank read's sync", self.refusal(acq))
 
     def test_a_sync_recorded_under_another_claim_is_refused(self):
         import db
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         with db.tx(self.conn):                          # unreachable through record_probe
             self.conn.execute("UPDATE probes SET gen=gen-1 WHERE kind='bank_sync'")
@@ -108,20 +108,20 @@ class Acquisition(StoreCase):
     # required a successful sync); the identity checks are unchanged
     def test_a_failed_sync_of_this_acquisition_under_this_claim_binds_the_import(self):
         import ledger
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq, sync_ok=False)
         out = ledger.import_ledger_export(self.conn, path=self.export([{"row_id": 1}]),
                                           token=self.tok, ledger_instance=self.LEDGER, acq=acq)
         self.assertEqual(out["rows"], 1)
 
     def test_a_failed_sync_of_another_acquisition_is_refused(self):
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq - 1, sync_ok=False)              # a failed sync, not this read's
         self.assertIn("record this bank read's sync", self.refusal(acq))
 
     def test_a_failed_sync_recorded_under_another_claim_is_refused(self):
         import db
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq, sync_ok=False)
         with db.tx(self.conn):                          # unreachable through record_probe
             self.conn.execute("UPDATE probes SET gen=gen-1 WHERE kind='bank_sync'")
@@ -129,191 +129,37 @@ class Acquisition(StoreCase):
 
     def test_an_earlier_turns_acquisition_is_refused_as_such(self):
         import job
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         self.tok = job.claim(self.conn, A)
         self.assertIn("earlier turn", self.refusal(acq))
 
     def test_an_import_without_acq_is_refused_in_a_job_pass(self):
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         self.assertIn("call job_next", self.refusal(None))
 
     def test_a_replayed_export_is_refused_by_name(self):
         import ledger
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         path = self.export([{"row_id": 1}])
         ledger.import_ledger_export(self.conn, path=path, token=self.tok,
                                     ledger_instance=self.LEDGER, acq=acq)
-        acq2 = self.handed()
+        acq2 = self.acquire()
         self.probes(acq2)
         self.assertIn("imported already", self.refusal(acq2, path))
 
     def test_the_import_records_its_read(self):
         import ledger, os, pathlib
-        acq = self.handed()
+        acq = self.acquire()
         self.probes(acq)
         path = self.export([{"row_id": 1}])
         sid = ledger.import_ledger_export(self.conn, path=path, token=self.tok,
                                           ledger_instance=self.LEDGER, acq=acq)["snapshot"]
         s = self.conn.execute("SELECT * FROM snapshots WHERE snapshot_id=?", (sid,)).fetchone()
-        p = self.conn.execute("SELECT read_seq FROM passes WHERE pass_id=?",
-                              (self.pid,)).fetchone()
-        self.assertEqual((s["job_id"], s["read_seq"], s["acq"], s["export_ref"]),
-                         (A, p["read_seq"], acq,
-                          pathlib.Path(os.path.realpath(path)).parent.name))
-        self.assertIsNotNone(s["read_seq"])
-        self.assertIsNone(s["swept_at"])
-
-
-class FreshnessF(Acquisition):
-    def imported(self):
-        import ledger
-        acq = self.handed()
-        self.probes(acq)
-        ledger.import_ledger_export(self.conn, path=self.export([{"row_id": 1}]),
-                                    token=self.tok, ledger_instance=self.LEDGER, acq=acq)
-
-    def reason(self):
-        import db, job
-        with db.tx(self.conn):
-            return job.fresh_reason(self.conn)
-
-    def test_condition_1_another_jobs_import(self):
-        import job
-        self.imported()
-        self.sweep_to_zero()
-        self.assertIsNone(self.reason())
-        self.tok = job.claim(self.conn, "bbbbbbbb-2")    # adoption by another job
-        self.assertIn("another job", self.reason())
-
-    def test_condition_2_a_request_after_the_watermark(self):
-        import asks
-        self.imported()
-        self.sweep_to_zero()
-        asks.request_work(self.conn, "check", "operator")
-        import db
-        with db.tx(self.conn):
-            asks.take_queued(self.conn, self.pid)
-        self.assertIn("asked after", self.reason())
-
-    def test_condition_3_w_from_the_sweeps_completion_and_its_cap(self):
-        import datetime as _dt, db, job
-        self.imported()
-        self.sweep_to_zero()
-        later = db._clock() + _dt.timedelta(seconds=job.W_S + 1)
-        with self.patch_clock(later):
-            self.assertIn("older than", self.reason())
-            with db.tx(self.conn):
-                self.conn.execute("UPDATE passes SET w_refreshes=? WHERE pass_id=?",
-                                  (job.W_REFRESH_MAX, self.pid))
-            self.assertIsNone(self.reason())           # waived after two W refreshes
-
-    def test_machine_pairing_refuses_while_f_fails(self):
-        import db, job
-        self.imported()
-        self.sweep_to_zero()
-        self.tok = job.claim(self.conn, "bbbbbbbb-2")    # condition 1 now fails
-        pid = self.only_pid()
-        doc = self.doc()
-        with self.assertRaises(db.Refusal) as cm:
-            self.machine_match(pid, doc, self.tok)
-        self.assertIn("call job_next", str(cm.exception))
-
-    def test_not_read_before_the_pass_imports(self):
-        self.assertIn("not read", self.reason())
-
-    def test_unswept_until_a_listing_finds_nothing_due(self):
-        import sweep
-        self.imported()
-        self.assertIn("not finished", self.reason())
-        sweep.list_projections(self.conn, token=self.tok)   # lists the one due row
-        self.assertIn("not finished", self.reason())
-        self.sweep_to_zero()
-        self.assertIsNone(self.reason())
-
-    def test_a_quarters_sweep_completes_its_read_for_a_package(self):
-        import asks, db, ledger, passes, sweep
-        # a PACKAGE pass (S2 Task 7): only its quarter's listing completes its read; the
-        # setUp's check pass ends first and the package round takes the marker
-        with db.tx(self.conn):
-            passes._end_pass_tx(self.conn, self.tok, "interrupted", {})
-        asks.request_package(self.conn, "2026-Q3")
-        self.pid = self.start_job_pass(self.tok, trigger="package")
-        self.bind_round_and_take(self.pid)
-        acq = self.handed()
-        self.probes(acq)
-        ledger.import_ledger_export(
-            self.conn, path=self.export([{"row_id": 1},
-                                         {"row_id": 2, "booking_date": "2026-10-01",
-                                          "value_date": "2026-10-01"}]),
-            token=self.tok, ledger_instance=self.LEDGER, acq=acq)
-        page = sweep.list_projections(self.conn, token=self.tok, quarter="2026-Q3")
-        (item,) = page["projections"]
-        sweep.record_observation(self.conn, pid=item["pid"], token=self.tok,
-                                 snapshot_id=page["snapshot_id"], observed_tags=item["desired"],
-                                 observed_notes=[item["note"]],
-                                 observed_first_seen="2026-07-03T08:00:00Z",
-                                 observed_tag_revision=0)
-        self.assertTrue(sweep._due(self.conn))        # the other quarter's row is still due
-        sweep.list_projections(self.conn, token=self.tok, quarter="2026-Q3")
-        self.assertIsNone(self.reason())
-
-    def test_proposal_and_relabel_refuse_while_f_fails(self):
-        import db, job, matches, work
-        self.imported()
-        self.sweep_to_zero()
-        self.tok = job.claim(self.conn, "bbbbbbbb-2")    # condition 1 now fails
-        pid = self.only_pid()
-        item = work.list_quarter_state(self.conn, pid=pid)["item"]
-        with self.assertRaises(db.Refusal) as cm:
-            matches.propose_match(self.conn, pid=pid, doc_id=self.doc(),
-                                  expected_revision=item["revision"],
-                                  row_digest=item["row_digest"], token=self.tok)
-        self.assertIn("call job_next", str(cm.exception))
-        with self.assertRaises(db.Refusal) as cm:
-            matches.relabel_match(self.conn, match_id=1, labels=["clean"], token=self.tok)
-        self.assertIn("call job_next", str(cm.exception))
-
-
-    def test_a_pairing_and_a_proposal_commit_while_f_holds(self):
-        """FW-I3 (M17): the positive half of INV-J10 — while F holds, a job pass's
-        machine pairing and proposal commit (a guard that refused every machine write
-        under a live job pass would pass every refusal test above)."""
-        import db, job, ledger, lineage, matches, work
-        acq = self.handed()
-        self.probes(acq)
-        ledger.import_ledger_export(
-            self.conn, path=self.export([{"row_id": 1},
-                                         {"row_id": 2, "amount_minor": 20000}]),
-            token=self.tok, ledger_instance=self.LEDGER, acq=acq)
-        self.sweep_to_zero()
-        with db.tx(self.conn):
-            self.assertIsNone(job.fresh_reason(self.conn))
-            self.assertIsNotNone(job.live_job_pass(self.conn))
-        p1, p2 = sorted(lineage.live_pids(self.conn))
-        for pid in (p1, p2):                    # sweep_to_zero's reads carry no category
-            self.classify(pid, {"software"})
-        self.machine_match(p1, self.doc(), self.tok)
-        item = work.list_quarter_state(self.conn, pid=p2)["item"]
-        matches.propose_match(self.conn, pid=p2, doc_id=self.doc(amount_minor=20000),
-                              expected_revision=item["revision"],
-                              row_digest=item["row_digest"], document_date="2026-07-02",
-                              token=self.tok)
-        rows = {(r["pid"], r["state"]) for r in self.conn.execute(
-            "SELECT pid, state FROM match_state")}
-        self.assertEqual(rows, {(p1, "matched"), (p2, "proposed")})
-
-
-class DelegationPass(StoreCase):
-    def test_f_never_gates_a_delegation_pass(self):
-        import db, job
-        self.bind()
-        self.pass_()
-        with db.tx(self.conn):
-            self.assertIsNone(job.fresh_reason(self.conn))
-            job.require_fresh(self.conn)
+        self.assertEqual((s["job_id"], s["pass_id"], s["acq"], s["export_ref"]),
+                         (A, self.pid, acq, pathlib.Path(os.path.realpath(path)).parent.name))
 
 
 class ProbeArguments(StoreCase):
@@ -323,8 +169,7 @@ class ProbeArguments(StoreCase):
         super().setUp()
         import job
         self.bind()
-        self.tok = job.claim(self.conn, A)
-        self.start_job_pass(self.tok)
+        self.tok = job.claim(self.conn, A)          # the run's pass starts with its claim
 
     def probe(self, kind):
         import json

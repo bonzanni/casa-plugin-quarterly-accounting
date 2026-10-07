@@ -40,7 +40,6 @@ class Base(StoreCase):
                               (observed, pid))
         self.settle(pid)
         if searched:                # the pass looked; a never-searched item is not `missing`
-            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=self.token, queries=["x"])
         return pid
 
@@ -159,8 +158,8 @@ class TestSheet(Base):
         self.assertIn("MISSING\nSearched · ", text)
         self.assertNotIn("Unsearched", text)         # never looked for: not `missing`
         self.assertIn("3 transactions, 1 missing a document.", flat(text))
-        self.assertIn("1 new payment not checked yet", text)
-        self.assertIn("1 not yet classified", text)
+        self.assertIn("2 new payments not checked yet", text)   # an unclassified one is unsearched
+        self.assertNotIn("not yet classified", text)
 
     def test_a_week_spanning_the_boundary_is_one_view(self):
         a = self.add(counterparty="SeptCo", booking_date="2026-09-29")
@@ -195,7 +194,7 @@ class TestSheet(Base):
         self.assertNotIn("New1", text)
         self.assertNotIn("not checked yet", text)    # could not look is not "not reached"
         self.assertIn("3 transactions, 1 missing a document.", flat(text))
-        self.end_with_counts(self.token, "interrupted", {"checked": 18, "total": 30})
+        self.end_live_pass("interrupted", {"checked": 18, "total": 30})
         text = untag(self.render()["text"])
         self.assertIn("Review interrupted.\n18 of 30 new payments checked.\n12 not checked yet. Saved.",
                       text)
@@ -235,17 +234,6 @@ class TestSheet(Base):
         text = self.render()["text"]
         self.assertNotIn("not yet classified", text)
         self.assertNotIn("OtherAcct", text)
-
-    def test_kind_mismatch_line_uses_the_right_article(self):
-        def d(doc_kind, need):
-            return {"current": {"document": {"kind": doc_kind, "number": "7", "date": "2026-09-01"},
-                                "labels": ["clean"], "runners_up": [], "match_id": 1},
-                    "reasons": ["kind-mismatch"], "expectation": {"kind": need},
-                    "status": "matched", "candidates": []}
-        lines = views.evidence(d("invoice", "payslip")) + views.evidence(d("payslip", "invoice"))
-        self.assertIn("Paired with an invoice, but this payment now needs a payslip.", lines)
-        self.assertIn("Paired with a payslip, but this payment now needs an invoice.", lines)
-        self.assertFalse(any("a invoice" in x for x in lines))
 
     def test_the_wrong_one_example_names_a_printed_guess(self):
         for i in range(12):
@@ -408,25 +396,20 @@ class TestSheet(Base):
     def test_an_interrupted_pass_says_not_checked_once(self):
         self.add(counterparty="Seen")
         self.add(counterparty="Unreached", searched=False)
-        self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 2})
+        self.end_live_pass("interrupted", {"checked": 1, "total": 2})
         text = untag(self.render()["text"])
         self.assertIn("Review interrupted.\n1 of 2 new payments checked.\n1 not checked yet. Saved.",
                       text)
         self.assertEqual(text.count("not checked yet"), 1)
 
-    def test_a_package_or_handover_pass_keeps_the_interrupted_block(self):
-        # Task 22 review, item 5: those passes are not reviews; ending one must not
-        # erase what the interrupted review still owes the operator.
+    def test_a_complete_run_clears_the_interrupted_block(self):
         self.add(counterparty="Seen")
         self.add(counterparty="Unreached", searched=False)
-        self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 2})
-        for trigger in ("package", "handover"):
-            tok = self.pass_(trigger=trigger)
-            passes.end_pass(self.conn, tok, "complete", {})
-            self.assertIn("Review interrupted.\n1 of 2 new payments checked.",
-                          untag(self.render()["text"]), trigger)
-        tok = self.pass_(trigger="cron")
-        passes.end_pass(self.conn, tok, "complete", {})
+        self.end_live_pass("interrupted", {"checked": 1, "total": 2})
+        self.assertIn("Review interrupted.\n1 of 2 new payments checked.",
+                      untag(self.render()["text"]))
+        self.pass_(trigger="cron")
+        self.end_live_pass()
         self.assertNotIn("Review interrupted.", self.render()["text"])
 
     def _older(self, counterparty, searched):
@@ -442,7 +425,7 @@ class TestSheet(Base):
         for i in range(3):
             self._older(f"OldNew{i}", searched=False)
         self.add(counterparty="NowSeen", tags=("internal-transfer",))
-        self.end_with_counts(self.token, "interrupted", {"checked": 1, "total": 4})
+        self.end_live_pass("interrupted", {"checked": 1, "total": 4})
         text = self.render()["text"]
         self.assertIn('+3 older not searched yet (Q2) — say "show older"', flat(text))
         older = self.render("older")["text"]
@@ -546,15 +529,12 @@ class TestRenderLog(Base):
 
     def test_a_view_binds_only_the_pairings_it_displays(self):
         pid = self.add()
-        for _ in range(2):                                   # two candidates collide
-            matches.record_match(self.conn, pid=pid, doc_id=self.doc(), author="auto",
-                                 expected_revision=self.rev(pid), token=self.token,
-                                 row_snapshot=self.snapshot(pid))
-        r = self.render("missing")
+        for _ in range(2):                                   # a joint machine set
+            self.machine_entry(pid, self.doc())
+        r = self.render("missing")         # D3: the joint set is a proposal, not "missing"
         views.mark_rendering_delivered(self.conn, r["render_id"])
-        shown = self.conn.execute("SELECT match_revisions_json FROM shown WHERE pid=?",
-                                  (pid,)).fetchone()[0]
-        self.assertEqual(json.loads(shown), {})
+        self.assertIsNone(self.conn.execute("SELECT match_revisions_json FROM shown WHERE pid=?",
+                                            (pid,)).fetchone())
         r = self.render("check")
         views.mark_rendering_delivered(self.conn, r["render_id"])
         shown = self.conn.execute("SELECT match_revisions_json FROM shown WHERE pid=?",

@@ -71,6 +71,16 @@ def quarter_start(day: str) -> str:
     return quarter_bounds(quarter_of(day))[0]
 
 
+def add_months(day: str, n: int) -> str:
+    """`day` plus `n` calendar months, clamped to the target month's last day
+    (2026-01-31 + 1 → 2026-02-28): the vendor search's "plus a month after" (§2.2)."""
+    import calendar
+    d = parse_day(day)
+    m = d.month - 1 + n
+    year, month = d.year + m // 12, m % 12 + 1
+    return _dt.date(year, month, min(d.day, calendar.monthrange(year, month)[1])).isoformat()
+
+
 def effective_date(row: dict) -> str | None:
     return (row.get("booking_date") or row.get("value_date") or None)
 
@@ -82,6 +92,12 @@ def is_partial(q: str, today_iso: str) -> bool:
 def short_day(day: str) -> str:
     d = parse_day(day)
     return f"{d.day} {_MONTHS[d.month - 1]}"
+
+
+def long_day(day: str) -> str:
+    """The note's date (simple loop §2.4): "2 Sep 2026"."""
+    d = parse_day(day)
+    return f"{d.day} {_MONTHS[d.month - 1]} {d.year}"
 
 
 def quarter_label(q: str) -> str:

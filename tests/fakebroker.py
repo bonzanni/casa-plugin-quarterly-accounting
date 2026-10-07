@@ -1,6 +1,8 @@
 """An in-process stand-in for Casa's broker deposit route: a Unix-socket HTTP server on a
 thread. It records every deposit body and answers a fresh reference, or the error code set
-in `refuse`. It does NOT validate: Casa's validators run in the Task 14 gate."""
+in `refuse`. It does NOT validate: Casa's validators run in the Task 14 gate.
+`honour_keys` (Casa #1312): a deposit whose `key` was delivered before sends nothing —
+the original reference comes back; `sent` lists only what was sent."""
 import http.server, json, os, secrets, socketserver, tempfile, threading
 
 
@@ -11,6 +13,7 @@ class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 class FakeBroker:
     def __init__(self):
         self.deposits, self.refuse = [], None
+        self.honour_keys, self.sent, self._keys = False, [], {}
 
     def __enter__(self):
         self._dir = tempfile.TemporaryDirectory()
@@ -21,8 +24,16 @@ class FakeBroker:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 broker.deposits.append(body)
-                answer = ({"error": broker.refuse} if broker.refuse
-                          else {"reference": "casa-cap-" + secrets.token_hex(16)})
+                key = body.get("key") if broker.honour_keys else None
+                if broker.refuse:
+                    answer = {"error": broker.refuse}
+                elif key in broker._keys:
+                    answer = {"reference": broker._keys[key], "repeat": True}
+                else:
+                    answer = {"reference": "casa-cap-" + secrets.token_hex(16)}
+                    broker.sent.append(body)
+                    if key is not None:
+                        broker._keys[key] = answer["reference"]
                 raw = json.dumps(answer).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

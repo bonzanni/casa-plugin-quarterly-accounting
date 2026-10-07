@@ -53,7 +53,6 @@ class Base(StoreCase):
             # searched", not "missing", and a status/missing sheet counts it
             # without printing it (Task 16, spec §Weekly pass "four states stay
             # distinct"). These fixtures mean a MISSING line the operator saw.
-            self.handed(pid)
             work.record_search(self.conn, pid=pid, token=self.token, queries=[cp])
         if paired:
             d = self.doc(counterparty=cp, issuer=cp, amount_minor=amount, document_date=day)
@@ -329,18 +328,6 @@ class TestGrammar(Base):
         self.assertIsNone(self.author(v))
         self.assertEqual(self.author(z)[0], "auto")
 
-    def test_candidates_not_displayed_are_reshown_not_rejected(self):
-        pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
-        for _ in range(2):
-            matches.record_match(self.conn, pid=pid, doc_id=self.doc(), author="auto",
-                                 expected_revision=self.rev(pid), token=self.token,
-                                 row_snapshot=self.snapshot(pid))
-        self.deliver(view="missing")
-        out = apply_now(self.conn, "the Adobe one is wrong")
-        self.assertEqual(out["reshow"], [pid])
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM match_state WHERE"
-                                           " state='rejected'").fetchone()[0], 0)
-
     def test_a_question_is_never_a_correction(self):
         z = self.item("Zapier", 9900, "2026-09-17")
         self.deliver()
@@ -586,9 +573,7 @@ class TestFixRound1(Base):
         docs = []
         for _ in range(2):
             docs.append(self.doc())
-            matches.record_match(self.conn, pid=pid, doc_id=docs[-1], author="auto",
-                                 expected_revision=self.rev(pid), token=self.token,
-                                 row_snapshot=self.snapshot(pid))
+            self.machine_entry(pid, docs[-1])      # a joint machine set (pre-floor shape)
         self.deliver(view="check")
         return pid, docs
 
@@ -834,10 +819,7 @@ class TestFieldClip(Base):
     def test_a_long_invoice_number_never_hides_the_next_candidate(self):
         pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
         for number in ("N" * 590, "HIDDEN-B"):
-            d = self.doc(document_number=number)
-            matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
-                                 expected_revision=self.rev(pid), token=self.token,
-                                 row_snapshot=self.snapshot(pid))
+            self.machine_entry(pid, self.doc(document_number=number))     # a joint set
         r = self.deliver(view="check")
         self.assertIn("HIDDEN\\-B", r["text"])
         self.assertIn(views.CLIP_MARK, r["text"])
@@ -850,10 +832,19 @@ class TestIdentity(Base):
     """fix wave D round 4: every entity a rendering binds is uniquely identified
     by text visibly in it, and every item is bindable in a reachable view."""
     def pair(self, pid, number, date="2026-09-02", **kw):
-        d = self.doc(document_number=number, document_date=date)
-        matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
-                             expected_revision=self.rev(pid), token=self.token,
-                             row_snapshot=self.snapshot(pid), **kw)
+        """A machine match through the floor (the document carries the payment's amount);
+        a further one for the same payment joins a joint machine set, which only a
+        pre-floor store holds (the floor replaces a payment's own pairing)."""
+        d = self.doc(document_number=number, document_date=date,
+                     amount_minor=self.snapshot(pid)["amount_minor"])
+        if self.conn.execute("SELECT 1 FROM match_state WHERE pid=? AND author='auto' AND"
+                             " state IN ('matched','proposed','conflicted')",
+                             (pid,)).fetchone() is None:
+            matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
+                                 expected_revision=self.rev(pid), token=self.token,
+                                 row_snapshot=self.snapshot(pid), **kw)
+        else:
+            self.machine_entry(pid, d, **kw)
         return d
 
     def more_candidates(self, pid, numbers, dates_):
@@ -909,10 +900,8 @@ class TestIdentity(Base):
         # neither and "Adobe is wrong" re-showed forever. Distinct by construction now.
         pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
         for issuer in ("Adobe", "Adobe Ireland"):
-            d = self.doc(document_number="SAME", issuer=issuer, document_date="2026-09-02")
-            matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
-                                 expected_revision=self.rev(pid), token=self.token,
-                                 row_snapshot=self.snapshot(pid))
+            self.machine_entry(pid, self.doc(document_number="SAME", issuer=issuer,
+                                             document_date="2026-09-02"))   # a joint set
         r = self.deliver(view="check")
         flat = " ".join(r["text"].split())
         self.assertIn("invoice SAME \u00b7Adobe (2 Sep)", flat)
@@ -1064,7 +1053,7 @@ class TestIdentity(Base):
         if between == "alert":
             t = self.pass_()
             passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
-            speak = passes.end_pass(self.conn, t, "complete", {})["speak"]
+            speak = self.end_and_speak()
             views.mark_rendering_delivered(self.conn, speak["render_id"])
             self.token = self.pass_()
         else:

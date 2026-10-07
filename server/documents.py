@@ -34,6 +34,7 @@ MIME = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg",
         "tif": "image/tiff", "tiff": "image/tiff", "xml": "text/plain"}
 # How far into a held PDF read_document looks for the %PDF- header (issue #8).
 PDF_HEADER_WINDOW = 1024
+VENDOR_MAX = 2000         # e2/e6: the payment unit hands the vendor exactly (an identity)
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _CCY = re.compile(r"^[A-Z]{3}$")
 
@@ -100,7 +101,11 @@ def collisions(conn, doc_id: int) -> list:
 def ingest_document(conn, *, source_path, kind, source, extraction_author, counterparty=None,
                     issuer=None, document_date=None, document_number=None, amount_minor=None,
                     currency=None, recipient=None, source_ref=None, acquisition=None,
-                    token=None) -> dict:
+                    vendor=None, token=None) -> dict:
+    """`vendor` is the KB counterparty of the vendor group being worked when the job files
+    it (design rev 17 §2.2, D1); a document filed otherwise (own mail, a handover) carries
+    none. `filed_seq` is the store sequence at filing: "newly filed" (§2.1)."""
+    import decide
     import passes
     if source not in SOURCES:
         raise db.Refusal(f"source is one of {', '.join(SOURCES)}")
@@ -110,6 +115,12 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
     fields = {"kind": kind, "document_date": document_date, "currency": currency,
               "amount_minor": amount_minor}
     _validate(fields)
+    if vendor is not None and (not isinstance(vendor, str) or not vendor.strip()
+                               or len(vendor) > VENDOR_MAX):
+        raise db.Refusal(f"vendor is the vendor group's name, at most {VENDOR_MAX} characters")
+    # whitespace collapsed as kb.norm does (case kept for display): every reader compares
+    # vendors by kb.norm, the run's work list (run_work.vendor) and the vendor marks alike
+    vendor = re.sub(r"\s+", " ", vendor.strip()) if vendor is not None else None
     try:
         name, data = casa_handoff.capture(source_path)
     except casa_handoff.HandoffError as exc:
@@ -135,7 +146,14 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 # (re)installed under the held name, never beside it as a second copy no
                 # row names (fix wave F)
                 _install(data, sha, "." + existing["ext"])
-                _operator_ref(conn, source, source_ref, existing[0])
+                _reread(conn, existing[0],                      # h1: before the ref
+                        *_amount_said(amount_minor, currency, filing=True))
+                if _operator_ref(conn, source, source_ref, existing[0]) and token is not None:
+                    decide.note_progress(conn, token)   # d2: a newly filed ref is progress
+                if vendor is not None:
+                    # a vendor group that found it again names it, where none was recorded
+                    conn.execute("UPDATE documents SET vendor=? WHERE doc_id=? AND vendor IS"
+                                 " NULL", (vendor, existing[0]))
                 return {"doc_id": existing[0], "sha256": sha, "created": False,
                         "collisions": collisions(conn, existing[0])}
             _install(data, sha, ext)
@@ -143,25 +161,111 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 "INSERT INTO documents(sha256, ext, size, kind, counterparty, issuer,"
                 " document_date, document_number, amount_minor, currency, recipient, source,"
                 " source_ref, acquisition_json, extraction_author, original_name, ingested_at,"
-                " ingest_quarter)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " ingest_quarter, vendor, filed_seq, read_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sha, ext.lstrip("."), len(data), kind, counterparty, issuer, document_date,
                  document_number, amount_minor, currency, recipient, source, source_ref,
                  db.canonical(acquisition) if acquisition is not None else None,
-                 extraction_author, name, db.now(), dates.quarter_of(db.now()[:10])))
+                 extraction_author, name, db.now(), dates.quarter_of(db.now()[:10]), vendor,
+                 db.next_seq(conn),
+                 # h1: a reading given at filing (an amount) is recorded; none → owed
+                 db.now() if amount_minor is not None or currency else None))
             doc_id = cur.lastrowid
             _operator_ref(conn, source, source_ref, doc_id)
+            if token is not None:
+                decide.note_progress(conn, token)      # §2.2 `progressed`: a document filed
             return {"doc_id": doc_id, "sha256": sha, "created": True,
                     "collisions": collisions(conn, doc_id)}
 
 
-def _operator_ref(conn, source, source_ref, doc_id) -> None:
-    """Issue #24 (D5): a file the operator supplied, filed — by its own ref (an
-    attachment of a self-addressed mail, a Telegram file), also when its bytes were
-    already held — so a pass's capped filing skips it next time."""
-    if source in ("manual-email", "manual-telegram") and source_ref:
+def amount_unknown(doc) -> bool:
+    """Never read, or two readings disagreed (amount_conflict, sticky: a later reading never
+    clears it) — the job may only propose such a document, never match it."""
+    return doc["amount_minor"] is None or not doc["currency"] or bool(doc["amount_conflict"])
+
+
+def _amount_said(amount_minor, currency, cleared=False, filing=False) -> tuple:
+    """h5: THE reader of what one call says about a document's amount, for every entry
+    point — (amount, currency, withdrawn). In a reading (update_document_metadata) a blank
+    currency ("", spaces) or `cleared` (an explicit null amount or currency) withdraws.
+    The ingest contract (BRAIN, h6): a `filing` (ingest_document) files the document — a
+    blank or null there is "not read here" and says nothing; only its concrete values are a
+    reading (a disagreeing one conflicts, Q2 run 1). None is always "nothing said"."""
+    blank = currency is not None and not str(currency).strip()
+    return (amount_minor, None if blank else currency,
+            bool(blank or cleared) and not filing)
+
+
+def _reread(conn, doc_id, amount_minor, currency, withdrawn=False) -> None:
+    """Q2 run 1 (PLAY, BRAIN: a reading that copies the payment): a reading of the document's
+    amount — the same bytes filed again with one, or the job's update_document_metadata. The
+    one rule for both (h1, Astra S1), field by field (d1, Astra S1: a partial reading too):
+    a field none held is taken; a field held that the reading DISAGREES with → the readings
+    conflict for good (f1, Terra/Astra S1: a third reading never restores it): the amount is
+    unknown, the document can only be proposed, never matched by the job
+    (matches._floor_doc), and a machine match holding it shows as a proposal (reducer). The
+    same reading changes nothing. A reading given is recorded (read_at), conflicting or not.
+    `withdrawn` (h3, Astra S1): the reading explicitly clears the amount or the currency — it
+    disagrees with any held value, so a held one makes the readings conflict."""
+    if amount_minor is None and not currency and not withdrawn:
+        return
+    d = conn.execute("SELECT amount_minor, currency, amount_conflict, read_at FROM documents"
+                     " WHERE doc_id=?", (doc_id,)).fetchone()
+    if d["read_at"] is None:
+        conn.execute("UPDATE documents SET read_at=? WHERE doc_id=?", (db.now(), doc_id))
+    if d["amount_conflict"]:
+        return
+    clash = ((amount_minor is not None and d["amount_minor"] is not None
+              and amount_minor != d["amount_minor"])
+             or (currency and d["currency"] and currency != d["currency"])
+             or (withdrawn and (d["amount_minor"] is not None or bool(d["currency"]))))
+    if clash:
+        conn.execute("UPDATE documents SET amount_minor=NULL, currency=NULL, amount_conflict=1"
+                     " WHERE doc_id=?", (doc_id,))
+    else:
+        new = (d["amount_minor"] if amount_minor is None else amount_minor,
+               d["currency"] if not currency else currency)
+        if new == (d["amount_minor"], d["currency"]):
+            return
+        conn.execute("UPDATE documents SET amount_minor=?, currency=? WHERE doc_id=?",
+                     (*new, doc_id))
+    import lineage
+    lineage.settle_doc_holders(conn, doc_id)
+
+
+def _operator_ref(conn, source, source_ref, doc_id) -> bool:
+    """Issue #24 (D5), d5: a filed file's own ref (an attachment of a self-addressed mail,
+    a Telegram file, a vendor's message), also when its bytes were already held — what
+    work.filed answers a search's refs against, across runs. True when the ref is new
+    (d2: filing it persisted work)."""
+    if source_ref:
+        import queues
+        new = conn.execute("SELECT 1 FROM operator_refs WHERE ref=?",
+                           (source_ref,)).fetchone() is None
         conn.execute("INSERT OR REPLACE INTO operator_refs(ref, source, doc_id, filed_at)"
                      " VALUES (?,?,?,?)", (source_ref, source, doc_id, db.now()))
+        # queues: the ref's closing write — every queued item of it, in every unit and run
+        # (a given-up one stays given up) — once its document's reading is recorded (h1:
+        # filed and unread, it is handed again; update_document_metadata closes it)
+        if _read(conn, doc_id):
+            return queues.close(conn, None, "ref", source_ref) > 0 or new
+        return new
+    return False
+
+
+def _read(conn, doc_id) -> bool:
+    return conn.execute("SELECT read_at FROM documents WHERE doc_id=?",
+                        (doc_id,)).fetchone()[0] is not None
+
+
+def _close_read_refs(conn, doc_id) -> int:
+    """h1: the document's reading is recorded — every queued item of a ref it was filed
+    under is done."""
+    import queues
+    refs = {r[0] for r in conn.execute(
+        "SELECT ref FROM operator_refs WHERE doc_id=? UNION SELECT source_ref FROM documents"
+        " WHERE doc_id=? AND source_ref IS NOT NULL", (doc_id, doc_id))}
+    return sum(queues.close(conn, None, "ref", r) for r in sorted(refs))
 
 
 def _doc(conn, doc_id):
@@ -250,6 +354,21 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
     with db.tx(conn):
         passes.check_token(conn, token)
         _doc(conn, doc_id)
+        # h1/h2: every write of a document's amount goes through the one sticky conflict
+        # rule (_reread), with the pass_token or without (h2, Astra S1: a job reading sent
+        # without it matched a disagreeing amount; no other caller writes an amount)
+        cleared = any(k in fields and fields[k] is None for k in ("amount_minor", "currency"))
+        _reread(conn, doc_id, *_amount_said(fields.pop("amount_minor", None),
+                                            fields.pop("currency", None), cleared))
+        if token is not None:
+            # the job's reading (read_document, then Read), with any fields or none, records
+            # the reading
+            conn.execute("UPDATE documents SET read_at=coalesce(read_at, ?) WHERE doc_id=?",
+                         (db.now(), doc_id))
+        # a recorded reading closes every queued item of a ref the document was filed under
+        if _read(conn, doc_id) and _close_read_refs(conn, doc_id) and token is not None:
+            import decide
+            decide.note_progress(conn, token)
         if fields:
             conn.execute("UPDATE documents SET %s WHERE doc_id=?"
                          % ", ".join(f"{k}=?" for k in fields), (*fields.values(), doc_id))
@@ -261,7 +380,10 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
             conn.execute("UPDATE documents SET date_read_at=? WHERE doc_id=?",
                          (db.now() if fields["document_date"] else None, doc_id))
         lineage.settle_doc_holders(conn, doc_id)
-        return {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields}
+        d = _doc(conn, doc_id)
+        return {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields,
+                "amount_minor": d["amount_minor"], "currency": d["currency"],
+                "amount_conflict": bool(d["amount_conflict"])}
 
 
 def mark_irrelevant(conn, doc_id: int, irrelevant: bool = True, token=None) -> dict:

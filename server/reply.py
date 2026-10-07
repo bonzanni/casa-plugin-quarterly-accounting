@@ -440,7 +440,15 @@ class _Scope:
 
     def recovery(self, more=False) -> dict:
         """The show_view arguments of a fresh rendering of R's view (r5; page 1 for "more",
-        as r3 #4's legacy page answered)."""
+        as r3 #4's legacy page answered). A card (cards.KINDS: end message, open items, a
+        tap card) is recovered by the open-items card of its quarter, the one card kind
+        show_view composes afresh (simple loop §1 Recovery)."""
+        import cards
+        if self.kind in cards.KINDS:
+            out = {"view": "open"}
+            if self._vals["quarter"]:
+                out["quarter"] = self._vals["quarter"]
+            return out
         out = {"view": self.kind}
         if self._vals["quarter"]:
             out["quarter"] = self._vals["quarter"]
@@ -455,7 +463,6 @@ class _Scope:
     proposed = property(lambda self: self.get("proposed"))
     offers = property(lambda self: self.get("offers"))
     next = property(lambda self: self.get("next"))
-    walk = property(lambda self: self.get("walk"))
 
 
 class _Run:
@@ -778,7 +785,8 @@ def _apply(conn, run, verb, m, items):
         # bound to (the quoted post's, else the most recent DELIVERED rendering), and it
         # approves exactly the pairings that rendering proposed (as taps.verdict, §2 #10)
         last = run.bound
-        if last is None or last["kind"] not in ("status", "check", "all"):
+        if last is None or last["kind"] not in ("status", "check", "all", "end",
+                                                "open-items"):
             run.note("Nothing applied for \"all good\": the last thing I sent you was "
                      "not a sheet to approve. Name the payment, e.g. \"the Zapier one "
                      "is good\".")
@@ -925,8 +933,6 @@ def _apply(conn, run, verb, m, items):
             # answered with a fresh page 1 of its view (an explicit null is "nothing more")
             sc = run.scope
             nxt = sc.next
-            if nxt and sc.kind == "item" and sc.walk:
-                nxt = dict(nxt, walk=sc.walk)            # r3 #5: as the More button does
             if nxt:
                 run.instructions.append({"show_view": nxt})
             else:

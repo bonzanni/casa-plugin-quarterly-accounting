@@ -19,7 +19,6 @@ class Base(StoreCase):
         self.pid = self.lineage_for(1)
         self.classify(self.pid, {"software"})
         self.settle(self.pid)
-        self.handed(self.pid)
 
 
 class Weekly:
@@ -49,7 +48,6 @@ class TestSearchBookkeeping(Base):
     def next_pass(self, clock, days=7):
         clock.advance(days)
         self.token = self.pass_()
-        self.handed(self.pid)
 
     def test_effort_ages_out_after_fruitless_passes_and_revives(self):
         clock = self.weekly()
@@ -177,6 +175,7 @@ class TestWatermark(Base):
             self.granted(work.set_watermark_in_tx, "2026-Q4")
         self.granted(work.set_watermark_in_tx, "2026-Q2")
         out = ledger.import_ledger_export(self.conn, token=self.token, ledger_instance=self.LEDGER,
+                                          acq=self.acq,
                                           path=self.export_csv([
             {"row_id": 1, "first_seen": "2026-07-01T00:00:00Z"},
             {"row_id": 5, "booking_date": "2026-05-10", "value_date": "2026-05-10",
@@ -205,14 +204,14 @@ class TestTriage(Base):
         self.granted(work.stop_chasing_in_tx, "2026-Q3")
         self.assertEqual([i["pid"] for i in work.triage(self.conn)], [optional])
 
-    def test_operator_pairing_of_the_wrong_kind_is_searched(self):
+    def test_operator_pairing_is_not_searched_when_the_kind_changes(self):
         rid = self.show(self.pid)
         self.operator_pair(pid=self.pid, doc_id=self.doc(), expected_revision=self.rev(self.pid),
                            render_id=rid)
         self.assertEqual(work.triage(self.conn), [])
         self.classify(self.pid, {"income", "salary"})
         self.settle(self.pid)
-        self.assertEqual([i["pid"] for i in work.triage(self.conn)], [self.pid])
+        self.assertEqual(work.triage(self.conn), [])      # §2: no kind gate; the pairing stands
 
     def test_describe_carries_what_a_line_prints(self):
         d = work.describe(self.conn, self.pid)

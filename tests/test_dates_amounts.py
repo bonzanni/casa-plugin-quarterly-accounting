@@ -46,6 +46,8 @@ class TestDates(unittest.TestCase):
 
     def test_short_forms(self):
         self.assertEqual(dates.short_day("2026-09-20"), "20 Sep")
+        self.assertEqual(dates.long_day("2026-09-02"), "2 Sep 2026")    # §2.4's note date
+        self.assertEqual(dates.long_day("2025-12-31"), "31 Dec 2025")
         self.assertEqual(dates.quarter_label("2026-Q3"), "Q3 2026")
 
 

@@ -6,9 +6,7 @@ KB or document edit. It:
   1. folds the lineage's log (fold.py) with the occupancy check;
   2. records every retirement the fold newly produced, and the store's own
      rules — an ended lineage retires every pairing `rejected` (cause
-     row-ended); a MACHINE pairing whose document kind differs from a known
-     expectation is retired `rejected` (cause kind-mismatch) — then folds
-     again, until nothing new is produced;
+     row-ended) — then folds again, until nothing new is produced;
   3. materializes match_state; the partial unique index on active documents
      is the backstop, and a violation becomes a recorded `conflicted`
      retirement for that later activation, never an error;
@@ -27,16 +25,6 @@ import expectation as ex
 import fold as F
 import kb
 import reducer as R
-
-STATUS_PHRASE = {
-    "matched": "document matched",
-    "proposed": "document paired, awaiting review",
-    "open": "required document missing",
-    "no-document": "no document expected",
-    "exempt": "no document expected (operator)",
-    "optional": "optional document not found",
-}
-
 
 def projection(conn, pid: int):
     row = conn.execute("SELECT * FROM projections WHERE pid=?", (pid,)).fetchone()
@@ -122,24 +110,12 @@ def fold_of(conn, pid: int) -> F.FoldState:
     return F.fold(entries(conn, pid), _occupied(conn, pid))
 
 
-def _doc_kinds(conn, doc_ids) -> dict:
-    if not doc_ids:
-        return {}
-    q = ",".join("?" * len(doc_ids))
-    return {r[0]: r[1] for r in conn.execute(
-        f"SELECT doc_id, kind FROM documents WHERE doc_id IN ({q})", tuple(doc_ids))}
-
-
-def _store_rules(proj, st: F.FoldState, exp: ex.Expectation, kinds: dict) -> list:
+def _store_rules(proj, st: F.FoldState) -> list:
     out = []
     if proj["ended"]:
         for c in st.cands.values():
             if c.state in F.ACTIVE + ("conflicted",):
                 out.append(F.Retirement(c.match_id, c.activation, "rejected", "row-ended"))
-    elif not exp.unknown:
-        for c in st.active():
-            if c.author == "auto" and kinds.get(c.doc_id) != exp.kind:
-                out.append(F.Retirement(c.match_id, c.activation, "rejected", "kind-mismatch"))
     return out
 
 
@@ -172,7 +148,7 @@ def _operator_rejections(conn, pid, proj, st, exp, row) -> list:
     never asked the same question again."""
     import documents
     import matches
-    if proj["ended"] or row is None or exp.unknown:
+    if proj["ended"] or row is None:
         return []
     out = []
     # a conflicted candidate too (C2, Astra S1): a merge's collision makes it one before
@@ -195,7 +171,7 @@ def _record_retirement(conn, pid, r: F.Retirement) -> None:
         other = conn.execute("SELECT pid FROM match_state WHERE doc_id=? AND pid<>? AND state IN"
                              " ('matched','proposed')", (doc[0], pid)).fetchone()
         add_residue(conn, pid, "occupied", f"document already on #{other[0] if other else '?'}")
-    elif r.cause in ("row-ended", "kind-mismatch"):
+    elif r.cause == "row-ended":
         add_residue(conn, pid, r.cause, f"match {r.match_id}")
 
 
@@ -225,27 +201,6 @@ def _bump(old_digest, digest, revision) -> int:
     return revision + (1 if old_digest != digest else 0)
 
 
-def _note_body(conn, red: R.Reduction) -> str | None:
-    if red.status in ("ended", "ineligible"):
-        return None
-    body = STATUS_PHRASE[red.status]
-    if red.current is not None:
-        d = conn.execute("SELECT d.kind, d.issuer, d.counterparty, d.document_number, d.sha256"
-                         " FROM matches m JOIN documents d ON d.doc_id=m.doc_id"
-                         " WHERE m.match_id=?", (red.current,)).fetchone()
-        who = d["issuer"] or d["counterparty"] or ""
-        num = f" {d['document_number']}" if d["document_number"] else ""
-        body += f"; document: {d['kind']} {who}{num} [{d['sha256'][:8]}]"
-    return body + ". Supersedes earlier accounting notes."
-
-
-def note_text(conn, pid) -> str | None:
-    p = projection(conn, pid)
-    if p["note_body"] is None:
-        return None
-    return f"Accounting revision {p['note_seq']}: {p['note_body']}"
-
-
 def settle(conn, pid: int) -> R.Reduction:
     assert conn.in_transaction, "settle runs inside the write transaction"
     proj = projection(conn, pid)
@@ -255,13 +210,12 @@ def settle(conn, pid: int) -> R.Reduction:
     for _ in range(32):
         log = entries(conn, pid)
         st = F.fold(log, _occupied(conn, pid))
-        kinds = _doc_kinds(conn, {c.doc_id for c in st.cands.values()})
         exp = expectation_for(conn, proj, row, exempt=st.exemption is not None)
         recorded = {(e.match_id, e.retire_activation, e.retire_to) for e in log
                     if e.kind == "retire"}
         new, seen = [], set()
         produced = [r for r in st.produced if _holds(st, r)]
-        for r in produced + _store_rules(proj, st, exp, kinds) + _operator_rejections(
+        for r in produced + _store_rules(proj, st) + _operator_rejections(
                 conn, pid, proj, st, exp, row):
             key = (r.match_id, r.activation, r.to)
             if key in recorded or key in seen:
@@ -288,14 +242,16 @@ def settle(conn, pid: int) -> R.Reduction:
     cp = kb.counterparty_for(conn, row["counterparty"]) if row else None
     inp = R.Inputs(ended=proj["ended"], eligible=eligible(conn, row), fold=st,
                    facts=R.facts_of(row) if row else None, expectation=exp,
-                   last_known_kind=last_known, doc_kinds=kinds, portal=kb.is_portal(cp))
+                   last_known_kind=last_known, doc_kinds={}, portal=kb.is_portal(cp),
+                   unknown_docs=_unknown_docs(conn, st))
     red = R.reduce(inp)
 
     match_digests = {}
     for c in st.cands.values():
-        m = conn.execute("SELECT label, rationale, runners_up_json FROM matches WHERE match_id=?",
-                         (c.match_id,)).fetchone()
+        m = conn.execute("SELECT label, rationale, runners_up_json, alternatives_json FROM"
+                         " matches WHERE match_id=?", (c.match_id,)).fetchone()
         live = c.state in F.ACTIVE + ("conflicted",)
+        alts = json.loads(m["alternatives_json"]) if live else []
         digest = db.canonical({
             # the live facts and expectation under the pairing, not only whether they
             # still agree with its fingerprint (round p2, Astra S1: €100 -> €90 -> €80
@@ -305,10 +261,13 @@ def settle(conn, pid: int) -> R.Reduction:
             "exp": [exp.kind, exp.tier] if live else None,
             "payee": kb.display_name(conn, row["counterparty"]) if (live and row) else None,
             "state": c.state, "author": c.author, "activation": c.activation, "fp": c.fp,
-            "verdict": R.kind_verdict(c, inp) if live else None,
             "row_ok": (json.loads(c.fp)["facts"] == inp.facts) if (live and c.fp) else None,
             "label": m["label"], "rationale": m["rationale"], "runners_up": m["runners_up_json"],
-            "doc": _doc_digest(conn, c.doc_id)})
+            "doc": _doc_digest(conn, c.doc_id),
+            # a live proposal's alternatives are part of what its card binds (plan round 1,
+            # Astra S1: an alternative edited after display was committed by a tap); absent
+            # when there are none, so a pairing without alternatives keeps its revision
+            **({"alts": [_doc_digest(conn, a) for a in alts]} if alts else {})})
         old = conn.execute("SELECT digest, revision FROM match_state WHERE match_id=?",
                            (c.match_id,)).fetchone()
         conn.execute("UPDATE match_state SET digest=?, revision=? WHERE match_id=?",
@@ -327,17 +286,13 @@ def settle(conn, pid: int) -> R.Reduction:
         "payee": kb.display_name(conn, row["counterparty"]) if row else None,
         "link": cp["document_link"] if cp is not None else None,
         "portal": kb.is_portal(cp)})
-    body = _note_body(conn, red)
-    note_seq = proj["note_seq"]
-    if body != proj["note_body"]:
-        note_seq = db.next_seq(conn) if body is not None else None
     conn.execute(
         "UPDATE projections SET digest=?, revision=?, status=?, desired_json=?, current_match=?,"
-        " reasons_json=?, exp_kind=?, exp_tier=?, exp_row=?, last_known_kind=?, note_seq=?,"
-        " note_body=?, last_facts_json=coalesce(?, last_facts_json) WHERE pid=?",
+        " reasons_json=?, exp_kind=?, exp_tier=?, exp_row=?, last_known_kind=?,"
+        " last_facts_json=coalesce(?, last_facts_json) WHERE pid=?",
         (pdigest, _bump(proj["digest"], pdigest, proj["revision"]), red.status,
          json.dumps(sorted(red.desired)), red.current, json.dumps(list(red.reasons)),
-         exp.kind, exp.tier, exp.row, last_known, note_seq, body,
+         exp.kind, exp.tier, exp.row, last_known,
          db.canonical(row) if row else None, pid))
     return red
 
@@ -351,9 +306,8 @@ def latest_import(conn) -> int:
 def is_fresh(conn, proj) -> bool:
     """A lineage's classification is FRESH iff it was observed at the latest
     successful import (fix E2; issue #1): the import itself observes every row
-    the export carries (bank-feed 0.20.0 exports each row's tags), and the
-    sweep's read (sweep.record_observation) observes one row. A row absent from
-    the latest export stays unobserved until a read. Compared by snapshot id,
+    the export carries (bank-feed 0.20.0 exports each row's tags). A row absent
+    from the latest export stays unobserved until a later import observes it. Compared by snapshot id,
     never by timestamp (a one-second clock cannot order an import and a read)."""
     seen = proj["class_observed_snapshot"]
     return seen is not None and seen >= latest_import(conn)
@@ -364,12 +318,29 @@ def live_pids(conn) -> list:
                                        " ORDER BY pid")]
 
 
+def _unknown_docs(conn, st) -> frozenset:
+    """The machine candidates' documents whose amount is unknown (documents.amount_unknown)."""
+    import documents
+    ids = sorted({c.doc_id for c in st.cands.values()})
+    if not ids:
+        return frozenset()
+    rows = conn.execute("SELECT * FROM documents WHERE doc_id IN (%s)" % ",".join("?" * len(ids)),
+                        ids).fetchall()
+    return frozenset(r["doc_id"] for r in rows if documents.amount_unknown(r))
+
+
 def settle_all(conn, pids=None) -> None:
     for pid in (pids if pids is not None else live_pids(conn)):
         settle(conn, pid)
 
 
 def settle_doc_holders(conn, doc_id: int) -> None:
-    pids = sorted({r[0] for r in conn.execute("SELECT pid FROM match_state WHERE doc_id=?",
-                                                (doc_id,))})
-    settle_all(conn, pids)
+    """Every payment that pairs `doc_id`, or whose live machine pairing lists it as an
+    alternative (its card binds the alternative's facts)."""
+    pids = {r[0] for r in conn.execute("SELECT pid FROM match_state WHERE doc_id=?",
+                                       (doc_id,))}
+    pids |= {r[0] for r in conn.execute(
+        "SELECT s.pid FROM match_state s JOIN matches m ON m.match_id=s.match_id,"
+        " json_each(m.alternatives_json) j WHERE s.state IN ('matched', 'proposed',"
+        " 'conflicted') AND j.value=?", (doc_id,))}
+    settle_all(conn, sorted(pids))

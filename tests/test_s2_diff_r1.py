@@ -1,6 +1,6 @@
-"""S2 diff review round 1 (R1, R3, R4): a large check's later Gmail rounds earn judge
-credit again; informational relay pages never take the operator's reply; a ledger
-instance switched mid-pass after the reset acknowledgement stops the pass.
+"""S2 diff review round 1 (R1, R3, R4): a large check never reports three batches without
+progress; informational pages never take the operator's reply; a ledger instance switched
+mid-pass after the reset acknowledgement stops the pass.
 
 The relay tests drive the registered tools (qa_server.TOOLS) against a synthetic bank,
 as the round's reproductions did (Astra, /tmp/s2-review-XQEBYB/review_repro.py)."""
@@ -14,34 +14,26 @@ OTHER = "b" * 32
 
 
 class LargeCheck(StoreCase):
-    """R1: a judge restart earns fresh credit iff its cause is drawn from a finite
-    budget — so a check of many Gmail chunk rounds is never ended by Casa's guard."""
+    """R1, simple loop Task 10: a run of many batches never reports three batches in a row
+    without progress (Casa ends a job after three): every vendor batch persists a search or
+    a decision (claims.progressed)."""
 
     def test_eighty_payments_never_three_no_progress_batches(self):
         import asks, job
         self.bind()
-        drv = JobDriver(self, payments=80)
+        drv = JobDriver(self, payments=0)
+        for i in range(80):
+            drv.add_payments(["2026-08-05"], counterparty=f"Vendor {i:02d}")
         asks.request_work(self.conn, "check", "cron")
-        drv.token = job.claim(self.conn, A)
-        flags, judged, rounds = [], None, set()
-        for _ in range(20000):
-            u = job.next_unit(self.conn, drv.token, judged=judged)
-            judged = None
-            if u["unit"] == "complete":
-                break
-            if u["unit"] == "end-batch":
-                flags.append(u["progress"]["progressed"])
-                self.assertNotEqual(flags[-3:], [False] * 3, flags)
-                drv.token = job.claim(self.conn, A)
-                continue
-            if u["unit"] == "judge":
-                rounds.add(u["judgment"])
-            judged = drv.do(u, drv.token)
-        else:
-            self.fail("the check never completed")
-        self.assertGreater(len(rounds), 3)               # several Gmail chunk rounds
+        drv.casa_cut = 80              # Casa's cut and its 3-batch guard (the driver's)
+        units = drv.run_job(A, started_by="scheduled")
+        self.assertGreaterEqual(len(drv.batch_calls), 3, drv.batch_calls)   # several
+        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
+        self.assertEqual(units[-1]["unit"], "complete")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM run_work WHERE outcome IS"
+                                           " NULL").fetchone()[0], 0)
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("reported", "complete"))   # a cron check
+        self.assertEqual((r["state"], r["outcome"]), ("reported", "complete"))
 
 
 class Tools(StoreCase):
@@ -55,7 +47,6 @@ class Tools(StoreCase):
         self.addCleanup(setattr, tools, "_CONN", None)
         self.rows, self.bank, self.instance = [], {}, self.LEDGER
         self.handed = []                # S7 §5: the post/view units, their receipts withheld
-        self.package_receipt = True     # S7 §6.1: a posted package's receipt arrives
 
     def call(self, name, **kw):
         import qa_server
@@ -69,7 +60,7 @@ class Tools(StoreCase):
         return self.call("job_next", job_id=A)
 
     def do(self, u):
-        t, k, ans = u["pass_token"], u["unit"], {}
+        t, k = u["pass_token"], u["unit"]
         if k == "probes":
             for kind, data in (("bank_tools", {}),
                                ("bank_accounts", {"accounts": [{"account_id": "acc-biz",
@@ -85,66 +76,26 @@ class Tools(StoreCase):
                          tag_revision=self.bank[r["row_id"]]["rev"]) for r in self.rows]
             self.call("import_ledger_export", path=self.export_csv(rows), pass_token=t,
                       ledger_instance=self.instance, acq=u["acq"])
-        elif k == "sweep":
-            page = self.call("list_projections", pass_token=t, limit=10, quarter=u["quarter"])
-            for it in page["projections"]:
-                b = self.bank[it["row_id"]]
-                for _ in range(6):
-                    w = self.call("record_observation", pid=it["pid"], pass_token=t,
-                                  snapshot_id=page["snapshot_id"], observed_tags=b["tags"],
-                                  observed_notes=b["notes"],
-                                  observed_first_seen="2026-07-03T08:00:00Z",
-                                  observed_tag_revision=b["rev"])["instructions"]
-                    if not w:
-                        break
-                    if "tag" in w:
-                        b["tags"] = sorted(set(b["tags"]) | set(w["tag"]))
-                        b["rev"] += 1
-                    if "untag" in w:
-                        b["tags"] = sorted(set(b["tags"]) - set(w["untag"]))
-                        b["rev"] += 1
-                    if "add_note" in w:
-                        b["notes"].append(w["add_note"])
-                else:
-                    self.fail("the sweep did not settle")
-        elif k == "gmail-probe":
-            self.call("record_probe", pass_token=t, kind="gmail", ok=True)
         elif k == "filing":
-            self.call("record_filing", pass_token=t)
-        elif k == "item":
-            self.call("record_search", pass_token=t, pid=u["item"]["pid"],
-                      queries=["invoice"], exhausted=True)
-        elif k == "judge":
-            page = self.call("list_quarter_state", pass_token=t, triage=True, limit=8,
-                             quarter=u["quarter"], after=u["after"])
-            ans = {"judged": {"judgment": u["judgment"], "after": u["after"],
-                              "page_next": page["next"], "triage_remaining": page["remaining"],
-                              "documents": {str(i): "no-payment-yet"
-                                            for i in u["documents_first"]}}}
+            self.call("record_probe", pass_token=t, kind="gmail", ok=True)
+        elif k == "payment":                # rev 18.4: nothing found, missing
+            self.call("decide", pass_token=t, entries=[
+                {"pid": u["pid"], "outcome": "missing", "expected_revision": u["revision"]}])
+        elif k == "report":                 # Q2 run 1: report_job_progress, then job_next
+            pass
+        elif k == "mirror":
+            self.call("record_mirror", pass_token=t, done=[c["n"] for c in u["calls"]])
         elif k in ("post", "view"):
             self.handed.append(u)       # posted; its receipt arrives when deliver() says
-        elif k == "build":
-            self.call("build_quarterly_package", quarter=u["quarter"],
-                      package_token=u["package_token"], request_id=u["request_id"])
-        elif k == "deliver":
-            from tests.fakebroker import FakeBroker
-            st = self.call("stage_for_delivery", package_id=u["package_id"],
-                           package_token=u["package_token"])
-            with FakeBroker():
-                self.call("post_package", delivery_id=st["delivery_id"],
-                          package_token=u["package_token"])
-            self.call("record_delivery", delivery_id=st["delivery_id"],
-                      outcome="delivered" if self.package_receipt else "uncertain",
-                      package_token=u["package_token"])
         else:
             raise AssertionError(u)
-        return self.call("job_next", pass_token=t, **ans)
+        return self.call("job_next", pass_token=t)
 
     def until(self, u, unit, job_id=A):
         for _ in range(400):
             if u["unit"] == unit:
                 return u
-            u = self.call("job_next", job_id=job_id) if u["unit"] == "end-batch" else self.do(u)
+            u = self.do(u)
         self.fail(f"no {unit} unit")
 
     def deliver(self):
@@ -162,69 +113,6 @@ class Tools(StoreCase):
     def kind(self, render_id):
         return self.conn.execute("SELECT kind FROM renders WHERE render_id=?",
                                  (render_id,)).fetchone()[0]
-
-
-class InformationalPages(Tools):
-    """R3: handover case lines and stop lines never move the reply binding. S7 §9 deletes
-    the R5/R6 non-binding boundary: "send it again" binds to the offer last delivered
-    (§6.3), whoever handed it out."""
-
-    # At the S7 merge (§9): test_an_offer_relayed_in_an_operators_turn_is_resent and
-    # test_astras_q2_offer_after_a_q3_offer_resends_q2 are deleted. Task 6 rewrote them for
-    # §9's deleted R5/R6 boundary (NEWER_SINCE), and both were built on job_report, which §9
-    # also deletes (the job posts its own results); the offer they pinned has no hand-out
-    # left to relay. "Send it again" binding to the last delivered offer stays pinned in
-    # LastDelivered and in the handover case below.
-
-    def test_a_handover_page_after_the_resend_offer_keeps_it(self):
-        """Astra's reproduction, on S7's units (§5, §6.1): an uncertain package send (the
-        job posted it, its receipt withheld), then a finished handover; the job's posts
-        carry the resend offer and the handover page, delivered in that order. "Send it
-        again" still resends the offered package."""
-        self.package_receipt = False
-        self.call("request_package", quarter="2026-Q3")
-        self.until(self.call("job_next", job_id=A), "complete")
-        pkg = self.conn.execute("SELECT package_id FROM packages").fetchone()[0]
-        self.assertEqual(self.conn.execute("SELECT status FROM deliveries").fetchone()[0],
-                         "uncertain")
-        self.call("request_work", kind="handover", trigger="operator", doc_ids=[self.doc()])
-        self.until(self.call("job_next", job_id=B), "complete", job_id=B)
-        shown = self.deliver()
-        offer = self.conn.execute("SELECT render_id FROM alerts WHERE"
-                                  " kind='package-uncertain'").fetchone()[0]
-        self.assertIn("send it again", self.render_text(offer))
-        self.assertIn(offer, shown)
-        self.assertEqual(self.kind(shown[-1]), "handover")
-        before = self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0]
-        again = self.call("stage_for_delivery", resend=True)
-        self.assertEqual(self.conn.execute("SELECT package_id FROM deliveries WHERE"
-                                           " delivery_id=?", (again["delivery_id"],)
-                                           ).fetchone()[0], pkg)
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0],
-                         before + 1)
-
-    def test_all_good_after_a_handover_page_binds_to_the_sheet_before_it(self):
-        with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
-            u = self.until(self.start(2), "judge")
-            pid = self.conn.execute("SELECT min(pid) FROM projections").fetchone()[0]
-            it = self.call("list_quarter_state", pid=pid, pass_token=u["pass_token"])["item"]
-            self.call("record_match", pid=pid, doc_id=self.doc(amount_minor=10001),
-                      author="auto", pass_token=u["pass_token"],
-                      expected_revision=it["revision"], row_digest=it["row_digest"],
-                      document_date="2026-07-02", labels=["no-ref"])
-            self.until(self.do(u), "complete")
-            sheet = self.deliver()[-1]                  # the job's view (S7 §5)
-            self.assertEqual(self.kind(sheet), "status")
-            self.call("request_work", kind="handover", trigger="operator",
-                      doc_ids=[self.doc(amount_minor=55555)])
-            self.until(self.call("job_next", job_id=B), "complete", job_id=B)
-            shown = self.deliver()
-            self.assertIn("handover", [self.kind(r) for r in shown])
-            self.assertEqual(self.kind(shown[-1]), "handover")
-            apply_now(self.conn, "all good")
-        pairs = [tuple(r) for r in self.conn.execute(
-            "SELECT pid, render_id FROM log WHERE kind='pair' AND author='operator'")]
-        self.assertEqual(pairs, [(pid, sheet)])
 
 
 class LastDelivered(StoreCase):
@@ -261,54 +149,6 @@ class LastDelivered(StoreCase):
         self.assertEqual(db.last_delivered(self.conn)["render_id"], "r3")
 
 
-class OperatorTurnRelay(Tools):
-    """Was R5 (job_report's non-binding stamp for an operator turn's hand-out) and R6
-    (the refusal boundary): S7 §9 deletes both with job_report. The job posts its own
-    results (§5), every delivered rendering binds, and a reading binds to what it
-    quotes, else the last delivered rendering; its proposal shows what it would change."""
-
-    def two_checks(self):
-        """Job A pairs payment 1 and its status view, posted by the job, is delivered; job
-        B (an operator's check) pairs payment 2 and completes, its view posted and its
-        receipt not yet in. Returns (pid1, pid2, the delivered sheet)."""
-        with self.patch_clock(datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)):
-            u = self.until(self.start(2), "judge")
-            pids = [r[0] for r in self.conn.execute("SELECT pid FROM projections ORDER BY pid")]
-            self.pair(u, pids[0], 10001)
-            self.until(self.do(u), "complete")
-            old = self.deliver()[-1]                    # A's status view (S7 §5)
-            self.call("request_work", kind="check", trigger="operator")
-            u = self.until(self.call("job_next", job_id=B), "judge", job_id=B)
-            self.pair(u, pids[1], 10002)
-            self.until(self.do(u), "complete", job_id=B)
-        return pids[0], pids[1], old
-
-    def pair(self, u, pid, amount):
-        it = self.call("list_quarter_state", pid=pid, pass_token=u["pass_token"])["item"]
-        self.call("record_match", pid=pid, doc_id=self.doc(amount_minor=amount), author="auto",
-                  pass_token=u["pass_token"], expected_revision=it["revision"],
-                  row_digest=it["row_digest"], document_date="2026-07-02", labels=["no-ref"])
-
-    def operator_pairs(self):
-        return [tuple(r) for r in self.conn.execute(
-            "SELECT pid, render_id FROM log WHERE kind='pair' AND author='operator'"
-            " ORDER BY rowid")]
-
-    # S7 §9: test_astras_reply_race_applies_nothing and
-    # test_astras_wider_sheet_confirms_nothing are deleted — both pinned the NEWER_SINCE
-    # refusal at a non-binding rendering, a mechanism §9 deletes (the quoted binding and
-    # the proposal shown before Apply replace it, §8).
-
-    def test_a_later_checks_sheet_binds(self):
-        """S7 §5 (was: a notification relay still binds): B's status view, posted by the
-        job and delivered after A's, takes "all good" for both payments it shows."""
-        p1, p2, old = self.two_checks()
-        new = self.deliver()[-1]
-        apply_now(self.conn, "all good")
-        pairs = self.operator_pairs()
-        self.assertEqual({p for p, _ in pairs}, {p1, p2})
-        self.assertEqual({r for _, r in pairs}, {new})
-
     # At the S7 merge (§9): test_the_latest_hand_out_wins and test_a_notification_re_offer_binds_again
     # are deleted (§9 deletes this mechanism): both pinned renders.binding, the stamp
     # job_report's hand-out wrote (1 notification, 0 operator turn); §9 deletes job_report
@@ -321,27 +161,30 @@ class InstanceSwitch(Tools):
     pass's gate was decided on the first instance."""
 
     def test_an_instance_switched_mid_pass_after_the_ack_stops_the_pass(self):
+        """Simple loop Task 10: the pass read the bank, its turn died before the import,
+        and the next batch reads another ledger instance: nothing is imported, the binding
+        stays, and the pass stops."""
         import binding, db, job
-        u = self.until(self.start(2), "judge")
+        self.until(self.start(2), "complete")             # run A: the store is on LEDGER
         snaps = self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0]
+        self.call("request_work", kind="check", trigger="operator")
+        self.until(self.call("job_next", job_id=B), "snapshot", job_id=B)   # read, not imported
         self.granted(binding.acknowledge_ledger_reset_in_tx)
-        self.instance = OTHER                         # the next read sees another ledger
-        later = db._clock() + datetime.timedelta(seconds=job.W_S + 1)
-        with self.patch_clock(later):
-            u = self.call("job_next", job_id=A)
-            self.assertEqual(u["unit"], "probes")      # W: the bank is read again
-            u = self.do(u)
-            self.assertEqual(u["unit"], "snapshot")
-            with self.assertRaises(db.Refusal) as cm:
-                self.do(u)
-            self.assertIn("nothing was imported", str(cm.exception))
-            b = binding.get(self.conn)
-            self.assertEqual((b["ledger_instance"], b["ledger_reset_ack"]), (self.LEDGER, 1))
-            self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0],
-                             snaps)
-            u = self.call("job_next", pass_token=u["pass_token"])
-            # the pass ended: next, the job posts its stop line (S7 §5), not delivered here
-            self.assertEqual(u["unit"], "post")
+        self.instance = OTHER                             # the next read sees another ledger
+        u = self.call("job_next", job_id=B)
+        self.assertEqual(u["unit"], "probes")             # a new batch reads again
+        u = self.do(u)
+        self.assertEqual(u["unit"], "snapshot")
+        with self.assertRaises(db.Refusal) as cm:
+            self.do(u)
+        self.assertIn("nothing was imported", str(cm.exception))
+        b = binding.get(self.conn)
+        self.assertEqual((b["ledger_instance"], b["ledger_reset_ack"]), (self.LEDGER, 1))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0],
+                         snaps)
+        u = self.call("job_next", pass_token=u["pass_token"])
+        self.assertEqual(u["unit"], "view")               # the run's one message: the stop
         self.assertIsNone(job.live_job_pass(self.conn))
-        r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
-        self.assertEqual((r["state"], r["outcome"]), ("done", "stopped"))
+        r = self.conn.execute("SELECT state, outcome FROM work_requests ORDER BY request_id"
+                              " DESC").fetchone()
+        self.assertEqual((r["state"], r["outcome"]), ("reported", "stopped"))

@@ -4,33 +4,35 @@ A Casa plugin that prepares a B.V.'s quarterly accounting. It matches every tran
 business bank account (from bank-feed) to the document it needs, keeps `acct::` tags and
 accounting notes current in the bank ledger, answers from its own store when asked, and builds
 a quarter's zip (SnelStart-ready `invoices/`, `ledger.csv`, `ledger.xlsx`, `notes.md`) on
-request. The server registers 39 tools. Design: `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.md`.
+request. The server registers 40 tools. Design: `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.md`.
 
 The checking runs as one Casa job on the finance specialist, `quarterly-accounting:work`
-("Accounting check", skill `skills/quarterly-job/SKILL.md`): the bank read, the ledger sweep,
-the Gmail searches and the judging of documents, one unit at a time from `job_next`, in fresh
-sessions of 80 turns per batch. The job posts what it finds itself (`post_results`,
-`show_view`) and builds and posts each package as a file in Telegram (`post_package`); nothing
-is emailed. The finance specialist's desk (skill `skills/quarterly-accounting/SKILL.md`)
-answers the operator with posted views and their buttons, reads the operator's words into a
-reading to Apply (`propose_reading`), files the documents the operator sends, and asks for
-work (`request_work`, `request_package`, then Casa's `start_job`). `job_status` answers,
-read-only, whether the job may end; `record_filing` closes the job's filing step. The 0.8.0 pass tools (`begin_pass`, `end_pass`, `continue_pass`,
-`record_step`, `more_work`) are gone.
+("Accounting check", skill `skills/quarterly-job/SKILL.md`): one pass per run that reads the
+bank, searches Gmail vendor by vendor, matches invoices to payments, keeps the bank ledger's
+notes current (`record_mirror`) and ends with one message and its cards, in fresh sessions of
+80 turns per batch. The job declares `quietWhenScheduled`: started by the scheduler it runs
+silently and speaks only when there is something to say. The operator's taps (`verdict`) are recorded at once and each answer posts the next card; the
+bank ledger's tags and notes follow at the next check. The
+finance specialist's desk (skill `skills/quarterly-accounting/SKILL.md`) answers the operator
+with posted views and their buttons, reads the operator's words into a reading to Apply
+(`propose_reading`), files the documents the operator sends, and asks for the check
+(`request_work`, then Casa's `start_job`). `get_package` builds the freshest quarter package
+from the store on request and sends it as a file in Telegram, open items or not; nothing is
+emailed. `job_status` answers, read-only, whether the job may end; `set_aside` closes a job
+item no other write closes (an attachment that is no invoice, a row bank-feed still has).
 
 ## Requirements
-- Casa 0.344.0 or newer (S7a: the file's delivered name, `operator_file` `filename`; a
-  specialist starts its own job). An older Casa refuses the manifest — the plugin is not
-  loaded there. Live use also needs ha-casa-app#1220 fixed (buttons on a specialist whose
-  plugin tools are deferred) and ha-casa-app#1228 fixed (the main assistant delegates a
-  specialist's job instead of starting it).
-- The job's starter line (`Started by: operator` — a job the operator started with nothing
-  asked yet runs as the operator's check, not as a silent scheduled one) takes effect from
-  Casa 0.344.31. On an older Casa the job's brief has no such line, and such a job runs as a
-  scheduled check, as before.
-- bank-feed **0.20.0** or newer (casa-specialist-finance component 0.21.0) — unchanged —
-  installed on the finance specialist with the business account linked, labelled `company`,
-  and synced.
+- **Casa v0.344.39 or newer** (the release carrying #1301, #1302 and #1303, #1308 and #1312). #1301
+  lets the job run silently when the scheduler starts it (`quietWhenScheduled`), #1302 lets a
+  tap's receipt post the next card, #1303 lets a [Get package] button deliver the file, and
+  #1308 (v0.344.38): a tap's pinned turn is the operator's tap, not a delegation (stored-call
+  taps no longer refuse on the specialist's role scope). #1312 (v0.344.39): a message the
+  job re-posts after Casa cut the batch before its delivery was marked is not sent twice
+  (each deposit carries a `key`). An older Casa refuses this
+  plugin's manifest (`casa.jobs invalid: entry 1 field quietWhenScheduled`): the plugin does
+  not load. There is no Casa min-version field and no fallback.
+- bank-feed **0.20.0** or newer (casa-specialist-finance component 0.21.0) installed on the
+  finance specialist with the business account linked, labelled `company`, and synced.
 - The gmail plugin (0.9.0 or newer) on the finance specialist (the job's searches; read-only).
   Without it, checks still run and say "Gmail isn't connected for the finance specialist —
   invoices aren't being searched." Packages are never emailed: they arrive as a file in
@@ -49,6 +51,10 @@ Nothing is asked at install. The account binds itself when exactly one company a
 The package name and the start quarter are defaulted and changeable by asking.
 
 ## Upgrade notes
+- **0.10 → 0.11:** schema 12. The first run writes one plain note per bank-ledger row (the
+  notes are plain text now). Buttons on the S7 renderings already posted go stale once.
+  Package requests still open at the upgrade are told so. Requires Casa v0.344.39 (see
+  Requirements).
 - **0.9 → 0.10: remove the old prompt cron.** The weekly prompt trigger
   `quarterly_accounting_pass` on the main assistant (the 0.9 install's
   `name: quarterly_accounting_pass, type: cron, schedule: 0 9 * * 1, prompt: Run the
@@ -76,7 +82,7 @@ already written into bank-feed's ledger, nor Home Assistant backups.
   below-floor case) and gmail's sent log. Refresh with `scripts/vendor-bankfeed.sh <tag>`.
 - `git config core.hooksPath .githooks` — tool-list agreement and the identifier scan.
 - `scripts/check_tool_agreement.py` — the server's registry, `casa.provides_tools` and
-  `casa.resultContract.tools` must name exactly the same 39 tools.
+  `casa.resultContract.tools` must name exactly the same 40 tools.
 - `scripts/scan_identifiers.py .` — fails the build on an IBAN-shaped token anywhere outside
   `tests/upstream/`. No IBAN, company name, vendor list or operator identity belongs in this
   tree; when in doubt, run the script.
