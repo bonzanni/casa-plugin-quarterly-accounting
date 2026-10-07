@@ -12,7 +12,9 @@ import views  # noqa: E402
 
 A, B, C, D = "aaaaaaaa-1", "bbbbbbbb-2", "cccccccc-3", "dddddddd-4"
 DEAD_LINK = "HTTP 404 not_found; cached data unchanged"      # casa-test's dead bank link
-FINISHED = ("Accounting work finished.", "All accounting work done")
+# issue #47: a finished run completes with what it checked (cards.checked_line)
+FINISHED_RE = (r"^(Q\d \d{4} checked: \d+ matched, \d+ to confirm, \d+ missing(, \d+ pending)?"
+               r"|Nothing to check .*)$")
 NO_TOOLS = ("Accounting check stopped: bank-feed's tools are not available to the finance "
             "specialist.")
 
@@ -65,7 +67,8 @@ class FailedSync(StoreCase):
         decided = self.conn.execute("SELECT count(*) FROM run_work WHERE job_id=? AND"
                                     " outcome='missing'", (B,)).fetchone()[0]
         self.assertEqual(decided, 3)                        # the cached rows were worked
-        self.assertEqual((units[-1]["text"], units[-1]["progress"]["summary"]), FINISHED)
+        self.assertRegex(units[-1]["text"], FINISHED_RE)
+        self.assertEqual(units[-1]["progress"]["summary"], "All accounting work done")
         # D10: one failed sync three days after a good one is not yet a failure line
         self.assertEqual(self.conn.execute("SELECT count(*) FROM alerts").fetchone()[0], 0)
 
@@ -115,8 +118,9 @@ class RunEnd(StoreCase):
         drv = JobDriver(self)
         asks.request_work(self.conn, "check", "operator")
         last = drv.run_job(A)[-1]
-        self.assertEqual((last["text"], last["progress"]["summary"]), FINISHED)
-        self.assertEqual(job.status(self.conn, A), {"done": True, "text": FINISHED[0]})
+        self.assertRegex(last["text"], FINISHED_RE)
+        self.assertEqual(last["progress"]["summary"], "All accounting work done")
+        self.assertEqual(job.status(self.conn, A), {"done": True, "text": last["text"]})
 
     def test_another_runs_stop_is_not_this_runs(self):
         import asks, job
@@ -127,8 +131,9 @@ class RunEnd(StoreCase):
         drv._no_tools = False
         asks.request_work(self.conn, "check", "operator")
         last = drv.run_job(B)[-1]                          # B's pass finished
-        self.assertEqual((last["text"], last["progress"]["summary"]), FINISHED)
-        self.assertEqual(job.status(self.conn, B)["text"], FINISHED[0])
+        self.assertRegex(last["text"], FINISHED_RE)
+        self.assertEqual(last["progress"]["summary"], "All accounting work done")
+        self.assertEqual(job.status(self.conn, B)["text"], last["text"])
         self.assertEqual(job.status(self.conn, A)["text"], NO_TOOLS)
 
     def test_an_interrupted_pass_is_named(self):

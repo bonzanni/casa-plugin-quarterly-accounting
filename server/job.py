@@ -196,7 +196,13 @@ def run_end(conn, job_id) -> tuple:
                      " p.pass_id=u.pass_id WHERE u.job_id=? AND p.ended_at IS NOT NULL",
                      (job_id,)).fetchone()
     if r is None or r["outcome"] == "complete":
-        return RUN_FINISHED, loop.WORDS["complete"]
+        # issue #47: what happened, for whoever started the run (an assistant relays it)
+        import binding, cards
+        if binding.get(conn) is None:
+            return RUN_FINISHED, loop.WORDS["complete"]
+        line = views.clip(cards.checked_line(conn, cards.main_quarter(conn, job_id)),
+                          TOPIC_MAX)
+        return line, loop.WORDS["complete"]
     text = views.clip(_end_line(r["outcome"], json.loads(r["report_json"] or "{}")),
                       TOPIC_MAX)
     return text, text

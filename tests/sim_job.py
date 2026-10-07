@@ -232,6 +232,8 @@ class JobDriver:
         self.calls_mode = None
         self.cut_reports = 0            # g1: report calls Casa cuts (a model that stops there)
         self.broker = None              # a FakeBroker the whole run deposits to (else one a unit)
+        self.read_mode = "store"        # how a found attachment is read (see _file_one)
+        self.reads = []                 # every Read path
         self.bank_log = []              # every bank-feed call: (tool, canonical args)
         self.near_days = 10             # the skill's "certain": a match dated this near
         self.propose_days = 20          # a look-alike this near is proposed; farther: not it
@@ -735,14 +737,43 @@ class JobDriver:
             files = out["files"]
         for ref in files:
             m = self._mail(ref)
-            self._spend(2)                                # download_attachment, Read
-            self._tool("ingest_document", {
-                "source_path": m["path"], "kind": "invoice", "source": "manual-email",
-                "extraction_author": "specialist", "source_ref": m["ref"],
-                "amount_minor": m["amount_minor"], "currency": m["currency"],
-                "document_date": m["date"], "issuer": m["issuer"],
-                "document_number": m["number"], "pass_token": token})
+            self._file_one(token, m, {"kind": "invoice", "source": "manual-email",
+                                      "issuer": m["issuer"]})
         return None
+
+    SESSION = "/config/cc-home/.claude/projects/-config-agent-home-finance/s/tool-results/"
+
+    def _read(self, path) -> bool:
+        """Read, under Casa's path_scope for finance: only the session's own files (where
+        Claude Code saves read_document's PDF) — never the handoff folder nor the store."""
+        self._spend(1)
+        self.reads.append(path)
+        return path.startswith(self.SESSION)
+
+    def _file_one(self, token, m, base) -> dict | None:
+        """One found attachment filed as the skill says. read_mode "store" (#Q2-R7): download,
+        ingest with only what the mail states, read_document, Read the session copy, then
+        update_document_metadata with what is printed. "handoff" (the R7 skill): Read the
+        download first — denied by path_scope, so the attachment is set aside."""
+        self._spend(1)                                    # download_attachment
+        args = {"source_path": m["path"], "extraction_author": "specialist",
+                "source_ref": m["ref"], "pass_token": token, **base}
+        if self.read_mode == "handoff":
+            if not self._read(m["path"]):
+                self._tool("set_aside", {"pass_token": token, "items": [{"ref": m["ref"]}],
+                                         "reason": "the attachment could not be read"})
+                return None
+            return self._tool("ingest_document", {
+                **args, "amount_minor": m["amount_minor"], "currency": m["currency"],
+                "document_date": m["date"], "document_number": m["number"]})
+        out = self._tool("ingest_document", args)
+        self._tool("read_document", {"doc_id": out["doc_id"]})
+        if self._read(self.SESSION + f"doc-{out['doc_id']}.pdf"):
+            self._tool("update_document_metadata", {
+                "doc_id": out["doc_id"], "amount_minor": m["amount_minor"],
+                "currency": m["currency"], "document_date": m["date"],
+                "document_number": m["number"], "pass_token": token})
+        return out
 
     def _file_vendor(self, token, vendor, refs) -> list:
         """The vendor's found attachments, each downloaded, read once and filed (vendor=);
@@ -750,14 +781,10 @@ class JobDriver:
         filed = []
         for ref in refs:
             m = self._mail(ref)
-            self._spend(2)                                # download_attachment, Read
-            out = self._tool("ingest_document", {
-                "source_path": m["path"], "kind": m["kind"], "source": "gmail",
-                "extraction_author": "specialist", "counterparty": m["vendor"],
-                "source_ref": m["ref"], "issuer": m["vendor"], "document_date": m["date"],
-                "document_number": m["number"], "amount_minor": m["amount_minor"],
-                "currency": m["currency"], "vendor": vendor, "pass_token": token})
-            if out["created"]:
+            out = self._file_one(token, m, {"kind": m["kind"], "source": "gmail",
+                                            "counterparty": m["vendor"],
+                                            "issuer": m["vendor"], "vendor": vendor})
+            if out is not None and out["created"]:
                 filed.append({"doc_id": out["doc_id"], "amount_minor": m["amount_minor"],
                               "currency": m["currency"], "date": m["date"], "held": None})
         return filed
@@ -775,6 +802,19 @@ class JobDriver:
         import dates
         vendor, pid = u["vendor"], u["pid"]
         filed = self._file_vendor(token, vendor, u["files"])
+        for c in u.get("candidates", []):    # a files-only hand-out carries none
+            if c.get("unread"):                 # Q2 R7: filed, its reading cut — read it now
+                ref = self.conn.execute("SELECT source_ref FROM documents WHERE doc_id=?",
+                                        (c["doc_id"],)).fetchone()[0]
+                m = self._mail(ref)
+                self._tool("read_document", {"doc_id": c["doc_id"]})
+                if self._read(self.SESSION + f"doc-{c['doc_id']}.pdf"):
+                    self._tool("update_document_metadata", {
+                        "doc_id": c["doc_id"], "amount_minor": m["amount_minor"],
+                        "currency": m["currency"], "document_date": m["date"],
+                        "document_number": m["number"], "pass_token": token})
+                    c.update(amount_minor=m["amount_minor"], currency=m["currency"],
+                             date=m["date"], number=m["number"])
         if u.get("decided") or u["files_total"] > len(u["files"]):
             return None                 # the skill: the rest come with the next job_next
         hint = u["kb"].get("hint_sender") if u["kb"].get("known") else None

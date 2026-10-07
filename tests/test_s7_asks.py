@@ -39,7 +39,8 @@ class Asks(StoreCase):
                                             ("aaaaaaaa-1",)).fetchone()[0])
         self.run_job_to_complete("bbbbbbbb-2")
         out = job.status(self.conn, "bbbbbbbb-2")
-        self.assertEqual(out, {"done": True, "text": job.RUN_FINISHED})
+        self.assertTrue(out["done"])
+        self.assertRegex(out["text"], r"^Q\d \d{4} checked: |^Nothing to check ")   # #47
         self.assertFalse(asks._live_run(self.conn))
 
     def test_ask_state_taken_done_and_refusals(self):

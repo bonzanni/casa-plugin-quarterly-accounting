@@ -84,11 +84,16 @@ With `search: true`: `search_emails` (`from:me to:me has:attachment newer_than:8
 once `record_probe(pass_token, kind="gmail", ok=…, detail=…, data={"refs": [every attachment found, as <message id>:<attachment id>, newest first]})`
 — before anything else; no Gmail tools: no search,
 `record_probe(pass_token, kind="gmail", ok=false, absent=true)`. File each of `files` (the
-unit's, or the probe's answer), in order — `Read` each FIRST, pass only what is printed on
-it (an unreadable amount: leave out `amount_minor` and `currency`):
-`ingest_document(source_path, kind, source="manual-email", extraction_author="specialist", source_ref=<the ref, exactly>, amount_minor, currency, document_date, issuer, document_number, pass_token)`
+unit's, or the probe's answer), in order, and read it (**Reading a document**):
+`ingest_document(source_path, kind, source="manual-email", extraction_author="specialist", source_ref=<the ref, exactly>, pass_token)`
 — no `vendor`: your own mail is no vendor's. No document, or refused:
 `set_aside(pass_token, items=[{"ref": …}], reason=…)`. Then `job_next`.
+
+**Reading a document.** A download cannot be `Read`: file it first with no amount, date or
+number, then `read_document(doc_id)`, `Read` the path it names, and
+`update_document_metadata(doc_id, amount_minor, currency, document_date, issuer, document_number, pass_token)`
+with only what is printed on it — never a value from the payment; an amount you cannot read
+stays out.
 
 ### `payment`
 
@@ -97,14 +102,12 @@ reading (kind, issuer, number, date, amount, currency, vendor; `held: other` is 
 payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, its
 `search_window`, `searches_left` and `files`.
 1. **`files` first**: the attachments its searches found, still to file. File each, in
-   order: `Read` it FIRST, then
-   `ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<the ref, exactly>, vendor=<the unit's vendor, when it is from that vendor>, amount_minor, currency, document_date, issuer, document_number, pass_token)`
-   with only what is printed on it — never a value from the payment; an amount you cannot
-   read: leave out `amount_minor` and `currency`;
+   order, and read it (**Reading a document**):
+   `ingest_document(source_path, kind, source="gmail", extraction_author="specialist", source_ref=<the ref, exactly>, vendor=<the unit's vendor, when it is from that vendor>, pass_token)`;
    no invoice: `set_aside(pass_token, items=[{"ref": …}], reason=…)`. `files_total` more
    than `files`, or `decided: true`: then `job_next`.
-2. **Judge the candidates from their reading**; open one (`read_document(doc_id)`, then
-   `Read` its path) only when in doubt.
+2. **Judge the candidates from their reading** (`unread`: read it first, as above); open
+   one (`read_document(doc_id)`, then `Read` its path) only when in doubt.
 3. **Nothing fits:** search the vendor's mail over the `search_window` dates (with a learned
    hint first `from:<hint_sender>` and the `hint_subject` words, then the plain
    vendor-and-dates search, then wider), at most `searches_left` searches. Record EACH

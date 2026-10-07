@@ -438,24 +438,26 @@ class TestJob(TempEnv):
         self.assertIn("refused while a found attachment is neither filed nor set aside", v)
 
     def test_own_mail_and_vendor_filing_pass_the_reading(self):
-        """d2 (Astra S2): the model reads each document and passes amount, currency, date,
-        issuer and number — own mail with no vendor (a candidate, never an exact_fit), the
-        vendor search's filing with the unit's vendor."""
+        """d2 (Astra S2), Q2 R7: the model files each document, then reads it through
+        read_document and records the reading — own mail with no vendor (a candidate, never
+        an exact_fit), the vendor search's filing with the unit's vendor."""
         f = flat(self.units("filing", "### `payment`"))
-        self.assertIn("`Read` each FIRST, pass only what is printed on it (an unreadable "
-                      "amount: leave out `amount_minor` and `currency`): "
-                      "`ingest_document(source_path, kind, "
-                      'source="manual-email", extraction_author="specialist", '
-                      "source_ref=<the ref, exactly>, " + self.READING, f)
-        self.assertNotIn("vendor=", f)
+        self.assertIn("in order, and read it (**Reading a document**): "
+                      '`ingest_document(source_path, kind, source="manual-email", '
+                      'extraction_author="specialist", source_ref=<the ref, exactly>, '
+                      "pass_token)`", f)
+        self.assertIn("**Reading a document.** A download cannot be `Read`: file it first "
+                      "with no amount, date or number, then `read_document(doc_id)`, `Read` "
+                      "the path it names, and `update_document_metadata(doc_id, amount_minor, "
+                      "currency, document_date, issuer, document_number, pass_token)` with "
+                      "only what is printed on it — never a value from the payment; an amount "
+                      "you cannot read stays out.", f)
         v = flat(self.vendor())
-        self.assertIn("File each, in order: `Read` it FIRST, then "
+        self.assertIn("File each, in order, and read it (**Reading a document**): "
                       '`ingest_document(source_path, kind, source="gmail", '
                       'extraction_author="specialist", source_ref=<the ref, exactly>, '
-                      "vendor=<the unit's vendor, when it is from that vendor>, "
-                      + self.READING, v)
-        self.assertIn("with only what is printed on it — never a value from the payment; an "
-                      "amount you cannot read: leave out `amount_minor` and `currency`", v)
+                      "vendor=<the unit's vendor, when it is from that vendor>, pass_token)`",
+                      v)
 
     def vendor(self):
         return self.units("payment", "### `mirror`")

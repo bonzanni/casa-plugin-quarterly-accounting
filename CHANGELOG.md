@@ -39,8 +39,10 @@ builds on it.
 - **The floor and decide.** A match needs the same currency and the exact amount; another
   currency is only proposed; a document is held only by a match or a proposal's chosen
   document (a proposal's alternatives hold nothing); a no-op re-decision changes nothing.
-  `record_missing` records a payment with no document. A document is read before it is
-  filed, with only what it prints — never the payment's amount; two readings of the same
+  `record_missing` records a payment with no document. A document is filed first, then read
+  through `read_document` (a download itself cannot be read) and its reading recorded with
+  only what it prints — never the payment's amount; a document a cut left unread is handed
+  `unread` and read before it is judged; two readings of the same
   file that disagree make its amount unknown for good, and such a document is only ever
   proposed (a machine match on it turns into a proposal).
 - **Later documents and handovers.** A document found later by mail never reopens a match or a
@@ -55,6 +57,11 @@ builds on it.
 - **One delivery per message.** Every view and results deposit carries a key (`view:<store
   id>:<render id>`, `results:<store id>:<render ids>`): with Casa #1312, a message re-posted after Casa cut the batch
   before its delivery was marked is not sent twice (Casa v0.344.39).
+- **An empty check says why (#47).** A check with no payment in its quarter says so plainly
+  — "Nothing to check for Q2 2026: the books start 1 Oct 2026. Say 'start from Q2 2026' to
+  include it." — in the operator's end message and in the completion text an assistant
+  relays (whoever started the run); a check that worked completes with "Q3 2026 checked: N
+  matched, M to confirm, K missing".
 - **The end message and its cards.** One message ends a run, with a Review order, paged vendor
   cards and an open-items card; a tap's receipt posts the next card (#1302), and the ready
   notice announces a finished package.

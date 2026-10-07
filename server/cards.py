@@ -67,6 +67,34 @@ def main_quarter(conn, job_id=None) -> str:
     return dates.quarter_of(max(days) if days else dates.today())
 
 
+def nothing_to_check(conn, q) -> str:
+    """Issue #47: a check with no payment in quarter `q`, in plain words — why, and how to
+    change it when the books start at or after it (the binding's watermark)."""
+    import binding
+    wm = binding.get(conn)["watermark"]
+    books, wq, ql = dates.long_day(wm), dates.quarter_of(wm), dates.quarter_label(q)
+    if q < wq:
+        return (f"Nothing to check for {ql}: the books start {books}. Say 'start from {ql}' "
+                "to include it.")
+    if q == wq:
+        prev = dates.quarter_label(dates.quarter_of(dates.add_months(
+            dates.quarter_bounds(wq)[0], -3)))
+        return (f"Nothing to check yet: the books start {books} and the bank has no payment "
+                f"since. Say 'start from {prev}' to include {prev}.")
+    return f"Nothing to check for {ql} yet: the bank has no payment in it."
+
+
+def checked_line(conn, q) -> str:
+    """Issue #47: a run's completion text — what the assistant relays: the main quarter's
+    counts, or nothing_to_check."""
+    c = state(conn)["counts"].get(q, collections.Counter())
+    if not sum(c.values()):
+        return nothing_to_check(conn, q)
+    line = (f"{dates.quarter_label(q)} checked: {c['matched']} matched, {c['proposed']} to "
+            f"confirm, {c['missing']} missing")
+    return line + (f", {c['pending']} pending" if c["pending"] else "")
+
+
 def _line_key(d):
     """Proposal line order (§1): vendor (kb.norm), then date, then pid."""
     return (kb.norm(d["vendor"]), d["date"] or "", d["pid"])
@@ -517,7 +545,9 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         if ready and not qs:
             return compose_ready(conn, ready, extra, alerts=alerts, receipts=receipts)
         if not c["pending"]:
+            # issue #47: no payment at all in the quarter says why, never "all accounted for"
             first = ([stopped] if stopped else
+                     [views.esc(nothing_to_check(conn, q))] if not n else
                      [f"{_qn(q)} checked · {_s(n, 'payment')} · all accounted for."])
             rest = list(extra[1:] if stopped else extra)
             first += _fit_receipts(receipts, first, rest)
