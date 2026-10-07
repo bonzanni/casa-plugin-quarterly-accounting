@@ -432,8 +432,8 @@ def offer_lines(filename: str, status: str = "uncertain") -> list:
     send that failed, did not go out) — the same in the status view and in the
     package notice record_delivery raises."""
     if status == "failed":
-        return [f"{views.field(filename)} didn't go out —", 'say "send it again".']
-    return [f"{views.field(filename)} may not have arrived —", 'say "send it again".']
+        return [f"{views.field(filename)} didn't go out — say \"send it again\"."]
+    return [f"{views.field(filename)} may not have arrived — say \"send it again\"."]
 
 
 _LATEST = ("SELECT d.package_id, d.status, d.revoked_at, p.filename, p.quarter FROM deliveries d"

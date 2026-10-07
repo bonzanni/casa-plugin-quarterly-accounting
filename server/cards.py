@@ -260,14 +260,24 @@ def _doc_word(doc) -> str:
         views.KIND_WORD.get(doc["kind"], "document")
 
 
+def _purchases(offered) -> int:
+    """Issue #52: how many purchases the offered documents are (#48's unit: the same issuer
+    and number, db.purchase_key; a document with no number is a purchase of its own)."""
+    return len({(db.purchase_key(c["doc"]["issuer"]), db.purchase_key(c["doc"]["number"]))
+                if db.purchase_key(c["doc"].get("number")) else ("doc", c["doc"]["doc_id"])
+                for c in offered})
+
+
 def _proposal_line(conn, i, d) -> str:
-    """§1: "{i}. {vendor} · {day} · {amount} ↔ {doc}"."""
+    """§1: "{i}. {vendor} · {day} · {amount} ↔ {doc}" — counting purchases, so an invoice
+    and its own receipt read as the one document they are (#52)."""
     offered = _offered(conn, d)
-    if d["current"] is None:
-        doc = f"{len(offered)} invoices fit"                         # D3: no chosen one
-    elif len(offered) > 1:
+    n = _purchases(offered)
+    if d["current"] is None and n != 1:
+        doc = f"{n} invoices fit"                                    # D3: no chosen one
+    elif n > 1:
         chosen = offered[0]["doc"]
-        doc = f"{len(offered)} invoices fit; chose {_doc_word(chosen)} ({_day(chosen['date'])})"
+        doc = f"{n} invoices fit; chose {_doc_word(chosen)} ({_day(chosen['date'])})"
     else:
         c = offered[0]["doc"]
         word = views.KIND_WORD.get(c["kind"], "document")

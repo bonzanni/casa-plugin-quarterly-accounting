@@ -135,7 +135,8 @@ class TestSheet(Base):
         all_text = self.render("all")["text"]
         self.assertIn("Vendor00", all_text)
 
-    def test_phone_width_no_numbering_no_machinery(self):
+    def test_whole_lines_no_numbering_no_machinery(self):
+        """#54: no fixed-width hard break; a headline stays one line, the client wraps."""
         for i in range(12):
             self.add(amount_minor=100 + i, counterparty="A very long vendor name that goes on %d" % i)
         for v in views.VIEWS:
@@ -143,8 +144,8 @@ class TestSheet(Base):
                 continue
             text = self.render(v)["text"]
             for line in text.splitlines():
-                if not line.startswith("http"):
-                    self.assertLessEqual(len(line), views.WIDTH, (v, line))
+                if line.startswith("A very long vendor name"):
+                    self.assertIn(" · ", line, (v, line))      # its amount and date with it
                 self.assertIsNone(re.match(r"^\s*\d+[.)]\s", line), (v, line))
             for word in views.FORBIDDEN:
                 self.assertNotIn(word, text, (v, word))

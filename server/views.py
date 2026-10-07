@@ -17,7 +17,6 @@ import contextlib
 import hashlib
 import json
 import re
-import textwrap
 import unicodedata
 
 import amounts
@@ -27,7 +26,6 @@ import db
 import lineage
 import work
 
-WIDTH = 64
 CAP = 8
 TELEGRAM_LIMIT = 4096
 LABEL_ALLOWANCE = 64       # Casa's "📊 <display name>" label line: the plugin cannot read it
@@ -252,25 +250,6 @@ def names_for(items, view_quarter=None) -> _Names:
     finally:
         _NAMES = saved
     return names
-
-
-def _wrap(line: str) -> list:
-    if len(line) <= WIDTH:
-        return [line]
-    out, cur = [], ""
-    for part in line.split(" · "):
-        cand = part if not cur else cur + " · " + part
-        if len(cand) <= WIDTH:
-            cur = cand
-            continue
-        if cur:
-            out.append(cur)
-        pieces = textwrap.wrap(part, WIDTH, break_long_words=False, break_on_hyphens=False) or [""]
-        out.extend(pieces[:-1])
-        cur = pieces[-1]
-    if cur:
-        out.append(cur)
-    return out
 
 
 def _day(d):
@@ -784,20 +763,16 @@ def _compose(conn, view, q, items, members, lead):
                 out.append(f'Tell me if one is wrong — "the {field(printed_guessed[0])} one is '
                            'wrong".')
         if view in ("status", "all", "missing") and missing:
-            out.append("Download the PDFs and email them to yourself, then")
-            out.append('say "check emailed invoices" to file them now.')
+            out.append('Download the PDFs and email them to yourself, then say "check emailed '
+                       'invoices" to file them now.')
         return out
     parts["tail"] = tail
     return parts
 
 
 def _text(lines) -> str:
-    """The lines, each wrapped to WIDTH — but while a rendering is composed (binding V2) its
-    first line is kept whole: the tag ends it, and a tag spliced into a wrapped headline
-    would split the identity it binds (_bindable)."""
-    return "\n".join(w for i, line in enumerate(lines)
-                     for w in ([line] if i == 0 and _TAG and line else
-                               _wrap(line) if line else [""]))
+    """The lines, one logical item each: the client wraps them (#54)."""
+    return "\n".join(lines)
 
 
 def _emit(parts, picks, *, announce, more=None, cap=None, all_sections_empty_msgs=True):
