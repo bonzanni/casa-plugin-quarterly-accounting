@@ -73,8 +73,38 @@ class UnlistedEmail(StoreCase):
 
     def test_an_email_listed_at_its_search_owes_nothing(self):
         self.search([{"id": "m-ship", "listed": True}])
-        self.assertEqual(items(self.conn, JOB, kind="email"), [])
+        self.assertEqual(items(self.conn, JOB, kind="email"),
+                         [(f"payment:{self.pid}", "email", "m-ship", "done")])
         self.assertEqual(self.missing()["applied"], 1)
+
+    def test_a_listing_is_remembered_when_a_later_search_returns_the_email_again(self):
+        """r1 Astra S2: listed at its first search, reported unlisted by a later one — the
+        listing already happened; missing is not refused."""
+        self.search([{"id": "m-ship", "listed": True}])
+        self.search([{"id": "m-ship", "listed": False}], queries=("ME280426000457 bis",))
+        self.assertEqual(self.missing()["applied"], 1)
+
+    def test_a_listing_report_moves_no_age_out_count(self):
+        """r1 Astra S2: a listing is not a search — `exhausted` on it counts no fruitless
+        pass."""
+        def streak():
+            return self.conn.execute("SELECT passes_without_candidate FROM projections WHERE"
+                                     " pid=?", (self.pid,)).fetchone()[0]
+        # Astra's sequence: a search that found a candidate (no fruitless pass counted) …
+        self.drv._tool("record_search", {
+            "pass_token": self.drv.token, "pids": [self.pid], "search": "payment",
+            "queries": ["ME280426000457"], "refs": ["m-other:att-1"], "found_candidate": True,
+            "emails": [{"id": "m-ship", "listed": False}]})
+        self.drv._tool("set_aside", {"pass_token": self.drv.token,
+                                     "items": [{"ref": "m-other:att-1"}], "reason": "terms"})
+        before = streak()
+        self.assertEqual(before, 0)
+        # … then the remaining email's listing, reported with exhausted
+        self.drv._tool("record_search", {
+            "pass_token": self.drv.token, "pids": [self.pid], "search": "payment",
+            "queries": [], "refs": [], "exhausted": True,
+            "emails": [{"id": "m-ship", "listed": True}]})
+        self.assertEqual(streak(), before)
 
     def test_a_plain_search_reports_no_emails(self):
         self.search([], queries=("Zapier after:2026/06/01",))

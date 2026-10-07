@@ -789,11 +789,24 @@ def _retry_locked(stmt, bound_s: float):
             time.sleep(0.05)
 
 
+def purchase_key(text) -> str:
+    """Issue #48 (r1 Astra + Terra S1): one normalisation of a purchase's number and issuer,
+    the same on both sides of every comparison (SQLite's lower() folds ASCII only)."""
+    return (text or "").strip().lower() if isinstance(text, str) else ""
+
+
+def purchase_issuer(issuer, counterparty) -> str:
+    """The issuer a purchase is compared by: the issuer, else the counterparty."""
+    return purchase_key(issuer) or purchase_key(counterparty)
+
+
 def open_store(path=None, bound_s: float = LOCK_BOUND_S) -> sqlite3.Connection:
     p = pathlib.Path(path) if path else data_dir() / DB_NAME
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p), isolation_level=None, timeout=BUSY_TIMEOUT_MS / 1000)
     try:
+        conn.create_function("purchase_key", 1, purchase_key, deterministic=True)
+        conn.create_function("purchase_issuer", 2, purchase_issuer, deterministic=True)
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         # A fresh file's journal-mode conversion writes the file header, so it

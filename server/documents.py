@@ -86,35 +86,41 @@ def _install(data: bytes, sha: str, ext: str) -> pathlib.Path:
     return final
 
 
+def _purchase_of(d):
+    """(number, issuer) as one purchase is compared (db.purchase_key, both sides), or None
+    when the document has no number or no issuer."""
+    number = db.purchase_key(d["document_number"])
+    issuer = db.purchase_issuer(d["issuer"], d["counterparty"])
+    return (number, issuer) if number and issuer else None
+
+
+_SAME_PURCHASE = ("purchase_key(document_number)=? AND"
+                  " purchase_issuer(issuer, counterparty)=?")
+
+
 def collisions(conn, doc_id: int) -> list:
     d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
-    number = (d["document_number"] or "").strip().lower()
-    issuer = (d["issuer"] or d["counterparty"] or "").strip().lower()
-    if not number or not issuer or d["irrelevant"]:
+    key = _purchase_of(d)
+    if key is None or d["irrelevant"]:
         return []
     return [r[0] for r in conn.execute(
-        "SELECT doc_id FROM documents WHERE doc_id<>? AND irrelevant=0 AND sha256<>?"
-        " AND lower(trim(document_number))=? AND lower(trim(coalesce(issuer, counterparty)))=?"
-        " ORDER BY doc_id", (doc_id, d["sha256"], number, issuer))]
-
-
-# issue #48: one purchase's identity, compared as `collisions` compares documents — but
-# both sides in SQL, so a document is always of its own purchase
-_PURCHASE_KEY = ("lower(trim(document_number))", "lower(trim(coalesce(issuer, counterparty)))")
+        "SELECT doc_id FROM documents WHERE doc_id<>? AND irrelevant=0 AND sha256<>? AND "
+        + _SAME_PURCHASE + " ORDER BY doc_id", (doc_id, d["sha256"], *key))]
 
 
 def purchase(conn, doc_id: int) -> list:
     """Issue #48: the documents of `doc_id`'s purchase, itself first — every document with
-    the same issuer and the same document number; a document with no number (or no issuer)
-    is a purchase of its own. Ownership, not duplicates: an irrelevant document or the same
-    bytes filed twice count too."""
-    key = conn.execute(f"SELECT {_PURCHASE_KEY[0]}, {_PURCHASE_KEY[1]} FROM documents WHERE"
-                       " doc_id=?", (doc_id,)).fetchone()
-    if key is None or not key[0] or not key[1]:
+    the same issuer and the same document number, compared as `collisions` compares them
+    (one normalisation, both sides); a document with no number (or no issuer) is a purchase
+    of its own. Ownership, not duplicates: an irrelevant document or the same bytes filed
+    twice count too."""
+    d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
+    key = _purchase_of(d) if d is not None else None
+    if key is None:
         return [doc_id]
     return [doc_id] + [r[0] for r in conn.execute(
-        f"SELECT doc_id FROM documents WHERE doc_id<>? AND {_PURCHASE_KEY[0]}=? AND"
-        f" {_PURCHASE_KEY[1]}=? ORDER BY doc_id", (doc_id, key[0], key[1]))]
+        "SELECT doc_id FROM documents WHERE doc_id<>? AND " + _SAME_PURCHASE
+        + " ORDER BY doc_id", (doc_id, *key))]
 
 
 def ingest_document(conn, *, source_path, kind, source, extraction_author, counterparty=None,

@@ -61,6 +61,18 @@ class OnePurchase(_Twins):
         self.decide(self.entry(self.may, "propose", self.invoice))
         self.assertFalse(self.decide(self.entry(self.july, "propose", twin))[0]["applied"])
 
+    def test_one_normalisation_on_both_sides(self):
+        """r1 Astra + Terra S1: non-ASCII case, tab padding and an empty issuer falling back to
+        the counterparty compare the same on both sides (SQLite's lower() folds ASCII only) —
+        and as `collisions` sees them."""
+        import documents
+        a = self.doc(issuer="École", counterparty="École", document_number="\tÉ-1 ")
+        b = self.doc(issuer="", counterparty="éCOLE", document_number="é-1")
+        self.assertEqual(documents.purchase(self.conn, b), [b, a])
+        self.assertEqual(documents.collisions(self.conn, b), [a])
+        self.decide(self.entry(self.may, "propose", a))
+        self.assertFalse(self.decide(self.entry(self.july, "propose", b))[0]["applied"])
+
     def test_another_number_or_another_issuer_is_another_purchase(self):
         self.decide(self.entry(self.may, "propose", self.invoice))
         other_no = self.doc(document_number="CUWVSRB8-0003")

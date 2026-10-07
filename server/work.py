@@ -76,10 +76,12 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
             job_id = None
         if job_id is not None:
             unit = _search_unit(conn, job_id, pids, refs, effort)
+        # r1 Astra S2: a listing is not a search — it spends no age-out budget either
         out = [record_search_in_tx(conn, pid=p, token=token, queries=queries,
-                                   found_candidate=found_candidate, exhausted=exhausted,
-                                   incomplete=incomplete, identity_unknown=identity_unknown,
-                                   revive=revive)
+                                   found_candidate=found_candidate,
+                                   exhausted=exhausted and not listing,
+                                   incomplete=incomplete and not listing,
+                                   identity_unknown=identity_unknown, revive=revive)
                for p in dict.fromkeys(pids)]
         answer = {"recorded": out}
         if job_id is not None:
@@ -88,10 +90,12 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
                              " WHERE job_id=? AND pid=?",
                              (db.next_seq(conn), job_id, pids[0]))
             queues.enqueue(conn, job_id, unit, "ref", [r for r in refs if not filed(conn, r)])
-            listed = {r.split(":", 1)[0] for r in refs}
-            queues.enqueue(conn, job_id, unit, "email",
-                           [m for m, ok in emails or () if not ok and m not in listed])
-            for m in listed | {m for m, ok in emails or () if ok}:
+            # issue #50: an email is listed once its listing is reported or a ref of it is
+            # found; a listing is remembered (r1 Astra S2: a later search returning the same
+            # email unlisted owes nothing), an unlisted one is owed
+            listed = {r.split(":", 1)[0] for r in refs} | {m for m, ok in emails or () if ok}
+            queues.enqueue(conn, job_id, unit, "email", [m for m, _ok in emails or ()])
+            for m in listed:
                 queues.list_email(conn, job_id, unit, m)
             rows = queues.queued(conn, job_id, unit, "ref")
             answer.update(files=[r["key"] for r in queues.take_fitting(rows)],
