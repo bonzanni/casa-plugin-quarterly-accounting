@@ -337,7 +337,8 @@ def evidence(d: dict, cands=None) -> list:
         if "guessed" not in labels or cur["author"] == "operator":
             # a line that asks for a verdict names what it is asking about (round p7:
             # a no-ref line never named its invoice, yet "all good" confirmed it)
-            out.insert(0, f"Matched to {ident(doc)}.")
+            out.insert(0, f"{'Suggested' if d['status'] == 'proposed' else 'Matched to'}"
+                          f"{':' if d['status'] == 'proposed' else ''} {ident(doc)}.")
         if "guessed" in labels and cur["author"] != "operator":
             rs = cur["runners_up"]
             others = "; ".join(field(x) for x in rs[:RUNNERS_MAX])
@@ -700,8 +701,8 @@ def _compose(conn, view, q, items, members, lead):
         start_q = dates.quarter_of(b["watermark"])
         n = dates.parse_quarter(start_q)[1]
         before = f"Q{n - 1}" if n > 1 else "Q4"
-        parts["announce"].append(f"Starting from {dates.quarter_label(start_q)} — say \"start "
-                                 f"from {before}\" to go further back")
+        parts["announce"].append(f"Starting from {dates.quarter_label(start_q)} — ask me to do "
+                                 f"{before} to go further back")
     secs = parts["sections"]
     if view in ("status", "all"):
         res, parts["silent"] = _residue_blocks(conn)

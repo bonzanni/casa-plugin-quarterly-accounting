@@ -37,7 +37,7 @@ class Cards(LoopCase):
         self.assertIn("2 to confirm · 1 missing", text)
         self.assertIn("1. ", text)
         self.assertIn("(other currency)", text)
-        self.assertEqual(self.labels(rid), ["Review (3)", "Confirm all (2)", "Get package"])
+        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
         self.assertEqual([("p" in o) for o in scope["order"]], [True, True, False])
 
     def test_confirm_all_is_left_out_at_25_proposals(self):
@@ -180,7 +180,7 @@ class Cards(LoopCase):
         shown = len(scope["bound_lines"])
         self.assertLess(shown, 24)                   # fewer than Confirm all's bound
         self.assertIn(f"… and {30 - shown} more to confirm — Review shows them.", r["text"])
-        self.assertEqual(self.labels(end), ["Review (30)", "Get package"])
+        self.assertEqual(self.labels(end), ["Review", "Get package"])
         self.assertEqual([o["p"] for o in scope["order"]], pids)       # every proposal
         self.assertEqual(sorted(scope["proposed"]),
                          sorted(int(p) for p in scope["bound_lines"]))
@@ -197,7 +197,7 @@ class Cards(LoopCase):
         self.assertEqual(r["text"].split("\n")[1], "30 to confirm")
         self.assert_binds_exactly_what_it_shows(rid)
         self.assertLess(len(scope["bound_lines"]), 24)
-        self.assertEqual(self.labels(rid), ["Review (30)", "Get package"])
+        self.assertEqual(self.labels(rid), ["Review", "Get package"])
 
     def test_an_oversized_vendor_page_is_sized_from_its_real_lines(self):
         """Round 7 (Astra S1): a punctuated 60-character vendor name, 24 "left missing"
@@ -365,7 +365,7 @@ class Cards(LoopCase):
         end = self.c(cards.compose_end, self.job_id, scheduled=False, extra=extra)
         r, scope = self.rendering(end)
         self.assertLess(len(scope["bound_lines"]), 22)
-        self.assertEqual(self.labels(end), ["Review (22)", "Get package"])
+        self.assertEqual(self.labels(end), ["Review", "Get package"])
         self.assertEqual(scope["confirm_all"], 0)
         # the failure lines stay (0.11.2: before the legend line)
         self.assertEqual(r["text"].split("\n")[-5:-1], extra)
@@ -386,7 +386,7 @@ class Cards(LoopCase):
         p, mids = self.legacy_set(6)
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         self.assertIn("6 invoices fit", self.rendering(end)[0]["text"])
-        self.assertEqual(self.labels(end), ["Review (1)", "Get package"])   # no chosen one
+        self.assertEqual(self.labels(end), ["Review", "Get package"])   # no chosen one
         rid = self.c(cards.card, end, 0)
         r, scope = self.rendering(rid)
         self.assert_binds_exactly_what_it_shows(rid)
@@ -416,7 +416,7 @@ class Cards(LoopCase):
                               alternatives=[alt])
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         self.assertIn("2 invoices fit; chose INV\\-88 (2 Aug)", self.rendering(end)[0]["text"])
-        self.assertEqual(self.labels(end), ["Review (1)", "Confirm all (1)", "Get package"])
+        self.assertEqual(self.labels(end), ["Review", "Confirm all", "Get package"])
         rid = self.c(cards.card, end, 0)
         r, scope = self.rendering(rid)
         self.assertEqual(scope["alternatives"], [alt])
@@ -508,7 +508,7 @@ class Cards(LoopCase):
         self.assertIn("To confirm:", lines)
         self.assertNotIn("Twilio", r["text"])
         self.assertEqual(scope["order"], [{"p": q}])
-        self.assertEqual(self.labels(rid), ["Review (1)", "Confirm all (1)", "Get package"])
+        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
 
     def test_owed_notices_join_an_end_message_or_become_the_message(self):
         import cards, loop
@@ -603,7 +603,7 @@ class Cards(LoopCase):
             posting.show_view(self.conn, render_id=end)
             posting.show_view(self.conn, view="open")
         first, second = b.proposal(0), b.proposal(1)
-        self.assertEqual([x["label"] for x in first["buttons"]], ["Review (1)", "Get package"])
+        self.assertEqual([x["label"] for x in first["buttons"]], ["Review", "Get package"])
         self.assertEqual(first["revision"], "walk:" + end)
         self.assertEqual(untag(second["text"]).split("\n")[:2], ["Q3 · 1 payment", "1 missing"])
         self.assertEqual(second["buttons"][-1]["call"],

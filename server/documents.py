@@ -108,19 +108,43 @@ def collisions(conn, doc_id: int) -> list:
         + _SAME_PURCHASE + " ORDER BY doc_id", (doc_id, d["sha256"], *key))]
 
 
+def _email_of(d):
+    """(message id, amount, currency) a document's email ties it by (BRAIN ruling
+    2026-10-08: prod read each receipt with its OWN number, so issuer + number alone left an
+    invoice and its own receipt apart): a document filed from an email (source_ref
+    `<message id>:<attachment id>`) with its amount and currency read; else None."""
+    ref = d["source_ref"] or ""
+    if d["source"] not in ("gmail", "manual-email") or ":" not in ref \
+            or d["amount_minor"] is None or not d["currency"]:
+        return None
+    return ref.rsplit(":", 1)[0], d["amount_minor"], d["currency"]
+
+
 def purchase(conn, doc_id: int) -> list:
-    """Issue #48: the documents of `doc_id`'s purchase, itself first — every document with
-    the same issuer and the same document number, compared as `collisions` compares them
-    (one normalisation, both sides); a document with no number (or no issuer) is a purchase
-    of its own. Ownership, not duplicates: an irrelevant document or the same bytes filed
-    twice count too."""
+    """Issue #48, the ONE definition of a purchase (0.11.2): the documents of `doc_id`'s
+    purchase, itself first — every document with the same issuer and the same document
+    number (compared as `collisions` compares them, one normalisation, both sides), and every
+    document filed from the same email with the same read amount and currency (an invoice and
+    its own receipt, however each number was read; the amount keeps a digest email's other
+    purchases apart). A document with neither link is a purchase of its own. Ownership, not
+    duplicates: an irrelevant document or the same bytes filed twice count too."""
     d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
-    key = _purchase_of(d) if d is not None else None
-    if key is None:
+    if d is None:
         return [doc_id]
-    return [doc_id] + [r[0] for r in conn.execute(
-        "SELECT doc_id FROM documents WHERE doc_id<>? AND " + _SAME_PURCHASE
-        + " ORDER BY doc_id", (doc_id, *key))]
+    key, email = _purchase_of(d), _email_of(d)
+    out = []
+    if key is not None:
+        out += [r[0] for r in conn.execute(
+            "SELECT doc_id FROM documents WHERE doc_id<>? AND " + _SAME_PURCHASE
+            + " ORDER BY doc_id", (doc_id, *key))]
+    if email is not None:
+        msg, amount, currency = email
+        out += [r[0] for r in conn.execute(
+            "SELECT doc_id FROM documents WHERE doc_id<>? AND source IN ('gmail',"
+            " 'manual-email') AND substr(source_ref, 1, length(?) + 1)=? || ':' AND"
+            " instr(substr(source_ref, length(?) + 2), ':')=0 AND amount_minor=? AND"
+            " currency=? ORDER BY doc_id", (doc_id, msg, msg, msg, amount, currency))]
+    return [doc_id] + sorted(set(out))
 
 
 def ingest_document(conn, *, source_path, kind, source, extraction_author, counterparty=None,

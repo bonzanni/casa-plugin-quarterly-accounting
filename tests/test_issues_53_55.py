@@ -98,8 +98,9 @@ class StatusCard(_Cards):
         self.assertIn("1. Zapier · 1 Sep · EUR 19.58 ↔ invoice ZAP\\-114 · EUR 19.58", lines)
         self.assertNotIn("Notion", self.text(rid).split("Q4 so far")[0])
         self.assertIn("Q4 so far: 1 to confirm", lines)
-        self.assertEqual(self.labels(rid), ["Review (2)", "Confirm all (1)", "Get package"])
-        self.assertEqual(lines[-1], "Review: see each open item and decide · Confirm all: "
+        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
+        self.assertEqual(lines[-1], "Review: go through the 1 to confirm and the 1 missing, one "
+                                    "at a time · Confirm all: "
                                     "accept the invoices listed above · Get package: the Q3 zip "
                                     "for your accountant")
         scope = json.loads(self.row_of(rid)["scope_json"])
@@ -231,7 +232,7 @@ class EndCardIsTheQuartersCard(_Cards):
         self.assertTrue(lines[0].startswith("Q3 checked · 1 payment · "), lines)
         self.assertNotIn("Notion", self.text(rid).split("Q4 so far")[0])
         self.assertIn("Q4 so far: 1 to confirm", lines)
-        self.assertEqual(self.labels(rid), ["Review (1)", "Confirm all (1)", "Get package"])
+        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
 
 
 class CompletionText(_Cards):
@@ -255,3 +256,54 @@ class CompletionText(_Cards):
         import job, views
         views.mark_rendering_delivered(self.conn, self.end())
         self.assertEqual(job.run_end(self.conn, self.job_id)[0], job.CARD_POSTED)
+
+
+class AnOperatorsAskGetsTheOperatorsCard(_Cards):
+    """A run someone else started that took an operator's check naming a quarter answers the
+    operator: their quarter's card, never the scheduled "· new:" form (pin review, 0.11.2)."""
+
+    def test_an_agent_started_run_with_an_operator_ask(self):
+        import asks, loop
+        self.pay("Twilio", 2000, "2026-08-14")
+        self.pay("Notion", 900, "2026-10-02")
+        self.end_live_pass()
+        asks.request_work(self.conn, "check", "operator", quarter="2026-Q3")
+        self.run_claim(started_by="agent")
+        run = self.conn.execute("SELECT * FROM runs WHERE job_id=?", (self.job_id,)).fetchone()
+        with db.tx(self.conn):
+            rid = loop.run_message(self.conn, self.job_id, run)
+        text = self.text(rid)
+        self.assertTrue(text.startswith("Q3 checked · 1 payment"), text)
+        self.assertIn("Q4 so far: 1 missing", text)
+
+    def test_a_plain_scheduled_run_keeps_its_new_form(self):
+        import loop
+        self.pay("Twilio", 2000, "2026-08-14")
+        self.end_live_pass()
+        self.run_claim(started_by="scheduled")
+        run = self.conn.execute("SELECT * FROM runs WHERE job_id=?", (self.job_id,)).fetchone()
+        with db.tx(self.conn):
+            rid = loop.run_message(self.conn, self.job_id, run)
+        self.assertIn("· new: 1 missing", self.text(rid))
+
+
+class WalkLegend(_Cards):
+    def test_review_says_what_the_walk_covers_and_buttons_carry_no_count(self):
+        import cards
+        for who in ("A", "B"):
+            self.pay(who, 2000, "2026-08-14")
+        p = self.pay("Zapier", 1958, "2026-09-01")
+        self.propose(p, issuer="Zapier", document_number="ZAP-114", amount_minor=1958)
+        rid = self.c(cards.compose_open, "2026-Q3")
+        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
+        self.assertTrue(self.text(rid).split("\n")[-1].startswith(
+            "Review: go through the 1 to confirm and the 2 missing, one at a time · "))
+
+    def test_a_proposal_reads_as_suggested_not_matched(self):
+        import cards
+        p = self.pay("Zapier", 1958, "2026-09-01")
+        self.propose(p, issuer="Zapier", document_number="ZAP-114", amount_minor=1958)
+        end = self.c(cards.compose_end, self.job_id, scheduled=False)
+        rid = self.c(cards.card, end, 0)
+        self.assertIn("Suggested: invoice ZAP\\-114", self.text(rid))
+        self.assertNotIn("Matched to", self.text(rid))

@@ -159,7 +159,7 @@ class HandoverJoiningACheck(StoreCase):
         self.assertIn("1 matched · 1 missing", lines)
         (receipt,) = [ln for ln in lines if ln.startswith("Filed. ")]
         self.assertTrue(receipt.startswith("Filed. Matched to Zapier · 5 Jul · EUR 10.00"))
-        self.assertEqual([b["label"] for b in end["buttons"]], ["Review (1)", "Get package"])
+        self.assertEqual([b["label"] for b in end["buttons"]], ["Review", "Get package"])
         # the Review order is the check's: the missing payment's vendor
         rid = self.conn.execute("SELECT end_render_id FROM runs WHERE job_id='d2d2d2d2-b1'"
                                 ).fetchone()[0]

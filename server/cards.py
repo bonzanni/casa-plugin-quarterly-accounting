@@ -274,37 +274,42 @@ def _doc_word(doc) -> str:
         views.KIND_WORD.get(doc["kind"], "document")
 
 
-def _purchase(doc):
-    """Issue #52: a document's purchase (#48's unit: the same issuer and number,
-    db.purchase_key; a document with no number is a purchase of its own)."""
-    return ((db.purchase_key(doc["issuer"]), db.purchase_key(doc["number"]))
-            if db.purchase_key(doc.get("number")) else ("doc", doc["doc_id"]))
+def _groups(conn, offered) -> list:
+    """Issue #52: the offered documents grouped by purchase (documents.purchase, the ONE
+    definition: the same issuer and number, or the same email with the same read amount),
+    in offer order."""
+    import documents
+    groups: list = []
+    for c in offered:
+        mine = set(documents.purchase(conn, c["doc"]["doc_id"]))
+        g = next((g for g in groups if g["ids"] & mine), None)
+        if g is None:
+            groups.append({"ids": mine, "cs": [c]})
+        else:
+            g["ids"] |= mine
+            g["cs"].append(c)
+    return [g["cs"] for g in groups]
 
 
-def _purchases(offered) -> int:
+def _purchases(conn, offered) -> int:
     """How many purchases the offered documents are."""
-    return len({_purchase(c["doc"]) for c in offered})
+    return len(_groups(conn, offered))
 
 
-def _one_per_purchase(offered) -> list:
+def _one_per_purchase(conn, offered) -> list:
     """The offered documents, one per purchase, in offer order (#52 on the Review card):
     the current document when its purchase holds it, else the purchase's invoice, else its
     first. The others are neither displayed nor bound."""
-    groups: dict = {}
-    for c in offered:
-        groups.setdefault(_purchase(c["doc"]), []).append(c)
-    out = []
-    for cs in groups.values():
-        out.append(next((c for c in cs if c["match_id"] is not None), None)
-                   or next((c for c in cs if c["doc"]["kind"] == "invoice"), cs[0]))
-    return out
+    return [next((c for c in cs if c["match_id"] is not None), None)
+            or next((c for c in cs if c["doc"]["kind"] == "invoice"), cs[0])
+            for cs in _groups(conn, offered)]
 
 
 def _proposal_line(conn, i, d) -> str:
     """§1: "{i}. {vendor} · {day} · {amount} ↔ {doc}" — counting purchases, so an invoice
     and its own receipt read as the one document they are (#52)."""
     offered = _offered(conn, d)
-    n = _purchases(offered)
+    n = _purchases(conn, offered)
     if d["current"] is None and n != 1:
         doc = f"{n} invoices fit"                                    # D3: no chosen one
     elif n > 1:
@@ -454,6 +459,8 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
                        and len(proposals) <= CONFIRM_ALL_MAX)
         scope = {"quarter": quarter, "scheduled": scheduled, "proposed": chosen,
                  "confirm_all": len(chosen) if confirm_all else 0,
+                 "walk_counts": {"confirm": len(proposals), "questions": len(questions),
+                                 "missing": sum(len(v["pids"]) for v in vendors)},
                  "order": [{"q": q["question_id"]} for q in questions]
                  + [{"p": d["pid"]} for d in proposals] + list(vendors),
                  **_grammar(listed), **(extra_scope or {})}
@@ -587,6 +594,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         if earlier:
             head.append(f"{_s(earlier, 'earlier item')} still open")
         head += _fit_receipts(receipts, head, _confirm_room(new_props) + tail)
+        extra_scope["package"] = bool(sum(st["counts"].get(q, collections.Counter()).values()))
         return _summary(conn, "end", q, head, new_props, _vendor_items(new_miss), tail,
                         reported, scheduled=True, extra_scope=extra_scope,
                         questions=new_qs)       # e1 (Astra S2): only this run's new ones
@@ -706,7 +714,7 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
     d = work.describe(conn, pid)
     if d["status"] != "proposed":
         return None
-    offered = _one_per_purchase(_offered(conn, d))
+    offered = _one_per_purchase(conn, _offered(conn, d))
     with views.named([{**d, "candidates": [{"document": c["doc"]} for c in offered]}],
                      quarter):
         head = [f"Card {pos + 1} of {n} · to confirm", views.headline(d, quarter)]
@@ -968,9 +976,9 @@ def _buttons(rid, kind, scope) -> list:
     if kind in ("end", "open-items"):
         out = []
         if scope.get("order"):
-            out.append(v(f"Review ({len(scope['order'])})", "review"))
+            out.append(v("Review", "review"))
         if scope.get("confirm_all"):
-            out.append(v(f"Confirm all ({scope['confirm_all']})", "confirm-all"))
+            out.append(v("Confirm all", "confirm-all"))
         return out + get
     if kind == "ready":
         return get
@@ -998,9 +1006,9 @@ def _buttons(rid, kind, scope) -> list:
     raise ValueError(kind)
 
 
-LEGEND = {"review": "Review: see each open item and decide",
+LEGEND = {"review": "Review: go through {walk}, one at a time",
           "confirm-all": "Confirm all: accept the invoices listed above",
-          "pick": "{label}: use this document",
+          "pick": "{label}: use that document",
           "confirm": "Confirm: this invoice is right",
           "wrong": "Wrong: not this one, keep looking",
           "leave": "Leave for now: decide later",
@@ -1010,7 +1018,7 @@ LEGEND = {"review": "Review: see each open item and decide",
           "next-page": "Next page: the rest of this vendor",
           "keep-current": "Keep current: keep the filed invoice",
           "use-new": "Use new: use the new one"}
-PICKS_WORD = "A document"
+PICKS_WORD = "Each document"
 
 
 def legend(kind, scope) -> str:
@@ -1027,9 +1035,26 @@ def legend(kind, scope) -> str:
             if any(p.startswith(PICKS_WORD) for p in parts):
                 continue
             label = PICKS_WORD if len(scope.get("picks") or []) > 1 else label
-        parts.append(LEGEND[action].format(label=label,
+        parts.append(LEGEND[action].format(label=label, walk=_walk_words(scope),
                                            vendor=views.field(scope.get("vendor") or "")))
     return " · ".join(parts)
+
+
+def _walk_words(scope) -> str:
+    """BRAIN/operator 2026-10-08: a count on a button must be a number the card shows, so
+    [Review] carries none and its legend says what the walk covers, in the card's own units:
+    the proposals listed, the unanswered missing payments of its vendor cards, the
+    handed-over documents to check."""
+    w = scope.get("walk_counts") or {}
+    parts = [f"{n} {word}" for n, word in ((w.get("confirm", 0), "to confirm"),
+                                           (w.get("missing", 0), "missing"),
+                                           (w.get("questions", 0), "handed-over documents"
+                                            if w.get("questions", 0) != 1
+                                            else "handed-over document")) if n]
+    if not parts:
+        return "each open item"
+    return "the " + (" and the ".join(parts) if len(parts) <= 2
+                     else ", the ".join(parts[:-1]) + " and the " + parts[-1])
 
 
 LEGEND_MAX = 400          # the longest legend line: the vendor page's, its name clipped

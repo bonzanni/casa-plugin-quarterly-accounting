@@ -931,7 +931,11 @@ def run_message(conn, job_id, run):
     import alerts
     import cards
     owed = owed_notices(conn)
-    scheduled = run["started_by"] != "operator"
+    # 0.11.2: a run that took an operator's ask (a check naming a quarter, queued while a run
+    # was busy, then taken by a run someone else started) answers the operator: their card
+    scheduled = run["started_by"] != "operator" and conn.execute(
+        "SELECT 1 FROM work_requests WHERE pass_id=? AND trigger='operator'",
+        (run["pass_id"],)).fetchone() is None
     stopped, said = _stop_line(conn, run) if not scheduled else (None, [])
     alert_lines, alert_ids = alerts.pending_lines(conn, said=said)
     incomplete = partial_lines(conn, job_id)

@@ -177,7 +177,7 @@ class TestSheet(Base):
         self.add()
         r = self.render()
         self.assertIn("First review", r["text"])
-        self.assertIn('say "start from Q2" to go further back', r["text"])
+        self.assertIn('ask me to do Q2 to go further back', r["text"])
         views.mark_rendering_delivered(self.conn, r["render_id"])
         again = self.render()["text"]
         self.assertNotIn("First review", again)

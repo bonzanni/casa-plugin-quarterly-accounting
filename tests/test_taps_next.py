@@ -32,7 +32,7 @@ class Taps(_Tapping):
         p = self.pay()
         self.propose(p)
         self.pay("Twilio")                                       # one vendor card
-        out = self.tap(self.end(), "Review (2)")
+        out = self.tap(self.end(), "Review")
         self.assertIn("Card 1 of 2", out["next"]["text"])
         out = self.tap(out["next"], "Confirm")
         self.assertIn("Confirmed", out["receipt"])
@@ -48,7 +48,7 @@ class Taps(_Tapping):
         p = self.pay()
         self.propose(p)
         rev = self.rev(p)
-        out = self.tap(self.tap(self.end(), "Review (1)")["next"], "Leave for now")
+        out = self.tap(self.tap(self.end(), "Review")["next"], "Leave for now")
         self.assertEqual(self.rev(p), rev)
         # the open-items card (0.11.2: the quarter status card)
         self.assertTrue(untag(out["next"]["text"]).startswith("Q3 · 1 payment\n1 to confirm\n"),
@@ -59,7 +59,7 @@ class Taps(_Tapping):
         alt = self.doc(document_number="INV-91", document_date="2026-08-04")
         chosen = self.propose(p, alternatives=[alt], document_number="INV-88",
                               document_date="2026-08-02")
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         labels = [b["label"] for b in card["buttons"]]
         self.assertEqual(labels[:2], ["INV-88 (2 Aug)", "INV-91 (4 Aug)"])
         self.assertEqual(labels[2:], ["Wrong", "Leave for now"])
@@ -73,7 +73,7 @@ class Taps(_Tapping):
         p = self.pay()
         alt = self.doc(document_number="INV-91", amount_minor=10000)
         chosen = self.propose(p, alternatives=[alt], document_number="INV-88")
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         documents.update_document_metadata(self.conn, alt, amount_minor=90000)
         out = self.tap(card, next(b["label"] for b in card["buttons"]
                                   if b["label"].startswith("INV-91")))
@@ -88,7 +88,7 @@ class Taps(_Tapping):
         p = self.pay()
         alt = self.doc(document_number="INV-91")
         self.propose(p, alternatives=[alt], document_number="INV-88")
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         self.tap(card, "Wrong")
         with self.assertRaisesRegex(db.Refusal, "operator rejected"):
             matches.propose_match(self.conn, pid=p, doc_id=alt, expected_revision=self.rev(p),
@@ -97,7 +97,7 @@ class Taps(_Tapping):
     def test_exempting_page_one_leaves_page_two_answerable(self):
         for i in range(30):
             self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1))
-        page1 = self.tap(self.end(), "Review (1)")["next"]
+        page1 = self.tap(self.end(), "Review")["next"]
         page2 = self.tap(page1, "Next page")["next"]       # page 2 posted before page 1's answer
         # plugin keys are per button: page 1's other button is still its own (Casa clears
         # the keyboard; the test calls the stored call directly)
@@ -125,7 +125,7 @@ class Taps(_Tapping):
                 lineage.append(self.conn, p, "propose", "auto", match_id=mid, doc_id=d,
                                fp=R.fingerprint(R.facts_of(row), "invoice"))
             lineage.settle(self.conn, p)
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         self.assertEqual(len([b for b in card["buttons"] if b["label"].startswith("L-")]), 4)
         self.assertIn("1 more could fit", card["text"])
         self.tap(card, "Wrong")
@@ -141,7 +141,7 @@ class Taps(_Tapping):
         p = self.pay()
         alt = self.doc(document_number="B")
         self.propose(p, alternatives=[alt], document_number="A")
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         b = dict(card["buttons"][0]["call"]["arguments"], doc_id=alt)
         out = qa_server.TOOLS["verdict"]["fn"](b)
         self.assertEqual(out["receipt"], keys.NO_LONGER)
@@ -149,7 +149,7 @@ class Taps(_Tapping):
     def test_never_on_the_last_page_refuses_a_changed_union_and_returns_a_fresh_first_page(self):
         for i in range(30):
             self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1))
-        page = self.tap(self.end(), "Review (1)")["next"]
+        page = self.tap(self.end(), "Review")["next"]
         while "Next page" in [b["label"] for b in page["buttons"]]:
             page = self.tap(page, "Next page")["next"]
         new = self.pay("Adobe", 999)                             # arrives before the tap
@@ -166,7 +166,7 @@ class Taps(_Tapping):
         import work
         a, b = self.pay("Adobe", 100), self.pay("Adobe", 200)
         self.granted(lambda c, grant: work.leave_missing_in_tx(c, [b], grant=grant))
-        page = self.tap(self.end(), "Review (1)")["next"]
+        page = self.tap(self.end(), "Review")["next"]
         self.assertIn("left missing", page["text"])            # b is shown, marked
         out = self.tap(page, "Never for Adobe")
         self.assertIn("never needs an invoice", out["receipt"])
@@ -176,7 +176,7 @@ class Taps(_Tapping):
 
     def test_never_with_the_union_unchanged_sets_the_rule(self):
         pids = [self.pay("Adobe", 100 + i) for i in range(3)]
-        page = self.tap(self.end(), "Review (1)")["next"]
+        page = self.tap(self.end(), "Review")["next"]
         out = self.tap(page, "Never for Adobe")
         self.assertIn("never needs an invoice", out["receipt"])
         for p in pids:
@@ -189,12 +189,12 @@ class Taps(_Tapping):
         for p, amt in ((a, 1000), (b, 1001), (c, 1002)):
             self.propose(p, amount_minor=amt, issuer="X%d" % p)
         end = self.end()
-        card = self.tap(end, "Review (3)")["next"]
+        card = self.tap(end, "Review")["next"]
         self.tap(card, "Wrong")                                  # a: answered through Review
         matches.propose_match(self.conn, pid=b, doc_id=self.doc(amount_minor=1001),
                               expected_revision=self.rev(b), token=self.token,
                               document_date="2026-09-03")         # b: changed by a later run
-        out = self.tap(end, "Confirm all (3)")
+        out = self.tap(end, "Confirm all")
         self.assertIn("changed since", out["receipt"])
         states = {p: self.conn.execute("SELECT author FROM match_state WHERE pid=? AND state"
                                        "='matched'", (p,)).fetchone() for p in (a, b, c)}
@@ -213,7 +213,7 @@ class TapsMore(_Tapping):
         import keys, qa_server, tools  # noqa: F401
         p = self.pay()
         self.propose(p)
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         args = dict(next(b for b in card["buttons"] if b["label"] == "Confirm")["call"]
                     ["arguments"])
         self.assertIn("next", qa_server.TOOLS["verdict"]["fn"](dict(args)))
@@ -224,7 +224,7 @@ class TapsMore(_Tapping):
         p = self.pay()
         self.propose(p)
         self.pay("Twilio")
-        out = self.tap(self.end(), "Review (2)")
+        out = self.tap(self.end(), "Review")
         seen = [out]
         out = self.tap(out["next"], "Leave for now")
         seen.append(out)
@@ -234,7 +234,7 @@ class TapsMore(_Tapping):
         # Review counts only the open proposal
         self.assertTrue(untag(out["next"]["text"]).startswith(
             "Q3 · 2 payments\n1 to confirm · 1 missing\n"), out["next"]["text"])
-        seen.append(self.tap(out["next"], "Review (1)"))
+        seen.append(self.tap(out["next"], "Review"))
         self.assertIn("Card 1 of 1", seen[-1]["next"]["text"])
         for o in seen:
             self.assertEqual(set(o), {"receipt", "next"})
@@ -245,7 +245,7 @@ class TapsMore(_Tapping):
         p = self.pay()
         alt = self.doc(document_number="INV-91")
         chosen = self.propose(p, alternatives=[alt], document_number="INV-88")
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         other = self.pay("Adobe", 10000, "2026-09-03")
         self.machine_entry(other, alt)              # a merge: the floor refuses this write
         out = self.tap(card, next(b["label"] for b in card["buttons"]
@@ -277,7 +277,7 @@ class TapsMore(_Tapping):
                 lineage.append(self.conn, p, "propose", "auto", match_id=mid, doc_id=d,
                                fp=R.fingerprint(R.facts_of(row), "invoice"))
             lineage.settle(self.conn, p)
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         shown = {d for d, _ in self.scope_of(card)["picks"]}
         self.assertEqual(len(shown), 4)
         pick = sorted(shown)[0]
@@ -295,7 +295,7 @@ class TapsMore(_Tapping):
         p = self.pay()
         alt = self.doc(document_number="INV-91")
         self.propose(p, alternatives=[alt], document_number="INV-88")
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         rid = card["buttons"][0]["call"]["arguments"]["render_id"]
         mrevs = json.loads(self.conn.execute("SELECT match_revisions_json FROM render_items"
                                              " WHERE render_id=? AND pid=?",
@@ -309,8 +309,8 @@ class TapsMore(_Tapping):
         self.propose(a, amount_minor=1000)
         self.propose(b, amount_minor=1001)
         end = self.end()
-        self.tap(self.tap(end, "Review (2)")["next"], "Confirm")      # a, through Review
-        out = self.tap(end, "Confirm all (2)")
+        self.tap(self.tap(end, "Review")["next"], "Confirm")      # a, through Review
+        out = self.tap(end, "Confirm all")
         self.assertEqual(out["receipt"],
                          "Confirmed 1 of 2.\n1 proposal already answered — left as answered.")
         for p in (a, b):
@@ -321,7 +321,7 @@ class TapsMore(_Tapping):
 
     def _two_pages(self):
         pids = [self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1)) for i in range(30)]
-        page1 = self.tap(self.end(), "Review (1)")["next"]
+        page1 = self.tap(self.end(), "Review")["next"]
         page2 = self.tap(page1, "Next page")["next"]
         self.assertIn("Never for Adobe", [b["label"] for b in page2["buttons"]])
         return pids, page1, page2
@@ -368,7 +368,7 @@ class TapsMore(_Tapping):
         so page 2 lists them marked, offers no exemption, and Never there binds all 30."""
         import matches
         pids = [self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1)) for i in range(30)]
-        page1 = self.tap(self.end(), "Review (1)")["next"]
+        page1 = self.tap(self.end(), "Review")["next"]
         later = self.scope_of(page1)["pages"][1]
         for p in later:
             matches.record_match(self.conn, pid=p, author="auto",
@@ -396,12 +396,12 @@ class TapsMore(_Tapping):
         matches.record_match(self.conn, pid=a, author="auto",
                              doc_id=self.doc(amount_minor=100),
                              expected_revision=self.rev(a), token=self.token)
-        out = self.tap(end, "Review (1)")
+        out = self.tap(end, "Review")
         self.assertIn("· all accounted for", out["next"]["text"])
 
     def test_leave_missing_on_a_changed_page_commits_nothing(self):
         a = self.pay("Adobe", 100)
-        page = self.tap(self.end(), "Review (1)")["next"]
+        page = self.tap(self.end(), "Review")["next"]
         self.row(1, counterparty="Adobe", amount_minor=101, booking_date="2026-09-02",
                  value_date="2026-09-02")
         self.settle(a)
@@ -427,7 +427,7 @@ class TapsMore(_Tapping):
                 raise db.Refusal("that document has since been matched to payment #99")
             return out
         self.patch(taps, "_apply_one", refusing)
-        out = self.tap(self.end(), "Confirm all (2)")
+        out = self.tap(self.end(), "Confirm all")
         self.assertTrue(out["receipt"].startswith("Confirmed 1 of 2.\n"), out["receipt"])
         self.assertIn("payment #99", out["receipt"])
         self.assertIsNone(self.conn.execute("SELECT 1 FROM log WHERE pid=? AND author="
@@ -438,7 +438,7 @@ class TapsMore(_Tapping):
 
     def test_never_on_the_last_page_with_the_set_unchanged_applies_to_every_page(self):
         pids = [self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1)) for i in range(30)]
-        page = self.tap(self.end(), "Review (1)")["next"]
+        page = self.tap(self.end(), "Review")["next"]
         while "Next page" in [b["label"] for b in page["buttons"]]:
             page = self.tap(page, "Next page")["next"]
         self.assertGreater(self.scope_of(page)["page"], 1)
@@ -454,7 +454,7 @@ class TapsMore(_Tapping):
         c = self.doc(document_number="INV-C", document_date="2026-08-05")
         a = self.propose(p, alternatives=[b, c], document_number="INV-A",
                          document_date="2026-08-02")
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         self.tap(card, "INV-B (4 Aug)")
         rejected = {r[0] for r in self.conn.execute(
             "SELECT m.doc_id FROM log l JOIN matches m ON m.match_id=l.match_id WHERE"
@@ -468,7 +468,7 @@ class TapsMore(_Tapping):
         p = self.pay()
         alt = self.doc(document_number="INV-91")
         self.propose(p, alternatives=[alt], document_number="INV-88")
-        card = self.tap(self.end(), "Review (1)")["next"]
+        card = self.tap(self.end(), "Review")["next"]
         rid = card["buttons"][0]["call"]["arguments"]["render_id"]
         mrevs = {k: v - 1 for k, v in json.loads(self.conn.execute(
             "SELECT match_revisions_json FROM render_items WHERE render_id=? AND pid=?",
