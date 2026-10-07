@@ -10,13 +10,15 @@ the result passes Casa's structural check Casa posts the deposited value itself.
 Protocol (Casa `result_broker.py`):
 
     POST /internal/broker/deposit
-         {"client", "slot", "value", "caption"?, "label"?, "kind"?, "filename"?}
+         {"client", "slot", "value", "caption"?, "label"?, "kind"?, "filename"?, "key"?}
       -> {"reference": "casa-cap-<32 hex>"} | {"error": "<code>"}
 
 Only the members given are sent. `value` is a string (a proposal travels as a
 JSON string; a file as its path). Nothing Casa sends back is echoed: a reference
 must have Casa's exact shape, and an error must look like one of Casa's codes, or
-it is reported by a fixed label. Standard library only.
+it is reported by a fixed label. `key` (Casa #1312): a delivery Casa already made under
+that key is not sent again — Casa answers the original receipt (an older Casa ignores the
+member). Standard library only.
 """
 
 from __future__ import annotations
@@ -63,7 +65,7 @@ class _UnixHTTP(http.client.HTTPConnection):
 
 
 def deposit(slot: str, value: str, *, caption=None, label=None, kind=None,
-            filename=None) -> str:
+            filename=None, key=None) -> str:
     """Deposit `value` in `slot` and return Casa's reference (casa:result_broker.py
     `build_broker_deposit_handler`; S3 `kind`, S5 proposals as a JSON string, S7a
     `filename`). Only the members given are sent. Raises DepositFailed with:
@@ -75,7 +77,7 @@ def deposit(slot: str, value: str, *, caption=None, label=None, kind=None,
         raise DepositFailed("broker_env_missing")
     body = {"client": client, "slot": slot, "value": value}
     for k, v in (("caption", caption), ("label", label), ("kind", kind),
-                 ("filename", filename)):
+                 ("filename", filename), ("key", key)):
         if v is not None:
             body[k] = v
     conn = _UnixHTTP(path)

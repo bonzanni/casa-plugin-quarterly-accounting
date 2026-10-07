@@ -112,3 +112,39 @@ class NoBudget(StoreCase):
         self.assertEqual(drv.batch_reported[:2], [False, False])
         self.assertTrue(all(drv.batch_reported[2:]), drv.batch_reported)
         self.assertEqual(self.statuses(), {"matched": 60})
+
+
+class OneDeliveryAfterACut(StoreCase):
+    """g1 (Astra S1), OPERATOR RULING B: Casa #1312 dedupes a re-posted message by its key.
+    The end message is deposited, Casa cuts the batch before mark_rendering_delivered, the
+    next claim re-hands it — and the operator gets it once."""
+
+    def test_the_end_message_posted_cut_and_rehanded_is_delivered_once(self):
+        from tests.fakebroker import FakeBroker
+        import posting
+        self.bind()
+        drv = JobDriver(self, payments=3)
+        for i in range(3):
+            drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i], f"ZAP-{i + 1}")
+        real, cut = drv._view, []
+
+        def cut_after_the_post(u, token):
+            if not cut:
+                cut.append(u["render_id"])
+                drv._tool("show_view", {"render_id": u["render_id"]})
+                raise CasaCut()                  # deposited; mark_rendering_delivered lost
+            return real(u, token)
+        drv._view = cut_after_the_post
+        drv.casa_cut = 80
+        with FakeBroker() as b:
+            b.honour_keys = True
+            drv.broker = b
+            units = drv.run_job("b0b0b0b0-0b")
+        views = [u for u in units if u["unit"] == "view"]
+        self.assertEqual([u["render_id"] for u in views], cut * 2)       # re-handed once
+        keyed = [d for d in b.deposits if d.get("key") == f"view:{cut[0]}"]
+        self.assertEqual(len(keyed), 2)                                  # deposited twice
+        self.assertEqual(len([d for d in b.sent if d.get("key") == keyed[0]["key"]]), 1)
+        self.assertIsNotNone(self.conn.execute("SELECT delivered_at FROM renders WHERE"
+                                               " render_id=?", (cut[0],)).fetchone()[0])
+        self.assertEqual(posting.delivery_key("results", ["r1", "r22"]), "results:r1.r22")

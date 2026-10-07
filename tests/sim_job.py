@@ -231,6 +231,7 @@ class JobDriver:
         # (run 1), "total", None
         self.calls_mode = None
         self.cut_reports = 0            # g1: report calls Casa cuts (a model that stops there)
+        self.broker = None              # a FakeBroker the whole run deposits to (else one a unit)
         self.bank_log = []              # every bank-feed call: (tool, canonical args)
         self.near_days = 10             # the skill's "certain": a match dated this near
         self.propose_days = 20          # a look-alike this near is proposed; farther: not it
@@ -618,6 +619,10 @@ class JobDriver:
     @contextlib.contextmanager
     def _broker(self):
         """The test's own broker when one listens, else a FakeBroker of the driver's."""
+        if self.broker is not None:             # one broker for the run (Casa #1312's keys)
+            self._broker_now = self.broker
+            yield self.broker
+            return
         if os.environ.get("CASA_BROKER_SOCKET"):
             yield None
             return

@@ -51,6 +51,10 @@ builds on it.
   was last mirrored, in plain note text, in grouped calls (`record_mirror`, after each chunk
   of 8); rows that left scope lose their tags. A cut inside a chunk may repeat up to 8 calls:
   a repeated tag call changes nothing, a repeated note call adds an identical line.
+- **One delivery per message.** Every view and results deposit carries a key (`view:<render
+  id>`, `results:<render ids>`): with Casa #1312, a message re-posted after Casa cut the batch
+  before its delivery was marked is not sent twice. Until the Casa floor includes #1312 that
+  is a known residual (about 1 run in 80); an older Casa ignores the key.
 - **The end message and its cards.** One message ends a run, with a Review order, paged vendor
   cards and an open-items card; a tap's receipt posts the next card (#1302), and the ready
   notice announces a finished package.

@@ -4,6 +4,7 @@ returns the reference. Nothing here ever returns a key."""
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 import casa_broker
@@ -82,8 +83,21 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
             # among those (R1)
             conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
                          (db.next_seq(conn), r["render_id"]))
-    ref = casa_broker.deposit("view", value)
+    # g1 (Astra S1), Casa #1312: re-posting the same rendering after a cut that lost its
+    # mark_rendering_delivered sends nothing — Casa answers the original receipt
+    ref = casa_broker.deposit("view", value, key=delivery_key("view", [r["render_id"]]))
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
+
+
+DELIVERY_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")    # Casa #1312's `key`
+
+
+def delivery_key(slot, render_ids) -> str | None:
+    """Casa #1312: the deposit's identifier — the slot and its renderings, so the same
+    message re-posted after a cut is the same key. None when it would not fit (sent
+    without a key, as before)."""
+    key = f"{slot}:" + ".".join(render_ids)
+    return key if DELIVERY_KEY_RE.fullmatch(key) else None
 
 
 def post_results(conn, render_ids) -> dict:
@@ -109,8 +123,9 @@ def post_results(conn, render_ids) -> dict:
         if len(body) > job.POST_CHARS:
             raise db.Refusal("those renderings are too long for one message: post them one "
                              "at a time")
-    ref = casa_broker.deposit("results", body)
-    return {"results": ref, "render_ids": [r["render_id"] for r in rows]}
+    ids = [r["render_id"] for r in rows]
+    ref = casa_broker.deposit("results", body, key=delivery_key("results", ids))
+    return {"results": ref, "render_ids": ids}
 
 
 CAPTION_MAX = 900          # 1024 − views.LABEL_ALLOWANCE − 1, rounded down (§6.1)
