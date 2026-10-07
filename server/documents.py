@@ -146,7 +146,8 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 # (re)installed under the held name, never beside it as a second copy no
                 # row names (fix wave F)
                 _install(data, sha, "." + existing["ext"])
-                _reread(conn, existing[0], *_amount_said(amount_minor, currency))  # h1: first
+                _reread(conn, existing[0],                      # h1: before the ref
+                        *_amount_said(amount_minor, currency, filing=True))
                 if _operator_ref(conn, source, source_ref, existing[0]) and token is not None:
                     decide.note_progress(conn, token)   # d2: a newly filed ref is progress
                 if vendor is not None:
@@ -183,14 +184,16 @@ def amount_unknown(doc) -> bool:
     return doc["amount_minor"] is None or not doc["currency"] or bool(doc["amount_conflict"])
 
 
-def _amount_said(amount_minor, currency, cleared=False) -> tuple:
-    """h5 (Astra S1, the fifth finding of this shape): THE reader of what one call says
-    about a document's amount, for every entry point (ingest_document, update_document_
-    metadata) — (amount, currency, withdrawn). A blank currency ("", spaces) or `cleared`
-    (an explicit null amount or currency: update_document_metadata's) withdraws; None is
-    "nothing said"."""
+def _amount_said(amount_minor, currency, cleared=False, filing=False) -> tuple:
+    """h5: THE reader of what one call says about a document's amount, for every entry
+    point — (amount, currency, withdrawn). In a reading (update_document_metadata) a blank
+    currency ("", spaces) or `cleared` (an explicit null amount or currency) withdraws.
+    The ingest contract (BRAIN, h6): a `filing` (ingest_document) files the document — a
+    blank or null there is "not read here" and says nothing; only its concrete values are a
+    reading (a disagreeing one conflicts, Q2 run 1). None is always "nothing said"."""
     blank = currency is not None and not str(currency).strip()
-    return (amount_minor, None if blank else currency, bool(blank or cleared))
+    return (amount_minor, None if blank else currency,
+            bool(blank or cleared) and not filing)
 
 
 def _reread(conn, doc_id, amount_minor, currency, withdrawn=False) -> None:

@@ -133,18 +133,35 @@ class ReadOwed(StoreCase):
                 self.assertEqual(d["amount_conflict"], 1)
                 self.assertTrue(documents.amount_unknown(d))
 
-    def test_refiling_the_same_bytes_with_a_cleared_currency_withdraws_it_too(self):
-        """h5 (Astra S1): the fifth finding of this shape — ingest of held bytes with
-        currency "" kept EUR trusted. One reader of what a call says about the amount
-        (documents._amount_said) feeds the one rule from every entry point."""
+    def test_refiling_with_a_blank_or_null_amount_says_nothing(self):
+        """The ingest contract (BRAIN, h6): ingest FILES the document — a blank or null
+        amount or currency there is "not read here", never a withdrawal (that would make
+        every refile of a read invoice propose-only); only update_document_metadata
+        withdraws a held reading. A concrete disagreeing value still conflicts."""
+        import qa_server, tools  # noqa: F401
+        for said in ({"currency": ""}, {"currency": None}, {"amount_minor": None},
+                     {"amount_minor": None, "currency": None}):
+            with self.subTest(said=said):
+                self.setUp()
+                doc = self._filed_unread(amount=1000)
+                path = self.publish("x.pdf", b"%PDF-1.4 same bytes\n")
+                out = qa_server.TOOLS["ingest_document"]["fn"](
+                    {"source_path": path, "kind": "invoice", "source": "gmail",
+                     "extraction_author": "specialist", "source_ref": "m-1:att-2",
+                     "pass_token": self.claim_token(), **said})
+                self.assertEqual(out["doc_id"], doc)
+                self.assertEqual(tuple(self.conn.execute(
+                    "SELECT amount_minor, currency, amount_conflict FROM documents WHERE"
+                    " doc_id=?", (doc,)).fetchone()), (1000, "EUR", 0))
+
+    def test_refiling_with_a_disagreeing_amount_conflicts(self):
         import qa_server, tools  # noqa: F401
         doc = self._filed_unread(amount=1000)
         path = self.publish("x.pdf", b"%PDF-1.4 same bytes\n")
-        out = qa_server.TOOLS["ingest_document"]["fn"](
+        qa_server.TOOLS["ingest_document"]["fn"](
             {"source_path": path, "kind": "invoice", "source": "gmail",
-             "extraction_author": "specialist", "source_ref": "m-1:att-2", "currency": "",
-             "pass_token": self.claim_token()})
-        self.assertEqual(out["doc_id"], doc)
+             "extraction_author": "specialist", "source_ref": "m-1:att-2",
+             "amount_minor": 1100, "currency": "EUR", "pass_token": self.claim_token()})
         self.assertEqual(self.conn.execute("SELECT amount_conflict FROM documents WHERE"
                                            " doc_id=?", (doc,)).fetchone()[0], 1)
 
