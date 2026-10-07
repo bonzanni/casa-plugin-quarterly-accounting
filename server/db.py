@@ -21,7 +21,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -267,7 +267,8 @@ CREATE TABLE IF NOT EXISTS documents (
   date_read_at TEXT,             -- when document_date was last read on the document (#22)
   vendor TEXT,                   -- the vendor group that filed it (simple loop §2.2)
   filed_seq INTEGER,             -- store sequence at ingest: "newly filed" (§2.1)
-  amount_conflict INTEGER NOT NULL DEFAULT 0);  -- Q2 run 1: two readings disagreed (sticky)
+  amount_conflict INTEGER NOT NULL DEFAULT 0,   -- Q2 run 1: two readings disagreed (sticky)
+  read_at TEXT);                 -- h1: its reading recorded (a found ref is done only then)
 
 CREATE TABLE IF NOT EXISTS counterparties (
   cp_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
@@ -583,6 +584,12 @@ MIGRATIONS: dict[int, list[str]] = {
     # keyed documents; item states; the Gmail streak; batch progress; the learned hint.
     # Task 11 of the plan appends the drops of the deleted machinery to this same list.
     # 12 → 13 (Q2 run 1, round f1 Astra S1: schema 12 stores exist live since run 1)
+    # 13 -> 14 (round h1, design d1): a found document's reading is owed until recorded. A row
+    # carrying a reading (an amount, or readings that disagreed) was read; one without may be
+    # a document a cut left unread (Terra d1 S1): it stays owed, never backfilled as read.
+    13: ["ALTER TABLE documents ADD COLUMN read_at TEXT",
+         "UPDATE documents SET read_at=ingested_at WHERE amount_minor IS NOT NULL OR"
+         " amount_conflict=1"],
     12: ["ALTER TABLE claims ADD COLUMN said_seq INTEGER",
          "ALTER TABLE claims ADD COLUMN report_seq INTEGER",
          "ALTER TABLE documents ADD COLUMN amount_conflict INTEGER NOT NULL DEFAULT 0"],

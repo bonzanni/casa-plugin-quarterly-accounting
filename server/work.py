@@ -381,9 +381,11 @@ def filed(conn, ref) -> bool:
     unknowable (no attachment order is stored) — counting only a "first" one could offer
     the filed invoice again and skip the other."""
     bare = ref.split(":", 1)[0]
+    # h1: filed AND its reading recorded (documents.read_at) — filed and unread, it is owed
     return conn.execute(
-        "SELECT 1 FROM operator_refs WHERE ref=? UNION ALL SELECT 1 FROM documents WHERE"
-        " source_ref=? UNION ALL SELECT 1 FROM documents WHERE source='gmail' AND"
+        "SELECT 1 FROM operator_refs o JOIN documents d ON d.doc_id=o.doc_id WHERE o.ref=?"
+        " AND d.read_at IS NOT NULL UNION ALL SELECT 1 FROM documents WHERE source_ref=?"
+        " AND read_at IS NOT NULL UNION ALL SELECT 1 FROM documents WHERE source='gmail' AND"
         " source_ref=? AND ? LIMIT 1", (ref, ref, bare, ":" in ref)).fetchone() is not None
 
 

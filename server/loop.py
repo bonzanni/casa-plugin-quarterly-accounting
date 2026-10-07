@@ -211,9 +211,8 @@ def candidates(conn, pid, row, vendor) -> list:
                     "held": (None if not hs else "other" if any(h != pid for h, _ in hs)
                              else "own"),
                     # Q2 R7: filed, never read (a cut between ingest and its reading) — the
-                    # skill reads it first; readings that disagreed stay unknown, not unread
-                    **({"unread": True} if (d["amount_minor"] is None or not d["currency"])
-                       and not d["amount_conflict"] else {})})
+                    # skill reads it first (h1: its recorded reading, documents.read_at)
+                    **({"unread": True} if d["read_at"] is None else {})})
     day = dates.effective_date(row) or "1970-01-01"
     out.sort(key=lambda c: (_gap(c["date"], day) if c["date"] else 10**6, c["doc_id"]))
     return out                      # complete: eligibility and uniqueness are judged on all

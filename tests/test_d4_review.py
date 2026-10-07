@@ -78,10 +78,11 @@ class FilingComparesExactRefs(StoreCase):
         drv = JobDriver(self, payments=1)
         refs = [self.long_ref(i) for i in range(30)]
         drv.to_unit("d4d4d4d4-b2", "filing")
+        doc = self.doc()                                    # filed and read (h1)
         with db.tx(self.conn):
             for r in refs[:3]:                              # filed already
                 self.conn.execute("INSERT INTO operator_refs(ref, source, doc_id, filed_at)"
-                                  " VALUES (?, 'manual-email', 1, 'x')", (r,))
+                                  " VALUES (?, 'manual-email', ?, 'x')", (r, doc))
         out = drv._tool("record_probe", dict(pass_token=drv.token, kind="gmail", ok=True,
                                              data={"refs": refs + [refs[5]]}))
         self.assertEqual(out["files_total"], 27)

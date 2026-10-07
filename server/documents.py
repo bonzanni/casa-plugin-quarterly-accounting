@@ -146,13 +146,13 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 # (re)installed under the held name, never beside it as a second copy no
                 # row names (fix wave F)
                 _install(data, sha, "." + existing["ext"])
+                _reread(conn, existing[0], amount_minor, currency)    # before the ref (h1)
                 if _operator_ref(conn, source, source_ref, existing[0]) and token is not None:
                     decide.note_progress(conn, token)   # d2: a newly filed ref is progress
                 if vendor is not None:
                     # a vendor group that found it again names it, where none was recorded
                     conn.execute("UPDATE documents SET vendor=? WHERE doc_id=? AND vendor IS"
                                  " NULL", (vendor, existing[0]))
-                _reread(conn, existing[0], amount_minor, currency)
                 return {"doc_id": existing[0], "sha256": sha, "created": False,
                         "collisions": collisions(conn, existing[0])}
             _install(data, sha, ext)
@@ -160,13 +160,15 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 "INSERT INTO documents(sha256, ext, size, kind, counterparty, issuer,"
                 " document_date, document_number, amount_minor, currency, recipient, source,"
                 " source_ref, acquisition_json, extraction_author, original_name, ingested_at,"
-                " ingest_quarter, vendor, filed_seq)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " ingest_quarter, vendor, filed_seq, read_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sha, ext.lstrip("."), len(data), kind, counterparty, issuer, document_date,
                  document_number, amount_minor, currency, recipient, source, source_ref,
                  db.canonical(acquisition) if acquisition is not None else None,
                  extraction_author, name, db.now(), dates.quarter_of(db.now()[:10]), vendor,
-                 db.next_seq(conn)))
+                 db.next_seq(conn),
+                 # h1: a reading given at filing (an amount) is recorded; none → owed
+                 db.now() if amount_minor is not None or currency else None))
             doc_id = cur.lastrowid
             _operator_ref(conn, source, source_ref, doc_id)
             if token is not None:
@@ -182,26 +184,35 @@ def amount_unknown(doc) -> bool:
 
 
 def _reread(conn, doc_id, amount_minor, currency) -> None:
-    """Q2 run 1 (PLAY, BRAIN: a reading that copies the payment): the same bytes filed again
-    with an amount. None held → it is the first reading, taken. One held that DISAGREES → the
-    readings conflict for good (f1, Terra/Astra S1: a third reading never restores it): the
-    amount is unknown, the document can only be proposed, never matched by the job
+    """Q2 run 1 (PLAY, BRAIN: a reading that copies the payment): a reading of the document's
+    amount — the same bytes filed again with one, or the job's update_document_metadata. The
+    one rule for both (h1, Astra S1), field by field (d1, Astra S1: a partial reading too):
+    a field none held is taken; a field held that the reading DISAGREES with → the readings
+    conflict for good (f1, Terra/Astra S1: a third reading never restores it): the amount is
+    unknown, the document can only be proposed, never matched by the job
     (matches._floor_doc), and a machine match holding it shows as a proposal (reducer). The
-    same reading changes nothing."""
-    if amount_minor is None or not currency:
+    same reading changes nothing. A reading given is recorded (read_at), conflicting or not."""
+    if amount_minor is None and not currency:
         return
-    d = conn.execute("SELECT amount_minor, currency, amount_conflict FROM documents WHERE"
-                     " doc_id=?", (doc_id,)).fetchone()
+    d = conn.execute("SELECT amount_minor, currency, amount_conflict, read_at FROM documents"
+                     " WHERE doc_id=?", (doc_id,)).fetchone()
+    if d["read_at"] is None:
+        conn.execute("UPDATE documents SET read_at=? WHERE doc_id=?", (db.now(), doc_id))
     if d["amount_conflict"]:
         return
-    if d["amount_minor"] is None or not d["currency"]:
-        conn.execute("UPDATE documents SET amount_minor=?, currency=? WHERE doc_id=?",
-                     (amount_minor, currency, doc_id))
-    elif (d["amount_minor"], d["currency"]) != (amount_minor, currency):
+    clash = ((amount_minor is not None and d["amount_minor"] is not None
+              and amount_minor != d["amount_minor"])
+             or (currency and d["currency"] and currency != d["currency"]))
+    if clash:
         conn.execute("UPDATE documents SET amount_minor=NULL, currency=NULL, amount_conflict=1"
                      " WHERE doc_id=?", (doc_id,))
     else:
-        return
+        new = (d["amount_minor"] if amount_minor is None else amount_minor,
+               d["currency"] if not currency else currency)
+        if new == (d["amount_minor"], d["currency"]):
+            return
+        conn.execute("UPDATE documents SET amount_minor=?, currency=? WHERE doc_id=?",
+                     (*new, doc_id))
     import lineage
     lineage.settle_doc_holders(conn, doc_id)
 
@@ -218,9 +229,27 @@ def _operator_ref(conn, source, source_ref, doc_id) -> bool:
         conn.execute("INSERT OR REPLACE INTO operator_refs(ref, source, doc_id, filed_at)"
                      " VALUES (?,?,?,?)", (source_ref, source, doc_id, db.now()))
         # queues: the ref's closing write — every queued item of it, in every unit and run
-        # (a given-up one stays given up)
-        return queues.close(conn, None, "ref", source_ref) > 0 or new
+        # (a given-up one stays given up) — once its document's reading is recorded (h1:
+        # filed and unread, it is handed again; update_document_metadata closes it)
+        if _read(conn, doc_id):
+            return queues.close(conn, None, "ref", source_ref) > 0 or new
+        return new
     return False
+
+
+def _read(conn, doc_id) -> bool:
+    return conn.execute("SELECT read_at FROM documents WHERE doc_id=?",
+                        (doc_id,)).fetchone()[0] is not None
+
+
+def _close_read_refs(conn, doc_id) -> int:
+    """h1: the document's reading is recorded — every queued item of a ref it was filed
+    under is done."""
+    import queues
+    refs = {r[0] for r in conn.execute(
+        "SELECT ref FROM operator_refs WHERE doc_id=? UNION SELECT source_ref FROM documents"
+        " WHERE doc_id=? AND source_ref IS NOT NULL", (doc_id, doc_id))}
+    return sum(queues.close(conn, None, "ref", r) for r in sorted(refs))
 
 
 def _doc(conn, doc_id):
@@ -309,6 +338,20 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
     with db.tx(conn):
         passes.check_token(conn, token)
         _doc(conn, doc_id)
+        if token is not None:
+            # h1: the job's reading (read_document, then Read) — its amount through the one
+            # sticky conflict rule; the call, with any fields or none, records the reading
+            # and closes every queued item of a ref the document was filed under
+            amount = fields.pop("amount_minor", None), fields.pop("currency", None)
+            _reread(conn, doc_id, *amount)
+            conn.execute("UPDATE documents SET read_at=coalesce(read_at, ?) WHERE doc_id=?",
+                         (db.now(), doc_id))
+            if _close_read_refs(conn, doc_id):
+                import decide
+                decide.note_progress(conn, token)
+        elif "amount_minor" in fields or "currency" in fields:
+            conn.execute("UPDATE documents SET read_at=coalesce(read_at, ?) WHERE doc_id=?",
+                         (db.now(), doc_id))
         if fields:
             conn.execute("UPDATE documents SET %s WHERE doc_id=?"
                          % ", ".join(f"{k}=?" for k in fields), (*fields.values(), doc_id))

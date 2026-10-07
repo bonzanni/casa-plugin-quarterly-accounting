@@ -411,7 +411,7 @@ class StoreCase(TempEnv):
              "document_date": "2026-07-02", "document_number": "N%d" % StoreCase._doc_n,
              "amount_minor": 10000, "currency": "EUR", "recipient": "Voorbeeld BV",
              "source": "gmail", "extraction_author": "resident",
-             "ingested_at": db.now(), "ingest_quarter": "2026-Q3"}
+             "ingested_at": db.now(), "ingest_quarter": "2026-Q3", "read_at": db.now()}
         d.update(over)
         with db.tx(self.conn):
             cur = self.conn.execute("INSERT INTO documents(%s) VALUES (%s)"

@@ -149,7 +149,7 @@ class SchemaTwelveStoresUpgrade(StoreCase):
         and document columns, and the job's job_next runs on the upgraded store."""
         conn = self.conn
         for table, col in (("claims", "said_seq"), ("claims", "report_seq"),
-                           ("documents", "amount_conflict")):
+                           ("documents", "amount_conflict"), ("documents", "read_at")):
             conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")      # ba9e512's shape
         conn.execute("UPDATE meta SET value='12' WHERE key='schema_version'")
         conn.commit()
