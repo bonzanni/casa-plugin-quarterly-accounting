@@ -60,13 +60,12 @@ def data_dir() -> pathlib.Path:
 CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   gen INTEGER PRIMARY KEY, job_id TEXT NOT NULL, at TEXT NOT NULL,
   batch INTEGER NOT NULL,        -- the batch this claim belongs to: its first claim's gen
-  closed INTEGER NOT NULL DEFAULT 0,    -- this claim was answered end-batch or complete
+  closed INTEGER NOT NULL DEFAULT 0,    -- this claim was answered complete
   seq INTEGER,                   -- the store sequence taken at the claim (S7 §10)
   progressed INTEGER NOT NULL DEFAULT 0,    -- the batch moved the work list on (simple loop §2.2)
   said INTEGER NOT NULL DEFAULT 0,          -- d3: this claim's progress was handed for reporting
   progressed_seq INTEGER,        -- e3: when note_progress last stamped it (progress.made)
   handed INTEGER NOT NULL DEFAULT 0,    -- e4: this claim handed out a work unit (progress)
-  calls INTEGER NOT NULL DEFAULT 0,     -- Q2 run 1: the tool calls this claim's turn made (summed)
   said_seq INTEGER);             -- Q2 run 1: the store sequence when it last reported progress"""
 
 # Schema 10's credits (INV-J8), frozen for MIGRATIONS[9]; MIGRATIONS[11] drops it.
@@ -583,8 +582,7 @@ MIGRATIONS: dict[int, list[str]] = {
     # keyed documents; item states; the Gmail streak; batch progress; the learned hint.
     # Task 11 of the plan appends the drops of the deleted machinery to this same list.
     # 12 → 13 (Q2 run 1, round f1 Astra S1: schema 12 stores exist live since run 1)
-    12: ["ALTER TABLE claims ADD COLUMN calls INTEGER NOT NULL DEFAULT 0",
-         "ALTER TABLE claims ADD COLUMN said_seq INTEGER",
+    12: ["ALTER TABLE claims ADD COLUMN said_seq INTEGER",
          "ALTER TABLE documents ADD COLUMN amount_conflict INTEGER NOT NULL DEFAULT 0"],
     11: ["ALTER TABLE projections ADD COLUMN mirror_note TEXT",
          "ALTER TABLE documents ADD COLUMN vendor TEXT",

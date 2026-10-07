@@ -1,9 +1,10 @@
 # tests/sim_job.py
 """The job's worker side, done mechanically (simple loop, design rev 17 §2): claim, then
-job_next(calls_made), carrying out each unit it hands out the way the job skill describes
-it — against a REAL bank-feed (tests/bankfeed.py) and a Gmail fake. The cursor decides
+job_next, carrying out each unit it hands out the way the job skill describes it —
+against a REAL bank-feed (tests/bankfeed.py) and a Gmail fake. The cursor decides
 everything; the driver never chooses a unit or a token of its own. Every tool call the
-driver makes in a turn is counted into `calls_made` (a new turn — a claim — starts at 0).
+driver makes in a turn is counted (`calls`; a new turn — a claim — starts at 1) against
+Casa's cut.
 
   probes    bank-feed's tools, list_accounts, sync, list_backups, the four record_probes
             (bank_sync with the unit's acq), check_setup
@@ -29,11 +30,11 @@ driver makes in a turn is counted into `calls_made` (a new turn — a claim — 
             mark_rendering_delivered
   post      post_results(render_ids); on the receipt, mark_rendering_delivered
 
-Every unit is done within its `max_calls` (d3): at the budget the driver stops where it is
-and calls job_next — the unit comes again as a continuation. `casa_cut` (an int): Casa's
-batch bound — a call past it ends the batch without job_next (the driver re-claims), and
-three batches in a row without a reported progress (`report` with `progressed`) fail the
-run, as Casa ends it.
+No call budget (operator ruling 2026-10-07): the driver works until `complete`.
+`casa_cut` (an int): Casa's batch bound — a call past it ends the batch without job_next
+(the driver re-claims; what the unit still owed comes again), three batches in a row
+without a reported progress (`report` with `progressed`) fail the run, and so does a run
+past CASA_BATCHES, as Casa ends it.
 
 Plugin tools are called through qa_server.TOOLS (#43: the call shape the model makes)."""
 from __future__ import annotations
@@ -73,16 +74,11 @@ def ledger_state(listing: str) -> dict:
 
 MAX_UNITS = 600         # a cursor that never finishes is a failure, never a hang
 CASA_IDLE_BATCHES = 3   # Casa ends a run after this many batches without reported progress
-# d4: the writes that close a unit (loop.CLOSING), made from the unit's reserved calls
-CLOSING_TOOLS = ("decide", "record_mirror", "mark_rendering_delivered")
+CASA_BATCHES = 20       # the manifest's "batches": Casa ends the run after this many
 
 
 class CasaCut(Exception):
     """Casa ended the batch at its call bound, before the model's next job_next."""
-
-
-class UnitBudget(Exception):
-    """The unit's `max_calls` is reached: the model stops and calls job_next."""
 
 
 class JobLedger(bankfeed.Ledger):
@@ -222,17 +218,19 @@ class JobDriver:
         self.fx_rates = {}              # provider_ref -> (exchange_rate, unit): see _export
         self._spec = {}                 # fixture row number -> its bank row (quarter fixtures)
         self._broker_now = None
-        self.batch_calls = []           # calls_made at each batch's end, the last run_job
+        self.batch_calls = []           # the calls at each batch's end, the last run_job
         self.casa_cut = None            # Casa's batch call bound, when the test enforces it
         self.cuts = 0                   # batches Casa cut (casa_cut)
         self.batch_reported = []        # per batch: a progress report was handed (progressed)
-        self._limit = None              # the unit in hand's call budget
-        self._reserve = 0               # the calls its closing write needs (loop.CLOSING)
         self.tool_calls = {}            # plugin tool name -> calls made, every run
         self.replace_days = 3           # a handed document this near an exact fit replaces
         self.skip_attached_reports = False   # Q2 run 1: the model ignores report:true beside
-        #                                      a work unit (only `report`, end-batch count)
-        self._at_next = 0               # calls at the previous job_next (calls_made is a delta)
+        #                                      a work unit (only `report`, complete count)
+        self._at_next = 0               # calls at the previous job_next
+        # a stray call count the model sends (ignored since the no-budget ruling): "delta"
+        # (run 1), "total", None
+        self.calls_mode = None
+        self.bank_log = []              # every bank-feed call: (tool, canonical args)
         self.near_days = 10             # the skill's "certain": a match dated this near
         self.propose_days = 20          # a look-alike this near is proposed; farther: not it
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
@@ -503,9 +501,20 @@ class JobDriver:
         return self.token
 
     def next(self):
-        """job_next as the model calls it (Q2 run 1): calls_made is the calls since the
-        previous job_next of this turn. The caller counts the job_next call itself."""
-        u = job.next_unit(self.conn, self.token, self.calls - self._at_next)
+        """job_next as the model calls it, through the tool (#43), with `calls_mode`'s stray
+        count (Q2 run 1 sent the calls since the previous job_next). The caller counts the
+        job_next call itself."""
+        import db
+        import qa_server
+        import tools  # noqa: F401  -- registers every tool
+        args = {"pass_token": self.token}
+        if self.calls_mode == "delta":
+            args["calls_made"] = self.calls - self._at_next   # removed-name: asserted absent
+        elif self.calls_mode == "total":
+            args["calls_made"] = self.calls       # removed-name: asserted absent
+        u = qa_server.TOOLS["job_next"]["fn"](args)
+        if isinstance(u, dict) and isinstance(u.get("refused"), str):
+            raise db.Refusal(u["refused"])
         self._at_next = self.calls
         return u
 
@@ -515,20 +524,20 @@ class JobDriver:
         self.claim(job_id, started_by)
         with self._broker():
             for _ in range(MAX_UNITS):
-                u = job.next_unit(self.conn, self.token, self.calls - self._at_next)
+                u = self.next()
                 self.calls += 1
                 self._at_next = self.calls
                 self.last = u
                 if u["unit"] == unit:
                     return u
-                if u["unit"] in ("end-batch", "complete"):
+                if u["unit"] == "complete":
                     raise AssertionError(f"{unit} was not handed out before {u['unit']}")
                 self.do(u, self.token)
         raise AssertionError(f"{unit} was never handed out")
 
     def run_job(self, job_id, started_by="operator") -> list:
-        """Claim, then job_next until `complete`, re-claiming (a new turn, a new batch) on
-        `end-batch`. Returns every unit handed out."""
+        """Claim, then job_next until `complete`, re-claiming (a new turn, a new batch) at
+        Casa's cut. Returns every unit handed out."""
         self.claim(job_id, started_by)
         self.batch_calls = []
         self.batch_reported = []
@@ -551,6 +560,10 @@ class JobDriver:
             if self.casa_cut is not None and idle >= CASA_IDLE_BATCHES:
                 raise AssertionError(f"Casa ends the run: {idle} batches without reported "
                                      f"progress (calls {self.batch_calls})")
+            if self.casa_cut is not None and len(self.batch_calls) >= CASA_BATCHES \
+                    and not (units and units[-1]["unit"] == "complete"):
+                raise AssertionError(f"Casa ends the run: {CASA_BATCHES} batches (calls "
+                                     f"{self.batch_calls})")
         with self._broker():
             for _ in range(MAX_UNITS):
                 if self.casa_cut is not None and self.calls + 1 > self.casa_cut:
@@ -560,25 +573,27 @@ class JobDriver:
                     self.calls = 1
                     self._at_next = 1
                     continue
-                u = job.next_unit(self.conn, self.token, self.calls - self._at_next)
+                u = self.next()
                 self.calls += 1
                 self._at_next = self.calls
                 units.append(u)
                 self.units.append(u)
                 self.last = u
                 assert u.get("pass_token") == self.token, u
+                said = reported
                 if u["report"] and (not self.skip_attached_reports or u["unit"] in (
-                        "report", "end-batch", "complete")):
+                        "report", "complete")):
                     reported = bool(u["progress"]["progressed"])   # Casa keeps the LAST
+                if u["report"] and u["unit"] == "complete":
+                    # the closing report_job_progress is a call of its own; past Casa's cut
+                    # it never reaches Casa
+                    if self.casa_cut is not None and self.calls + 1 > self.casa_cut:
+                        reported = said
+                    else:
+                        self.calls += 1
                 if u["unit"] == "complete":
                     batch_end()
                     return units
-                if u["unit"] == "end-batch":
-                    batch_end()
-                    self.token = job.claim(self.conn, job_id)
-                    self.calls = 1
-                    self._at_next = 1
-                    continue
                 import db
                 try:
                     self.do(u, self.token)
@@ -611,29 +626,15 @@ class JobDriver:
 
     # --- the units ---------------------------------------------------------------------
     def do(self, u, token):
-        """Carry out unit `u` under claim `token`, within its `max_calls` (d3): at the
-        budget the unit stops where it is (the model then calls job_next)."""
+        """Carry out unit `u` under claim `token` (the model then calls job_next)."""
         self.token = token
-        import loop
-        self._limit = self.calls + u["max_calls"] if "max_calls" in u else None
-        self._reserve = loop.CLOSING.get(u["unit"], 0)     # d4: its closing write's calls
-        try:
-            with self._broker():
-                return getattr(self, "_" + u["unit"].replace("-", "_"))(u, token)
-        except UnitBudget:
-            return None
-        finally:
-            self._limit = None
+        with self._broker():
+            return getattr(self, "_" + u["unit"].replace("-", "_"))(u, token)
 
-    def _spend(self, k=1, closing=False) -> None:
-        """k tool calls: past Casa's bound the batch is cut; past the unit's budget the unit
-        stops (neither call is made). A work call keeps the unit's closing write's calls in
-        reserve (d4); the closing write itself may use them."""
+    def _spend(self, k=1) -> None:
+        """k tool calls: past Casa's bound the batch is cut (the call is not made)."""
         if self.casa_cut is not None and self.calls + k > self.casa_cut:
             raise CasaCut()
-        reserve = 0 if closing else self._reserve
-        if self._limit is not None and self.calls + k > self._limit - reserve:
-            raise UnitBudget()
         self.calls += k
 
     def _tool(self, name, args):
@@ -643,7 +644,7 @@ class JobDriver:
         import db
         import qa_server
         import tools  # noqa: F401  -- registers every tool
-        self._spend(closing=name in CLOSING_TOOLS)
+        self._spend()
         self.tool_calls[name] = self.tool_calls.get(name, 0) + 1
         out = qa_server.TOOLS[name]["fn"](args)
         if isinstance(out, dict) and isinstance(out.get("refused"), str):
@@ -652,6 +653,7 @@ class JobDriver:
 
     def _bank(self, tool, **args) -> str:
         self._spend()
+        self.bank_log.append((tool, json.dumps(args, sort_keys=True)))
         return self.bf.call(tool, **args)
 
     def _probes(self, u, token):
@@ -709,7 +711,7 @@ class JobDriver:
         """The skill's filing: with `search`, the own-mail search and at once the gmail probe
         with every attachment found; then each of `files` (the unit's, or the probe's)
         downloaded, read once and filed with the reading (no vendor: own mail is no
-        vendor's). A unit cut at its `max_calls` comes again (queues)."""
+        vendor's). A unit Casa cut comes again (queues)."""
         files = u["files"]
         if u["search"]:
             self._spend(1)

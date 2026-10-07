@@ -52,10 +52,10 @@ class RestoreMidPass(StoreCase):
                 workflow=version.WORKFLOW, expected_generation=bf.generation())
         bf.call("restore_backup", backup_id=bf.registered()[version.WORKFLOW])
         t = self.drv.claim(A)                             # the next batch reads again
-        u = job.next_unit(self.conn, t, 0)
+        u = job.next_unit(self.conn, t)
         self.assertEqual(u["unit"], "probes")
         self.drv.do(u, t)
-        u = job.next_unit(self.conn, t, 0)
+        u = job.next_unit(self.conn, t)
         self.assertEqual(u["unit"], "snapshot")
         with self.assertRaises(db.Refusal) as cm:
             self.drv.do(u, t)

@@ -1,9 +1,8 @@
 """Diff round d3 (Astra, 26b68ee..a1a074d), the two accepted findings, reproduced through
 the real surface (qa_server.TOOLS, a real bank-feed):
-- Astra S1 (ruled: generalize — the 2nd instance after d2's own-mail filing): every unit
-  carries a call budget (`max_calls`); at it the model checkpoints with job_next and the
-  unit comes again as a continuation, not counted against queues.ATTEMPTS_MAX while it
-  progressed (queues: an item closed or queued, a search kind first recorded);
+- Astra S1 (ruled: generalize — the 2nd instance after d2's own-mail filing): a unit
+  interrupted (since the no-budget ruling of 2026-10-07: by Casa's cut) comes again as a
+  continuation, not counted against queues.ATTEMPTS_MAX while it progressed (queues: an item closed or queued, a search kind first recorded);
   progress is reported on the first job_next after the batch persisted anything;
 - Astra S2: the 11 -> 12 migration backfills render_states from delivered legacy
   renderings whose items are provably unchanged, so the first scheduled run after the
@@ -30,7 +29,7 @@ class EveryUnitHasABudget(StoreCase):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"INV-{i + 1}")
         drv.casa_cut = CASA_CALLS
         units = drv.run_job("d3d3d3d3-a1")
-        self.assertEqual(drv.cuts, 0)
+        self.assertEqual(drv.cuts, len(drv.batch_calls) - 1)   # no budget: Casa ends a batch
         self.assertLessEqual(max(drv.batch_calls), CASA_CALLS, drv.batch_calls)
         self.assertTrue(all(drv.batch_reported), drv.batch_reported)
         self.assertEqual(dict(self.conn.execute(
@@ -43,8 +42,7 @@ class EveryUnitHasABudget(StoreCase):
         # a payment handed again with the attachments its search found still to file
         self.assertTrue(any(u["unit"] == "payment" and u["files"] for u in units))
         # a progress report mid-batch, not only at its end (the first answer after work)
-        self.assertTrue(any(u["report"] and u["unit"] not in ("end-batch", "complete")
-                            for u in units))
+        self.assertTrue(any(u["report"] and u["unit"] != "complete" for u in units))
 
     def test_progress_is_reported_on_the_first_answer_after_work_once_per_batch(self):
         import job
@@ -60,7 +58,6 @@ class EveryUnitHasABudget(StoreCase):
         # filing persisted too, but the batch already reported
         self.assertEqual(got, [("probes", False), ("snapshot", False), ("report", True),
                                ("filing", False)])
-        self.assertTrue(all(u["max_calls"] > 0 for u in drv.units[-4:]))
 
     def test_a_continuation_that_progressed_is_not_counted(self):
         """Queues (rev 18.4): a payment hand-out that records one search with a find and

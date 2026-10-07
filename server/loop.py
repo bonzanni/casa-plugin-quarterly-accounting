@@ -284,7 +284,7 @@ def payment_unit(conn, job_id):
         return u
 
 
-def _owed_files_unit(conn, job_id, hand_seq, calls_made):
+def _owed_files_unit(conn, job_id, hand_seq):
     """e1 (Astra S1, rev 18.4 §R18.2): a payment's found attachments stay owed whatever
     became of the payment — decided, or settled by the operator meanwhile — until filed,
     set aside or visibly given up. The earliest such payment is handed with its `files`
@@ -295,10 +295,7 @@ def _owed_files_unit(conn, job_id, hand_seq, calls_made):
                           " (w.outcome IS NOT NULL OR w.attempts >= ?) ORDER BY i.unit",
                           (job_id, queues.ATTEMPTS_MAX)).fetchall():
         refs = queues.queued(conn, job_id, r["unit"], "ref")
-        room = 10**6 if calls_made is None else unit_room("payment", calls_made)
-        fit = queues.take_fitting(refs, room)
-        if not fit:
-            return {"unit": "end-batch"}
+        fit = queues.take_fitting(refs)
         queues.stamp(conn, job_id, fit, hand_seq)
         out = budget.bounded({"unit": "payment", "pid": queues.pid_of_unit(r["unit"]),
                               "decided": True, "vendor": r["vendor"],
@@ -318,17 +315,17 @@ def _owed_files(conn, job_id) -> bool:
                         (job_id, queues.ATTEMPTS_MAX)).fetchone() is not None
 
 
-def payment_unit_in_tx(conn, job_id, hand_seq=None, calls_made=None):
+def payment_unit_in_tx(conn, job_id, hand_seq=None):
     """Rev 18.4 §R18.1: the first unresolved payment of the work list in DATE order
     (effective date, pid) — outcome NULL, attempts < ATTEMPTS_MAX; an entry no longer work
     takes outcome 'settled' — or None. Handed whole: its facts and revision, its candidates
     WITH their stored reading (the must-show ones — the exact fit and the run's handed
     documents — first, then up to CANDIDATES_MAX), its vendor's KB, its search window, the
     searches it had this run and `files`: the attachments its searches found still owed
-    (§R18.2). `calls_made` None: no bound (tests); else what does not fit is `end-batch`."""
+    (§R18.2)."""
     import work
     assert conn.in_transaction
-    owed = _owed_files_unit(conn, job_id, hand_seq, calls_made)
+    owed = _owed_files_unit(conn, job_id, hand_seq)
     if owed is not None:
         return owed
     rows = conn.execute(
@@ -356,17 +353,11 @@ def payment_unit_in_tx(conn, job_id, hand_seq=None, calls_made=None):
     if not live:
         # e2 (Astra S1): a payment settled just now may owe found attachments — they are
         # handed before the cursor moves on to the mirror and the post
-        return _owed_files_unit(conn, job_id, hand_seq, calls_made)
+        return _owed_files_unit(conn, job_id, hand_seq)
     _day, pid, r, row, p = min(live, key=lambda x: (x[0], x[1]))
-    if calls_made is not None and not unit_fits("payment", calls_made):
-        return {"unit": "end-batch"}
     unit = queues.unit_of_payment(pid)
     refs = queues.queued(conn, job_id, unit, "ref")
-    room = 10**6 if calls_made is None else \
-        unit_room("payment", calls_made) - CLOSING["payment"]
-    fit = queues.take_fitting(refs, room)
-    if refs and not fit:
-        return {"unit": "end-batch"}
+    fit = queues.take_fitting(refs)
     queues.stamp(conn, job_id, fit, hand_seq)
     vendor = r["vendor"]
     d = work.describe(conn, pid)
@@ -418,37 +409,19 @@ def completion_sig(conn, quarter) -> str:
 
 
 # ---- the run: one pass, its units in order (design rev 17 §2; plan Task 10) --------------
-CALLS_SOFT = 65          # §2.2: hand out payments while calls_made < about 65 (Casa: 80)
-CALLS_HARD = 75          # a mirror unit never carries the batch past this many calls
 OFFER_MAX = 2            # S7 §5: one rendering is handed out at most this often per run
-# d3/d4: every unit carries `max_calls` (unit_room), the calls it may make before the
-# batch's bound — its own closing write included (CLOSING), the job_next checkpoint
-# reserved. At it the model stops and checkpoints with job_next. What a unit still owes
-# then is the server's (queues): its items come again, settled by queues.settle. A unit is
-# handed only when its least useful work and its closing calls fit (unit_fits; the queue
-# units: queues.take_fitting); otherwise the batch ends
-CLOSING = {"payment": 1, "mirror": 1, "post": 1, "view": 1}  # decide, record_mirror,
-# mark_rendering_delivered
-MIN_WORK = {"probes": 9, "snapshot": 2, "erasures": 2, "payment": 8, "filing": 2,
-            "mirror": 1, "post": 1, "view": 1}
-
-
-def unit_room(unit, calls_made) -> int:
-    """The unit's `max_calls`: the room before the batch's bound (CALLS_HARD for the mirror
-    and the posts, CALLS_SOFT for the rest) less the job_next checkpoint."""
-    bound = CALLS_HARD if unit in ("mirror", "post", "view") else CALLS_SOFT
-    return bound - calls_made - 1
-
-
-def unit_fits(unit, calls_made) -> bool:
-    """d4: the unit's least useful work and its closing calls fit in its room."""
-    return unit_room(unit, calls_made) >= MIN_WORK.get(unit, 1) + CLOSING.get(unit, 0)
+# OPERATOR RULING (2026-10-07, after diff round f3): no call budget. A batch ends only when
+# Casa cuts it at its turn limit; a cut batch's persisted work is reported by the next
+# claim (said_seq), and a unit a cut interrupted comes again (its items persist as done).
+# The mirror is handed in chunks of MIRROR_CALLS bank-feed calls, each closed by its
+# record_mirror: a cut inside a chunk may repeat up to that many calls — repeated tag calls
+# are no-ops, a repeated note call adds an identical line (plan D9)
+MIRROR_CALLS = 8
 WORDS = {"probes": "Reading the bank", "snapshot": "Importing the bank read",
          "erasures": "Checking the bank's erased rows",
          "filing": "Filing your own emailed documents", "payment": "Matching invoices",
          "mirror": "Updating the bank ledger", "post": "Posting the result",
-         "view": "Posting the result", "end-batch": "Batch done",
-         "report": "Work saved",
+         "view": "Posting the result", "report": "Work saved",
          "complete": "All accounting work done"}
 NO_TOOLS = "bank-feed's tools are not available to the finance specialist"
 
@@ -636,23 +609,20 @@ def _handing(conn, job_id, unit, seq) -> None:
     conn.execute("UPDATE runs SET hand_unit=?, hand_seq=? WHERE job_id=?", (unit, seq, job_id))
 
 
-def _queue_unit(conn, job_id, unit, calls_made):
-    """The queue unit `unit` (erasures, filing) when it owes an item: (its fitting items,
-    the hand-out's seq), stamped and handed; ([], None) when it owes nothing; (None, None)
-    when it owes but nothing fits (the batch ends)."""
+def _queue_unit(conn, job_id, unit):
+    """The queue unit `unit` (erasures, filing) when it owes an item: (its items, the
+    hand-out's seq), stamped and handed; ([], None) when it owes nothing."""
     rows = queues.queued(conn, job_id, unit)
     if not rows:
         return [], None
-    fit = queues.take_fitting(rows, unit_room(unit, calls_made) - CLOSING.get(unit, 0))
-    if not fit:
-        return None, None
+    fit = queues.take_fitting(rows)
     seq = db.next_seq(conn)
     queues.stamp(conn, job_id, fit, seq)
     _handing(conn, job_id, unit, seq)
     return fit, seq
 
 
-def _choose(conn, token, job_id, calls_made, logs) -> dict:
+def _choose(conn, token, job_id, logs) -> dict:
     import mirror
     import passes
     run = _run(conn, job_id)
@@ -665,26 +635,20 @@ def _choose(conn, token, job_id, calls_made, logs) -> dict:
         take(conn, job_id, p["pass_id"])
         u = _acquire(conn, token, job_id, p)
         if u is not None:
-            if not unit_fits(u["unit"], calls_made):
-                return {"unit": "end-batch"}            # the import goes to a fresh batch
             return u
     run = _run(conn, job_id)
     p = run_pass(conn, run)
     if p is not None:
         # queues rule 1, the phases in order from the start at every job_next: erasures,
         # filing, the list (built once), vendors, mirror
-        fit, _ = _queue_unit(conn, job_id, "erasures", calls_made)
-        if fit is None:
-            return {"unit": "end-batch"}
+        fit, _ = _queue_unit(conn, job_id, "erasures")
         if fit:
             return {"unit": "erasures", "snapshot_id": p["snapshot_id"],
                     "rows": [{"pid": int(r["key"]), "row_id": lineage.projection(
                         conn, int(r["key"]))["dest_row_id"]} for r in fit]}
         if run["listed_at"] is None:
             queues.enqueue(conn, job_id, "filing", "search", ["own-mail"])
-        fit, _ = _queue_unit(conn, job_id, "filing", calls_made)
-        if fit is None:
-            return {"unit": "end-batch"}
+        fit, _ = _queue_unit(conn, job_id, "filing")
         if fit:
             return {"unit": "filing", "search": any(r["kind"] == "search" for r in fit),
                     "files": [r["key"] for r in fit if r["kind"] == "ref"],
@@ -697,7 +661,7 @@ def _choose(conn, token, job_id, calls_made, logs) -> dict:
             rewalk_missing_in_tx(conn, job_id)
         if _undecided(conn, job_id) or _owed_files(conn, job_id):
             seq = db.next_seq(conn)
-            u = payment_unit_in_tx(conn, job_id, hand_seq=seq, calls_made=calls_made)
+            u = payment_unit_in_tx(conn, job_id, hand_seq=seq)
             if u is not None:
                 if u["unit"] == "payment":
                     _handing(conn, job_id, queues.unit_of_payment(u["pid"]), seq)
@@ -710,19 +674,15 @@ def _choose(conn, token, job_id, calls_made, logs) -> dict:
             if line:
                 logs.append(line)
             if mirror.owed(conn, job_id) > 0:
-                # d4 (Astra S1): the unit's calls leave room for its record_mirror
-                if not unit_fits("mirror", calls_made):
-                    return {"unit": "end-batch"}
                 seq = db.next_seq(conn)
-                calls = mirror.hand_calls_in_tx(
-                    conn, job_id, unit_room("mirror", calls_made) - CLOSING["mirror"], seq)
+                calls = mirror.hand_calls_in_tx(conn, job_id, MIRROR_CALLS, seq)
                 _handing(conn, job_id, "mirror", seq)
                 return {"unit": "mirror", "calls": calls}
             conn.execute("UPDATE runs SET mirrored_at=coalesce(mirrored_at, ?) WHERE job_id=?",
                          (db.now(), job_id))
     u = _post_unit(conn, job_id, _run(conn, job_id))
     if u is not None:
-        return u if unit_fits(u["unit"], calls_made) else {"unit": "end-batch"}
+        return u
     run = _run(conn, job_id)
     p = run_pass(conn, run)
     if p is not None:
@@ -737,8 +697,8 @@ def _report_owed(conn, token, job_id):
     """Q2 run 1 (PLAY): the model skipped `report: true` beside a work unit, so Casa's
     3-batch guard ended a productive run. A claim that has not reported gets the `report`
     unit, alone, when the run persisted work since its LAST report (this claim's work, or a
-    batch Casa cut before it could report), while it fits the batch (else its end-batch
-    reports); the next job_next carries on."""
+    batch Casa cut before it could report — with no call budget, every batch but the last
+    ends in a cut); the next job_next carries on."""
     c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
     if c["said"] or c["seq"] is None or _run(conn, job_id)["completed_at"] is not None:
         return None
@@ -755,22 +715,19 @@ WORK_UNITS = ("erasures", "filing", "payment", "mirror")   # BRAIN: a payment, a
 #                                                          erase check, a mirror call
 
 
-def _close(conn, token, out, calls_made) -> dict:
-    """§2.2: every answer carries the pass_token. Progress is reported at a batch's end
-    (`end-batch`, `complete`) and — d3 (Astra S1) — on the FIRST answer after the batch
-    persisted work (claims.progressed: a decision, a filing, a search, an import, a mirror
-    report), so a batch Casa cuts later has already reported it. Every unit carries
-    `max_calls` (unit_room: its closing write included, the checkpoint reserved)."""
+def _close(conn, token, out) -> dict:
+    """§2.2: every answer carries the pass_token. Progress is reported by the `report` unit
+    (_report_owed) and at the run's end (`complete`)."""
     import job
     c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
-    ending = out["unit"] in ("end-batch", "complete")
+    ending = out["unit"] == "complete"
     conn.execute("UPDATE claims SET closed=? WHERE gen=?", (int(ending or c["closed"]), token))
     # progress/budget #3 under rev 18 (e4, Astra S1) — generalized by SIMPLIFYING (BRAIN's
     # pre-agreement, the operator's "no limits that complicate more than they benefit"):
     # this claim progressed iff it handed out a work unit or something was closed or
-    # persisted since it began (progress.made). Casa reads a batch's LAST report: it is
-    # said once as soon as it holds, and again at the batch's end, never overwritten by a
-    # false; a stuck model is bounded by the per-payment caps and `"batches": 20`
+    # persisted since it began (progress.made). Casa reads a batch's LAST report, never
+    # overwritten by a false; a stuck model is bounded by the per-payment caps and
+    # `"batches": 20`
     if out["unit"] in WORK_UNITS:
         conn.execute("UPDATE claims SET handed=1 WHERE gen=?", (token,))
     # a `report` is handed only when work is owed since the run's last report, so it says
@@ -778,44 +735,35 @@ def _close(conn, token, out, calls_made) -> dict:
     progressed = bool(c["said"] or c["handed"]) or out["unit"] in WORK_UNITS + ("report",) \
         or (c["seq"] is not None and progress.made(conn, c["job_id"], c["seq"]))
     # Q2 run 1: a report rides ONLY on the `report` unit (alone: the model cannot do a unit
-    # and skip it) and on end-batch / complete — never beside a work unit
+    # and skip it) and on `complete` — never beside a work unit
     report = ending or (out["unit"] == "report")
     if report and progressed:
         conn.execute("UPDATE claims SET said=1, said_seq=? WHERE gen=?",
                      (db.next_seq(conn), token))
     summary = (job.run_end(conn, c["job_id"])[1] if out["unit"] == "complete"
                else WORDS[out["unit"]])
-    if not ending:
-        out["max_calls"] = max(unit_room(out["unit"], calls_made), 1)
     out.update(pass_token=token, report=report,
                progress={"summary": summary, "progressed": progressed, "done": None,
                          "remaining": None})
     return out
 
 
-def next_unit(conn, token, calls_made) -> dict:
+def next_unit(conn, token) -> dict:
     """The cursor (§2), in order: probes / snapshot (the bank read), filing, the work list
-    (built once), vendor groups while calls_made < CALLS_SOFT, the mirror (while the bank
-    gate allows writes) until nothing is owed on a fresh diff, the run's one post, complete.
-    One transaction that re-checks the claim. Q2 run 1: `calls_made` is the tool calls made
-    SINCE THE PREVIOUS job_next of this turn — what a model counts naturally; the server sums
-    them per claim (a model that sends running totals only ends a batch early). A claim
-    that persisted work and has not reported is answered with the `report` unit alone, so
-    the report Casa's guard needs is never one more flag beside a work unit."""
+    (built once), the payments, the mirror (while the bank gate allows writes) until nothing
+    is owed on a fresh diff, the run's one post, complete. One transaction that re-checks
+    the claim. No call budget (operator ruling 2026-10-07): work is handed until Casa cuts
+    the batch. A claim that persisted work and has not reported is answered with the
+    `report` unit alone, so the report Casa's guard needs is never one more flag beside a
+    work unit."""
     import job
-    if isinstance(calls_made, bool) or not isinstance(calls_made, int) or calls_made < 0:
-        raise db.Refusal("calls_made is the number of tool calls you made since your previous "
-                         "job_next (0 or more)")
     logs: list = []
     with db.tx(conn):
         job.check_claim(conn, token)
         job_id = _job_of(conn, token)
-        # the calls since the previous job_next, and this job_next itself
-        conn.execute("UPDATE claims SET calls=calls+?+1 WHERE gen=?", (calls_made, token))
-        made = conn.execute("SELECT calls FROM claims WHERE gen=?", (token,)).fetchone()[0]
-        owed = _report_owed(conn, token, job_id) if made + 3 <= CALLS_HARD else None
+        owed = _report_owed(conn, token, job_id)
         out = _close(conn, token, owed if owed is not None else
-                     _choose(conn, token, job_id, made, logs), made)
+                     _choose(conn, token, job_id, logs))
         if out["unit"] == "post":
             for rid in out["render_ids"]:
                 _offer(conn, rid, job_id)

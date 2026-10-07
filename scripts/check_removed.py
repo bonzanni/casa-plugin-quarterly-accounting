@@ -89,6 +89,10 @@ REMOVED = [
      r"unit_of_vendor|_mark_vendor_search|_queue_refs|considered_seq|handed_upto|_reopening|"
      r"vendor_queries)\b|\bsearches\.(hinted|plain)\b|['\"](reopen|competitor)['\"]",
      "the vendor unit and the reopening rev 18.4 deletes"),
+    # the call budget (OPERATOR RULING 2026-10-07, after diff round f3)
+    (r"\b(calls_made|CALLS_SOFT|CALLS_HARD|unit_room|unit_fits|MIN_WORK|max_calls|UnitBudget|"
+     r"CLOSING_TOOLS)\b|\bloop\.CLOSING\b|\bqueues\.COST\b|['\"]end-batch['\"]",
+     "the call budget: calls_made, max_calls, end-batch (operator ruling 2026-10-07)"),
     # test helpers
     (r"\bself\.(handed|close_chunk|hand_empty_chunk|end_with_counts|package_built_unsent|"
      r"stage_stalled_package|check_round|bind_round_and_take|sweep_to_zero|start_job_pass|"

@@ -410,21 +410,16 @@ def t_import(args):
           "The job's next step. First call of every job turn: job_next(job_id=<your brief's "
           "`Job id:` line>, started_by=<the line right after your brief's first `Job id:` "
           "line, verbatim, when it is a `Started by:` line; else omit it>) — it gives you a "
-          "pass_token; then after each unit job_next(pass_token=…, calls_made=<the tool calls "
-          "you made since your previous job_next>). Do exactly the unit it returns: probes, "
-          "snapshot, erasures, filing, payment, mirror, view, post, report. Each unit carries "
-          "max_calls: when your calls for it reach that, stop and call job_next — an "
-          "unfinished unit comes again. `report` → report_job_progress with its `progress` "
-          "verbatim, then job_next. When an answer says report=true, call "
-          "report_job_progress with its `progress` verbatim; at end-batch, end your turn; at "
-          "complete, report_job_progress then emit_completion(status=\"ok\", text=<its "
-          "text>). `view` → show_view(render_id); on its receipt "
-          "mark_rendering_delivered(render_id). `post` → post_results(render_ids); on its "
-          "receipt mark_rendering_delivered(render_ids). A withheld post marks nothing — call "
-          "job_next: it is offered again, at most twice.",
+          "pass_token; then after each unit job_next(pass_token=…). Do exactly the unit it "
+          "returns: probes, snapshot, erasures, filing, payment, mirror, view, post, report — "
+          "and keep going until `complete`; Casa ends the turn when its batch is full, and "
+          "an unfinished unit comes again. `report` → report_job_progress with its "
+          "`progress` verbatim, then job_next. At complete, report_job_progress then "
+          "emit_completion(status=\"ok\", text=<its text>). `view` → show_view(render_id); "
+          "on its receipt mark_rendering_delivered(render_id). `post` → "
+          "post_results(render_ids); on its receipt mark_rendering_delivered(render_ids). A "
+          "withheld post marks nothing — call job_next: it is offered again, at most twice.",
           obj({"job_id": S, "pass_token": TOKEN,
-               "calls_made": {"type": "integer", "description": "with a pass_token: the "
-                              "tool calls you made since your previous job_next (0 or more)"},
                "started_by": {"type": "string", "description": "first job_id call only: "
                               "Casa's `Started by:` line, the one right after the first "
                               "`Job id:` line of your brief, copied verbatim"}}))
@@ -434,16 +429,7 @@ def t_job_next(args):
     if tok is None:
         _need(args, "job_id")
         tok = job.claim(conn(), args["job_id"], started_by=args.get("started_by"))
-        calls = 0
-    else:
-        calls = args.get("calls_made")
-        if calls is None:
-            raise db.Refusal("calls_made goes with the pass_token: the tool calls you made "
-                             "since your previous job_next")
-        if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
-            raise db.Refusal("calls_made is the number of tool calls you made since your "
-                             "previous job_next (0 or more)")
-    return _deliverable("job_next", job.next_unit(conn(), tok, calls))
+    return _deliverable("job_next", job.next_unit(conn(), tok))
 
 
 @register("job_status",

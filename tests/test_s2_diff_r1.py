@@ -25,11 +25,10 @@ class LargeCheck(StoreCase):
         for i in range(80):
             drv.add_payments(["2026-08-05"], counterparty=f"Vendor {i:02d}")
         asks.request_work(self.conn, "check", "cron")
+        drv.casa_cut = 80              # Casa's cut and its 3-batch guard (the driver's)
         units = drv.run_job(A, started_by="scheduled")
-        flags = [u["progress"]["progressed"] for u in units if u["unit"] == "end-batch"]
-        self.assertGreaterEqual(len(flags), 3, flags)    # several batches
-        for i in range(len(flags) - 2):
-            self.assertNotEqual(flags[i:i + 3], [False] * 3, flags)
+        self.assertGreaterEqual(len(drv.batch_calls), 3, drv.batch_calls)   # several
+        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
         self.assertEqual(units[-1]["unit"], "complete")
         self.assertEqual(self.conn.execute("SELECT count(*) FROM run_work WHERE outcome IS"
                                            " NULL").fetchone()[0], 0)
@@ -90,13 +89,13 @@ class Tools(StoreCase):
             self.handed.append(u)       # posted; its receipt arrives when deliver() says
         else:
             raise AssertionError(u)
-        return self.call("job_next", pass_token=t, calls_made=0)
+        return self.call("job_next", pass_token=t)
 
     def until(self, u, unit, job_id=A):
         for _ in range(400):
             if u["unit"] == unit:
                 return u
-            u = self.call("job_next", job_id=job_id) if u["unit"] == "end-batch" else self.do(u)
+            u = self.do(u)
         self.fail(f"no {unit} unit")
 
     def deliver(self):
@@ -183,7 +182,7 @@ class InstanceSwitch(Tools):
         self.assertEqual((b["ledger_instance"], b["ledger_reset_ack"]), (self.LEDGER, 1))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0],
                          snaps)
-        u = self.call("job_next", pass_token=u["pass_token"], calls_made=0)
+        u = self.call("job_next", pass_token=u["pass_token"])
         self.assertEqual(u["unit"], "view")               # the run's one message: the stop
         self.assertIsNone(job.live_job_pass(self.conn))
         r = self.conn.execute("SELECT state, outcome FROM work_requests ORDER BY request_id"

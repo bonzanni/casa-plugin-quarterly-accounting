@@ -1,8 +1,8 @@
 """Live Q2 run 1 on ba9e512 (PLAY, 2026-10-07), each failure reproduced:
-- the model sent `calls_made` as the calls since its previous job_next, and skipped a
-  `report: true` attached to a work unit — no batch ever reported, Casa's 3-batch guard
-  ended a productive run. Now `calls_made` is that delta (the server sums it per claim),
-  and a claim that persisted work gets the `report` unit alone;
+- the model miscounted its calls for the batch budget, and skipped a `report: true`
+  attached to a work unit — no batch ever reported, Casa's 3-batch guard ended a productive
+  run. Now a claim that persisted work gets the `report` unit alone (and since the
+  no-budget ruling, tests/test_no_budget.py, the server counts no calls at all);
 - a reading that copies the payment: the same bytes filed again with a different amount
   make the amount unknown — such a document is proposed, never matched."""
 from tests._base import StoreCase
@@ -27,20 +27,6 @@ class ProgressReachesCasa(StoreCase):
         self.assertEqual(dict(self.conn.execute(
             "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
             {"matched": 60})
-
-    def test_calls_made_is_summed_per_claim(self):
-        import job, loop
-        drv = JobDriver(self, payments=1)
-        tok = drv.claim("a2a2a2a2-02")
-        for _ in range(4):
-            u = job.next_unit(self.conn, tok, 0)
-            if u["unit"] == "payment":
-                break
-            drv.do(u, tok)
-        units = [job.next_unit(self.conn, tok, 20)["unit"] for _ in range(4)]   # 4 × 20
-        self.assertIn("end-batch", units)
-        self.assertGreaterEqual(self.conn.execute("SELECT calls FROM claims WHERE gen=?",
-                                                  (tok,)).fetchone()[0], loop.CALLS_SOFT)
 
 
 class ConflictingReadings(StoreCase):
@@ -162,16 +148,14 @@ class SchemaTwelveStoresUpgrade(StoreCase):
         """Round f1 (Astra S1): run 1 left schema-12 stores live; 12 → 13 adds the claim
         and document columns, and the job's job_next runs on the upgraded store."""
         conn = self.conn
-        for table, col in (("claims", "calls"), ("claims", "said_seq"),
-                           ("documents", "amount_conflict")):
+        for table, col in (("claims", "said_seq"), ("documents", "amount_conflict")):
             conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")      # ba9e512's shape
         conn.execute("UPDATE meta SET value='12' WHERE key='schema_version'")
         conn.commit()
         db.migrate(conn)
         cols = {(t, r[1]) for t in ("claims", "documents")
                 for r in conn.execute(f"PRAGMA table_info({t})")}
-        self.assertTrue({("claims", "calls"), ("claims", "said_seq"),
-                         ("documents", "amount_conflict")} <= cols)
+        self.assertTrue({("claims", "said_seq"), ("documents", "amount_conflict")} <= cols)
         self.bind()
         drv = JobDriver(self, payments=3)
         for i in range(3):

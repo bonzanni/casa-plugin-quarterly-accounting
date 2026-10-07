@@ -29,7 +29,7 @@ class FoundAttachmentsAreFiled(StoreCase):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"ZAP-{i + 1}")
         drv.casa_cut = CASA_CALLS
         drv.run_job("d6d6d6d6-a1")     # the sim records each search first, as the skill says
-        self.assertEqual(drv.cuts, 0)
+        self.assertEqual(drv.cuts, len(drv.batch_calls) - 1)   # no budget: Casa ends a batch
         self.assertTrue(all(drv.batch_reported), drv.batch_reported)
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM documents WHERE source='gmail'").fetchone()[0], 60)

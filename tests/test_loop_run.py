@@ -1,6 +1,6 @@
-"""Simple loop §2 (rev 17): one Casa job run is one pass; the units in order; payments are
-handed out while calls_made < 65, then end-batch; progress is reported only at a batch's
-end; an operator-started run ends with ONE end message; a scheduled run is silent unless an
+"""Simple loop §2 (rev 17): one Casa job run is one pass; the units in order; no call
+budget (2026-10-07): work is handed until Casa cuts the batch, progress rides the `report`
+unit alone; an operator-started run ends with ONE end message; a scheduled run is silent unless an
 item is in a new state, and then lists only those (rev 17); the mirror leaves a rerun with
 nothing to write."""
 from tests._base import StoreCase
@@ -26,24 +26,21 @@ class Run(StoreCase):
         self.assertIn("3 missing", self.conn.execute("SELECT text FROM renders WHERE"
                                                      " render_id=?", (end,)).fetchone()[0])
 
-    def test_payments_are_handed_out_only_below_65_calls(self):
-        import job, loop
+    def test_a_report_rides_alone_once_per_claim_and_the_next_claim_reports_the_rest(self):
+        """Q2 run 1 and the no-budget ruling: a report never rides beside a work unit; a
+        claim reports once (Casa keeps a batch's LAST report); the work after it is reported
+        by the next claim, first thing."""
+        import job
         tok = job.claim(self.conn, "aaaaaaaa-2", started_by="Started by: operator")
         for _ in range(4):                          # probes, snapshot, report, filing
-            u = job.next_unit(self.conn, tok, 0)
+            u = job.next_unit(self.conn, tok)
             self.drv.do(u, tok)
-        u = job.next_unit(self.conn, tok, loop.CALLS_SOFT)
-        self.assertEqual(u["unit"], "end-batch")
-        self.assertTrue(u["report"])
-        self.assertTrue(u["progress"]["progressed"])        # the filing and import progressed
-        tok = job.claim(self.conn, "aaaaaaaa-2")
-        u = job.next_unit(self.conn, tok, 0)
-        self.assertEqual(u["unit"], "payment")
-        # Q2 run 1: a report never rides beside a work unit — the `report` unit, alone, or
-        # the batch's end carry it
-        self.assertFalse(u["report"])
+        u = job.next_unit(self.conn, tok)
+        self.assertEqual((u["unit"], u["report"]), ("payment", False))
         self.drv.do(u, tok)                         # the payment decided: work persisted
-        u = job.next_unit(self.conn, tok, 1)
+        self.assertNotEqual(job.next_unit(self.conn, tok)["unit"], "report")
+        tok = job.claim(self.conn, "aaaaaaaa-2")    # Casa cut the batch; a new one
+        u = job.next_unit(self.conn, tok)
         self.assertEqual((u["unit"], u["report"], u["progress"]["progressed"]),
                          ("report", True, True))
 
@@ -180,9 +177,7 @@ class Carries(StoreCase):
         rest = []
         while not rest or rest[-1]["unit"] != "complete":
             rest.append(drv.next())
-            if rest[-1]["unit"] == "end-batch":
-                drv.claim("dddddddd-3")                      # a fresh batch (turn)
-            elif rest[-1]["unit"] != "complete":
+            if rest[-1]["unit"] != "complete":
                 drv.do(rest[-1], drv.token)
         self.assertEqual([u["unit"] for u in rest].count("payment"), 1)
         (row,) = self.conn.execute("SELECT why, outcome, attempts FROM run_work").fetchall()
@@ -286,15 +281,17 @@ class Carries(StoreCase):
 
 
 class Surface(StoreCase):
-    def test_job_next_needs_calls_made_with_a_pass_token(self):
+    def test_job_next_takes_a_pass_token_alone_and_ignores_a_stray_count(self):
+        """No call budget (2026-10-07): a model that still sends a call count is not
+        refused for it — it changes nothing."""
         import qa_server, tools  # noqa: F401
         self.bind()
         fn = qa_server.TOOLS["job_next"]["fn"]
         tok = fn({"job_id": "eeeeeeee-1", "started_by": "Started by: operator"})["pass_token"]
-        for bad in ({}, {"calls_made": -1}, {"calls_made": True}, {"calls_made": "3"}):
-            with self.assertRaises(db.Refusal):
-                fn({"pass_token": tok, **bad})
-        self.assertEqual(fn({"pass_token": tok, "calls_made": 3})["pass_token"], tok)
+        self.assertEqual(fn({"pass_token": tok})["pass_token"], tok)
+        stray = {"calls_made": 79}                  # removed-name: asserted absent
+        self.assertEqual(fn({"pass_token": tok, **stray})["pass_token"], tok)
+        self.assertNotIn("calls_made", qa_server.TOOLS["job_next"]["schema"]["properties"])  # removed-name: asserted absent
 
     def test_the_gmail_streak_counts_runs_not_probes(self):
         import passes
@@ -376,28 +373,6 @@ class ReviewRound1(StoreCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM alerts WHERE kind="
                                            "'run-stopped' AND sent_at IS NULL").fetchone()[0], 0)
 
-    def test_the_import_and_the_filing_wait_for_a_fresh_batch_past_the_soft_bound(self):
-        """2: snapshot and filing are handed out only while calls_made < CALLS_SOFT."""
-        import job, loop
-        drv = JobDriver(self, payments=1)
-        tok = drv.claim("ffffffff-a")
-        u = job.next_unit(self.conn, tok, 0)
-        self.assertEqual(u["unit"], "probes")
-        drv.do(u, tok)
-        self.assertEqual(job.next_unit(self.conn, tok, loop.CALLS_SOFT)["unit"], "end-batch")
-        tok = drv.claim("ffffffff-a")
-        u = job.next_unit(self.conn, tok, 0)
-        self.assertEqual(u["unit"], "probes")                 # a new turn reads again
-        drv.do(u, tok)
-        u = job.next_unit(self.conn, tok, 0)
-        self.assertEqual(u["unit"], "snapshot")
-        drv.do(u, tok)
-        # the import persisted: the `report` unit (it fits), then the batch ends
-        self.assertEqual(job.next_unit(self.conn, tok, loop.CALLS_SOFT)["unit"], "report")
-        self.assertEqual(job.next_unit(self.conn, tok, 1)["unit"], "end-batch")
-        tok = drv.claim("ffffffff-a")
-        self.assertEqual(job.next_unit(self.conn, tok, 0)["unit"], "filing")
-
     def test_weekly_runs_age_a_missing_payment_out_and_rearm_it(self):
         """3, D7: a missing payment is searched on three weekly runs, then aged out and left
         off the list until AGE_OUT_REARM_S after its last counted search."""
@@ -440,11 +415,11 @@ class ReviewRound1(StoreCase):
         pass_d = self.conn.execute("SELECT pass_id FROM runs WHERE job_id='ffffffff-d'"
                                    ).fetchone()[0]
         b = job.claim(self.conn, "ffffffff-c")                      # the finished run again
-        self.assertEqual(job.next_unit(self.conn, b, 0)["unit"], "complete")
+        self.assertEqual(job.next_unit(self.conn, b)["unit"], "complete")
         self.assertIsNone(self.conn.execute("SELECT ended_at FROM passes WHERE pass_id=?",
                                             (pass_d,)).fetchone()[0])
         a = job.claim(self.conn, "ffffffff-d")                      # it carries on
-        self.assertEqual(job.next_unit(self.conn, a, 0)["unit"], "probes")
+        self.assertEqual(job.next_unit(self.conn, a)["unit"], "probes")
 
 
 class TaskElevenCarries(StoreCase):

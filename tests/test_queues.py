@@ -151,9 +151,7 @@ class Queues(StoreCase):
         rest = []
         while not rest or rest[-1]["unit"] != "complete":
             rest.append(drv.next())
-            if rest[-1]["unit"] == "end-batch":
-                drv.claim("aaaa0007-1")                      # a fresh batch (turn)
-            elif rest[-1]["unit"] != "complete":
+            if rest[-1]["unit"] != "complete":
                 with drv._broker():
                     drv.do(rest[-1], drv.token)
         kinds = [u["unit"] for u in rest]

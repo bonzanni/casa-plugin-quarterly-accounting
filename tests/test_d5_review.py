@@ -33,10 +33,10 @@ class OneMembershipAcrossRuns(StoreCase):
         drv.add_payments([drv.DATES[i % 3] for i in range(40, 83)])
         for i in range(40, 83):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"INV-{i + 1}")
-        before = drv.tool_calls["ingest_document"]
+        before, cuts = drv.tool_calls["ingest_document"], drv.cuts
         drv.run_job("d5d5d5d5-a2")
         self.assertEqual(drv.tool_calls["ingest_document"] - before, 43)  # no old one again
-        self.assertEqual(drv.cuts, 0)
+        self.assertEqual(drv.cuts - cuts, len(drv.batch_calls) - 1)   # no budget: Casa ends a batch
         self.assertTrue(all(drv.batch_reported), drv.batch_reported)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM documents").fetchone()[0], 83)
         self.assertEqual(dict(self.conn.execute(

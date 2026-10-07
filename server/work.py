@@ -80,7 +80,7 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
                              (db.next_seq(conn), job_id, pids[0]))
             queues.enqueue(conn, job_id, unit, "ref", [r for r in refs if not filed(conn, r)])
             rows = queues.queued(conn, job_id, unit, "ref")
-            answer.update(files=[r["key"] for r in queues.take_fitting(rows, 10**6)],
+            answer.update(files=[r["key"] for r in queues.take_fitting(rows)],
                           files_total=len(rows))
         if token is not None and effort:
             decide.note_progress(conn, token)       # §2.2 `progressed`: a search recorded

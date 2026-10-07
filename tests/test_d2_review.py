@@ -1,8 +1,7 @@
 """Diff round d2 (Astra, 26b68ee..3d9f262), the three accepted findings, each reproduced
 through the real surface (qa_server.TOOLS, a real bank-feed):
-- Astra S1a: own-mail filing is handed within a call budget (d3 generalized it to every
-  unit: `max_calls`); the model checkpoints with job_next(calls_made) at it, so no batch is
-  cut at Casa's 80 calls without a progress report, and filing ends only once its queue
+- Astra S1a: no batch Casa cuts at 80 calls is left without a progress report (since the
+  no-budget ruling of 2026-10-07: the next claim reports it), and filing ends only once its queue
   (queues: the own-mail search and every attachment it found) is empty;
 - Astra S1b: a handover that joins an operator check keeps the check's full summary and
   Review order, the handover's receipt line added; the handover-only rendering is for a
@@ -33,14 +32,13 @@ class OwnMailFilingIsSliced(StoreCase):
             g.own(70000 + i, day="2026-07-20")
         self.drv.casa_cut = CASA_CALLS
         units = self.drv.run_job("d2d2d2d2-a1")
-        # Casa never cut a batch: every batch ended at or under its 80 calls
-        self.assertEqual(self.drv.cuts, 0)
+        # no call budget: Casa's cut ends every batch but the last, each at most 80 calls
+        self.assertEqual(self.drv.cuts, len(self.drv.batch_calls) - 1)
         self.assertLessEqual(max(self.drv.batch_calls), CASA_CALLS, self.drv.batch_calls)
         self.assertGreaterEqual(len(self.drv.batch_calls), 4)    # 83 files: several batches
         self.assertTrue(all(self.drv.batch_reported), self.drv.batch_reported)
         filing = [u for u in units if u["unit"] == "filing"]
         self.assertGreater(len(filing), 1)
-        self.assertTrue(all(u["max_calls"] <= loop.CALLS_SOFT for u in filing))
         self.assertEqual(self.conn.execute("SELECT count(*) FROM documents").fetchone()[0], 83)
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM operator_refs WHERE source='manual-email'").fetchone()[0], 83)
@@ -78,13 +76,9 @@ class OwnMailFilingIsSliced(StoreCase):
                     "SELECT listed_at FROM runs WHERE job_id='d2d2d2d2-a2'").fetchone()[0])
             if u["unit"] == "payment":
                 break
-            if u["unit"] == "end-batch":                    # a fresh batch (turn)
-                self.drv.claim("d2d2d2d2-a2")
-                continue
             self.drv.do(u, self.drv.token)
-        self.assertGreater(len(seen), 1)               # handed again, filed refs growing
+        self.assertGreaterEqual(len(seen), 1)          # handed until its queue is empty
         self.assertEqual(seen, sorted(seen))
-        self.assertGreater(seen[-1], 0)
         self.assertEqual(queued(), 0)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM operator_refs").fetchone()[0],
                          30)

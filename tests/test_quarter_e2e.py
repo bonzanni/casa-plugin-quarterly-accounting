@@ -332,8 +332,8 @@ class CheckQ2(StoreCase):
 class RealisticQuarter(StoreCase):
     """§5, §6.1 as code (plan round 6, Terra S2): a Q3-shaped quarter of 60 payments over 18
     vendors — recurring monthly charges, FX rows with USD invoices, tax and fee rows, one
-    0.00 authorisation, one PDNG row — driven through sim_job with calls_made counted per
-    tool call. Completion, no partial, at most 7 batches, every payment exactly once. The
+    0.00 authorisation, one PDNG row — driven through sim_job with every tool call counted
+    against Casa's cut. Completion, no partial, at most 7 batches, every payment exactly once. The
     dollar cost is not measurable offline (no model): PLAY measures it (§6.7)."""
 
     def test_sixty_payments_finish_within_seven_batches(self):
@@ -342,9 +342,9 @@ class RealisticQuarter(StoreCase):
         self.bind()
         drv = JobDriver(self, payments=0)
         rows = drv.quarter_fixture_60()
+        drv.casa_cut = 80                         # no call budget: Casa's cut ends a batch
         units = drv.run_job("ffffffff-1", started_by="operator")
-        batches = 1 + sum(1 for u in units if u["unit"] == "end-batch")
-        self.assertLessEqual(batches, 7)
+        self.assertLessEqual(len(drv.batch_calls), 7, drv.batch_calls)
         self.assertEqual(units[-1]["unit"], "complete")
         self.assertEqual(self.conn.execute("SELECT partial FROM runs WHERE job_id="
                                            "'ffffffff-1'").fetchone()[0], 0)
@@ -360,14 +360,16 @@ class RealisticQuarter(StoreCase):
                          {"matched": 42, "proposed": 5, "missing": 5, "not_needed": 7,
                           "pending": 1})
         # rev 18.4: per payment, and a recurring vendor's first search (its quarter) files
-        # what its later payments need — so a vendor is searched at most once per payment,
-        # and the hinted vendors only hinted
+        # what its later payments need — so a vendor is searched at most once per payment
+        # (no call budget: a payment Casa cut between a search and its record repeats that
+        # one search when redone), and the hinted vendors only hinted
         kinds = collections.Counter((v, k) for v, k, _ in drv.search_log)
         per_vendor = collections.Counter(drv._spec[n]["vendor"] for n in rows)
-        self.assertTrue(all(c <= per_vendor[v] for (v, _), c in kinds.items()), kinds)
-        self.assertLessEqual(len(drv.search_log), 40)
+        excess = sum(max(0, c - per_vendor[v]) for (v, _), c in kinds.items())
+        self.assertLessEqual(excess, drv.cuts, kinds)
+        self.assertLessEqual(len(drv.search_log), 40 + drv.cuts)
         self.assertEqual({k for (v, k) in kinds if v == "Notion"}, {"hinted"})
         self.assertFalse(drv.searches_of("IKEA Business") + drv.searches_of("Conrad"))
         # every turn stays inside Casa's 80-call turn (§2.2), counted honestly
-        self.assertLess(max(drv.batch_calls), 80, drv.batch_calls)
+        self.assertLessEqual(max(drv.batch_calls), 80, drv.batch_calls)
         self.assertEqual(sum(drv.batch_calls), drv.calls_total)

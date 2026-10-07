@@ -139,7 +139,7 @@ class RunEnd(StoreCase):
         text = job.run_end(self.conn, A)[0]
         self.assertEqual(text, "Accounting check interrupted before it finished.")
         self.assert_operator_text(text)
-        u = job.next_unit(self.conn, job.claim(self.conn, A), 0)
+        u = job.next_unit(self.conn, job.claim(self.conn, A))
         self.assertEqual((u["unit"], u["text"], u["progress"]["summary"]),
                          ("complete", text, text))
         self.assertEqual(job.status(self.conn, A), {"done": True, "text": text})

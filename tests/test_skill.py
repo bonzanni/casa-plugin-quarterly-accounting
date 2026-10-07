@@ -44,8 +44,6 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              "render_ids", "casa_delivery", "package_id",
              # the payment unit's fields (rev 18.4 §R18.1)
              "exact_fit", "search_window",
-             # d3: every unit's call budget
-             "max_calls",
              # queues: a unit's handed items and the probe's / record_search's answer
              "files", "files_total", "rows", "snapshot_id", "refs", "search",
              # rev 18.4: the payment unit's fields
@@ -314,12 +312,12 @@ class TestJob(TempEnv):
                       turn)
         first_call = re.search(r"`([a-z_]+)\(", turn).group(1)
         self.assertEqual(first_call, "job_next")
-        for phrase in ("call `job_next(pass_token=…, calls_made=",
+        for phrase in ("call `job_next(pass_token=…)`",
+                       "Keep going until `complete`: Casa ends the turn when its batch is full, "
+                       "and what a unit still owes then comes again.",
                        "`report` → `report_job_progress` with its `progress` verbatim, then "
-                       "`job_next`. Any answer with `report: true` likewise.",
+                       "`job_next`.",
                        "load all a unit needs in ONE `ToolSearch` `select:` call",
-                       "calls_made=<the tool calls you made since your previous job_next>",
-                       '`end-batch` → end the turn',
                        '`complete` → `report_job_progress` with its `progress`, then '
                        '`emit_completion(status="ok", text=<its text>)`',
                        "call `job_next(job_id=…)` once more; if that is refused too, end the "
@@ -354,13 +352,14 @@ class TestJob(TempEnv):
     def test_the_job_skill_names_exactly_the_new_units_and_rules(self):
         text = (ROOT / "skills/quarterly-job/SKILL.md").read_text()
         for unit in ("probes", "snapshot", "erasures", "filing", "payment", "mirror", "view",
-                     "post", "end-batch", "complete"):
+                     "post", "report", "complete"):
             self.assertIn(f"`{unit}`", text)
         for gone in ("sweep", "gmail-probe", "`item`", "`judge`", "build_quarterly_package",  # removed-name: asserted absent
                      "list_projections", "record_observation", "judged", "resolves",  # removed-name: asserted absent
-                     "set_expectation(", "window (default 10 days)"):
+                     "set_expectation(", "window (default 10 days)",
+                     "calls_made", "max_calls", "end-batch", "Budget"):  # removed-name: asserted absent
             self.assertNotIn(gone, text)
-        for rule in ("calls_made", "decide(", "exact_fit", "hint_sender", "searches_left",
+        for rule in ("decide(", "exact_fit", "hint_sender", "searches_left",
                      'search="hinted"', 'search="plain"',
                      "vendor-and-dates search", "record_mirror", "record_not_found",
                      "certain", "reset_store", "set_aside(", "refs=["):
@@ -421,13 +420,12 @@ class TestJob(TempEnv):
 
     READING = "amount_minor, currency, document_date, issuer, document_number, pass_token)`"
 
-    def test_every_unit_has_a_call_budget_and_what_it_owes_comes_again(self):
-        """d3, queues: a unit's `max_calls` — at it the model stops and checkpoints with
-        job_next; what the unit still owes is the server's and comes again."""
+    def test_what_a_unit_owes_comes_again(self):
+        """Queues; no call budget (2026-10-07): Casa's cut ends the turn, and what the unit
+        still owes is the server's and comes again."""
         turn = flat(section(JOB, "## Every turn", "**Refusals.**"))
-        self.assertIn("**Budget:** a unit carries `max_calls`, its closing write (`decide`, "
-                      "`record_mirror`) included: keep a call for it. At `max_calls`, stop "
-                      "and call `job_next`: what the unit still owes comes again.", turn)
+        self.assertIn("Casa ends the turn when its batch is full, and what a unit still owes "
+                      "then comes again.", turn)
         self.assertNotIn("filed_refs", JOB)                  # d5: one membership, the server's
         self.assertNotIn("max_files", JOB)
         self.assertNotIn("Which are new", JOB)

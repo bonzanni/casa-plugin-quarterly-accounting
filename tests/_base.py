@@ -108,9 +108,6 @@ class StoreCase(TempEnv):
             units.append(u)
             if u["unit"] in (stop_before, "complete"):
                 return units
-            if u["unit"] == "end-batch":
-                drv.claim(job_id, started_by)
-                continue
             drv.do(u, drv.token)
         raise AssertionError(f"no {stop_before} unit: {[u['unit'] for u in units]}")
 

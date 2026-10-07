@@ -130,11 +130,12 @@ def claim(conn, job_id, started_by=None) -> int:
 def _batch_of(conn, job_id, token, holder_changed) -> int:
     """The batch claim `token` belongs to (design r6, round 5): a new one — named by this
     claim's own gen — iff it is the job id's first claim, or that job id's latest claim
-    belongs to a batch answered `end-batch` or `complete`, or already holding
+    belongs to a batch answered `complete`, or already holding
     TURNS_PER_BATCH claims, or the live pass's holder changes with it; otherwise the
     latest claim's batch (a re-claim inside one batch). The claim count: a turn makes one
     claim and a Casa batch has at most turnsPerBatch turns, so the window is bounded even
-    when every Casa batch is cut before an `end-batch` answer."""
+    when every Casa batch is cut (no call budget: Casa's cut ends every batch but the
+    last)."""
     prev = conn.execute("SELECT batch FROM claims WHERE job_id=? ORDER BY gen DESC LIMIT 1",
                         (job_id,)).fetchone()
     if prev is None or holder_changed:
@@ -144,10 +145,10 @@ def _batch_of(conn, job_id, token, holder_changed) -> int:
     return token if closed or n >= TURNS_PER_BATCH else prev["batch"]
 
 
-def next_unit(conn, token, calls_made=0) -> dict:
+def next_unit(conn, token) -> dict:
     """The cursor is the simple loop's (loop.next_unit, design rev 17 §2)."""
     import loop
-    return loop.next_unit(conn, token, calls_made)
+    return loop.next_unit(conn, token)
 
 
 # --- the job posts its own results (S7 §5) -------------------------------------------

@@ -29,7 +29,7 @@ class StoppedResult(StoreCase):
         t = job.claim(self.conn, A)
         with db.tx(self.conn):
             loop.end_pass(self.conn, t, "stopped", {})
-        u = job.next_unit(self.conn, t, 0)
+        u = job.next_unit(self.conn, t)
         self.assertEqual((u["unit"], u["text"]), ("complete", "Accounting check stopped."))
 
     def test_a_cron_check_that_completed_shows_nothing(self):
@@ -39,6 +39,6 @@ class StoppedResult(StoreCase):
         t = job.claim(self.conn, A)                   # the implicit cron check, taken
         with db.tx(self.conn):
             loop.end_pass(self.conn, t, "complete")
-        self.assertEqual(job.next_unit(self.conn, t, 0)["unit"], "complete")
+        self.assertEqual(job.next_unit(self.conn, t)["unit"], "complete")
         self.assertEqual(self.conn.execute("SELECT state FROM work_requests").fetchone()[0],
                          "reported")

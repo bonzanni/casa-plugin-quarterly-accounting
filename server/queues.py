@@ -18,8 +18,6 @@ from __future__ import annotations
 import db
 
 ATTEMPTS_MAX = 2         # D8: an item is handed again at most once without progress
-COST = {"erase": 2, "search": 2, "ref": 3}   # calls per item: get_transaction + a write;
-# search_emails + the probe; download + Read + ingest_document
 UPSTREAM = ("erase", "search", "ref")        # every kind a decision depends on (rule 5)
 
 
@@ -94,16 +92,16 @@ CHARS_MAX = 12_000       # d4: a hand-out's exact refs, at most this many charac
 KEY_MAX = 4_000          # one ref's length: refused beyond it, never clipped
 
 
-def take_fitting(rows, room) -> list:
-    """The queued items that fit `room` calls (and CHARS_MAX of keys), oldest first: a
-    hand-out."""
-    out, used, chars = [], 0, 0
+def take_fitting(rows) -> list:
+    """The queued items whose keys fit CHARS_MAX (the answer's size; at least one), oldest
+    first: a hand-out. No call budget (operator ruling 2026-10-07): an item persists as it
+    is done, and one a cut interrupted comes again."""
+    out, chars = [], 0
     for r in rows:
         chars += len(r["key"]) + 4
-        if used + COST[r["kind"]] > room or (out and chars > CHARS_MAX):
+        if out and chars > CHARS_MAX:
             break
         out.append(r)
-        used += COST[r["kind"]]
     return out
 
 

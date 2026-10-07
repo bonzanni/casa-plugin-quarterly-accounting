@@ -1,8 +1,8 @@
 """Diff round d4 (Astra, 26b68ee..29f0f46), the two accepted findings, reproduced through
 the real surface (qa_server.TOOLS, a real bank-feed) under Casa's 80-call cut:
-- Astra S1a (ruled: generalize within the d3 budget rule): a unit's `max_calls` keeps its
-  own closing write (record_mirror, decide) and the job_next checkpoint; a
-  unit is handed only when its least work and its closing calls fit (loop.unit_fits);
+- Astra S1a: a mirror unit's bank writes are closed by its record_mirror — since the
+  no-budget ruling (2026-10-07) by handing the mirror in chunks of loop.MIRROR_CALLS, so a
+  cut repeats at most one chunk;
 - Astra S1b: filing membership is decided on the EXACT refs — the gmail probe carries every
   attachment found; the ones no ingest filed join the filing unit's queue and are answered
   as `files` (no clipped list for the model to compare)."""
@@ -25,7 +25,7 @@ class MirrorKeepsItsAck(StoreCase):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"INV-{i + 1}")
         drv.casa_cut = CASA_CALLS
         units = drv.run_job("d4d4d4d4-a1")
-        self.assertEqual(drv.cuts, 0)
+        self.assertEqual(drv.cuts, len(drv.batch_calls) - 1)      # only Casa ends a batch
         self.assertLessEqual(max(drv.batch_calls), CASA_CALLS, drv.batch_calls)
         self.assertTrue(all(drv.batch_reported), drv.batch_reported)
         self.assertEqual(dict(self.conn.execute(
@@ -38,27 +38,10 @@ class MirrorKeepsItsAck(StoreCase):
             "SELECT completed_at FROM runs WHERE job_id='d4d4d4d4-a1'").fetchone()[0])
         mirrors = [u for u in units if u["unit"] == "mirror"]
         self.assertGreater(len(mirrors), 1)                   # the mirror spans batches
-        for u in mirrors:                                     # its calls + record_mirror fit
-            self.assertLessEqual(len(u["calls"]) + loop.CLOSING["mirror"], u["max_calls"])
-        for u in units:                                       # every unit's minimum fits
-            if u["unit"] not in ("end-batch", "complete"):
-                self.assertGreaterEqual(u["max_calls"], loop.MIN_WORK.get(u["unit"], 1)
-                                        + loop.CLOSING.get(u["unit"], 0), u["unit"])
+        for u in mirrors:                                     # a chunk at most
+            self.assertLessEqual(len(u["calls"]), loop.MIRROR_CALLS)
         again = drv.run_job("d4d4d4d4-a2", started_by="scheduled")
         self.assertEqual(sum(len(u["calls"]) for u in again if u["unit"] == "mirror"), 0)
-
-    def test_a_mirror_unit_leaves_a_call_for_record_mirror(self):
-        """Unit level: handed at any batch position, a mirror unit's calls plus its
-        record_mirror fit its max_calls, and it is not handed when even one call and the
-        ack do not fit."""
-        import loop
-        for made in range(0, 80):
-            room = loop.unit_room("mirror", made)
-            if loop.unit_fits("mirror", made):
-                self.assertGreaterEqual(room - loop.CLOSING["mirror"], 1)
-                self.assertLessEqual(made + room + 1, loop.CALLS_HARD)
-            else:
-                self.assertLess(room, 2)
 
 
 class FilingComparesExactRefs(StoreCase):
@@ -79,7 +62,7 @@ class FilingComparesExactRefs(StoreCase):
         self.assertGreater(len(self.long_ref(0)), 200)
         drv.casa_cut = CASA_CALLS
         drv.run_job("d4d4d4d4-b1")
-        self.assertEqual(drv.cuts, 0)
+        self.assertEqual(drv.cuts, len(drv.batch_calls) - 1)   # no budget: Casa ends a batch
         self.assertTrue(all(drv.batch_reported), drv.batch_reported)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM documents").fetchone()[0], 60)
         self.assertEqual(sorted(r[0] for r in self.conn.execute(

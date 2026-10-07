@@ -20,7 +20,11 @@ builds on it.
   real batch cap, `"batches": 20`. Each payment comes with its candidate documents and their
   stored reading; when nothing fits, the job searches that vendor's mail (at most three
   searches a payment), files every invoice it finds, and decides the payment in one call.
-  Progress is one definition, read by Casa's batch report and by the hand-outs alike.
+  Progress is one definition, read by Casa's batch report and by the hand-outs alike. There
+  is no call budget: work is handed until Casa ends the batch at its turn limit, and a
+  standalone `report` step reports the work since the last report (a batch Casa cut is
+  reported by the next one). Live Q2 run 1 showed a budget the model must count for is
+  fragile.
 - **Owed work survives a cut.** Everything a unit owes is a server row from the moment it is
   known: each erase candidate, the own-mail search and every attachment it found, every
   attachment a payment's search found (`record_search` carries `refs`, recorded right after
@@ -34,15 +38,19 @@ builds on it.
 - **The floor and decide.** A match needs the same currency and the exact amount; another
   currency is only proposed; a document is held only by a match or a proposal's chosen
   document (a proposal's alternatives hold nothing); a no-op re-decision changes nothing.
-  `record_missing` records a payment with no document.
+  `record_missing` records a payment with no document. A document is read before it is
+  filed, with only what it prints — never the payment's amount; two readings of the same
+  file that disagree make its amount unknown for good, and such a document is only ever
+  proposed (a machine match on it turns into a proposal).
 - **Later documents and handovers.** A document found later by mail never reopens a match or a
   proposal: it is filed and listed in the package as unmatched. A document the operator hands
   over for a payment that already has one gets ONE card — "… already has an invoice. Current: …
   New: …" [Keep current] [Use new] — bound to what it showed; nothing is replaced without the
   tap.
 - **The mirror.** The bank ledger's `acct::` tags and notes are written as a diff against what
-  was last mirrored, in plain note text, in grouped calls (`record_mirror`); rows that left
-  scope lose their tags.
+  was last mirrored, in plain note text, in grouped calls (`record_mirror`, after each chunk
+  of 8); rows that left scope lose their tags. A cut inside a chunk may repeat up to 8 calls:
+  a repeated tag call changes nothing, a repeated note call adds an identical line.
 - **The end message and its cards.** One message ends a run, with a Review order, paged vendor
   cards and an open-items card; a tap's receipt posts the next card (#1302), and the ready
   notice announces a finished package.

@@ -169,11 +169,12 @@ class ToolLayer(StoreCase):
         self.assertEqual(first["unit"], "probes")
         self.assertTrue(self.call("job_next").startswith("refused: "))
 
-    def test_the_descriptions_carry_calls_made_and_never_a_claim(self):
+    def test_the_descriptions_say_keep_going_and_never_a_claim(self):
         import qa_server, tools  # noqa: F401
         nxt = " ".join(qa_server.TOOLS["job_next"]["description"].split())
-        self.assertIn("job_next(pass_token=…, calls_made=<the tool calls you made since "
-                      "your previous job_next>)", nxt)
+        self.assertIn("then after each unit job_next(pass_token=…)", nxt)
+        self.assertIn("keep going until `complete`; Casa ends the turn when its batch is "
+                      "full, and an unfinished unit comes again", nxt)
         self.assertIn("`report` → report_job_progress with its `progress` verbatim, then "
                       "job_next", nxt)
         status = " ".join(qa_server.TOOLS["job_status"]["description"].split())

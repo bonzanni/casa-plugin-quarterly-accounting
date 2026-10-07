@@ -196,7 +196,7 @@ def _filing_search(conn, token, refs) -> dict:
         todo = [r for r in refs if not work.filed(conn, r)]
         queues.enqueue(conn, job_id, "filing", "ref", todo)
     rows = queues.queued(conn, job_id, "filing", "ref")
-    return {"files": [r["key"] for r in queues.take_fitting(rows, 10**6)],
+    return {"files": [r["key"] for r in queues.take_fitting(rows)],
             "files_total": len(rows)}
 
 

@@ -43,10 +43,10 @@ class LastReportHolds(StoreCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM run_items WHERE"
                                            " state='queued'").fetchone()[0], 0)
 
-    def test_a_batch_that_worked_ends_with_a_true_report(self):
-        """Astra's order: the first payment is worked; the next answer reports progress
-        (true); the second payment is handed but nothing more is done before the batch's
-        end — its end-batch report, Casa's LAST, is still true."""
+    def test_a_batch_that_worked_is_reported_true(self):
+        """Astra's order: the first payment is worked; the second is handed, then Casa cuts
+        the batch (no call budget: every batch but the last ends so) — the next claim's
+        first answer reports the work, true."""
         import job
         drv = JobDriver(self, payments=2)
         drv.claim("e4e4e4e4-a2")
@@ -59,10 +59,11 @@ class LastReportHolds(StoreCase):
                 if seen == 2:
                     break
             drv.do(u, drv.token)
-        u = job.next_unit(self.conn, drv.token, 79)          # the batch's end, nothing more
-        self.assertEqual(u["unit"], "end-batch")
+        tok = job.claim(self.conn, "e4e4e4e4-a2")                # Casa's cut, a new batch
+        u = job.next_unit(self.conn, tok)
+        self.assertEqual(u["unit"], "report")
         self.assertTrue(u["report"])
-        self.assertTrue(u["progress"]["progressed"])          # the last report stays true
+        self.assertTrue(u["progress"]["progressed"])
 
 
 class UnmatchedByDocumentDate(StoreCase):
