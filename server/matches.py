@@ -12,6 +12,7 @@ import json
 import amounts
 import authority
 import authorship
+import budget
 import db
 import documents
 import fx
@@ -128,10 +129,53 @@ def holders(conn, doc_id) -> list:
     return [(r["pid"], r["how"]) for r in conn.execute(HOLDERS_SQL, {"d": doc_id})]
 
 
+def purchase_holders(conn, doc_id) -> list:
+    """Issue #48: every (pid, how, held doc) holding ANY document of `doc_id`'s purchase
+    (documents.purchase: the same issuer and number) — the job's ownership. `holders`
+    stays per document: the operator's taps are not limited by the purchase."""
+    return [(p, how, d) for d in documents.purchase(conn, doc_id)
+            for p, how in holders(conn, d)]
+
+
 def taken_elsewhere(conn, doc_id, pid) -> bool:
-    """R5: held by ANOTHER payment. What `pid` itself holds is never taken against `pid`
-    (§2.2 reopening)."""
-    return any(p != pid for p, _ in holders(conn, doc_id))
+    """R5, purchase-wide (issue #48): held by ANOTHER payment through any document of its
+    purchase. What `pid` itself holds is never taken against `pid` (§2.2 reopening). The
+    job's readers: the floor, the exact fit, the candidates, a card's offered alternatives,
+    the replace question."""
+    return taken_by(conn, doc_id, pid) is not None
+
+
+def taken_by(conn, doc_id, pid):
+    """(other pid, held doc) holding `doc_id`'s purchase, the document itself first; None."""
+    return next(((p, d) for p, _how, d in sorted(purchase_holders(conn, doc_id),
+                                                  key=lambda h: h[2] != doc_id)
+                 if p != pid), None)
+
+
+def _payment_words(conn, pid) -> str:
+    row = lineage.live_row(conn, lineage.projection(conn, pid))
+    if row is None:
+        return f"payment #{pid}"
+    return (f"the payment of {row['booking_date'] or row['value_date']} "
+            f"({amounts.fmt(row['amount_minor'], row['currency'])})")
+
+
+def taken_refusal(conn, doc_id, pid) -> str | None:
+    """The job's refusal when `doc_id`'s purchase backs another payment, naming that
+    payment so the job searches for this payment's own document (issue #48); None."""
+    t = taken_by(conn, doc_id, pid)
+    if t is None:
+        return None
+    other, held = t
+    if held == doc_id:
+        return (f"document #{doc_id} is taken: another payment's match or proposal holds "
+                "it")
+    d = documents._doc(conn, held)
+    return (f"document #{doc_id} is the same purchase as document #{held} "
+            f"({budget.clip(d['issuer'] or d['counterparty'], 80)} "
+            f"{budget.clip(d['document_number'], 40)}), which already "
+            f"backs {_payment_words(conn, other)}: one purchase backs one payment — search "
+            "for this payment's own document")
 
 
 def _own_machine(st) -> list:
@@ -169,9 +213,9 @@ def _floor_doc(conn, kind, pid, row, exp, doc_id, document_date):
         # that disagree) is never matched by the job — only proposed, for the operator
         raise db.Refusal(f"document #{doc_id}'s amount is unknown (never read, or its "
                          "readings disagree): propose it, never match it")
-    if taken_elsewhere(conn, doc_id, pid):
-        raise db.Refusal(f"document #{doc_id} is taken: another payment's match or proposal "
-                         "holds it")
+    taken = taken_refusal(conn, doc_id, pid)
+    if taken is not None:
+        raise db.Refusal(taken)
     if kind == "pair" and doc["currency"] != row["currency"]:
         raise db.Refusal(f"document #{doc_id} is in {doc['currency']} and the payment in "
                          f"{row['currency']}: a different currency is only ever proposed")

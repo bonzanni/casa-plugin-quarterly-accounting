@@ -117,6 +117,9 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
    every attachment it found:
    `record_search(pid, search="hinted", queries=[…], found_candidate=…, refs=[each attachment found, as <message id>:<attachment id>; [] when none], exhausted=<true on your last>, pass_token)`
    (`search="plain"`, `search="payment"`). File EVERY invoice of its answer's `files` as in 1.
+   On the reference or order-number search, also `emails`: every vendor email it returned,
+   `{"id": <message id>, "listed": true|false}`; `missing` waits for each unlisted one
+   (`emails_to_list`).
 4. **Decide it in ONE call:** `decide(pass_token, entries=[{pid, expected_revision, …}])` —
    refused while a found attachment is neither filed nor set aside:
    - `outcome: "match", doc_id, document_date` only when you are **certain**: the vendor or

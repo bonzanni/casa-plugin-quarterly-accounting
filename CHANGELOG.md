@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.11.1
+
+Two floors at the job's decide, from Q2 re-run #3 on 0.11.0. Same Casa floor: v0.344.39.
+Store schema 15 (the run's work queue admits an `email` item; the upgrade copies a live
+run's rows).
+
+- **One purchase backs at most one payment (#48).** A purchase is every document with the
+  same issuer and the same document number (an invoice and its receipt filed from one email);
+  a document with no number is a purchase of its own. The job's match or proposal of a
+  document whose purchase already backs another payment is refused, and the refusal names
+  that payment, so the job searches for this payment's own document. The candidates show such
+  a twin as held by another payment, the exact fit skips it, a card's alternatives leave it
+  out, and the job's `replace` answer to a handover refuses it (an open replace question
+  whose purchase another payment took since is retired). The job's own reading
+  (`update_document_metadata` with the pass token) is refused when its issuer or number would
+  move a held document into a purchase another payment backs. The operator's taps and edits
+  are not limited by it. No date window: Google's month shift and a March invoice paid in
+  April stay legitimate. Re-run #3: refuses exactly the two wrong ElevenLabs proposals (July
+  with May's receipt, September with August's); refuses nothing in run 1 or the bookkeeping
+  key.
+  *Accepted cost (operator ruling):* first claim wins within a run. If a later payment
+  wrongly takes an earlier `missing` payment's purchase, the earlier payment stays missing
+  until the next check; the operator rejects the wrong proposal, as with 0.11.0.
+- **`missing` waits for the emails a payment's own reference search returned (#50).**
+  `record_search` carries `emails`: on the search by the payment's own reference or order
+  number, every vendor email it returned and whether its attachments were listed. `missing`
+  is refused while one is unlisted, and the refusal names it; the hand-out carries them
+  (`emails_to_list`). A listing is reported with no queries and is not a search. This is a
+  reminder the model fills in: it catches a skipped listing on an honest report, never an
+  email left out of the report or a query mislabelled — the server does not see Gmail.
+  Re-run #3: refuses 2 of 31 `missing` decisions — Megekko 1 (its shipped email carries the
+  invoice) and one Amazon payment whose outcome does not change.
+
 ## 0.11.0
 
 The simple loop. Casa v0.344.37 carries the three features: #1301 `quietWhenScheduled`

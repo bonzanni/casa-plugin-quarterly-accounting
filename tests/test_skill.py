@@ -39,7 +39,7 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              "not_fresh", "not_searched",
              # the job's unit fields
              "documents_first", "page_next", "triage_remaining", "start_job", "end_batch",
-             "delivery_id", "job_busy",
+             "delivery_id", "job_busy", "emails_to_list",
              # S7: the desk's and the units' answer fields
              "render_ids", "casa_delivery", "package_id",
              # the payment unit's fields (rev 18.4 §R18.1)

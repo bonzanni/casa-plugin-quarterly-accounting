@@ -98,6 +98,25 @@ def collisions(conn, doc_id: int) -> list:
         " ORDER BY doc_id", (doc_id, d["sha256"], number, issuer))]
 
 
+# issue #48: one purchase's identity, compared as `collisions` compares documents — but
+# both sides in SQL, so a document is always of its own purchase
+_PURCHASE_KEY = ("lower(trim(document_number))", "lower(trim(coalesce(issuer, counterparty)))")
+
+
+def purchase(conn, doc_id: int) -> list:
+    """Issue #48: the documents of `doc_id`'s purchase, itself first — every document with
+    the same issuer and the same document number; a document with no number (or no issuer)
+    is a purchase of its own. Ownership, not duplicates: an irrelevant document or the same
+    bytes filed twice count too."""
+    key = conn.execute(f"SELECT {_PURCHASE_KEY[0]}, {_PURCHASE_KEY[1]} FROM documents WHERE"
+                       " doc_id=?", (doc_id,)).fetchone()
+    if key is None or not key[0] or not key[1]:
+        return [doc_id]
+    return [doc_id] + [r[0] for r in conn.execute(
+        f"SELECT doc_id FROM documents WHERE doc_id<>? AND {_PURCHASE_KEY[0]}=? AND"
+        f" {_PURCHASE_KEY[1]}=? ORDER BY doc_id", (doc_id, key[0], key[1]))]
+
+
 def ingest_document(conn, *, source_path, kind, source, extraction_author, counterparty=None,
                     issuer=None, document_date=None, document_number=None, amount_minor=None,
                     currency=None, recipient=None, source_ref=None, acquisition=None,
@@ -369,9 +388,12 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         if _read(conn, doc_id) and _close_read_refs(conn, doc_id) and token is not None:
             import decide
             decide.note_progress(conn, token)
+        before = purchase(conn, doc_id)
         if fields:
             conn.execute("UPDATE documents SET %s WHERE doc_id=?"
                          % ", ".join(f"{k}=?" for k in fields), (*fields.values(), doc_id))
+        if token is not None and purchase(conn, doc_id) != before:
+            _one_purchase_one_payment(conn, doc_id)
         if "document_date" in fields:
             # issue #22: a date written here was read on the document (the specialist
             # after opening it, or the operator's own words): the file is named by it. A
@@ -384,6 +406,27 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         return {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields,
                 "amount_minor": d["amount_minor"], "currency": d["currency"],
                 "amount_conflict": bool(d["amount_conflict"])}
+
+
+def _one_purchase_one_payment(conn, doc_id) -> None:
+    """Issue #48 (d1 Terra S1): the job's reading never makes one purchase back two payments
+    — an issuer or number that moves a HELD document into a purchase another payment's
+    document backs is refused (the caller's transaction rolls back), naming that payment.
+    Called only when the reading changed the document's purchase: a purchase that already
+    backed two payments before (a 0.11.0 store) never refuses a reading that joins nothing.
+    The operator's words (no pass token) are not limited."""
+    import lineage
+    import matches
+    held = matches.purchase_holders(conn, doc_id)
+    own = {lineage.resolve_pid(conn, p) for p, _how, d in held if d == doc_id}
+    other = next(((p, d) for p, _how, d in held
+                  if own and lineage.resolve_pid(conn, p) not in own), None)
+    if other is None:
+        return
+    other, twin = other
+    raise db.Refusal(f"that reading makes document #{doc_id} the same purchase as document "
+                     f"#{twin}, which already backs {matches._payment_words(conn, other)}: "
+                     "one purchase backs one payment — check the number and issuer you read")
 
 
 def mark_irrelevant(conn, doc_id: int, irrelevant: bool = True, token=None) -> dict:

@@ -32,7 +32,7 @@ SEARCH_KINDS = ("hinted", "plain", "payment")
 
 def record_search(conn, *, token, pids=None, pid=None, search="payment", queries=(),
                   found_candidate=False, exhausted=False, incomplete=False,
-                  identity_unknown=None, revive=False, refs=None) -> dict:
+                  identity_unknown=None, revive=False, refs=None, emails=None) -> dict:
     """One search, recorded for the payment(s) it was for; a lone pid is [pid]. `search` is
     the kind: hinted (the learned-hint vendor search), plain (the plain vendor-and-dates
     search) or payment (a wider search). Returns {"recorded": [one record_search_in_tx
@@ -42,7 +42,13 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
     handed payment's — `pids` is exactly that payment — at most SEARCHES_MAX a run, and it
     is recorded with `refs`, every attachment it found ([] when none): each one no ingest
     filed yet is the payment's owed item from this same commit; the answer's `files` are
-    the payment's attachments to file now."""
+    the payment's attachments to file now.
+
+    Issue #50: `emails` — the vendor emails a search on the payment's own reference or order
+    number returned, each listed or not. One reported unlisted is owed (a run item) until a
+    report lists it or names one of its attachments in `refs`; `missing` waits for it. A
+    report with no queries and `emails` is a listing, not a search: it counts toward no
+    SEARCHES_MAX (a payment that used its searches can still report it)."""
     import decide
     import queues
     if pids is not None and pid is not None:
@@ -57,7 +63,10 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
                          "vendor-and-dates search) or payment")
     if refs is not None:
         refs = queues.check_refs(refs, "refs")
-    effort = bool(queries) or found_candidate or exhausted or bool(refs)
+    if emails is not None:
+        emails = queues.check_emails(emails)
+    listing = not queries and emails is not None
+    effort = (bool(queries) or found_candidate or exhausted or bool(refs)) and not listing
     with db.tx(conn):
         # before the run's work list exists a search marks nothing of the run's
         job_id = queues.job_of(conn, token) if token is not None else None
@@ -79,10 +88,15 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
                              " WHERE job_id=? AND pid=?",
                              (db.next_seq(conn), job_id, pids[0]))
             queues.enqueue(conn, job_id, unit, "ref", [r for r in refs if not filed(conn, r)])
+            listed = {r.split(":", 1)[0] for r in refs}
+            queues.enqueue(conn, job_id, unit, "email",
+                           [m for m, ok in emails or () if not ok and m not in listed])
+            for m in listed | {m for m, ok in emails or () if ok}:
+                queues.list_email(conn, job_id, unit, m)
             rows = queues.queued(conn, job_id, unit, "ref")
             answer.update(files=[r["key"] for r in queues.take_fitting(rows)],
                           files_total=len(rows))
-        if token is not None and effort:
+        if token is not None and (effort or listing):
             decide.note_progress(conn, token)       # §2.2 `progressed`: a search recorded
     return answer
 

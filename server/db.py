@@ -21,7 +21,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -192,12 +192,13 @@ REPLACE_QUESTIONS_DDL = """CREATE TABLE IF NOT EXISTS replace_questions (
   state TEXT NOT NULL CHECK (state IN ('open', 'kept', 'used', 'superseded')),
   created_seq INTEGER NOT NULL, answered_at TEXT);"""
 # Queues (operator ruling A): every other item a unit owes, from the moment it is known —
-# an erase candidate, the own-mail search, a found attachment (docs queues-design.md)
+# an erase candidate, the own-mail search, a found attachment (docs queues-design.md); an
+# email a payment's own reference search returned, its attachments not yet listed (#50)
 RUN_ITEMS_DDL = """CREATE TABLE IF NOT EXISTS run_items (
   job_id TEXT NOT NULL,
   unit TEXT NOT NULL,            -- erasures | filing | vendor:<kb.norm vendor>
-  kind TEXT NOT NULL CHECK (kind IN ('erase', 'search', 'ref')),
-  key TEXT NOT NULL,             -- the pid, 'own-mail', <message id>:<attachment id>
+  kind TEXT NOT NULL CHECK (kind IN ('erase', 'search', 'ref', 'email')),
+  key TEXT NOT NULL,             -- the pid, 'own-mail', <message id>:<attachment id>, <message id>
   state TEXT NOT NULL CHECK (state IN ('queued', 'done', 'given_up')),
   attempts INTEGER NOT NULL DEFAULT 0, hand_seq INTEGER,
   seq INTEGER NOT NULL, closed_seq INTEGER, reason TEXT,
@@ -596,6 +597,14 @@ MIGRATIONS: dict[int, list[str]] = {
          "UPDATE runs SET end_text='Accounting work finished.' WHERE completed_at IS NOT NULL",
          "UPDATE documents SET read_at=ingested_at WHERE amount_minor IS NOT NULL OR"
          " amount_conflict=1"],
+    # 14 -> 15 (issue #50): run_items admits the `email` kind — SQLite widens a CHECK only by
+    # a rebuild; a live run's rows are copied whole
+    14: [RUN_ITEMS_DDL.replace("run_items (", "run_items_v15 (", 1),
+         "INSERT INTO run_items_v15(job_id, unit, kind, key, state, attempts, hand_seq, seq,"
+         " closed_seq, reason) SELECT job_id, unit, kind, key, state, attempts, hand_seq, seq,"
+         " closed_seq, reason FROM run_items",
+         "DROP TABLE run_items",
+         "ALTER TABLE run_items_v15 RENAME TO run_items"],
     12: ["ALTER TABLE claims ADD COLUMN said_seq INTEGER",
          "ALTER TABLE claims ADD COLUMN report_seq INTEGER",
          "ALTER TABLE documents ADD COLUMN amount_conflict INTEGER NOT NULL DEFAULT 0"],
