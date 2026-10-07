@@ -186,6 +186,9 @@ def reset_store(conn) -> dict:
             # operator data (fix wave B, Astra S2); the monotonic generation that
             # fences a running pass lives in counters, bumped above
             conn.execute("DELETE FROM pass_marker")
+            # g2 (Terra S1): a new store identity — Casa #1312's delivery keys of the wiped
+            # store never suppress a message of this one
+            conn.execute("DELETE FROM meta WHERE key='store_id'")
             # A "restored" or "other-ledger" refusal concerned the store just wiped; a
             # dirty-ledger one concerns the ledger, which a store reset does not clean.
             conn.execute("DELETE FROM meta WHERE key='gate_refusal' AND"

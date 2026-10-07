@@ -813,6 +813,16 @@ def tx(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S):
         raise
 
 
+def store_id(conn: sqlite3.Connection) -> str:
+    """This store's identity (g2, Terra S1): random, made on first use and dropped by
+    binding.reset_store, so a key built on it (posting.delivery_key) never names a
+    rendering of a store since wiped — render ids restart at r1 after a reset."""
+    assert conn.in_transaction, "the store id is read inside the write transaction"
+    conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('store_id',"
+                 " lower(hex(randomblob(8))))")
+    return conn.execute("SELECT value FROM meta WHERE key='store_id'").fetchone()[0]
+
+
 def next_seq(conn: sqlite3.Connection) -> int:
     assert conn.in_transaction, "the sequence is allocated inside the write transaction"
     conn.execute("UPDATE counters SET value = value + 1 WHERE name='seq'")

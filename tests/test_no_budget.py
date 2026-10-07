@@ -121,7 +121,6 @@ class OneDeliveryAfterACut(StoreCase):
 
     def test_the_end_message_posted_cut_and_rehanded_is_delivered_once(self):
         from tests.fakebroker import FakeBroker
-        import posting
         self.bind()
         drv = JobDriver(self, payments=3)
         for i in range(3):
@@ -142,9 +141,25 @@ class OneDeliveryAfterACut(StoreCase):
             units = drv.run_job("b0b0b0b0-0b")
         views = [u for u in units if u["unit"] == "view"]
         self.assertEqual([u["render_id"] for u in views], cut * 2)       # re-handed once
-        keyed = [d for d in b.deposits if d.get("key") == f"view:{cut[0]}"]
+        keyed = [d for d in b.deposits if (d.get("key") or "").startswith("view:")
+                 and d["key"].endswith(f":{cut[0]}")]
         self.assertEqual(len(keyed), 2)                                  # deposited twice
         self.assertEqual(len([d for d in b.sent if d.get("key") == keyed[0]["key"]]), 1)
         self.assertIsNotNone(self.conn.execute("SELECT delivered_at FROM renders WHERE"
                                                " render_id=?", (cut[0],)).fetchone()[0])
-        self.assertEqual(posting.delivery_key("results", ["r1", "r22"]), "results:r1.r22")
+
+    def test_a_reset_store_never_suppresses_a_new_message_under_an_old_key(self):
+        """g2 (Terra S1): render ids restart after reset_store — the key names the store
+        (meta.store_id, new after every reset), so a new message is sent, never deduped."""
+        from tests.fakebroker import FakeBroker
+        import binding, posting
+        self.bind()
+        with FakeBroker() as b:
+            b.honour_keys = True
+            posting.show_view(self.conn, view="status")
+            binding.reset_store(self.conn)
+            self.bind()
+            posting.show_view(self.conn, view="status")
+        self.assertEqual(len(b.deposits), 2)
+        self.assertEqual(len(b.sent), 2, [d.get("key") for d in b.deposits])
+        self.assertNotEqual(b.deposits[0]["key"], b.deposits[1]["key"])
