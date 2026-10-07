@@ -441,7 +441,7 @@ def _confirm_room(props) -> list:
             if props else [])
 
 
-def _handover(conn, job_id, docs, quarter, tail, ready, sent=None) -> str:
+def _handover(conn, job_id, docs, quarter, tail, ready, sent=None, scheduled=False) -> str:
     """§1 "A missing invoice the operator has" (§2.5), a standalone continuation (d2: a run
     whose only request is the handover): one line per handed document — what the
     continuation changed — and the proposals among them to confirm."""
@@ -451,7 +451,9 @@ def _handover(conn, job_id, docs, quarter, tail, ready, sent=None) -> str:
                     {d["pid"]: item_state(d) for d in props}, scheduled=False,
                     extra_scope={"job_id": job_id, **(sent or {}),
                                  **(_ready_scope(conn, ready) if ready else {})},
-                    questions=replace.open_ones(conn))
+                    # e5 (Astra S2): a scheduled run offers only its own run's questions
+                    questions=[q for q in replace.open_ones(conn)
+                               if not scheduled or q["job_id"] == job_id])
 
 
 def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), ready=(),
@@ -480,7 +482,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         tail = [stopped] + tail if handover_docs and standalone else tail
         extra = [stopped] + list(extra)
     if handover_docs and standalone:
-        return _handover(conn, job_id, handover_docs, q, tail, ready, sent)
+        return _handover(conn, job_id, handover_docs, q, tail, ready, sent, scheduled=scheduled)
     receipts = _receipts(conn, handover_docs)[0] if handover_docs else []
     reported = {d["pid"]: item_state(d) for d in st["proposals"]}
     reported.update({d["pid"]: "missing" for ds in st["missing"].values() for d in ds})

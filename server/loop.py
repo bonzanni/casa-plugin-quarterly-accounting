@@ -327,8 +327,9 @@ def payment_unit_in_tx(conn, job_id, hand_seq=None, calls_made=None):
     if owed is not None:
         return owed
     rows = conn.execute(
-        "SELECT vendor, pid, why, attempts, hand_seq, searches FROM run_work WHERE job_id=?"
-        " AND outcome IS NULL AND attempts < ?", (job_id, queues.ATTEMPTS_MAX)).fetchall()
+        "SELECT vendor, pid, why, attempts, hand_seq, searches, closed_seq FROM run_work"
+        " WHERE job_id=? AND outcome IS NULL AND attempts < ?",
+        (job_id, queues.ATTEMPTS_MAX)).fetchall()
     if not rows:
         return None
     handed_docs = run_handover_docs(conn, job_id)
@@ -367,7 +368,11 @@ def payment_unit_in_tx(conn, job_id, hand_seq=None, calls_made=None):
     cands = candidates(conn, pid, row, vendor)               # the complete set
     fx = exact_fit(conn, pid, row, vendor, cands)
     handed_over = triggers(conn, pid, p, row, handed_docs, cands=cands)
-    shown = handed_candidates(cands, [fx] + handed_over)
+    # e5 (Astra S2): a payment walked again (18.3) is handed the documents filed after its
+    # earlier decision — what re-opened it — first, ahead of the cap
+    rewalked = [c["doc_id"] for c in cands if r["closed_seq"] is not None
+                and (c["filed_seq"] or 0) > r["closed_seq"]]
+    shown = handed_candidates(cands, [fx] + handed_over + rewalked)
     conn.execute("UPDATE run_work SET hand_seq=? WHERE job_id=? AND pid=?",
                  (hand_seq, job_id, pid))
     out = budget.bounded({
