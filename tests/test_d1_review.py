@@ -159,7 +159,7 @@ class LateHandover(StoreCase):
         import job
         self.drv.claim(jid, started)
         for _ in range(60):
-            u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
+            u = self.drv.next()
             self.drv.calls += 1
             if u["unit"] == target:
                 return u
@@ -185,7 +185,7 @@ class LateHandover(StoreCase):
         said = asks.ask_state(self.conn, "work", ask["request_id"])   # Astra's window
         self.assertEqual((said["state"], said["live_run"], said["line"]),
                          ("queued", False, asks.BUSY_NO_RESULT))
-        u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
+        u = self.drv.next()
         self.assertEqual(u["unit"], "view")                    # not the handover's vendor
         self.assertEqual(u["render_id"], composed)
         self.drv.do(u, self.drv.token)

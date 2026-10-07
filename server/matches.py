@@ -163,11 +163,12 @@ def _relevant_doc(conn, doc_id):
 def _floor_doc(conn, kind, pid, row, exp, doc_id, document_date):
     """The document side of the floor, for the chosen document and each alternative."""
     doc = _relevant_doc(conn, doc_id)
-    if doc["amount_minor"] is None or not doc["currency"]:
-        # issue #32: the floor compares amounts — read them on the document first
-        raise db.Refusal(f"document #{doc_id}'s amount and currency were never read: read "
-                         "them on the document, update_document_metadata(doc_id, "
-                         "amount_minor=…, currency=…, pass_token=…), then decide again")
+    unknown = doc["amount_minor"] is None or not doc["currency"]
+    if unknown and kind == "pair":
+        # issue #32; Q2 run 1: a document of unknown amount (never read, or two readings
+        # that disagree) is never matched by the job — only proposed, for the operator
+        raise db.Refusal(f"document #{doc_id}'s amount is unknown (never read, or its "
+                         "readings disagree): propose it, never match it")
     if taken_elsewhere(conn, doc_id, pid):
         raise db.Refusal(f"document #{doc_id} is taken: another payment's match or proposal "
                          "holds it")
@@ -179,7 +180,7 @@ def _floor_doc(conn, kind, pid, row, exp, doc_id, document_date):
                          f"{amounts.fmt(doc['amount_minor'], doc['currency'])}, payment: "
                          f"{amounts.fmt(row['amount_minor'], row['currency'])}): propose it "
                          "if it may still be the one")
-    if doc["currency"] != row["currency"]:
+    if not unknown and doc["currency"] != row["currency"]:
         why = fx.screen(row_fx(row), row["amount_minor"], row["currency"],
                         doc["amount_minor"], doc["currency"])           # #35, kept
         if why is not None:

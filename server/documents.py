@@ -152,6 +152,7 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                     # a vendor group that found it again names it, where none was recorded
                     conn.execute("UPDATE documents SET vendor=? WHERE doc_id=? AND vendor IS"
                                  " NULL", (vendor, existing[0]))
+                _reread(conn, existing[0], amount_minor, currency)
                 return {"doc_id": existing[0], "sha256": sha, "created": False,
                         "collisions": collisions(conn, existing[0])}
             _install(data, sha, ext)
@@ -172,6 +173,27 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 decide.note_progress(conn, token)      # §2.2 `progressed`: a document filed
             return {"doc_id": doc_id, "sha256": sha, "created": True,
                     "collisions": collisions(conn, doc_id)}
+
+
+def _reread(conn, doc_id, amount_minor, currency) -> None:
+    """Q2 run 1 (PLAY, BRAIN: a reading that copies the payment): the same bytes filed again
+    with an amount. None held → it is the first reading, taken. One held that DISAGREES → the
+    readings conflict, so the amount is unknown: the document can then only be proposed,
+    never matched by the job (matches._floor_doc). The same reading changes nothing."""
+    if amount_minor is None or not currency:
+        return
+    d = conn.execute("SELECT amount_minor, currency FROM documents WHERE doc_id=?",
+                     (doc_id,)).fetchone()
+    if d["amount_minor"] is None or not d["currency"]:
+        conn.execute("UPDATE documents SET amount_minor=?, currency=? WHERE doc_id=?",
+                     (amount_minor, currency, doc_id))
+    elif (d["amount_minor"], d["currency"]) != (amount_minor, currency):
+        conn.execute("UPDATE documents SET amount_minor=NULL, currency=NULL WHERE doc_id=?",
+                     (doc_id,))
+    else:
+        return
+    import lineage
+    lineage.settle_doc_holders(conn, doc_id)
 
 
 def _operator_ref(conn, source, source_ref, doc_id) -> bool:

@@ -16,7 +16,8 @@ class Run(StoreCase):
 
     def test_an_operator_run_unit_by_unit(self):
         units = [u["unit"] for u in self.drv.run_job("aaaaaaaa-1", started_by="operator")]
-        self.assertEqual(units[:3], ["probes", "snapshot", "filing"])
+        # Q2 run 1: the import persisted work, so the `report` unit comes alone before filing
+        self.assertEqual(units[:4], ["probes", "snapshot", "report", "filing"])
         self.assertIn("payment", units)
         self.assertLess(units.index("payment"), units.index("mirror"))
         self.assertEqual(units[-2:], ["view", "complete"])
@@ -28,7 +29,7 @@ class Run(StoreCase):
     def test_payments_are_handed_out_only_below_65_calls(self):
         import job, loop
         tok = job.claim(self.conn, "aaaaaaaa-2", started_by="Started by: operator")
-        for _ in range(3):                                  # probes, snapshot, filing
+        for _ in range(4):                          # probes, snapshot, report, filing
             u = job.next_unit(self.conn, tok, 0)
             self.drv.do(u, tok)
         u = job.next_unit(self.conn, tok, loop.CALLS_SOFT)
@@ -38,10 +39,13 @@ class Run(StoreCase):
         tok = job.claim(self.conn, "aaaaaaaa-2")
         u = job.next_unit(self.conn, tok, 0)
         self.assertEqual(u["unit"], "payment")
-        # e4 (progress/budget #3, simplified): handing out a work unit is progress — said
-        # once per claim, as soon as it holds, and again at the batch's end
-        self.assertTrue(u["report"])
-        self.assertFalse(job.next_unit(self.conn, tok, 1)["report"])
+        # Q2 run 1: a report never rides beside a work unit — the `report` unit, alone, or
+        # the batch's end carry it
+        self.assertFalse(u["report"])
+        self.drv.do(u, tok)                         # the payment decided: work persisted
+        u = job.next_unit(self.conn, tok, 1)
+        self.assertEqual((u["unit"], u["report"], u["progress"]["progressed"]),
+                         ("report", True, True))
 
     def test_a_scheduled_run_lists_only_new_state_items_and_omits_never(self):
         self.drv.run_job("aaaaaaaa-3", started_by="operator")       # the 3 shown once
@@ -102,7 +106,7 @@ class Carries(StoreCase):
         drv.claim("dddddddd-1")
         units = []
         while not units or units[-1]["unit"] != "filing":         # probes, snapshot read
-            units.append(__import__("job").next_unit(self.conn, drv.token, drv.calls))
+            units.append(drv.next())
             if units[-1]["unit"] != "filing":
                 drv.do(units[-1], drv.token)
         refused = {"allowed": False, "reason": "the ledger was restored since this store "
@@ -175,8 +179,10 @@ class Carries(StoreCase):
         asks.request_work(self.conn, "handover", "operator", [doc["doc_id"]])
         rest = []
         while not rest or rest[-1]["unit"] != "complete":
-            rest.append(job.next_unit(self.conn, drv.token, drv.calls))
-            if rest[-1]["unit"] not in ("complete", "end-batch"):
+            rest.append(drv.next())
+            if rest[-1]["unit"] == "end-batch":
+                drv.claim("dddddddd-3")                      # a fresh batch (turn)
+            elif rest[-1]["unit"] != "complete":
                 drv.do(rest[-1], drv.token)
         self.assertEqual([u["unit"] for u in rest].count("payment"), 1)
         (row,) = self.conn.execute("SELECT why, outcome, attempts FROM run_work").fetchall()
@@ -386,7 +392,9 @@ class ReviewRound1(StoreCase):
         u = job.next_unit(self.conn, tok, 0)
         self.assertEqual(u["unit"], "snapshot")
         drv.do(u, tok)
-        self.assertEqual(job.next_unit(self.conn, tok, loop.CALLS_SOFT)["unit"], "end-batch")
+        # the import persisted: the `report` unit (it fits), then the batch ends
+        self.assertEqual(job.next_unit(self.conn, tok, loop.CALLS_SOFT)["unit"], "report")
+        self.assertEqual(job.next_unit(self.conn, tok, 1)["unit"], "end-batch")
         tok = drv.claim("ffffffff-a")
         self.assertEqual(job.next_unit(self.conn, tok, 0)["unit"], "filing")
 

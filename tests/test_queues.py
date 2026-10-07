@@ -150,8 +150,10 @@ class Queues(StoreCase):
         asks.request_work(self.conn, "handover", "operator", [doc])
         rest = []
         while not rest or rest[-1]["unit"] != "complete":
-            rest.append(job.next_unit(self.conn, drv.token, drv.calls))
-            if rest[-1]["unit"] not in ("complete", "end-batch"):
+            rest.append(drv.next())
+            if rest[-1]["unit"] == "end-batch":
+                drv.claim("aaaa0007-1")                      # a fresh batch (turn)
+            elif rest[-1]["unit"] != "complete":
                 with drv._broker():
                     drv.do(rest[-1], drv.token)
         kinds = [u["unit"] for u in rest]

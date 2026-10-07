@@ -65,7 +65,9 @@ CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   progressed INTEGER NOT NULL DEFAULT 0,    -- the batch moved the work list on (simple loop §2.2)
   said INTEGER NOT NULL DEFAULT 0,          -- d3: this claim's progress was handed for reporting
   progressed_seq INTEGER,        -- e3: when note_progress last stamped it (progress.made)
-  handed INTEGER NOT NULL DEFAULT 0);   -- e4: this claim handed out a work unit (progress)"""
+  handed INTEGER NOT NULL DEFAULT 0,    -- e4: this claim handed out a work unit (progress)
+  calls INTEGER NOT NULL DEFAULT 0,     -- Q2 run 1: the tool calls this claim's turn made (summed)
+  said_seq INTEGER);             -- Q2 run 1: the store sequence when it last reported progress"""
 
 # Schema 10's credits (INV-J8), frozen for MIGRATIONS[9]; MIGRATIONS[11] drops it.
 CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (
@@ -589,6 +591,8 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE claims ADD COLUMN said INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE claims ADD COLUMN progressed_seq INTEGER",
          "ALTER TABLE claims ADD COLUMN handed INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE claims ADD COLUMN calls INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE claims ADD COLUMN said_seq INTEGER",
          "ALTER TABLE counterparties ADD COLUMN hint_sender TEXT",
          "ALTER TABLE counterparties ADD COLUMN hint_subject TEXT",
          "ALTER TABLE runs ADD COLUMN started_by TEXT",

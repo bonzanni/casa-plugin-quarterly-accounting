@@ -82,6 +82,8 @@ class Tools(StoreCase):
         elif k == "payment":                # rev 18.4: nothing found, missing
             self.call("decide", pass_token=t, entries=[
                 {"pid": u["pid"], "outcome": "missing", "expected_revision": u["revision"]}])
+        elif k == "report":                 # Q2 run 1: report_job_progress, then job_next
+            pass
         elif k == "mirror":
             self.call("record_mirror", pass_token=t, done=[c["n"] for c in u["calls"]])
         elif k in ("post", "view"):

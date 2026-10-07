@@ -151,12 +151,15 @@ class TestAmounts(StoreCase):
         self.classify(pid, {"software"})
         self.settle(pid)
         doc = self.doc(amount_minor=None)
-        for fn, extra in ((matches.record_match, {"author": "auto"}),
-                          (matches.propose_match, {})):
-            with self.assertRaises(db.Refusal) as cm:
-                fn(self.conn, pid=pid, doc_id=doc, expected_revision=self.rev(pid),
-                   row_snapshot=self.snapshot(pid), token=token, **extra)
-            self.assertIn("amount and currency were never read", str(cm.exception))
+        with self.assertRaises(db.Refusal) as cm:
+            matches.record_match(self.conn, pid=pid, doc_id=doc, expected_revision=self.rev(pid),
+                                 row_snapshot=self.snapshot(pid), token=token, author="auto")
+        self.assertIn("amount is unknown", str(cm.exception))
+        # Q2 run 1 (BRAIN): a document whose amount is unknown is proposed, never matched
+        matches.propose_match(self.conn, pid=pid, doc_id=doc, expected_revision=self.rev(pid),
+                              row_snapshot=self.snapshot(pid), token=token)
+        self.assertEqual(self.conn.execute("SELECT status FROM projections WHERE pid=?",
+                                           (pid,)).fetchone()[0], "proposed")
 
 
 if __name__ == "__main__":

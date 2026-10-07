@@ -315,7 +315,10 @@ class TestJob(TempEnv):
         first_call = re.search(r"`([a-z_]+)\(", turn).group(1)
         self.assertEqual(first_call, "job_next")
         for phrase in ("call `job_next(pass_token=…, calls_made=",
-                       "`report: true` → `report_job_progress` with its `progress` verbatim",
+                       "`report` → `report_job_progress` with its `progress` verbatim, then "
+                       "`job_next`. Any answer with `report: true` likewise.",
+                       "load all a unit needs in ONE `ToolSearch` `select:` call",
+                       "calls_made=<the tool calls you made since your previous job_next>",
                        '`end-batch` → end the turn',
                        '`complete` → `report_job_progress` with its `progress`, then '
                        '`emit_completion(status="ok", text=<its text>)`',
@@ -362,7 +365,7 @@ class TestJob(TempEnv):
                      "vendor-and-dates search", "record_mirror", "record_not_found",
                      "certain", "reset_store", "set_aside(", "refs=["):
             self.assertIn(rule, text)
-        self.assertLessEqual(len(text), 9_600)     # queues: + the erasures unit, refs, set_aside
+        self.assertLessEqual(len(text), 10_400)    # queues; Q2 run 1: report unit, tool loading, reading rules
 
     def test_the_units_come_in_the_loops_order(self):
         """Simple loop §2: probes, snapshot, filing, vendor, mirror, the run's one post."""
@@ -429,8 +432,9 @@ class TestJob(TempEnv):
         self.assertNotIn("max_files", JOB)
         self.assertNotIn("Which are new", JOB)
         v = flat(self.vendor())
-        self.assertIn("Record each **right after it ran, before anything else**, with every "
-                      "attachment it found:", v)
+        self.assertIn("Record EACH `search_emails` **right after it ran, before anything "
+                      "else** (one `record_search` per query), with every attachment it found:",
+                      v)
         self.assertIn("refs=[each attachment found, as <message id>:<attachment id>; [] when "
                       "none], exhausted=<true on your last>, pass_token)`", v)
         self.assertIn("refused while a found attachment is neither filed nor set aside", v)
@@ -440,16 +444,20 @@ class TestJob(TempEnv):
         issuer and number — own mail with no vendor (a candidate, never an exact_fit), the
         vendor search's filing with the unit's vendor."""
         f = flat(self.units("filing", "### `payment`"))
-        self.assertIn("read each, pass its fields: `ingest_document(source_path, kind, "
+        self.assertIn("`Read` each FIRST, pass only what is printed on it (an unreadable "
+                      "amount: leave out `amount_minor` and `currency`): "
+                      "`ingest_document(source_path, kind, "
                       'source="manual-email", extraction_author="specialist", '
                       "source_ref=<the ref, exactly>, " + self.READING, f)
         self.assertNotIn("vendor=", f)
         v = flat(self.vendor())
-        self.assertIn("File each, in order, read once: "
+        self.assertIn("File each, in order: `Read` it FIRST, then "
                       '`ingest_document(source_path, kind, source="gmail", '
                       'extraction_author="specialist", source_ref=<the ref, exactly>, '
                       "vendor=<the unit's vendor, when it is from that vendor>, "
                       + self.READING, v)
+        self.assertIn("with only what is printed on it — never a value from the payment; an "
+                      "amount you cannot read: leave out `amount_minor` and `currency`", v)
 
     def vendor(self):
         return self.units("payment", "### `mirror`")
@@ -461,7 +469,7 @@ class TestJob(TempEnv):
         v = flat(self.vendor())
         order = ["1. **`files` first**", "2. **Judge the candidates from their reading**",
                  "only when in doubt", "3. **Nothing fits:**", "at most `searches_left`",
-                 "Record each **right after it ran, before anything else**",
+                 "Record EACH `search_emails` **right after it ran, before anything else**",
                  '`record_search(pid, search="hinted"', 'search="plain"', 'search="payment"',
                  "File EVERY invoice", "4. **Decide it in ONE call:**",
                  "5. **Save what worked:**"]

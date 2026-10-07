@@ -183,9 +183,13 @@ def candidates(conn, pid, row, vendor) -> list:
     facts, fxp = matches.R.facts_of(row), matches.row_fx(row)
     kind = lineage.projection(conn, pid)["exp_kind"]
     out = []
-    for d in conn.execute("SELECT * FROM documents WHERE irrelevant=0 AND amount_minor IS NOT"
-                          " NULL AND currency IS NOT NULL ORDER BY doc_id"):
-        if d["currency"] == row["currency"]:
+    for d in conn.execute("SELECT * FROM documents WHERE irrelevant=0 ORDER BY doc_id"):
+        if d["amount_minor"] is None or not d["currency"]:
+            # Q2 run 1: a document of unknown amount is a candidate of its own vendor only
+            # — to propose (the floor never matches it)
+            if not d["vendor"] or kb.norm(d["vendor"]) != kb.norm(vendor):
+                continue
+        elif d["currency"] == row["currency"]:
             if d["amount_minor"] != row["amount_minor"]:
                 continue
         else:
@@ -444,6 +448,7 @@ WORDS = {"probes": "Reading the bank", "snapshot": "Importing the bank read",
          "filing": "Filing your own emailed documents", "payment": "Matching invoices",
          "mirror": "Updating the bank ledger", "post": "Posting the result",
          "view": "Posting the result", "end-batch": "Batch done",
+         "report": "Work saved",
          "complete": "All accounting work done"}
 NO_TOOLS = "bank-feed's tools are not available to the finance specialist"
 
@@ -728,6 +733,20 @@ def _choose(conn, token, job_id, calls_made, logs) -> dict:
     return {"unit": "complete", "text": job.run_end(conn, job_id)[0]}
 
 
+def _report_owed(conn, token, job_id):
+    """Q2 run 1 (PLAY): the model skipped `report: true` beside a work unit, so Casa's
+    3-batch guard ended a productive run. A claim that has not reported gets the `report`
+    unit, alone, when the run persisted work since its LAST report (this claim's work, or a
+    batch Casa cut before it could report), while it fits the batch (else its end-batch
+    reports); the next job_next carries on."""
+    c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
+    if c["said"] or c["seq"] is None or _run(conn, job_id)["completed_at"] is not None:
+        return None
+    since = conn.execute("SELECT coalesce(max(said_seq), min(seq)) FROM claims WHERE"
+                         " job_id=?", (job_id,)).fetchone()[0]
+    return {"unit": "report"} if progress.made(conn, job_id, since) else None
+
+
 WORK_UNITS = ("erasures", "filing", "payment", "mirror")   # BRAIN: a payment, a file, an
 #                                                          erase check, a mirror call
 
@@ -750,11 +769,16 @@ def _close(conn, token, out, calls_made) -> dict:
     # false; a stuck model is bounded by the per-payment caps and `"batches": 20`
     if out["unit"] in WORK_UNITS:
         conn.execute("UPDATE claims SET handed=1 WHERE gen=?", (token,))
-    progressed = bool(c["handed"]) or out["unit"] in WORK_UNITS or (
-        c["seq"] is not None and progress.made(conn, c["job_id"], c["seq"]))
-    report = ending or (progressed and not c["said"])
+    # a `report` is handed only when work is owed since the run's last report, so it says
+    # true; a claim that said true never ends on a false
+    progressed = bool(c["said"] or c["handed"]) or out["unit"] in WORK_UNITS + ("report",) \
+        or (c["seq"] is not None and progress.made(conn, c["job_id"], c["seq"]))
+    # Q2 run 1: a report rides ONLY on the `report` unit (alone: the model cannot do a unit
+    # and skip it) and on end-batch / complete — never beside a work unit
+    report = ending or (out["unit"] == "report")
     if report and progressed:
-        conn.execute("UPDATE claims SET said=1 WHERE gen=?", (token,))
+        conn.execute("UPDATE claims SET said=1, said_seq=? WHERE gen=?",
+                     (db.next_seq(conn), token))
     summary = (job.run_end(conn, c["job_id"])[1] if out["unit"] == "complete"
                else WORDS[out["unit"]])
     if not ending:
@@ -769,16 +793,25 @@ def next_unit(conn, token, calls_made) -> dict:
     """The cursor (§2), in order: probes / snapshot (the bank read), filing, the work list
     (built once), vendor groups while calls_made < CALLS_SOFT, the mirror (while the bank
     gate allows writes) until nothing is owed on a fresh diff, the run's one post, complete.
-    One transaction that re-checks the claim; `calls_made` is the tool calls this turn
-    (batch) made so far."""
+    One transaction that re-checks the claim. Q2 run 1: `calls_made` is the tool calls made
+    SINCE THE PREVIOUS job_next of this turn — what a model counts naturally; the server sums
+    them per claim (a model that sends running totals only ends a batch early). A claim
+    that persisted work and has not reported is answered with the `report` unit alone, so
+    the report Casa's guard needs is never one more flag beside a work unit."""
     import job
     if isinstance(calls_made, bool) or not isinstance(calls_made, int) or calls_made < 0:
-        raise db.Refusal("calls_made is the number of tool calls you made this turn (0 or more)")
+        raise db.Refusal("calls_made is the number of tool calls you made since your previous "
+                         "job_next (0 or more)")
     logs: list = []
     with db.tx(conn):
         job.check_claim(conn, token)
         job_id = _job_of(conn, token)
-        out = _close(conn, token, _choose(conn, token, job_id, calls_made, logs), calls_made)
+        # the calls since the previous job_next, and this job_next itself
+        conn.execute("UPDATE claims SET calls=calls+?+1 WHERE gen=?", (calls_made, token))
+        made = conn.execute("SELECT calls FROM claims WHERE gen=?", (token,)).fetchone()[0]
+        owed = _report_owed(conn, token, job_id) if made + 3 <= CALLS_HARD else None
+        out = _close(conn, token, owed if owed is not None else
+                     _choose(conn, token, job_id, made, logs), made)
         if out["unit"] == "post":
             for rid in out["render_ids"]:
                 _offer(conn, rid, job_id)

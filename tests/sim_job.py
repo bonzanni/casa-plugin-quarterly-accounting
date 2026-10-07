@@ -230,6 +230,9 @@ class JobDriver:
         self._reserve = 0               # the calls its closing write needs (loop.CLOSING)
         self.tool_calls = {}            # plugin tool name -> calls made, every run
         self.replace_days = 3           # a handed document this near an exact fit replaces
+        self.skip_attached_reports = False   # Q2 run 1: the model ignores report:true beside
+        #                                      a work unit (only `report`, end-batch count)
+        self._at_next = 0               # calls at the previous job_next (calls_made is a delta)
         self.near_days = 10             # the skill's "certain": a match dated this near
         self.propose_days = 20          # a look-alike this near is proposed; farther: not it
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
@@ -496,7 +499,15 @@ class JobDriver:
         """A job turn's first call: job_next(job_id, started_by) claims. Returns the token."""
         self.token = job.claim(self.conn, job_id, started_by=f"Started by: {started_by}")
         self.calls = 1
+        self._at_next = 1
         return self.token
+
+    def next(self):
+        """job_next as the model calls it (Q2 run 1): calls_made is the calls since the
+        previous job_next of this turn. The caller counts the job_next call itself."""
+        u = job.next_unit(self.conn, self.token, self.calls - self._at_next)
+        self._at_next = self.calls
+        return u
 
     def to_unit(self, job_id, unit, started_by="operator"):
         """Claim, then carry out every unit until `unit` is handed out (not done): its
@@ -504,8 +515,9 @@ class JobDriver:
         self.claim(job_id, started_by)
         with self._broker():
             for _ in range(MAX_UNITS):
-                u = job.next_unit(self.conn, self.token, self.calls)
+                u = job.next_unit(self.conn, self.token, self.calls - self._at_next)
                 self.calls += 1
+                self._at_next = self.calls
                 self.last = u
                 if u["unit"] == unit:
                     return u
@@ -546,15 +558,18 @@ class JobDriver:
                     batch_end()
                     self.token = job.claim(self.conn, job_id)
                     self.calls = 1
+                    self._at_next = 1
                     continue
-                u = job.next_unit(self.conn, self.token, self.calls)
+                u = job.next_unit(self.conn, self.token, self.calls - self._at_next)
                 self.calls += 1
+                self._at_next = self.calls
                 units.append(u)
                 self.units.append(u)
                 self.last = u
                 assert u.get("pass_token") == self.token, u
-                if u["report"]:                 # Casa keeps a batch's LAST report (e4)
-                    reported = bool(u["progress"]["progressed"])
+                if u["report"] and (not self.skip_attached_reports or u["unit"] in (
+                        "report", "end-batch", "complete")):
+                    reported = bool(u["progress"]["progressed"])   # Casa keeps the LAST
                 if u["unit"] == "complete":
                     batch_end()
                     return units
@@ -562,6 +577,7 @@ class JobDriver:
                     batch_end()
                     self.token = job.claim(self.conn, job_id)
                     self.calls = 1
+                    self._at_next = 1
                     continue
                 import db
                 try:
@@ -571,6 +587,7 @@ class JobDriver:
                     batch_end()
                     self.token = job.claim(self.conn, job_id)
                     self.calls = 1
+                    self._at_next = 1
                 except db.Refusal as exc:   # the model reads `refused:` and calls job_next
                     if self.refusals is None:
                         raise
@@ -840,6 +857,11 @@ class JobDriver:
             self._tool("upsert_counterparty", {"name": vendor, "hint_sender": senders[0],
                                                "hint_subject": f"{vendor} invoice",
                                                "pass_token": token})
+        return None
+
+    def _report(self, u, token):
+        """`report` → report_job_progress(progress) (a Casa tool: one call), then job_next."""
+        self._spend(1)
         return None
 
     def _mirror(self, u, token):

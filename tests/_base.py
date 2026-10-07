@@ -103,7 +103,7 @@ class StoreCase(TempEnv):
         drv.claim(job_id, started_by)
         units = []
         for _ in range(200):
-            u = job.next_unit(self.conn, drv.token, drv.calls)
+            u = drv.next()
             drv.calls += 1
             units.append(u)
             if u["unit"] in (stop_before, "complete"):

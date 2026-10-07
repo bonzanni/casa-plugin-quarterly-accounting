@@ -52,14 +52,14 @@ class EveryUnitHasABudget(StoreCase):
         drv.claim("d3d3d3d3-a2")
         got = []
         for _ in range(4):
-            u = job.next_unit(self.conn, drv.token, drv.calls)
+            u = drv.next()
             drv.calls += 1
             got.append((u["unit"], u["report"]))
             drv.do(u, drv.token)
-        # the import persisted work: the next answer (filing) reports; filing persisted too,
-        # but the batch already reported, so the payment unit does not
-        self.assertEqual(got, [("probes", False), ("snapshot", False), ("filing", True),
-                               ("payment", False)])
+        # Q2 run 1: the import persisted work — the next answer is the `report` unit, alone;
+        # filing persisted too, but the batch already reported
+        self.assertEqual(got, [("probes", False), ("snapshot", False), ("report", True),
+                               ("filing", False)])
         self.assertTrue(all(u["max_calls"] > 0 for u in drv.units[-4:]))
 
     def test_a_continuation_that_progressed_is_not_counted(self):

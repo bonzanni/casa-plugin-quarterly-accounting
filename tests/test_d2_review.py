@@ -68,7 +68,7 @@ class OwnMailFilingIsSliced(StoreCase):
         self.drv.claim("d2d2d2d2-a2")
         seen = []
         for _ in range(20):
-            u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
+            u = self.drv.next()
             self.drv.calls += 1
             if u["unit"] == "filing":
                 seen.append(self.conn.execute("SELECT count(*) FROM operator_refs"
@@ -105,7 +105,7 @@ class OwnMailFilingIsSliced(StoreCase):
         import job
         self.drv.claim("d2d2d2d2-a4")
         for _ in range(10):
-            u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
+            u = self.drv.next()
             if u["unit"] == "filing":
                 break
             self.drv.do(u, self.drv.token)
@@ -135,7 +135,7 @@ class HandoverJoiningACheck(StoreCase):
         import job
         self.drv.claim(jid, started)
         for _ in range(40):
-            u = job.next_unit(self.conn, self.drv.token, self.drv.calls)
+            u = self.drv.next()
             self.drv.calls += 1
             if u["unit"] == at:
                 break

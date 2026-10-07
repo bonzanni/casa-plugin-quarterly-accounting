@@ -411,10 +411,11 @@ def t_import(args):
           "`Job id:` line>, started_by=<the line right after your brief's first `Job id:` "
           "line, verbatim, when it is a `Started by:` line; else omit it>) — it gives you a "
           "pass_token; then after each unit job_next(pass_token=…, calls_made=<the tool calls "
-          "you made this turn so far>). Do exactly the unit it returns: probes, snapshot, "
-          "erasures, filing, payment, mirror, view, post. Each unit carries max_calls: when your calls "
-          "for it reach that, stop and call job_next — an unfinished unit comes again. When "
-          "it says report=true, call "
+          "you made since your previous job_next>). Do exactly the unit it returns: probes, "
+          "snapshot, erasures, filing, payment, mirror, view, post, report. Each unit carries "
+          "max_calls: when your calls for it reach that, stop and call job_next — an "
+          "unfinished unit comes again. `report` → report_job_progress with its `progress` "
+          "verbatim, then job_next. When an answer says report=true, call "
           "report_job_progress with its `progress` verbatim; at end-batch, end your turn; at "
           "complete, report_job_progress then emit_completion(status=\"ok\", text=<its "
           "text>). `view` → show_view(render_id); on its receipt "
@@ -423,7 +424,7 @@ def t_import(args):
           "job_next: it is offered again, at most twice.",
           obj({"job_id": S, "pass_token": TOKEN,
                "calls_made": {"type": "integer", "description": "with a pass_token: the "
-                              "tool calls you made this turn so far (0 or more)"},
+                              "tool calls you made since your previous job_next (0 or more)"},
                "started_by": {"type": "string", "description": "first job_id call only: "
                               "Casa's `Started by:` line, the one right after the first "
                               "`Job id:` line of your brief, copied verbatim"}}))
@@ -438,10 +439,10 @@ def t_job_next(args):
         calls = args.get("calls_made")
         if calls is None:
             raise db.Refusal("calls_made goes with the pass_token: the tool calls you made "
-                             "this turn so far")
+                             "since your previous job_next")
         if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
-            raise db.Refusal("calls_made is the number of tool calls you made this turn "
-                             "(0 or more)")
+            raise db.Refusal("calls_made is the number of tool calls you made since your "
+                             "previous job_next (0 or more)")
     return _deliverable("job_next", job.next_unit(conn(), tok, calls))
 
 

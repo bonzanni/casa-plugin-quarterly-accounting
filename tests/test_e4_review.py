@@ -52,7 +52,7 @@ class LastReportHolds(StoreCase):
         drv.claim("e4e4e4e4-a2")
         seen = 0
         for _ in range(20):
-            u = job.next_unit(self.conn, drv.token, drv.calls)
+            u = drv.next()
             drv.calls += 1
             if u["unit"] == "payment":
                 seen += 1

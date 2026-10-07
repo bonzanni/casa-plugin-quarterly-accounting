@@ -172,8 +172,10 @@ class ToolLayer(StoreCase):
     def test_the_descriptions_carry_calls_made_and_never_a_claim(self):
         import qa_server, tools  # noqa: F401
         nxt = " ".join(qa_server.TOOLS["job_next"]["description"].split())
-        self.assertIn("job_next(pass_token=…, calls_made=<the tool calls you made this "
-                      "turn so far>)", nxt)
+        self.assertIn("job_next(pass_token=…, calls_made=<the tool calls you made since "
+                      "your previous job_next>)", nxt)
+        self.assertIn("`report` → report_job_progress with its `progress` verbatim, then "
+                      "job_next", nxt)
         status = " ".join(qa_server.TOOLS["job_status"]["description"].split())
         self.assertIn("never a claim", status)
 
