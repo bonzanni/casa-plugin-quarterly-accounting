@@ -346,6 +346,8 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         # without it matched a disagreeing amount; no other caller writes an amount)
         withdrawn = (("amount_minor" in fields and fields["amount_minor"] is None)
                      or ("currency" in fields and not (fields["currency"] or "").strip()))
+        if "currency" in fields and not (fields["currency"] or "").strip():
+            fields["currency"] = None
         amount = fields.pop("amount_minor", None), fields.pop("currency", None) or None
         _reread(conn, doc_id, *amount, withdrawn=withdrawn)
         if token is not None:

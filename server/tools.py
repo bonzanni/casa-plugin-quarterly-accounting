@@ -193,13 +193,17 @@ def t_ingest(args):
           "number, date, amount, currency, recipient). A kind correction re-checks every payment "
           "holding the document. During a pass, pass the pass_token.",
           obj({"doc_id": I, "kind": S, "counterparty": S, "issuer": S, "document_date": S,
-               "document_number": S, "amount_minor": I, "currency": S, "recipient": S,
+               "document_number": S, "amount_minor": {"type": ["integer", "null"]},
+               "currency": {"type": ["string", "null"]}, "recipient": S,
                "pass_token": TOKEN}, ("doc_id",)))
 def t_update_doc(args):
     _need(args, "doc_id")
+    fields = _pick(args, documents.EDITABLE)
+    for k in ("amount_minor", "currency"):
+        if k in args and args[k] is None:
+            fields[k] = None                # h4 (Astra/Terra S1): an explicit clear is a reading
     return documents.update_document_metadata(conn(), _int(args, "doc_id"),
-                                              token=_int(args, "pass_token"),
-                                              **_pick(args, documents.EDITABLE))
+                                              token=_int(args, "pass_token"), **fields)
 
 
 @register("mark_irrelevant",

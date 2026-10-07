@@ -116,13 +116,16 @@ class ReadOwed(StoreCase):
         """h3 (Astra S1): currency="" (through the tool) or amount_minor=None withdraws a
         held value — a reading that disagrees, so the amount is unknown for good."""
         import documents, qa_server, tools  # noqa: F401
-        for how in ("tool-currency", "direct-amount"):
+        for how in ("tool-currency", "tool-amount", "tool-null-currency", "direct-amount"):
             with self.subTest(how=how):
                 self.setUp()
                 doc = self._filed_unread(amount=1000)
-                if how == "tool-currency":
+                if how.startswith("tool-"):        # h4 (Terra S1): a null amount too
                     qa_server.TOOLS["update_document_metadata"]["fn"](
-                        {"doc_id": doc, "currency": ""})
+                        {"doc_id": doc, **({"currency": ""} if how == "tool-currency"
+                                           else {"currency": None}
+                                           if how == "tool-null-currency"
+                                           else {"amount_minor": None})})
                 else:
                     documents.update_document_metadata(self.conn, doc, amount_minor=None)
                 d = self.conn.execute("SELECT amount_minor, currency, amount_conflict FROM"
@@ -175,3 +178,21 @@ class Migration(StoreCase):
         got = {r[0]: r[1] is not None for r in self.conn.execute(
             "SELECT doc_id, read_at FROM documents")}
         self.assertEqual(got, {read: True, unread: False, clash: True})
+
+    def test_13_to_14_keeps_a_completed_runs_words_as_said(self):
+        """h4 (Astra S2): a run completed before the upgrade said "Accounting work
+        finished." — kept, never re-derived from a later store."""
+        import db, job
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO runs(job_id, started_by, completed_at) VALUES"
+                              " ('old-run', 'scheduled', '2026-10-01T00:00:00Z')")
+            self.conn.execute("INSERT INTO runs(job_id, started_by) VALUES ('live-run',"
+                              " 'scheduled')")
+            self.conn.execute("ALTER TABLE documents DROP COLUMN read_at")
+            self.conn.execute("ALTER TABLE runs DROP COLUMN end_text")
+            self.conn.execute("UPDATE meta SET value='13' WHERE key='schema_version'")
+        db.migrate(self.conn)
+        self.bind()
+        self.assertEqual(job.run_end(self.conn, "old-run")[0], "Accounting work finished.")
+        self.assertIsNone(self.conn.execute("SELECT end_text FROM runs WHERE"
+                                            " job_id='live-run'").fetchone()[0])

@@ -591,6 +591,9 @@ MIGRATIONS: dict[int, list[str]] = {
     # a document a cut left unread (Terra d1 S1): it stays owed, never backfilled as read.
     13: ["ALTER TABLE documents ADD COLUMN read_at TEXT",
          "ALTER TABLE runs ADD COLUMN end_text TEXT",
+         # h4 (Astra S2): a run completed before kept its words as said — the build before
+         # schema 14 completed every run with "Accounting work finished." (job.RUN_FINISHED)
+         "UPDATE runs SET end_text='Accounting work finished.' WHERE completed_at IS NOT NULL",
          "UPDATE documents SET read_at=ingested_at WHERE amount_minor IS NOT NULL OR"
          " amount_conflict=1"],
     12: ["ALTER TABLE claims ADD COLUMN said_seq INTEGER",
