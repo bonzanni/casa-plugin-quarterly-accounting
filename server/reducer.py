@@ -52,6 +52,7 @@ class Inputs:
     last_known_kind: str | None
     doc_kinds: dict
     portal: bool
+    unknown_docs: frozenset = frozenset()   # Q2 run 1: documents of unknown amount
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,12 @@ def reduce(inp: Inputs) -> Reduction:
         row_ok = _row_ok(m, inp)
         if not row_ok:
             reasons.append("facts-changed")
-        ok = m.state == "matched" and row_ok
+        # f1 (Terra/Astra S1): the document's readings disagreed after the job matched it —
+        # the job never matches an unknown amount, so its match shows as a proposal
+        amount_ok = m.doc_id not in inp.unknown_docs
+        if not amount_ok:
+            reasons.append("amount-unknown")
+        ok = m.state == "matched" and row_ok and amount_ok
         tag = "acct::matched" if ok else "acct::proposed"
         return Reduction(_with_portal({tag}, inp), "matched" if ok else "proposed",
                          m.match_id, tuple(reasons))

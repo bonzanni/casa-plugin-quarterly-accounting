@@ -742,6 +742,10 @@ def _report_owed(conn, token, job_id):
     c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
     if c["said"] or c["seq"] is None or _run(conn, job_id)["completed_at"] is not None:
         return None
+    # claims.said_seq is the DELIBERATE exception to e4's "no since-the-last-report
+    # bookkeeping" (BRAIN, 2026-10-07): a true report only for PERSISTED work keeps Casa's
+    # stuck-run guard able to stop a looping run before the 20-batch cap; revisit if Casa
+    # credits progress from job_next itself (DRIVE's option A)
     since = conn.execute("SELECT coalesce(max(said_seq), min(seq)) FROM claims WHERE"
                          " job_id=?", (job_id,)).fetchone()[0]
     return {"unit": "report"} if progress.made(conn, job_id, since) else None

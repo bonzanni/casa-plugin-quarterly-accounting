@@ -21,7 +21,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -266,7 +266,8 @@ CREATE TABLE IF NOT EXISTS documents (
   ingested_at TEXT NOT NULL, ingest_quarter TEXT NOT NULL,
   date_read_at TEXT,             -- when document_date was last read on the document (#22)
   vendor TEXT,                   -- the vendor group that filed it (simple loop §2.2)
-  filed_seq INTEGER);            -- store sequence at ingest: "newly filed" (§2.1)
+  filed_seq INTEGER,             -- store sequence at ingest: "newly filed" (§2.1)
+  amount_conflict INTEGER NOT NULL DEFAULT 0);  -- Q2 run 1: two readings disagreed (sticky)
 
 CREATE TABLE IF NOT EXISTS counterparties (
   cp_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
@@ -581,6 +582,10 @@ MIGRATIONS: dict[int, list[str]] = {
     # message; a quarter's ready notice; mirror_note; the filing vendor; alternatives;
     # keyed documents; item states; the Gmail streak; batch progress; the learned hint.
     # Task 11 of the plan appends the drops of the deleted machinery to this same list.
+    # 12 → 13 (Q2 run 1, round f1 Astra S1: schema 12 stores exist live since run 1)
+    12: ["ALTER TABLE claims ADD COLUMN calls INTEGER NOT NULL DEFAULT 0",
+         "ALTER TABLE claims ADD COLUMN said_seq INTEGER",
+         "ALTER TABLE documents ADD COLUMN amount_conflict INTEGER NOT NULL DEFAULT 0"],
     11: ["ALTER TABLE projections ADD COLUMN mirror_note TEXT",
          "ALTER TABLE documents ADD COLUMN vendor TEXT",
          "ALTER TABLE documents ADD COLUMN filed_seq INTEGER",
@@ -591,8 +596,6 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE claims ADD COLUMN said INTEGER NOT NULL DEFAULT 0",
          "ALTER TABLE claims ADD COLUMN progressed_seq INTEGER",
          "ALTER TABLE claims ADD COLUMN handed INTEGER NOT NULL DEFAULT 0",
-         "ALTER TABLE claims ADD COLUMN calls INTEGER NOT NULL DEFAULT 0",
-         "ALTER TABLE claims ADD COLUMN said_seq INTEGER",
          "ALTER TABLE counterparties ADD COLUMN hint_sender TEXT",
          "ALTER TABLE counterparties ADD COLUMN hint_subject TEXT",
          "ALTER TABLE runs ADD COLUMN started_by TEXT",

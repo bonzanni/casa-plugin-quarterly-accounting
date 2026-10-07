@@ -11,7 +11,7 @@ class Schema12(StoreCase):
 
     def test_version_tables_and_columns(self):
         import db
-        self.assertEqual(db.SCHEMA_VERSION, 12)
+        self.assertEqual(db.SCHEMA_VERSION, 13)
         self.assertTrue({"job_id", "pid", "vendor", "why", "outcome", "reason", "attempts",
                          "searches", "searched_seq"}
                         <= self.cols("run_work"))
@@ -54,7 +54,7 @@ class Schema12(StoreCase):
         conn = db.open_store(path)
         self.addCleanup(conn.close)
         self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='schema_version'")
-                         .fetchone()[0], "12")
+                         .fetchone()[0], "13")
         self.assertEqual(conn.execute("SELECT alternatives_json FROM matches").fetchone()[0],
                          "[]")
         self.assertIsNone(conn.execute("SELECT mirror_note FROM projections").fetchone()[0])

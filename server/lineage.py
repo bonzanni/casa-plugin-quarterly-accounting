@@ -242,7 +242,8 @@ def settle(conn, pid: int) -> R.Reduction:
     cp = kb.counterparty_for(conn, row["counterparty"]) if row else None
     inp = R.Inputs(ended=proj["ended"], eligible=eligible(conn, row), fold=st,
                    facts=R.facts_of(row) if row else None, expectation=exp,
-                   last_known_kind=last_known, doc_kinds={}, portal=kb.is_portal(cp))
+                   last_known_kind=last_known, doc_kinds={}, portal=kb.is_portal(cp),
+                   unknown_docs=_unknown_docs(conn, st))
     red = R.reduce(inp)
 
     match_digests = {}
@@ -315,6 +316,17 @@ def is_fresh(conn, proj) -> bool:
 def live_pids(conn) -> list:
     return [r[0] for r in conn.execute("SELECT pid FROM projections WHERE merged_into IS NULL"
                                        " ORDER BY pid")]
+
+
+def _unknown_docs(conn, st) -> frozenset:
+    """The machine candidates' documents whose amount is unknown (documents.amount_unknown)."""
+    import documents
+    ids = sorted({c.doc_id for c in st.cands.values()})
+    if not ids:
+        return frozenset()
+    rows = conn.execute("SELECT * FROM documents WHERE doc_id IN (%s)" % ",".join("?" * len(ids)),
+                        ids).fetchall()
+    return frozenset(r["doc_id"] for r in rows if documents.amount_unknown(r))
 
 
 def settle_all(conn, pids=None) -> None:

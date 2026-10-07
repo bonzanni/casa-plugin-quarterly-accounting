@@ -163,7 +163,7 @@ def _relevant_doc(conn, doc_id):
 def _floor_doc(conn, kind, pid, row, exp, doc_id, document_date):
     """The document side of the floor, for the chosen document and each alternative."""
     doc = _relevant_doc(conn, doc_id)
-    unknown = doc["amount_minor"] is None or not doc["currency"]
+    unknown = documents.amount_unknown(doc)
     if unknown and kind == "pair":
         # issue #32; Q2 run 1: a document of unknown amount (never read, or two readings
         # that disagree) is never matched by the job — only proposed, for the operator

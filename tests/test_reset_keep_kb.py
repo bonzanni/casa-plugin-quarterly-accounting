@@ -109,7 +109,7 @@ class ResetKeepKB(StoreCase):
                                        ).fetchone()[0], "11")
             c.close()
             c = db.sqlite3.connect(str(pathlib.Path(d) / db.DB_NAME))
-            c.execute("UPDATE meta SET value='12' WHERE key='schema_version'")
+            c.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(db.SCHEMA_VERSION),))
             c.commit()
             c.close()
             # no binding: refused, but the backup beside it was taken first

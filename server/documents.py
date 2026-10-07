@@ -175,21 +175,31 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                     "collisions": collisions(conn, doc_id)}
 
 
+def amount_unknown(doc) -> bool:
+    """Never read, or two readings disagreed (amount_conflict, sticky: a later reading never
+    clears it) — the job may only propose such a document, never match it."""
+    return doc["amount_minor"] is None or not doc["currency"] or bool(doc["amount_conflict"])
+
+
 def _reread(conn, doc_id, amount_minor, currency) -> None:
     """Q2 run 1 (PLAY, BRAIN: a reading that copies the payment): the same bytes filed again
     with an amount. None held → it is the first reading, taken. One held that DISAGREES → the
-    readings conflict, so the amount is unknown: the document can then only be proposed,
-    never matched by the job (matches._floor_doc). The same reading changes nothing."""
+    readings conflict for good (f1, Terra/Astra S1: a third reading never restores it): the
+    amount is unknown, the document can only be proposed, never matched by the job
+    (matches._floor_doc), and a machine match holding it shows as a proposal (reducer). The
+    same reading changes nothing."""
     if amount_minor is None or not currency:
         return
-    d = conn.execute("SELECT amount_minor, currency FROM documents WHERE doc_id=?",
-                     (doc_id,)).fetchone()
+    d = conn.execute("SELECT amount_minor, currency, amount_conflict FROM documents WHERE"
+                     " doc_id=?", (doc_id,)).fetchone()
+    if d["amount_conflict"]:
+        return
     if d["amount_minor"] is None or not d["currency"]:
         conn.execute("UPDATE documents SET amount_minor=?, currency=? WHERE doc_id=?",
                      (amount_minor, currency, doc_id))
     elif (d["amount_minor"], d["currency"]) != (amount_minor, currency):
-        conn.execute("UPDATE documents SET amount_minor=NULL, currency=NULL WHERE doc_id=?",
-                     (doc_id,))
+        conn.execute("UPDATE documents SET amount_minor=NULL, currency=NULL, amount_conflict=1"
+                     " WHERE doc_id=?", (doc_id,))
     else:
         return
     import lineage

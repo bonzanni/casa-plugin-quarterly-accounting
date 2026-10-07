@@ -342,6 +342,8 @@ def evidence(d: dict, cands=None) -> list:
         name = _docname(doc)
         if "facts-changed" in d["reasons"]:
             out.append("The bank changed this payment after it was paired — still right?")
+        if "amount-unknown" in d["reasons"]:
+            out.append("The invoice's amount was read two different ways — check it.")
         labels = cur["labels"]
         if "guessed" not in labels or cur["author"] == "operator":
             # a line that asks for a verdict names what it is asking about (round p7:
