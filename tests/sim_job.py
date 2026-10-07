@@ -103,9 +103,14 @@ class Gmail:
     casa_handoff, as gmail's download_attachment does). A hinted search
     (`from:<sender> …`) finds the messages whose sender is exactly that address; a plain
     search (`<vendor> invoice after:… before:…`) finds the vendor's messages; both only
-    within the query's `after:`/`before:` dates. The operator's own-mail search
-    (`from:me to:me …`) finds the operator's own mail (`own`), newest first. `down`: every
-    search fails (the probe records ok=false)."""
+    within the query's `after:`/`before:` dates. Any other query is a reference search: it
+    finds the messages that mention one of its words (`mentions`), dated or not. With a
+    `cap` (Gmail's page, 20), a search answers at most that many, newest first. A message's
+    attachment is in the search answer unless `listed`: then only list_attachments shows
+    it (inline images first, a snippet that names no invoice). The operator's own-mail
+    search (`from:me to:me …`) finds the operator's own mail (`own`), newest first. `down`:
+    every search fails (the probe records ok=false)."""
+
 
     def __init__(self, test):
         self.test = test
@@ -113,6 +118,7 @@ class Gmail:
         self.messages = []
         self.own_mail = []
         self.down = False
+        self.cap = None
 
     def own(self, amount_minor, currency="EUR", day="2026-07-05", number=None,
             issuer="Zapier", ref=None) -> str:
@@ -129,11 +135,12 @@ class Gmail:
         return ref
 
     def invoice(self, vendor, amount_minor, currency, day, number, sender=None,
-                kind="invoice", sent=False, message=None) -> str:
+                kind="invoice", sent=False, message=None, mentions=(), listed=False) -> str:
         """One message from `sender` (default billing@<vendor>.com) carrying a PDF of
         `kind`. `sent`: a sales invoice in the operator's Sent folder. `message`: the id of
-        an earlier message this PDF is one more attachment of. Its ref,
-        <message id>:<attachment id>."""
+        an earlier message this PDF is one more attachment of. `mentions`: the references
+        its text carries (an order number). `listed`: its attachment shows only through
+        list_attachments. Its ref, <message id>:<attachment id>."""
         sender = sender or "billing@%s.com" % re.sub(r"[^a-z0-9]", "", vendor.lower())
         path = self.test.publish(f"{number}.pdf", b"%PDF-1.4 " + number.encode() + b"\n")
         mid = message or f"msg-{len(self.messages) + 1:04d}"
@@ -141,8 +148,28 @@ class Gmail:
         self.messages.append({"vendor": vendor, "amount_minor": amount_minor,
                               "currency": currency, "date": day, "number": number,
                               "path": path, "sender": sender, "kind": kind, "sent": sent,
-                              "id": mid, "ref": f"{mid}:att-{att}"})
+                              "id": mid, "ref": f"{mid}:att-{att}",
+                              "mentions": [x.lower() for x in mentions], "listed": listed})
         return f"{mid}:att-{att}"
+
+    def notices(self, vendor, days, sender=None) -> None:
+        """One attachment-less message from the vendor on each of `days` (shipping
+        notices): they fill a search's page and carry no invoice."""
+        sender = sender or "billing@%s.com" % re.sub(r"[^a-z0-9]", "", vendor.lower())
+        for day in days:
+            self.messages.append({"vendor": vendor, "date": day, "sender": sender,
+                                  "id": f"msg-{len(self.messages) + 1:04d}", "ref": None,
+                                  "kind": "notice", "sent": False, "mentions": [],
+                                  "listed": False})
+
+    @staticmethod
+    def visible(found) -> list:
+        """The attachment refs a search answer shows."""
+        return [m["ref"] for m in found if m["ref"] is not None and not m["listed"]]
+
+    def list_attachments(self, message_id) -> list:
+        """Every attachment ref of the message."""
+        return [m["ref"] for m in self.messages if m["id"] == message_id and m["ref"]]
 
     def search_emails(self, query):
         """The messages the query finds; None when Gmail is down."""
@@ -155,16 +182,21 @@ class Gmail:
         after = re.search(r"after:(\d{4}-\d{2}-\d{2})", q)
         before = re.search(r"before:(\d{4}-\d{2}-\d{2})", q)
         hint = re.match(r"from:(\S+)", q)
+        words = [w for w in q.split() if not w.startswith(("after:", "before:"))]
         out = []
         for m in self.messages:
             if hint is not None:
                 if m["sender"].lower() != hint.group(1):
                     continue
-            elif not q.startswith(m["vendor"].lower() + " "):
+            elif q.startswith(m["vendor"].lower() + " "):
+                pass
+            elif not any(w in m["mentions"] for w in words):
                 continue
             if (after and m["date"] < after.group(1)) or (before and m["date"] >= before.group(1)):
                 continue
             out.append(m)
+        if self.cap is not None and len(out) > self.cap:
+            out = sorted(out, key=lambda m: m["date"], reverse=True)[:self.cap]
         return out
 
 
@@ -214,6 +246,11 @@ class JobDriver:
         self.refusals = None            # a list: a unit's refusal is kept there, not raised
         self.deliver = True             # Casa's receipt arrives for every post
         self.search_log = []            # (vendor, kind, query) of every vendor search
+        self.ingested = []              # the source_ref of every ingest_document call
+        # how the payment unit searches: "reference" (the skill: a hint, the remittance's
+        # reference with no dates, vendor-and-dates, wider; a message naming the payment
+        # has its attachments listed) or "dated" (Q2 R7's model: vendor searches only)
+        self.search_mode = "reference"
         self.posted = {}                # render_id -> the deposit a view unit posted
         self.fx_rates = {}              # provider_ref -> (exchange_rate, unit): see _export
         self._spec = {}                 # fixture row number -> its bank row (quarter fixtures)
@@ -270,7 +307,8 @@ class JobDriver:
         for r in self._spec.values():
             rows.append(self.bf.row(r["date"], amount=r["amount"], ref=r["ref"],
                                     counterparty=r["vendor"], status=r["status"],
-                                    direction=r["direction"], value_date=r["value_date"]))
+                                    direction=r["direction"], value_date=r["value_date"],
+                                    remittance=r.get("remittance", "")))
         return rows
 
     def _fetch_spec(self) -> None:
@@ -297,6 +335,7 @@ class JobDriver:
             no = max(self._spec, default=0) + 1
             self._spec[no] = {"vendor": vendor, "amount": amount, "status": status,
                               "date": day, "value_date": day,
+                              "remittance": r[6] if len(r) > 6 else "",
                               "direction": direction, "ref": f"Q{no:03d}",
                               "tags": sorted(tags.split(","))}
             nos.append(no)
@@ -323,10 +362,10 @@ class JobDriver:
         self._spec[row_no].update(status="BOOK", date=day)
         self._fetch_spec()
 
-    def pay_once(self, vendor, amount, day, tags="software") -> int:
+    def pay_once(self, vendor, amount, day, tags="software", remittance="") -> int:
         """One more payment fetched into the bank; its fixture row number (its pid exists
         once a run imported it: pid_of)."""
-        return self._add_rows([(vendor, amount, day, tags)])[0]
+        return self._add_rows([(vendor, amount, day, tags, "BOOK", "DBIT", remittance)])[0]
 
     def searches_of(self, vendor) -> list:
         """The (kind, query) of every vendor search the sim made for `vendor`."""
@@ -661,6 +700,8 @@ class JobDriver:
         out = qa_server.TOOLS[name]["fn"](args)
         if isinstance(out, dict) and isinstance(out.get("refused"), str):
             raise db.Refusal(out["refused"])
+        if name == "ingest_document":
+            self.ingested.append(args.get("source_ref"))
         return out
 
     def _bank(self, tool, **args) -> str:
@@ -843,22 +884,34 @@ class JobDriver:
                            and gap(c) <= self.near_days),
                           key=lambda c: (c["doc_id"] != u["exact_fit"], gap(c), c["doc_id"]))
         found_any = []
-        kinds = (["hinted"] if hint else []) + ["plain", "payment"]
-        kinds = kinds[u["searches"]:][:u["searches_left"]]
+        refno = [w for w in re.findall(r"[A-Za-z0-9]+", u.get("remittance") or "")
+                 if len(w) >= 6 and any(ch.isdigit() for ch in w)]
+        if self.search_mode == "dated":
+            refno = []
+        plan = ([("hinted", f"from:{hint}{span}")] if hint else []) \
+            + ([("payment", " ".join(refno))] if refno else []) \
+            + [("plain", f"{vendor} invoice{span}"), ("payment", f"{vendor}{span}")]
+        plan = plan[u["searches"]:][:u["searches_left"]]
         if not u["holds"]:
-            for k, kind in enumerate(kinds):
+            for k, (kind, query) in enumerate(plan):
                 if exact():
                     break
-                query = (f"from:{hint}{span}" if kind == "hinted"
-                         else f"{vendor} invoice{span}" if kind == "plain" else f"{vendor}{span}")
                 self._spend(1)
                 found = self.gmail.search_emails(query) or []
                 self.search_log.append((vendor, kind, query))
+                refs = Gmail.visible(found)
+                if self.search_mode == "reference":
+                    for m in found:          # a message naming the payment: its attachments
+                        if refno and any(w.lower() in m["mentions"] for w in refno):
+                            self._spend(1)
+                            refs += [r for r in self.gmail.list_attachments(m["id"])
+                                     if r not in refs]
+                found = [m for m in found if m["ref"] in refs]
                 found_any += found
                 out = self._tool("record_search", {
                     "pass_token": token, "pids": [pid], "search": kind, "queries": [query],
-                    "found_candidate": bool(found), "refs": [m["ref"] for m in found],
-                    "exhausted": k == len(kinds) - 1})
+                    "found_candidate": bool(refs), "refs": refs,
+                    "exhausted": k == len(plan) - 1})
                 filed.extend(self._file_vendor(token, vendor, out["files"]))
                 if out["files_total"] > len(out["files"]):
                     return None         # more found than one answer carries: job_next

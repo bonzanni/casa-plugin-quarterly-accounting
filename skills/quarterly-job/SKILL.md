@@ -93,7 +93,7 @@ unit's, or the probe's answer), in order, and read it (**Reading a document**):
 number, then `read_document(doc_id)`, `Read` the path it names, and
 `update_document_metadata(doc_id, amount_minor, currency, document_date, issuer, document_number, pass_token)`
 with only what is printed on it — never a value from the payment; an amount you cannot read
-stays out.
+stays out. Call it even with nothing readable: it records the reading.
 
 ### `payment`
 
@@ -111,10 +111,10 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
 3. **Nothing fits:** search the vendor's mail (a learned hint first: `from:<hint_sender>` and
    the `hint_subject` words; then the remittance's reference or order number, no dates; then
    the plain vendor-and-dates search over `search_window`, then wider), at most
-   `searches_left` searches. A vendor email naming the payment: `list_attachments` before
-   `missing`; a snippet or `has:attachment` never rules an invoice out. Record EACH
-   `search_emails` **right after it ran, before anything else** (one `record_search` per
-   query), with every attachment it found:
+   `searches_left` searches. A vendor email naming the payment: `list_attachments` (a snippet
+   or `has:attachment` never rules an invoice out). Record EACH `search_emails` **right after
+   it ran and its listing, before anything else** (one `record_search` per query), with
+   every attachment it found:
    `record_search(pid, search="hinted", queries=[…], found_candidate=…, refs=[each attachment found, as <message id>:<attachment id>; [] when none], exhausted=<true on your last>, pass_token)`
    (`search="plain"`, `search="payment"`). File EVERY invoice of its answer's `files` as in 1.
 4. **Decide it in ONE call:** `decide(pass_token, entries=[{pid, expected_revision, …}])` —

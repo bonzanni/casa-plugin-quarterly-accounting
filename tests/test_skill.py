@@ -430,8 +430,9 @@ class TestJob(TempEnv):
         self.assertNotIn("max_files", JOB)
         self.assertNotIn("Which are new", JOB)
         v = flat(self.vendor())
-        self.assertIn("Record EACH `search_emails` **right after it ran, before anything "
-                      "else** (one `record_search` per query), with every attachment it found:",
+        self.assertIn("Record EACH `search_emails` **right after it ran and its listing, "
+                      "before anything else** (one `record_search` per query), with every "
+                      "attachment it found:",
                       v)
         self.assertIn("refs=[each attachment found, as <message id>:<attachment id>; [] when "
                       "none], exhausted=<true on your last>, pass_token)`", v)
@@ -462,6 +463,12 @@ class TestJob(TempEnv):
     def vendor(self):
         return self.units("payment", "### `mirror`")
 
+    def test_a_reading_is_recorded_even_when_nothing_is_readable(self):
+        """h1 (design d1): a found ref is done only once its document's reading is recorded
+        — by update_document_metadata, also with no field read."""
+        self.assertIn("Call it even with nothing readable: it records the reading.",
+                      flat(JOB))
+
     def test_the_search_tries_the_payments_reference_and_opens_its_mail(self):
         """Q2 re-run R7: three invoices run 1 found were decided missing. Two were found by
         the remittance's reference or order number (one invoice was dated before the
@@ -474,8 +481,11 @@ class TestJob(TempEnv):
                  "vendor-and-dates search"]
         pos = [step3.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
-        self.assertIn("`list_attachments`", step3)
         self.assertIn("never rules an invoice out", step3)
+        # h1 (Astra S1): the listing comes BEFORE the search's record, which carries its refs
+        self.assertLess(step3.index("`list_attachments`"),
+                        step3.index("Record EACH `search_emails` **right after it ran and its "
+                                    "listing, before anything else**"))
 
     def test_the_payment_unit_judges_then_searches_then_decides_once(self):
         """Rev 18.4 §R18.1: `files` first; the candidates judged from their stored reading;
@@ -484,7 +494,8 @@ class TestJob(TempEnv):
         v = flat(self.vendor())
         order = ["1. **`files` first**", "2. **Judge the candidates from their reading**",
                  "only when in doubt", "3. **Nothing fits:**", "at most `searches_left`",
-                 "Record EACH `search_emails` **right after it ran, before anything else**",
+                 "Record EACH `search_emails` **right after it ran and its listing, before "
+                 "anything else**",
                  '`record_search(pid, search="hinted"', 'search="plain"', 'search="payment"',
                  "File EVERY invoice", "4. **Decide it in ONE call:**",
                  "5. **Save what worked:**"]
