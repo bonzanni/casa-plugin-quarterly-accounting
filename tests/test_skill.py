@@ -462,6 +462,21 @@ class TestJob(TempEnv):
     def vendor(self):
         return self.units("payment", "### `mirror`")
 
+    def test_the_search_tries_the_payments_reference_and_opens_its_mail(self):
+        """Q2 re-run R7: three invoices run 1 found were decided missing. Two were found by
+        the remittance's reference or order number (one invoice was dated before the
+        window); one email named the order and carried the invoice, judged from its
+        snippet. The reference goes first after a hint, with no dates, and a vendor email
+        naming the payment has its attachments listed before `missing`."""
+        v = flat(self.vendor())
+        step3 = v[v.index("3. **Nothing fits:**"):v.index("4. **Decide it in ONE call:**")]
+        order = ["from:<hint_sender>", "reference or order number", "no dates",
+                 "vendor-and-dates search"]
+        pos = [step3.index(k) for k in order]
+        self.assertEqual(pos, sorted(pos))
+        self.assertIn("`list_attachments`", step3)
+        self.assertIn("never rules an invoice out", step3)
+
     def test_the_payment_unit_judges_then_searches_then_decides_once(self):
         """Rev 18.4 §R18.1: `files` first; the candidates judged from their stored reading;
         nothing fits: the vendor's mail searched (hint, plain, wider), each search recorded

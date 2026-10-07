@@ -108,9 +108,11 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
    than `files`, or `decided: true`: then `job_next`.
 2. **Judge the candidates from their reading** (`unread`: read it first, as above); open
    one (`read_document(doc_id)`, then `Read` its path) only when in doubt.
-3. **Nothing fits:** search the vendor's mail over the `search_window` dates (with a learned
-   hint first `from:<hint_sender>` and the `hint_subject` words, then the plain
-   vendor-and-dates search, then wider), at most `searches_left` searches. Record EACH
+3. **Nothing fits:** search the vendor's mail (a learned hint first: `from:<hint_sender>` and
+   the `hint_subject` words; then the remittance's reference or order number, no dates; then
+   the plain vendor-and-dates search over `search_window`, then wider), at most
+   `searches_left` searches. A vendor email naming the payment: `list_attachments` before
+   `missing`; a snippet or `has:attachment` never rules an invoice out. Record EACH
    `search_emails` **right after it ran, before anything else** (one `record_search` per
    query), with every attachment it found:
    `record_search(pid, search="hinted", queries=[…], found_candidate=…, refs=[each attachment found, as <message id>:<attachment id>; [] when none], exhausted=<true on your last>, pass_token)`
