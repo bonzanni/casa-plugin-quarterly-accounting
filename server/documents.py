@@ -338,20 +338,20 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
     with db.tx(conn):
         passes.check_token(conn, token)
         _doc(conn, doc_id)
+        # h1/h2: every write of a document's amount goes through the one sticky conflict
+        # rule (_reread), with the pass_token or without (h2, Astra S1: a job reading sent
+        # without it matched a disagreeing amount; no other caller writes an amount)
+        amount = fields.pop("amount_minor", None), fields.pop("currency", None)
+        _reread(conn, doc_id, *amount)
         if token is not None:
-            # h1: the job's reading (read_document, then Read) — its amount through the one
-            # sticky conflict rule; the call, with any fields or none, records the reading
-            # and closes every queued item of a ref the document was filed under
-            amount = fields.pop("amount_minor", None), fields.pop("currency", None)
-            _reread(conn, doc_id, *amount)
+            # the job's reading (read_document, then Read), with any fields or none, records
+            # the reading
             conn.execute("UPDATE documents SET read_at=coalesce(read_at, ?) WHERE doc_id=?",
                          (db.now(), doc_id))
-            if _close_read_refs(conn, doc_id):
-                import decide
-                decide.note_progress(conn, token)
-        elif "amount_minor" in fields or "currency" in fields:
-            conn.execute("UPDATE documents SET read_at=coalesce(read_at, ?) WHERE doc_id=?",
-                         (db.now(), doc_id))
+        # a recorded reading closes every queued item of a ref the document was filed under
+        if _read(conn, doc_id) and _close_read_refs(conn, doc_id) and token is not None:
+            import decide
+            decide.note_progress(conn, token)
         if fields:
             conn.execute("UPDATE documents SET %s WHERE doc_id=?"
                          % ", ".join(f"{k}=?" for k in fields), (*fields.values(), doc_id))
@@ -363,7 +363,10 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
             conn.execute("UPDATE documents SET date_read_at=? WHERE doc_id=?",
                          (db.now() if fields["document_date"] else None, doc_id))
         lineage.settle_doc_holders(conn, doc_id)
-        return {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields}
+        d = _doc(conn, doc_id)
+        return {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields,
+                "amount_minor": d["amount_minor"], "currency": d["currency"],
+                "amount_conflict": bool(d["amount_conflict"])}
 
 
 def mark_irrelevant(conn, doc_id: int, irrelevant: bool = True, token=None) -> dict:

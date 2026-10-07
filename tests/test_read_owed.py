@@ -101,13 +101,33 @@ class ReadOwed(StoreCase):
         documents.update_document_metadata(self.conn, doc, token=self.claim_token())
         self.assertTrue(work.filed(self.conn, "m-1:att-1"))
 
-    def test_the_operators_correction_outside_a_pass_is_written(self):
+    def test_a_reading_without_the_token_goes_through_the_same_rule(self):
+        """h2 (Astra S1): a job reading sent without its pass_token wrote the amount past
+        the conflict rule, and a €12 document matched a €10 payment. Every write of a
+        document's amount goes through _reread, token or none (no other caller writes one)."""
         import documents
         doc = self._filed_unread(amount=1200)
         documents.update_document_metadata(self.conn, doc, amount_minor=1000, currency="EUR")
         self.assertEqual(self.conn.execute("SELECT amount_minor, amount_conflict FROM"
                                            " documents WHERE doc_id=?", (doc,)).fetchone()[:],
-                         (1000, 0))
+                         (None, 1))
+
+    def test_a_tokenless_reading_closes_the_refs_too(self):
+        import documents, work
+        doc = self._filed_unread()
+        documents.update_document_metadata(self.conn, doc, amount_minor=1000, currency="EUR")
+        self.assertTrue(work.filed(self.conn, "m-1:att-1"))
+
+    def test_a_document_filed_under_a_bare_message_id_is_owed_until_read(self):
+        """h2 (Astra S1): the legacy bare-id fallback counted an unread document filed."""
+        import documents, work
+        path = self.publish("y.pdf", b"%PDF-1.4 bare\n")
+        doc = documents.ingest_document(self.conn, source_path=path, kind="invoice",
+                                        source="gmail", extraction_author="specialist",
+                                        source_ref="msg-0001")["doc_id"]
+        self.assertFalse(work.filed(self.conn, "msg-0001:att-1"))
+        documents.update_document_metadata(self.conn, doc, token=self.claim_token())
+        self.assertTrue(work.filed(self.conn, "msg-0001:att-1"))
 
     def test_a_reading_given_at_filing_is_read(self):
         import work
