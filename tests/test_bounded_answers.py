@@ -155,7 +155,8 @@ class Bounded(RealLedger):
     def test_quarter_pages_fit_and_visit_every_item_once(self):
         for i, pid in enumerate(self.pids[:10]):       # long runners-up, rationale, labels
             doc = self.file(amount_minor=1000 + i, document_date="2026-07-01",
-                            issuer="I" * 500, recipient="R" * 500, document_number="N" * 300)
+                            issuer="I" * 500, recipient="R" * 500,
+                            document_number="N" * 297 + "%03d" % i)
             d = self.page(pid=pid)["item"]
             self.call("propose_match", pid=pid, doc_id=doc, expected_revision=d["revision"],
                       row_digest=d["row_digest"], pass_token=self.t1,

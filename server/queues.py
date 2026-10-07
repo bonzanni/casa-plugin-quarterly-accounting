@@ -19,6 +19,9 @@ import db
 
 ATTEMPTS_MAX = 2         # D8: an item is handed again at most once without progress
 UPSTREAM = ("erase", "search", "ref")        # every kind a decision depends on (rule 5)
+# issue #50: an email a payment's own reference search returned, its attachments not yet
+# listed — owed by that payment alone. Never a give-up of its own: a payment that owes one
+# is never decided missing, so its undecided outcome already reads "search incomplete"
 
 
 def unit_of_payment(pid) -> str:
@@ -127,13 +130,49 @@ def blocks_decide(conn, job_id, unit) -> bool:
 
 def gave_up_upstream(conn, job_id) -> bool:
     """Rule 5: the run gave up an item a decision depends on, at any time."""
-    return conn.execute("SELECT 1 FROM run_items WHERE job_id=? AND state='given_up'",
-                        (job_id,)).fetchone() is not None
+    return conn.execute("SELECT 1 FROM run_items WHERE job_id=? AND state='given_up' AND"
+                        " kind IN ('erase', 'search', 'ref')", (job_id,)).fetchone() is not None
 
 
 def given_up(conn, job_id) -> dict:
+    """The UPSTREAM kinds given up, counted (an `email` item never is: issue #50)."""
     return dict(conn.execute("SELECT kind, count(*) FROM run_items WHERE job_id=? AND"
-                             " state='given_up' GROUP BY kind", (job_id,)).fetchall())
+                             " state='given_up' AND kind IN ('erase', 'search', 'ref')"
+                             " GROUP BY kind", (job_id,)).fetchall())
+
+
+EMAILS_MAX = 50
+EMAIL_ID_MAX = 200     # a Gmail message id is 16 hex characters
+
+
+def check_emails(emails) -> list:
+    """Issue #50: [{"id": <message id>, "listed": true|false}, …] → [(id, listed)]."""
+    if not isinstance(emails, list) or len(emails) > EMAILS_MAX or not all(
+            isinstance(e, dict) and set(e) == {"id", "listed"} and isinstance(e["id"], str)
+            and e["id"] and len(e["id"]) <= EMAIL_ID_MAX and isinstance(e["listed"], bool)
+            for e in emails):
+        raise db.Refusal('emails is a list of {"id": <message id>, "listed": true|false}: '
+                         "every vendor email a search on this payment's own reference or "
+                         f"order number returned (at most {EMAILS_MAX}), [] for any other "
+                         "search")
+    return [(e["id"], e["listed"]) for e in emails]
+
+
+def unlisted(conn, job_id, unit) -> list:
+    """Issue #50: the emails `unit` owes a listing — queued, or given up with a payment a
+    handover reopened since (d1 Astra S1) — oldest first."""
+    return [r[0] for r in conn.execute(
+        "SELECT key FROM run_items WHERE job_id=? AND unit=? AND kind='email' AND state<>'done'"
+        " ORDER BY seq", (job_id, unit))]
+
+
+def list_email(conn, job_id, unit, key) -> int:
+    """Issue #50: a listing reported closes the email whether queued or given up (d2 Terra
+    S2: a reopened payment clears it). Returns how many closed."""
+    assert conn.in_transaction
+    return conn.execute("UPDATE run_items SET state='done', closed_seq=?, reason='listed'"
+                        " WHERE job_id=? AND unit=? AND kind='email' AND key=? AND"
+                        " state<>'done'", (db.next_seq(conn), job_id, unit, key)).rowcount
 
 
 # ---- the settle (rule 2) -------------------------------------------------------------------

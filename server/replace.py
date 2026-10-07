@@ -39,6 +39,9 @@ def ask_in_tx(conn, job_id, pid, doc_id) -> int:
         raise db.Refusal(f"there is no such document #{doc_id} to use")
     if any(h != pid for h, _ in matches.holders(conn, doc_id)):
         raise db.Refusal("that document is another payment's")
+    if matches.taken_elsewhere(conn, doc_id, pid):
+        # issue #48 (d1 Astra S1): its purchase backs another payment through a twin
+        raise db.Refusal(matches.taken_refusal(conn, doc_id, pid))
     if conn.execute("SELECT doc_id FROM match_state WHERE match_id=?",
                     (cur[0],)).fetchone()[0] == doc_id:
         raise db.Refusal("the payment already holds that document: keep it")
@@ -58,7 +61,9 @@ def get(conn, qid):
 def open_ones(conn) -> list:
     """Every live question, oldest first. e1 (Astra S1): a question whose payment left
     scope, or no longer holds the pairing it asked about, is retired here — superseded, never
-    offered — so no message advertises a card nothing can show. Inside a transaction."""
+    offered — so no message advertises a card nothing can show. Issue #48 (d2 Astra S1): so
+    is one whose new document's purchase another payment has taken since (the job's offer).
+    Inside a transaction."""
     assert conn.in_transaction
     out = []
     for q in conn.execute("SELECT * FROM replace_questions WHERE state='open' ORDER BY"
@@ -66,7 +71,8 @@ def open_ones(conn) -> list:
         p = lineage.projection(conn, q["pid"])
         cur = current(conn, q["pid"])
         if p is None or p["ended"] or p["merged_into"] is not None or cur is None \
-                or cur[0] != q["match_id"]:
+                or cur[0] != q["match_id"] \
+                or matches.taken_elsewhere(conn, q["new_doc_id"], q["pid"]):
             conn.execute("UPDATE replace_questions SET state='superseded', answered_at=?"
                          " WHERE question_id=?", (db.now(), q["question_id"]))
             continue

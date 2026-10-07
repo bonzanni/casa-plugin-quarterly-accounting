@@ -6,7 +6,7 @@ live acceptance's second run.
 
 It reads the binding row, every `counterparties` row (learned hints included) and every
 `chain_overrides` row, runs `binding.reset_store` (the same erasure the reset_store tool does),
-and re-inserts the kept rows in ONE transaction. Table by table, at schema 14:
+and re-inserts the kept rows in ONE transaction. Table by table, at schema 15:
 
   KEPT      counterparties (verbatim, hint_sender/hint_subject included), chain_overrides
             (verbatim), binding: account_id, account_label, watermark, bound_at, package_name,
@@ -19,7 +19,7 @@ and re-inserts the kept rows in ONE transaction. Table by table, at schema 14:
             operator_refs, claims, runs, readings, render_keys, account_choices, post_offers,
             run_work, run_mirror, quarter_notices, pass_marker, work_requests.
 
-Refuses a store whose schema version is not 14. It never touches bank-feed's ledger: PLAY
+Refuses a store whose schema version is not 15. It never touches bank-feed's ledger: PLAY
 restores bank-feed's install backup first, as its reset recipe does. Before erasing, `main`
 copies the store beside itself (accounting.sqlite.pre-reset-<time>); the copy is never deleted.
 """
@@ -35,7 +35,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server"))
 import binding  # noqa: E402
 import db  # noqa: E402
 
-REQUIRED_SCHEMA = 14
+REQUIRED_SCHEMA = 15
 _KEPT_BINDING = ("account_id", "account_label", "watermark", "bound_at", "package_name",
                  "package_name_announced", "watermark_announced")
 _KB_TABLES = ("counterparties", "chain_overrides")

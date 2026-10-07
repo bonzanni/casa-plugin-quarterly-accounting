@@ -133,6 +133,7 @@ def _entry(conn, token, e, seen) -> dict:
         return {"pid": pid, **out, "status": lineage.projection(conn, pid)["status"]}
     if outcome == "missing":
         reason = str(e.get("reason") or "")[:REASON_MAX]
+        _check_listed(conn, token, pid)
         out = missing_in_tx(conn, pid, rev, reason)
     else:
         if not e.get("document_date") or not isinstance(e["document_date"], str):
@@ -182,6 +183,26 @@ def guard_single(conn, token, pid, doc_id) -> None:
     if _handover_onto_pairing(conn, token, lineage.resolve_pid(conn, pid), entry):
         raise db.Refusal("this payment already has a document: answer it with decide — "
                          "replace (the operator is asked) or keep")
+
+
+def _check_listed(conn, token, pid) -> None:
+    """Issue #50 (operator ruling A, the narrow reading): `missing` waits while an email this
+    payment's own reference search returned has never had its attachments listed — as
+    record_search reported it (a reminder the model fills in: it catches a skipped step on
+    an honest report, never an omitted email). The refusal names the emails."""
+    import queues
+    job_id = queues.job_of(conn, token)
+    if job_id is None:
+        return
+    owed = queues.unlisted(conn, job_id, queues.unit_of_payment(pid))
+    if owed:
+        named = ", ".join(owed[:3]) + (f" and {len(owed) - 3} more" if len(owed) > 3 else "")
+        raise db.Refusal(
+            f"this payment's own search returned email{'s' if len(owed) > 1 else ''} "
+            f"{named}, never listed: list_attachments on "
+            f"{'each' if len(owed) > 1 else 'it'} (an invoice may be attached), report it "
+            "with record_search(pid, queries=[], refs=[what it found], emails=[{id, listed: "
+            "true}]), then decide")
 
 
 def _check_order(conn, token, entries) -> None:

@@ -21,7 +21,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -192,12 +192,13 @@ REPLACE_QUESTIONS_DDL = """CREATE TABLE IF NOT EXISTS replace_questions (
   state TEXT NOT NULL CHECK (state IN ('open', 'kept', 'used', 'superseded')),
   created_seq INTEGER NOT NULL, answered_at TEXT);"""
 # Queues (operator ruling A): every other item a unit owes, from the moment it is known —
-# an erase candidate, the own-mail search, a found attachment (docs queues-design.md)
+# an erase candidate, the own-mail search, a found attachment (docs queues-design.md); an
+# email a payment's own reference search returned, its attachments not yet listed (#50)
 RUN_ITEMS_DDL = """CREATE TABLE IF NOT EXISTS run_items (
   job_id TEXT NOT NULL,
   unit TEXT NOT NULL,            -- erasures | filing | vendor:<kb.norm vendor>
-  kind TEXT NOT NULL CHECK (kind IN ('erase', 'search', 'ref')),
-  key TEXT NOT NULL,             -- the pid, 'own-mail', <message id>:<attachment id>
+  kind TEXT NOT NULL CHECK (kind IN ('erase', 'search', 'ref', 'email')),
+  key TEXT NOT NULL,             -- the pid, 'own-mail', <message id>:<attachment id>, <message id>
   state TEXT NOT NULL CHECK (state IN ('queued', 'done', 'given_up')),
   attempts INTEGER NOT NULL DEFAULT 0, hand_seq INTEGER,
   seq INTEGER NOT NULL, closed_seq INTEGER, reason TEXT,
@@ -596,6 +597,14 @@ MIGRATIONS: dict[int, list[str]] = {
          "UPDATE runs SET end_text='Accounting work finished.' WHERE completed_at IS NOT NULL",
          "UPDATE documents SET read_at=ingested_at WHERE amount_minor IS NOT NULL OR"
          " amount_conflict=1"],
+    # 14 -> 15 (issue #50): run_items admits the `email` kind — SQLite widens a CHECK only by
+    # a rebuild; a live run's rows are copied whole
+    14: [RUN_ITEMS_DDL.replace("run_items (", "run_items_v15 (", 1),
+         "INSERT INTO run_items_v15(job_id, unit, kind, key, state, attempts, hand_seq, seq,"
+         " closed_seq, reason) SELECT job_id, unit, kind, key, state, attempts, hand_seq, seq,"
+         " closed_seq, reason FROM run_items",
+         "DROP TABLE run_items",
+         "ALTER TABLE run_items_v15 RENAME TO run_items"],
     12: ["ALTER TABLE claims ADD COLUMN said_seq INTEGER",
          "ALTER TABLE claims ADD COLUMN report_seq INTEGER",
          "ALTER TABLE documents ADD COLUMN amount_conflict INTEGER NOT NULL DEFAULT 0"],
@@ -780,11 +789,24 @@ def _retry_locked(stmt, bound_s: float):
             time.sleep(0.05)
 
 
+def purchase_key(text) -> str:
+    """Issue #48 (r1 Astra + Terra S1): one normalisation of a purchase's number and issuer,
+    the same on both sides of every comparison (SQLite's lower() folds ASCII only)."""
+    return (text or "").strip().lower() if isinstance(text, str) else ""
+
+
+def purchase_issuer(issuer, counterparty) -> str:
+    """The issuer a purchase is compared by: the issuer, else the counterparty."""
+    return purchase_key(issuer) or purchase_key(counterparty)
+
+
 def open_store(path=None, bound_s: float = LOCK_BOUND_S) -> sqlite3.Connection:
     p = pathlib.Path(path) if path else data_dir() / DB_NAME
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p), isolation_level=None, timeout=BUSY_TIMEOUT_MS / 1000)
     try:
+        conn.create_function("purchase_key", 1, purchase_key, deterministic=True)
+        conn.create_function("purchase_issuer", 2, purchase_issuer, deterministic=True)
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         # A fresh file's journal-mode conversion writes the file header, so it

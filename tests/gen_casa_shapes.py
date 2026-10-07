@@ -738,11 +738,12 @@ def gen_ready_notice(sh, st, b):
     """The "package ready" notice (D19), first and updated, with an earlier quarter's line."""
     import cards, views
     loop_store(st)
-    for day in (Q2_DAY, Q3_DAY):
+    for n, day in enumerate((Q2_DAY, Q3_DAY), start=1):
         pid = st.pay(hostile(1), 900, day)
+        # one purchase per payment (issue #48): each its own number
         st.machine_match(pid, st.doc(counterparty=hostile(1), issuer=hostile(1),
                                      amount_minor=900, document_date=day,
-                                     document_number=docnum(1)), st.token)
+                                     document_number=docnum(n)), st.token)
     rid = _c(st, cards.compose_ready, ["2026-Q2", "2026-Q3"])
     _post(sh, st, b, "ready", rid, "Q3 complete · 1 of 1 accounted for · package ready")
     views.mark_rendering_delivered(st.conn, rid)

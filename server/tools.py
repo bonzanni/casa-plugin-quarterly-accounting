@@ -556,10 +556,15 @@ def t_reset(args):
           "now, at most 3 searches a run, "
           "recorded right after the search ran with refs: every attachment it found, as "
           "<message id>:<attachment id>, [] when none; it answers files, the payment's found "
-          "attachments to file now, and files_total.",
+          "attachments to file now, and files_total. emails: on a search by the payment's own "
+          "reference or order number, every vendor email it returned, {id: <message id>, "
+          "listed: whether you listed its attachments} ([] for any other search); missing is "
+          "refused while one is unlisted. Report a listing later with no queries: "
+          "record_search(pid, queries=[], refs=[what it found], emails=[{id, listed: true}]) "
+          "— not a search.",
           obj({"pids": AI, "pid": I, "search": S, "pass_token": TOKEN, "queries": A,
                "found_candidate": B, "exhausted": B, "incomplete": B, "identity_unknown": B,
-               "revive": B, "refs": A}))
+               "revive": B, "refs": A, "emails": {"type": "array", "items": O}}))
 def t_search(args):
     flags = {n: _bool(args, n, False) for n in ("found_candidate", "exhausted", "incomplete",
                                                 "revive")}
@@ -570,7 +575,7 @@ def t_search(args):
     return work.record_search(conn(), pids=args.get("pids") or None, pid=_int(args, "pid"),
                               search=args.get("search") or "payment",
                               token=_int(args, "pass_token"),
-                              **_pick(args, ("queries", "refs")), **flags)
+                              **_pick(args, ("queries", "refs", "emails")), **flags)
 
 
 # --- views and replies -------------------------------------------------------------
