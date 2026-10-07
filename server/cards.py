@@ -79,8 +79,8 @@ def nothing_to_check(conn, q) -> str:
     if q == wq:
         prev = dates.quarter_label(dates.quarter_of(dates.add_months(
             dates.quarter_bounds(wq)[0], -3)))
-        return (f"Nothing to check yet: the books start {books} and the bank has no payment "
-                f"since. Say 'start from {prev}' to include {prev}.")
+        return (f"Nothing to check for {ql} yet: the bank has no payment in it (the books "
+                f"start {books}). Say 'start from {prev}' to include {prev}.")
     return f"Nothing to check for {ql} yet: the bank has no payment in it."
 
 

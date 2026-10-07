@@ -32,8 +32,23 @@ class EmptyCheck(StoreCase):
         units, end = self.run_it("agent", "47474747-01")
         self.assertIsNone(end)                            # #45: no message of its own
         self.assertEqual(units[-1]["text"],
-                         "Nothing to check yet: the books start 1 Oct 2026 and the bank has "
-                         "no payment since. Say 'start from Q3 2026' to include Q3 2026.")
+                         "Nothing to check for Q4 2026 yet: the bank has no payment in it "
+                         "(the books start 1 Oct 2026). Say 'start from Q3 2026' to include "
+                         "Q3 2026.")
+
+    def test_the_books_quarter_empty_with_a_later_payment_claims_nothing_beyond_it(self):
+        """h1 (Astra S2): bound from the quarter's start, a payment only in a LATER quarter,
+        the books' quarter checked: it has no payment, the bank does — never "since"."""
+        import asks
+        self.bind(watermark="2026-07-01")
+        drv = JobDriver(self, payments=0)
+        drv.pay_once("Zapier", 1000, "2026-10-02")
+        asks.request_work(self.conn, "check", "operator", quarter="2026-Q3")
+        units = drv.run_job("47474747-05", started_by="agent")
+        self.assertEqual(units[-1]["text"],
+                         "Nothing to check for Q3 2026 yet: the bank has no payment in it "
+                         "(the books start 1 Jul 2026). Say 'start from Q2 2026' to include "
+                         "Q2 2026.")
 
     def test_a_named_quarter_before_the_books_says_how_to_include_it(self):
         units, end = self.run_it("agent", "47474747-02", quarter="2026-Q2")
