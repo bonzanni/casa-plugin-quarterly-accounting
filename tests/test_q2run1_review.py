@@ -148,14 +148,16 @@ class SchemaTwelveStoresUpgrade(StoreCase):
         """Round f1 (Astra S1): run 1 left schema-12 stores live; 12 → 13 adds the claim
         and document columns, and the job's job_next runs on the upgraded store."""
         conn = self.conn
-        for table, col in (("claims", "said_seq"), ("documents", "amount_conflict")):
+        for table, col in (("claims", "said_seq"), ("claims", "report_seq"),
+                           ("documents", "amount_conflict")):
             conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")      # ba9e512's shape
         conn.execute("UPDATE meta SET value='12' WHERE key='schema_version'")
         conn.commit()
         db.migrate(conn)
         cols = {(t, r[1]) for t in ("claims", "documents")
                 for r in conn.execute(f"PRAGMA table_info({t})")}
-        self.assertTrue({("claims", "said_seq"), ("documents", "amount_conflict")} <= cols)
+        self.assertTrue({("claims", "said_seq"), ("claims", "report_seq"),
+                         ("documents", "amount_conflict")} <= cols)
         self.bind()
         drv = JobDriver(self, payments=3)
         for i in range(3):

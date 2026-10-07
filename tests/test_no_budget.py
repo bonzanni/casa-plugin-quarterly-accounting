@@ -97,3 +97,18 @@ class NoBudget(StoreCase):
         self.assertLessEqual(repeated, 8 * len(cuts))
         again = drv.run_job("b0b0b0b0-09", started_by="scheduled")      # nothing left owed
         self.assertEqual(sum(len(u["calls"]) for u in again if u["unit"] == "mirror"), 0)
+
+    def test_a_report_cut_before_it_reached_casa_is_handed_again(self):
+        """g1 (Terra S1): the `report` unit is handed, then the batch ends before its
+        report_job_progress — twice in a row. It never reached Casa: the next claim is
+        handed the report again, and the run finishes with every later batch reported."""
+        drv = JobDriver(self, payments=60)
+        for i in range(60):
+            drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"ZAP-{i + 1}")
+        drv.skip_attached_reports = True
+        drv.cut_reports = 2
+        drv.casa_cut = 80
+        drv.run_job("b0b0b0b0-0a")
+        self.assertEqual(drv.batch_reported[:2], [False, False])
+        self.assertTrue(all(drv.batch_reported[2:]), drv.batch_reported)
+        self.assertEqual(self.statuses(), {"matched": 60})

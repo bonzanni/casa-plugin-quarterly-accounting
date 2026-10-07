@@ -738,7 +738,11 @@ def _close(conn, token, out) -> dict:
     # and skip it) and on `complete` — never beside a work unit
     report = ending or (out["unit"] == "report")
     if report and progressed:
-        conn.execute("UPDATE claims SET said=1, said_seq=? WHERE gen=?",
+        # g1 (Terra S1): a handed `report` counts only once the model came back — its
+        # report_seq becomes said_seq on this claim's next job_next (next_unit); a batch
+        # cut before that delivered nothing, and the next claim is handed it again
+        col = "said_seq" if ending else "report_seq"
+        conn.execute(f"UPDATE claims SET said=1, {col}=? WHERE gen=?",
                      (db.next_seq(conn), token))
     summary = (job.run_end(conn, c["job_id"])[1] if out["unit"] == "complete"
                else WORDS[out["unit"]])
@@ -761,6 +765,9 @@ def next_unit(conn, token) -> dict:
     with db.tx(conn):
         job.check_claim(conn, token)
         job_id = _job_of(conn, token)
+        # the model came back after a handed `report`: it was delivered (g1)
+        conn.execute("UPDATE claims SET said_seq=report_seq, report_seq=NULL WHERE gen=? AND"
+                     " report_seq IS NOT NULL", (token,))
         owed = _report_owed(conn, token, job_id)
         out = _close(conn, token, owed if owed is not None else
                      _choose(conn, token, job_id, logs))

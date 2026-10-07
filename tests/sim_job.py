@@ -230,6 +230,7 @@ class JobDriver:
         # a stray call count the model sends (ignored since the no-budget ruling): "delta"
         # (run 1), "total", None
         self.calls_mode = None
+        self.cut_reports = 0            # g1: report calls Casa cuts (a model that stops there)
         self.bank_log = []              # every bank-feed call: (tool, canonical args)
         self.near_days = 10             # the skill's "certain": a match dated this near
         self.propose_days = 20          # a look-alike this near is proposed; farther: not it
@@ -581,8 +582,10 @@ class JobDriver:
                 self.last = u
                 assert u.get("pass_token") == self.token, u
                 said = reported
-                if u["report"] and (not self.skip_attached_reports or u["unit"] in (
-                        "report", "complete")):
+                # g1 (Terra S1): a `report` reaches Casa only when its report_job_progress
+                # call is made (_report) — a cut before it delivers nothing
+                if u["report"] and u["unit"] != "report" and (
+                        not self.skip_attached_reports or u["unit"] == "complete"):
                     reported = bool(u["progress"]["progressed"])   # Casa keeps the LAST
                 if u["report"] and u["unit"] == "complete":
                     # the closing report_job_progress is a call of its own; past Casa's cut
@@ -597,6 +600,8 @@ class JobDriver:
                 import db
                 try:
                     self.do(u, self.token)
+                    if u["unit"] == "report":
+                        reported = bool(u["progress"]["progressed"])   # delivered
                 except CasaCut:
                     self.cuts += 1
                     batch_end()
@@ -862,7 +867,11 @@ class JobDriver:
         return None
 
     def _report(self, u, token):
-        """`report` → report_job_progress(progress) (a Casa tool: one call), then job_next."""
+        """`report` → report_job_progress(progress) (a Casa tool: one call), then job_next.
+        `cut_reports`: that many report calls are cut by Casa (the batch ends there)."""
+        if self.cut_reports > 0:
+            self.cut_reports -= 1
+            raise CasaCut()
         self._spend(1)
         return None
 

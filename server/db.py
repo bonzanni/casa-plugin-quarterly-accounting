@@ -66,7 +66,8 @@ CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   said INTEGER NOT NULL DEFAULT 0,          -- d3: this claim's progress was handed for reporting
   progressed_seq INTEGER,        -- e3: when note_progress last stamped it (progress.made)
   handed INTEGER NOT NULL DEFAULT 0,    -- e4: this claim handed out a work unit (progress)
-  said_seq INTEGER);             -- Q2 run 1: the store sequence when it last reported progress"""
+  said_seq INTEGER,              -- Q2 run 1: the store sequence of its last DELIVERED report
+  report_seq INTEGER);           -- g1: a `report` handed, not yet acknowledged by a job_next             -- Q2 run 1: the store sequence when it last reported progress"""
 
 # Schema 10's credits (INV-J8), frozen for MIGRATIONS[9]; MIGRATIONS[11] drops it.
 CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (
@@ -583,6 +584,7 @@ MIGRATIONS: dict[int, list[str]] = {
     # Task 11 of the plan appends the drops of the deleted machinery to this same list.
     # 12 → 13 (Q2 run 1, round f1 Astra S1: schema 12 stores exist live since run 1)
     12: ["ALTER TABLE claims ADD COLUMN said_seq INTEGER",
+         "ALTER TABLE claims ADD COLUMN report_seq INTEGER",
          "ALTER TABLE documents ADD COLUMN amount_conflict INTEGER NOT NULL DEFAULT 0"],
     11: ["ALTER TABLE projections ADD COLUMN mirror_note TEXT",
          "ALTER TABLE documents ADD COLUMN vendor TEXT",
