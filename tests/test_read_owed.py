@@ -133,6 +133,33 @@ class ReadOwed(StoreCase):
                 self.assertEqual(d["amount_conflict"], 1)
                 self.assertTrue(documents.amount_unknown(d))
 
+    def test_refiling_the_same_bytes_with_a_cleared_currency_withdraws_it_too(self):
+        """h5 (Astra S1): the fifth finding of this shape — ingest of held bytes with
+        currency "" kept EUR trusted. One reader of what a call says about the amount
+        (documents._amount_said) feeds the one rule from every entry point."""
+        import qa_server, tools  # noqa: F401
+        doc = self._filed_unread(amount=1000)
+        path = self.publish("x.pdf", b"%PDF-1.4 same bytes\n")
+        out = qa_server.TOOLS["ingest_document"]["fn"](
+            {"source_path": path, "kind": "invoice", "source": "gmail",
+             "extraction_author": "specialist", "source_ref": "m-1:att-2", "currency": "",
+             "pass_token": self.claim_token()})
+        self.assertEqual(out["doc_id"], doc)
+        self.assertEqual(self.conn.execute("SELECT amount_conflict FROM documents WHERE"
+                                           " doc_id=?", (doc,)).fetchone()[0], 1)
+
+    def test_refiling_with_nothing_said_about_the_amount_changes_nothing(self):
+        import qa_server, tools  # noqa: F401
+        doc = self._filed_unread(amount=1000)
+        path = self.publish("x.pdf", b"%PDF-1.4 same bytes\n")
+        qa_server.TOOLS["ingest_document"]["fn"](
+            {"source_path": path, "kind": "invoice", "source": "gmail",
+             "extraction_author": "specialist", "source_ref": "m-1:att-2",
+             "pass_token": self.claim_token()})
+        self.assertEqual(tuple(self.conn.execute("SELECT amount_minor, amount_conflict FROM"
+                                                 " documents WHERE doc_id=?", (doc,)
+                                                 ).fetchone()), (1000, 0))
+
     def test_withdrawing_nothing_held_changes_nothing(self):
         import documents
         doc = self._filed_unread()

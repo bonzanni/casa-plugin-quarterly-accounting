@@ -146,7 +146,7 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 # (re)installed under the held name, never beside it as a second copy no
                 # row names (fix wave F)
                 _install(data, sha, "." + existing["ext"])
-                _reread(conn, existing[0], amount_minor, currency)    # before the ref (h1)
+                _reread(conn, existing[0], *_amount_said(amount_minor, currency))  # h1: first
                 if _operator_ref(conn, source, source_ref, existing[0]) and token is not None:
                     decide.note_progress(conn, token)   # d2: a newly filed ref is progress
                 if vendor is not None:
@@ -181,6 +181,16 @@ def amount_unknown(doc) -> bool:
     """Never read, or two readings disagreed (amount_conflict, sticky: a later reading never
     clears it) — the job may only propose such a document, never match it."""
     return doc["amount_minor"] is None or not doc["currency"] or bool(doc["amount_conflict"])
+
+
+def _amount_said(amount_minor, currency, cleared=False) -> tuple:
+    """h5 (Astra S1, the fifth finding of this shape): THE reader of what one call says
+    about a document's amount, for every entry point (ingest_document, update_document_
+    metadata) — (amount, currency, withdrawn). A blank currency ("", spaces) or `cleared`
+    (an explicit null amount or currency: update_document_metadata's) withdraws; None is
+    "nothing said"."""
+    blank = currency is not None and not str(currency).strip()
+    return (amount_minor, None if blank else currency, bool(blank or cleared))
 
 
 def _reread(conn, doc_id, amount_minor, currency, withdrawn=False) -> None:
@@ -344,12 +354,9 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         # h1/h2: every write of a document's amount goes through the one sticky conflict
         # rule (_reread), with the pass_token or without (h2, Astra S1: a job reading sent
         # without it matched a disagreeing amount; no other caller writes an amount)
-        withdrawn = (("amount_minor" in fields and fields["amount_minor"] is None)
-                     or ("currency" in fields and not (fields["currency"] or "").strip()))
-        if "currency" in fields and not (fields["currency"] or "").strip():
-            fields["currency"] = None
-        amount = fields.pop("amount_minor", None), fields.pop("currency", None) or None
-        _reread(conn, doc_id, *amount, withdrawn=withdrawn)
+        cleared = any(k in fields and fields[k] is None for k in ("amount_minor", "currency"))
+        _reread(conn, doc_id, *_amount_said(fields.pop("amount_minor", None),
+                                            fields.pop("currency", None), cleared))
         if token is not None:
             # the job's reading (read_document, then Read), with any fields or none, records
             # the reading
