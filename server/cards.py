@@ -404,8 +404,12 @@ def _receipts(conn, docs) -> tuple:
     head, props = [], []
     for doc in dict.fromkeys(docs):
         hs = matches.holders(conn, doc)
-        paired = [p for p, how in hs if how == "matched"]
-        held = [p for p, how in hs if how != "matched"]
+        # f2 (Astra S2): "Paired" only while the payment reduces to matched — a machine match
+        # whose document's readings then disagree is a proposal (reducer `amount-unknown`)
+        status = {p: conn.execute("SELECT status FROM projections WHERE pid=?",
+                                  (p,)).fetchone()[0] for p, _ in hs}
+        paired = [p for p, how in hs if how == "matched" and status[p] == "matched"]
+        held = [p for p, how in hs if p not in paired]
         if paired:
             d = work.describe(conn, paired[0])
             head.append(f"Filed. Paired with {views.field(d['counterparty'])} · "
@@ -649,7 +653,8 @@ def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):
     old = conn.execute("SELECT doc_id FROM match_state WHERE match_id=?",
                        (cur[0],)).fetchone()[0]
     how = ("confirmed by you" if cur[2] == "operator" else
-           "matched by the job" if cur[1] == "matched" else "suggested by the job")
+           "matched by the job" if cur[1] == "matched" and d["status"] == "matched"
+           else "suggested by the job")           # f2: a demoted match is a suggestion
 
     def doc_line(doc_id):
         x = _doc_summary(conn, doc_id)

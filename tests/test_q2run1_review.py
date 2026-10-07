@@ -145,6 +145,17 @@ class ConflictIsSticky(StoreCase):
         self.file("b.pdf", 2000)
         self.assertEqual(self.status(), "proposed")
 
+    def test_a_handover_receipt_shows_the_demoted_match_to_confirm(self):
+        """Round f2 (Astra S2): the handed document's readings disagree with its match — the
+        receipt must not say "Paired"; the payment is a proposal for the review."""
+        import cards
+        doc = self.file("a.pdf", 1000)
+        self.walk_payment()
+        self.assertEqual(self.match(doc)["applied"], 1)
+        self.file("b.pdf", 2000)
+        head, props = cards._receipts(self.conn, [doc])
+        self.assertEqual((head, [p["pid"] for p in props]), ([], [self.pid]))
+
 
 class SchemaTwelveStoresUpgrade(StoreCase):
     def test_a_ba9e512_store_gains_the_columns_and_the_job_runs(self):
