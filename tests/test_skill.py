@@ -185,7 +185,7 @@ class TestDesk(TempEnv):
             self.assertIn(phrase, f, phrase)
 
     def test_more_and_all_of_them_follow_next(self):
-        ans = flat(section(SKILL, "## Answering", "## The operator's words"))
+        ans = flat(section(SKILL, "## Two intents about a quarter", "## The operator's words"))
         self.assertIn("`show_view(view=…, quarter=…, page=…, after=…)`", ans)
         # final fix wave I-1: a fresh desk session cannot know the last view's `next`;
         # the reading returns it as show_view arguments
@@ -238,22 +238,27 @@ class TestDesk(TempEnv):
 
     def test_every_flow_and_its_line(self):
         asks = flat(section(SKILL, "## Asks", "## A file the operator sent"))
-        for phrase in ('`request_work(kind="check", trigger="operator")`',
-                       '"Check Q2": `request_work(kind="check", trigger="operator", '
-                       'quarter="2026-Q2")`',
+        # 0.11.2 (#55): one check ask, with the quarter when one is meant
+        for phrase in ('`request_work(kind="check", trigger="operator", quarter=<the quarter, '
+                       'when one is meant>)`',
+                       "Its end card and its [Get package] are that quarter's.",
                        '"Send the package", "Give me Q3", "rebuild it", "the package for Q2": '
                        "`get_package(quarter=…)`, also for the reading's \"rebuild Qn\"; a "
                        "bare \"send the package\" names no quarter: `get_package()` sends "
                        "the quarter the operator last checked.",
                        "built now from what the last check knew; say nothing more after it.",
                        "The job never sends a package.",
-                       "After `request_work`, always `start_job` with the ask's `start_job` "
-                       "exactly.",
+                       "After `request_work`, say its `line` and stop when its `start_job` is "
+                       "null (nothing was asked). Otherwise always `start_job` with the ask's "
+                       "`start_job` exactly.",
                        "`pending` → say the ask's `line`",
                        "`job_busy` → `ask_state(kind=<the ask's kind>, request_id=<its "
                        "request_id>)`, and say its `line`",
-                       "The ask stays recorded.", "check emailed invoices"):
+                       "The ask stays recorded."):
             self.assertIn(phrase, asks, phrase)
+        # 0.11.2: "check emailed invoices" is the reading's instruction for the check ask
+        self.assertIn('"check emailed invoices": the check ask below',
+                      flat(section(SKILL, "## The operator's words", "## Asks")))
         self.assertLess(asks.index("`request_work("), asks.index("`start_job`"))
         # simple loop §1: the desk never builds through the old staging path for a package
         # ask; staging is only "send it again" / "send the last one" (Sending again)

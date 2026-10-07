@@ -89,11 +89,21 @@ def printed_ref(pid):
     return _NAMES.pids.get(pid) if _NAMES is not None else None
 
 
-def tag_for(render_id: str) -> str:
-    """Binding V2: every rendering composed after S7 ends its first line with " · <n>", its
-    render id's digits — a separator and digits only, no machinery word — so two post-S7
-    renderings never match one quote, whatever Casa's raw truncation does to the rest."""
-    return f" {MARK} {render_id[1:]}"
+def tag_now() -> str:
+    """#53 (operator ruling 2026-10-08, the day added by BRAIN's ruling on d1 Terra S2): every
+    rendering's first line ends with " · 8 Oct 21:04:37", the moment it is composed in the
+    operator's zone (CASA_TZ, then TZ, then UTC: Casa's
+    timekeeping.resolve_tz order). A reply quoting a card binds the card it quotes; two
+    renderings with the same text composed in the same second (within a year) share it, and a quote of them
+    with differing facts is refused visibly (AMBIGUOUS), never bound to the wrong one."""
+    import os
+    from zoneinfo import ZoneInfo
+    try:
+        tz = ZoneInfo(os.environ.get("CASA_TZ") or os.environ.get("TZ") or "UTC")
+    except Exception:           # an unknown or malformed zone name: Casa falls back to UTC
+        tz = ZoneInfo("UTC")
+    t = db._clock().astimezone(tz)
+    return f" {MARK} {dates.short_day(t.date().isoformat())} {t.strftime('%H:%M:%S')}"
 
 
 def _limit() -> int:
@@ -320,14 +330,14 @@ def evidence(d: dict, cands=None) -> list:
         doc = cur["document"]
         name = _docname(doc)
         if "facts-changed" in d["reasons"]:
-            out.append("The bank changed this payment after it was paired — still right?")
+            out.append("The bank changed this payment after it was matched — still right?")
         if "amount-unknown" in d["reasons"]:
             out.append("The invoice's amount was read two different ways — check it.")
         labels = cur["labels"]
         if "guessed" not in labels or cur["author"] == "operator":
             # a line that asks for a verdict names what it is asking about (round p7:
             # a no-ref line never named its invoice, yet "all good" confirmed it)
-            out.insert(0, f"Paired with {ident(doc)}.")
+            out.insert(0, f"Matched to {ident(doc)}.")
         if "guessed" in labels and cur["author"] != "operator":
             rs = cur["runners_up"]
             others = "; ".join(field(x) for x in rs[:RUNNERS_MAX])
@@ -1072,7 +1082,7 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
     # binding V2: the render id is minted before composing — its tag ends line 1, counted
     # inside every page budget (_limit), and this page's `next` names it as `prev` (V1)
     rid = f"r{db.next_seq(conn)}"
-    _TAG = tag_for(rid)
+    _TAG = tag_now()
     lead = _lead(conn)                  # may record the pass's gate
     # Compose and persist under ONE write lock, so the revisions recorded are
     # exactly those of the facts the text shows (round p1, Astra S1: a write

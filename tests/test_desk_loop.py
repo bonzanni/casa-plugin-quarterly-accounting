@@ -4,7 +4,7 @@ broken walk, or after [Get package]); a typed "confirm all 3" on the end message
 Apply as Confirm all does; the desk skill names get_package for every package ask."""
 import json
 import pathlib
-from tests._base import StoreCase, apply_now
+from tests._base import StoreCase, apply_now, untag
 import db                     # server/ is on sys.path once tests._base is imported
 from tests.fakebroker import FakeBroker
 
@@ -38,7 +38,8 @@ class Desk(StoreCase):
             out = qa_server.TOOLS["show_view"]["fn"]({"view": "open"})
         self.assertTrue(out["view"].startswith("casa-cap-"))
         card = json.loads(broker.deposits[0]["value"])
-        self.assertIn("still open", card["text"])
+        # 0.11.2: the quarter status card ("Q3 · 1 payment" + the non-zero counts)
+        self.assertTrue(untag(card["text"]).startswith("Q3 · 1 payment\n1 missing"), card["text"])
         self.assertEqual(card["buttons"][-1]["label"], "Get package")
 
     def test_typed_confirm_all_on_the_end_message_commits_on_apply(self):
@@ -67,7 +68,8 @@ class Desk(StoreCase):
 
     def test_the_desk_skill_routes_every_package_ask_to_get_package(self):
         text = DESK.read_text()
-        for phrase in ("get_package", "what's open", 'show_view(view="open")', "#1305"):
+        for phrase in ("get_package", "Where a quarter stands", 'show_view(view="open")',
+                       "#1305"):
             self.assertIn(phrase, text)
         self.assertNotIn("request_package", text)  # removed-name: asserted absent
         self.assertNotIn("note_render_id", text)  # removed-name: asserted absent
@@ -116,8 +118,8 @@ class DeskMore(StoreCase):
         posted = self.conn.execute("SELECT kind FROM renders WHERE render_id=?",
                                    (out["render_id"],)).fetchone()[0]
         self.assertEqual(posted, "open-items")
-        self.assertIn("Q3 · still open: 1 to confirm",
-                      json.loads(broker.deposits[0]["value"])["text"])
+        self.assertIn("Q3 · 1 payment\n1 to confirm\n",
+                      untag(json.loads(broker.deposits[0]["value"])["text"]))
 
     def test_an_ambiguous_quote_among_cards_recovers_with_the_open_items_card(self):
         import views
@@ -160,13 +162,15 @@ class DeskMore(StoreCase):
         """Ruling Q2: "check Q2" carries quarter to request_work, which stores it."""
         import qa_server, tools  # noqa: F401
         asks = flat(section(DESK.read_text(), "## Asks", "## A file the operator sent"))
-        self.assertIn('"Check Q2": `request_work(kind="check", trigger="operator", '
-                      'quarter="2026-Q2")`', asks)
+        self.assertIn('`request_work(kind="check", trigger="operator", quarter=<the quarter, '
+                      'when one is meant>)`', asks)
+        # 0.11.2 (#55): a quarter before the books (Q2 here) is not asked while a run is
+        # live (setUp's claim); a quarter in the books is carried and stored
         out = qa_server.TOOLS["request_work"]["fn"]({"kind": "check", "trigger": "operator",
-                                                    "quarter": "Q2 2026"})
+                                                    "quarter": "Q3 2026"})
         self.assertEqual(self.conn.execute("SELECT quarter FROM work_requests WHERE"
                                            " request_id=?", (out["request_id"],)).fetchone()[0],
-                         "2026-Q2")
+                         "2026-Q3")
 
     def test_the_desk_asks_for_the_business_account_the_check_no_longer_asks(self):
         """Task 10 ruling: the job never offers the account choice; the desk's check_setup →
@@ -178,12 +182,13 @@ class DeskMore(StoreCase):
         self.assertLess(setup.index("`check_setup()`"), setup.index("`propose_account()`"))
 
     def test_the_desk_names_the_recovery_of_an_expired_button(self):
-        ans = flat(section(DESK.read_text(), "## Answering", "## The operator's words"))
-        self.assertIn('"What\'s open?", "review", "what\'s left to check?": '
-                      '`show_view(view="open")`', ans)
-        self.assertIn('A button that answers "expired" (a card whose send timed out, Casa '
-                      '#1305) is recovered the same way: say "review" or "what\'s open" and the '
-                      'card comes again.', ans)
+        # 0.11.2: the intent "where a quarter stands" posts the status card, which also
+        # recovers an expired button
+        ans = flat(section(DESK.read_text(), "## Two intents about a quarter",
+                           "## The operator's words"))
+        self.assertIn('`show_view(view="open")`', ans)
+        self.assertIn('The same card recovers a walk of cards that stopped, or a button that '
+                      'answered "expired" (Casa #1305).', ans)
 
 
 def _dt(day):

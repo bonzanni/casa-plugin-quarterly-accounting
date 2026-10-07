@@ -19,6 +19,8 @@ MARK = "# removed-name:"          # asserted absent | schema history (one line)
 BEGIN, END = "# removed-name: schema history begin", "# removed-name: schema history end"
 
 REMOVED = [
+    # 0.11.2 (#55): the start-from reading; getting a quarter done moves the start instead
+    (r"\bset_watermark_in_tx\b", "work.set_watermark_in_tx (asks.request_work moves the start)"),
     # modules
     (r"\bimport (steps|sweep)\b|\b(steps|sweep)\.[a-z_]", "server/steps.py, server/sweep.py"),
     (r"\blegacy_tools\b|from tests import [^\n]*\bsim\b|\btests\.sim\b|\bsim\.(run_pass|"

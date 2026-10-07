@@ -74,7 +74,7 @@ def _apply_one(conn, grant, render_id, action, d) -> tuple:
         res = matches.reject_in_tx(conn, grant=grant, match_id=cur["match_id"],
                                    expected_revision=mrevs.get(str(cur["match_id"]), -1),
                                    render_id=render_id, bind="rendered")
-        return res, f"Unpaired {views.headline(d)}."
+        return res, f"Removed the match for {views.headline(d)}."
     if action == "wrong":
         shown = [c["match_id"] for c in d["candidates"] if str(c["match_id"]) in mrevs]
         if not shown:
@@ -83,14 +83,14 @@ def _apply_one(conn, grant, render_id, action, d) -> tuple:
                                            grant=grant)
         n = len(shown)
         return ({"set_aside": shown, "effects": effects},
-                f"Set aside {'both' if n == 2 else n} candidate{'s' if n != 1 else ''} for "
+                f"Ruled out {'both' if n == 2 else n} invoice{'s' if n != 1 else ''} for "
                 f"{views.headline(d)}.")
     res = matches.set_exemption_in_tx(conn, grant=grant, pid=d["pid"], exempt=True,
                                       expected_revision=it["projection_revision"],
                                       render_id=render_id, bind="rendered")
     dropped = [e for e in res["effects"] if e.startswith("unpaired")]
     return res, (f"{views.headline(d)}: needs no document"
-                 + ("; dropped its pairing." if dropped else "."))
+                 + ("; removed its match." if dropped else "."))
 
 
 def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
@@ -223,7 +223,7 @@ def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:
         mrevs = json.loads(_item(conn, rid, pid)["match_revisions_json"])
         matches.pick_in_tx(conn, grant=grant, pid=pid, doc_id=doc_id, render_id=rid,
                            mrevs=mrevs, alternatives_shown=shown_alts)
-        return f"Paired {views.headline(d)}."
+        return f"Matched {views.headline(d)}."
     if action == "confirm":
         return _apply_one(conn, grant, rid, "right", d)[1]
     # D3 / plan round 2 (Astra S1): Wrong answers every candidate the card displayed — the
@@ -233,8 +233,8 @@ def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:
     matches.reject_alternatives_in_tx(conn, grant=grant, pid=pid, doc_ids=shown_alts,
                                       render_id=rid)
     if shown_alts:
-        line = (f"Unpaired {views.headline(d)} and set aside its "
-                f"{_plural(len(shown_alts), 'other candidate')}.")
+        line = (f"Removed the match for {views.headline(d)} and ruled out its "
+                f"{_plural(len(shown_alts), 'other invoice')}.")
     return line
 
 

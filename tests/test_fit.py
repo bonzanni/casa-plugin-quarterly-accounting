@@ -258,8 +258,8 @@ class TestReplyProperty(Base):
             outcomes.add("applied")
             for t in (out["proposal"], out["receipt"]):
                 self.assertLessEqual(views.utf16_len(t), LIMIT)
-            self.assertEqual(_flat(out["proposal"]).count("· Unpair Vendor"), len(picked))
-            self.assertEqual(_flat(out["receipt"]).count("Unpaired Vendor"), len(picked))
+            self.assertEqual(_flat(out["proposal"]).count("· Remove the match for Vendor"), len(picked))
+            self.assertEqual(_flat(out["receipt"]).count("Removed the match for Vendor"), len(picked))
             self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE"
                                                " author='operator'").fetchone()[0],
                              before + len(picked))

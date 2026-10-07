@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.11.2
+
+The card the operator reads, from the first prod "check Q3" on 0.11.1 (2026-10-08), and
+the operator-approved conversation script (`docs/superpowers/specs/
+2026-10-08-conversation-script.md`). Same Casa floor (v0.344.39) and store schema 15.
+
+- **Two intents about a quarter (#55).** Where a quarter stands: `show_view(view="open",
+  quarter=…)` posts one status card for that quarter: its payments, non-zero counts, its
+  own proposals and missing invoices, one line per other quarter with open items, and
+  [Get package] only when the quarter has a payment. Nothing runs. For a quarter before the
+  books' start it posts nothing and answers one line ("Q3 2026 isn't in the books yet…"),
+  as `{"view": null, "say": …}`, Casa's no-deposit statement. Getting a quarter done:
+  `request_work(check, operator, quarter)`. For a quarter before the books' start it moves
+  the start to the quarter's first day in the same transaction, with no question: "Starting
+  the books from 1 Jul 2026 and checking Q3 — I'll post the result here." While a check is
+  running, nothing moves and nothing is asked ("A check is running right now. When it has
+  finished, ask me again to do Q3.": the running check read the bank from the old start).
+  The "start from …" reading and its grant-only start setter are removed. The desk skill
+  describes the two intents in prose, with no phrase lists. The run's end card is the
+  quarter's card: its own items, every other quarter one line. After a delivered end card,
+  the run's completion text is "The result card is posted in the chat; there is nothing to
+  add." (Casa ha-casa-app#1332 owns the resident's restatement).
+- **The render tag is a day and time (#53).** Every card's first line ends with
+  " · 8 Oct 21:04:37", the moment it was composed, in CASA_TZ, then TZ, then UTC; it
+  replaces the bare render number. Residual (operator ruling): the same card shown twice in
+  the same second (within a year) is refused visibly when replied to, never bound wrongly.
+- **One purchase is one line (#52).** A proposal line counts purchases (issuer + number), so
+  an invoice and its own receipt read as one document. The Review card shows one line and
+  one button per purchase: the current document, else the purchase's invoice.
+- **Whole lines (#54).** No fixed-width hard breaks: `views._wrap` and `WIDTH` are gone, and
+  every line is one item that the client wraps.
+- **Plain words and buttons.** Zero counts are not shown. Buttons read ⟦Review (N)⟧
+  ⟦Confirm all (K)⟧ ⟦Get package⟧, and every card that carries buttons (and a reading, and
+  the account choice) ends with one line saying what each button shown does. Corrections
+  read "Remove the match for …", "Rule out …", "Matched to …".
+
 ## 0.11.1
 
 Two floors at the job's decide, from Q2 re-run #3 on 0.11.0. Same Casa floor: v0.344.39.

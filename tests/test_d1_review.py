@@ -38,7 +38,7 @@ class NeverIsRehearsed(_Tapping):
         Never changes exactly those two."""
         booked = self.pay("Adobe", 100)
         pdng = self.pending()
-        page = self.tap(self.end(), "Review 1")["next"]
+        page = self.tap(self.end(), "Review (1)")["next"]
         _, bound = self.page_of(page)
         self.assertEqual(bound, sorted([booked, pdng]))
         self.assertEqual(len([ln for ln in page["text"].splitlines() if "· pending" in ln]), 1)
@@ -57,7 +57,7 @@ class NeverIsRehearsed(_Tapping):
             self.assertEqual(cards.never_set(self.conn, "Adobe"),
                              sorted([missing, pdng, proposed]))
         end = self.end()
-        page = self.tap(end, "Review 2")["next"]                  # the proposal card first
+        page = self.tap(end, "Review (2)")["next"]                  # the proposal card first
         page = self.tap(page, "Leave for now")["next"]            # then Adobe's vendor card
         rid, bound = self.page_of(page)
         self.assertEqual(bound, sorted([missing, pdng, proposed]))
@@ -75,7 +75,7 @@ class NeverIsRehearsed(_Tapping):
     def test_no_invoice_needed_exempts_only_the_missing_lines(self):
         missing = self.pay("Adobe", 100)
         pdng = self.pending()
-        page = self.tap(self.end(), "Review 1")["next"]
+        page = self.tap(self.end(), "Review (1)")["next"]
         out = self.tap(page, "No invoice needed for these")
         self.assertEqual(out["receipt"], "No invoice needed for 1 Adobe payment.")
         self.assertEqual(self.status(missing)["status"], "exempt")
@@ -90,14 +90,14 @@ class NeverIsRehearsed(_Tapping):
         matched = self.pay("Adobe", 400)
         doc = self.doc(amount_minor=400)
         self.machine_match(matched, doc, self.token)
-        page = self.tap(self.end(), "Review 1")["next"]
+        page = self.tap(self.end(), "Review (1)")["next"]
         self.assertEqual(self.page_of(page)[1], sorted([missing, matched]))
         rev = self.rev(matched)
         documents.update_document_metadata(self.conn, doc, document_number="RENUMBERED")
         self.assertNotEqual(self.rev(matched), rev)              # the matched line moved
         never = self.tap(page, "Never for Adobe")
         self.assertIn("nothing applied", never["receipt"])
-        page = self.tap(self.end(), "Review 1")["next"]
+        page = self.tap(self.end(), "Review (1)")["next"]
         rev = self.rev(matched)
         documents.update_document_metadata(self.conn, doc, document_number="AGAIN")
         self.assertNotEqual(self.rev(matched), rev)
@@ -110,7 +110,7 @@ class NeverIsRehearsed(_Tapping):
         """A card composed before `arrive()` adds a payment the rule changes: Never commits
         nothing, and the next card is a fresh page 1 that lists the newcomer."""
         self.pay("Adobe", 100)
-        page = self.tap(self.end(), "Review 1")["next"]
+        page = self.tap(self.end(), "Review (1)")["next"]
         new = arrive()
         out = self.tap(page, "Never for Adobe")
         self.assertIn("nothing applied", out["receipt"])
@@ -224,7 +224,7 @@ class LateHandover(StoreCase):
         self.assertIsNotNone(r["delivered_at"])
         self.assertIn("1 handed-over document to check — Review shows it.", r["text"])
         self.assertEqual([b[0] for b in cards.buttons(self.conn, r)],
-                         ["Review 1", "Get package"])
+                         ["Review (1)", "Get package"])
         self.assertEqual(self.conn.execute("SELECT state FROM work_requests WHERE"
                                            " request_id=?", (ask["request_id"],)).fetchone()[0],
                          "reported")                             # the continuation's result

@@ -235,7 +235,7 @@ class Quarter(StoreCase):
         self.assertEqual((got[adobe], got[adobe_aug]), ("matched", "matched"))
         end = self.drv.posted_end("eeeeeeee-4")
         self.assertIn("1 handed-over document to check — Review shows it.", end["text"])
-        card = self.drv.tap(end, "Review 1")["next"]
+        card = self.drv.tap(end, "Review (1)")["next"]
         self.assertIn("already has an invoice.", card["text"])
         self.assertIn("(matched by the job)", card["text"])
         self.assertIn("(from you)", card["text"])
@@ -252,10 +252,10 @@ class Quarter(StoreCase):
 
     def test_confirm_all_after_a_review_answer(self):
         end = self.drv.posted_end("eeeeeeee-1")             # the end message's deposit
-        card = self.drv.tap(end, "Review 2")["next"]        # OpenRouter's card, then Twilio's
+        card = self.drv.tap(end, "Review (2)")["next"]        # OpenRouter's card, then Twilio's
         self.assertIn("OpenRouter", card["text"])
         self.drv.tap(card, "Wrong")
-        out = self.drv.tap(end, "Confirm all 1")
+        out = self.drv.tap(end, "Confirm all (1)")
         self.assertIn("Confirmed 0 of 1", out["receipt"])   # the one listed was answered
         self.assertEqual(self.conn.execute("SELECT count(*) FROM match_state WHERE pid=? AND"
                                            " state='matched'", (self.rows[3],)).fetchone()[0],

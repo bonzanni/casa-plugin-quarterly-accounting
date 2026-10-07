@@ -1,7 +1,7 @@
 # Quarterly accounting: what the operator says and sees (APPROVED 2026-10-08, 0.11.2)
 
 Approved by the operator through BRAIN on 2026-10-08, with their changes folded in (incl. the
-button-legend correction). This page is the reviewers' spec, alongside correctness.
+button-legend correction and the no-count-on-buttons rule). This page is the reviewers' spec, alongside correctness.
 
 Ellen reads intent from whatever the operator says, in any wording or language. The
 sentences below are **illustrations, never triggers**. There are two intents about a
@@ -12,11 +12,12 @@ quarter:
   the books' start has to move earlier.
 
 General rules:
-- Every card's first line ends with the time it was composed, in seconds (the operator's
-  local time). That time is how a swipe-reply knows which card it answers (#53).
+- Every card's first line ends with the day and time it was composed, in seconds (the
+  operator's local time), e.g. `8 Oct 21:04:37`. That time is how a swipe-reply knows which card it answers (#53).
 - Counts that are zero are not shown.
-- Buttons keep short labels, with counts in parentheses: ⟦Review (2)⟧ ⟦Confirm all (1)⟧
-  ⟦Get package⟧. A card that carries buttons ends with ONE short plain line saying what
+- Buttons keep short labels: ⟦Review⟧ ⟦Confirm all⟧ ⟦Get package⟧. A count on a button
+  must be a number the card itself shows, so buttons carry no counts; the legend line
+  says what they cover. A card that carries buttons ends with ONE short plain line saying what
   each button shown does. Only the buttons actually shown are described. `⟦…⟧` is a
   button.
 - One answer per ask.
@@ -26,20 +27,20 @@ General rules:
 **1a. Inside the books, with open items.** The operator says something like "how's Q3?",
 "check Q3" or "where are we with Q3". They get one card, and nothing runs:
 ```
-Q3 · 3 payments · 21:04:37
+Q3 · 3 payments · 8 Oct 21:04:37
 1 matched · 1 to confirm · 1 missing
 To confirm:
 1. Zapier · 1 Sep · EUR 19.58 ↔ invoice ZAP-114 · EUR 19.58
 Q4 so far: 1 to confirm
-Review: see each open item and decide · Confirm all: accept the proposed invoices · Get package: the Q3 zip for your accountant
-⟦Review (2)⟧ ⟦Confirm all (1)⟧ ⟦Get package⟧
+Review: go through the 1 to confirm and the 1 missing, one at a time · Confirm all: accept the invoices listed above · Get package: the Q3 zip for your accountant
+⟦Review⟧ ⟦Confirm all⟧ ⟦Get package⟧
 ```
 - The card lists only Q3's items. Another quarter with open items gets one line.
 - The package button is there when the quarter has payments in the books.
 
 **1b. Everything answered.**
 ```
-Q3 · 14 payments · all accounted for · 21:04:37
+Q3 · 14 payments · all accounted for · 8 Oct 21:04:37
 Get package: the Q3 zip for your accountant
 ⟦Get package⟧
 ```
@@ -54,7 +55,7 @@ the books from 1 Jul.`
 **2a. Inside the books.** The operator says something like "do the Q3 accounting" or
 "run Q3".
 1. Right away: `Checking the bank and your email — I'll post the result here.`
-2. When the run ends, one card: the 1a card, headed `Q3 checked · 3 payments · 21:09:12`.
+2. When the run ends, one card: the 1a card, headed `Q3 checked · 3 payments · 8 Oct 21:09:12`.
    No separate text repeats it.
 
 If a run is already going, the operator sees its line instead.
@@ -72,7 +73,7 @@ for that quarter: Q2 gets done.
 
 ⟦Review⟧ walks the cards. A vendor with no invoice reads:
 ```
-Card 2 of 2 · missing invoices · Twilio · 21:10:03
+Card 2 of 2 · missing invoices · Twilio · 8 Oct 21:10:03
 Twilio · EUR 20.00 · 14 Aug
 No invoice needed: these need none · Never for Twilio: Twilio never sends one · Leave missing: stop looking, keep them missing
 ⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧
@@ -105,5 +106,5 @@ are never shown.
 
 ---
 **Residual (#53, the operator's pick).** The same card shown twice within one second
-cannot be answered by a swipe until it is shown again. The reply is refused visibly, and
+(the day is shown, so within a year) cannot be answered by a swipe until it is shown again. The reply is refused visibly, and
 nothing wrong is ever applied.

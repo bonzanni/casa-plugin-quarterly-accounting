@@ -156,10 +156,10 @@ class HandoverJoiningACheck(StoreCase):
             {"matched": 1, "open": 1})
         lines = end["text"].split("\n")
         self.assertTrue(lines[0].startswith("Q3 checked · 2 payments"), lines)
-        self.assertIn("1 matched · 0 need no invoice · 0 to confirm · 1 missing", lines)
+        self.assertIn("1 matched · 1 missing", lines)
         (receipt,) = [ln for ln in lines if ln.startswith("Filed. ")]
-        self.assertTrue(receipt.startswith("Filed. Paired with Zapier · 5 Jul · EUR 10.00"))
-        self.assertEqual([b["label"] for b in end["buttons"]], ["Review 1", "Get package"])
+        self.assertTrue(receipt.startswith("Filed. Matched to Zapier · 5 Jul · EUR 10.00"))
+        self.assertEqual([b["label"] for b in end["buttons"]], ["Review (1)", "Get package"])
         # the Review order is the check's: the missing payment's vendor
         rid = self.conn.execute("SELECT end_render_id FROM runs WHERE job_id='d2d2d2d2-b1'"
                                 ).fetchone()[0]
@@ -181,7 +181,7 @@ class HandoverJoiningACheck(StoreCase):
             "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
             {"matched": 2})
         self.assertIn("Q3 complete · 2 of 2 accounted for · package ready", end["text"])
-        self.assertIn("Filed. Paired with Zapier · 5 Jul · EUR 10.00", end["text"])
+        self.assertIn("Filed. Matched to Zapier · 5 Jul · EUR 10.00", end["text"])
 
     def test_a_standalone_continuation_keeps_the_handover_only_message(self):
         """A run whose only request is the handover shows only what it changed."""
@@ -197,7 +197,7 @@ class HandoverJoiningACheck(StoreCase):
         self.drv.run_job("d2d2d2d2-b4")
         end = self.drv.posted_end("d2d2d2d2-b4")
         self.assertTrue(end["text"].split("\n")[0].startswith(
-            "Filed. Paired with Zapier · 5 Jul · EUR 10.00"))
+            "Filed. Matched to Zapier · 5 Jul · EUR 10.00"))
         self.assertNotIn("checked", end["text"])
         self.assertEqual([b["label"] for b in end["buttons"]], ["Get package"])
 

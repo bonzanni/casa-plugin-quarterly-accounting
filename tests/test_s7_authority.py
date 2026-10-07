@@ -26,7 +26,6 @@ class Authority(StoreCase):
         self.bind()
         with db.tx(self.conn):
             for call in (lambda: work.stop_chasing_in_tx(self.conn, "2026-Q3", grant=None),
-                         lambda: work.set_watermark_in_tx(self.conn, "2026-Q2", grant=None),
                          lambda: binding.set_package_name_in_tx(self.conn, "x", grant=None),
                          lambda: binding.acknowledge_ledger_reset_in_tx(self.conn, grant=None)):
                 with self.assertRaises(db.Refusal) as cm:
@@ -60,7 +59,7 @@ class Authority(StoreCase):
         self.assertEqual(self.snapshot(), before)
 
     def test_a_grant_from_another_connection_or_a_spent_rehearsal_is_refused(self):
-        import authority, db, work  # noqa: E401
+        import authority, binding, db  # noqa: E401
         self.bind()
         other = db.open_store()
         self.addCleanup(other.close)
@@ -69,7 +68,7 @@ class Authority(StoreCase):
                 with self.assertRaises(db.Refusal):
                     authority.require(other, r)
             with self.assertRaises(db.Refusal):
-                work.set_watermark_in_tx(self.conn, "2026-Q1", grant=r)
+                binding.set_package_name_in_tx(self.conn, "x", grant=r)
         with self.assertRaises(ValueError):
             authority.OperatorGrant("show_view", "k")
 
@@ -92,12 +91,12 @@ class Authority(StoreCase):
                                               bind="rendered")
 
     def test_a_rehearsal_writes_nothing_that_survives(self):
-        import authority, db, work  # noqa: E401
+        import authority, binding, db  # noqa: E401
         self.bind()
         before = self.snapshot()
         with db.tx(self.conn):
             with authority.rehearsal(self.conn) as r:
-                work.set_watermark_in_tx(self.conn, "2026-Q1", grant=r)
+                binding.set_package_name_in_tx(self.conn, "x", grant=r)
                 self.assertNotEqual(self.snapshot()["binding"], before["binding"])
         self.assertEqual(self.snapshot(), before)
 

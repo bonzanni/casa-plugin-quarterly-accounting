@@ -1,6 +1,8 @@
 # tests/test_s7_asks.py
 """S7 §4: every ask returns its request_id and kind; ask_state says whether the live run
 will take it; desk filing."""
+import re
+
 from tests._base import StoreCase
 
 
@@ -40,7 +42,9 @@ class Asks(StoreCase):
         self.run_job_to_complete("bbbbbbbb-2")
         out = job.status(self.conn, "bbbbbbbb-2")
         self.assertTrue(out["done"])
-        self.assertRegex(out["text"], r"^Q\d \d{4} checked: |^Nothing to check ")   # #47
+        # #47; 0.11.2: job.CARD_POSTED after a delivered end card
+        self.assertRegex(out["text"], r"^Q\d \d{4} checked: |^Nothing to check |"
+                                      + re.escape(job.CARD_POSTED))
         self.assertFalse(asks._live_run(self.conn))
 
     def test_ask_state_taken_done_and_refusals(self):

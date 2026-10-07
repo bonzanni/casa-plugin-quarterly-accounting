@@ -284,11 +284,12 @@ def leave_missing_in_tx(conn, pids, *, grant) -> list:
     return done
 
 
-def set_watermark_in_tx(conn, when: str, *, grant) -> dict:
-    """'Start from Q2', inside the caller's transaction, under a tap's grant (S7 §8.1)."""
-    authority.require(conn, grant)
-    day = dates.quarter_bounds(when)[0] if "-Q" in (when or "") else when
-    dates.parse_day(day)
+def start_from_in_tx(conn, quarter: str) -> str:
+    """#55 (operator ruling 2026-10-08): an operator's request to get `quarter` done, when it
+    lies before the books' start, moves the start to its first day — inside the caller's
+    transaction, from asks.request_work only (trigger "operator", a named quarter). The
+    start only ever moves earlier. Returns the new start."""
+    day = dates.quarter_bounds(quarter)[0]
     b = conn.execute("SELECT watermark FROM binding WHERE id=1").fetchone()
     if b is None:
         raise db.Refusal("no account is bound yet")
@@ -296,7 +297,7 @@ def set_watermark_in_tx(conn, when: str, *, grant) -> dict:
         raise db.Refusal("moving the start later is not offered; it can only move earlier")
     conn.execute("UPDATE binding SET watermark=?, watermark_announced=1 WHERE id=1", (day,))
     lineage.settle_all(conn)
-    return {"watermark": day, "note": "Rows from then on are admitted at the next pass."}
+    return day
 
 
 def _match_summary(conn, match_id) -> dict:

@@ -35,7 +35,7 @@ CANDIDATE_BUTTONS = 4         # §1: up to four named candidates
 PAGE_LINES = 25               # a vendor page's payments, then fitted to BODY_LIMIT
 LABEL_MAX = 32                # casa:result_broker.py, a button label
 BUCKETS = ("matched", "proposed", "missing", "not_needed", "pending")
-TAG_WORST = " · " + "9" * 18        # views.tag_for: the longest render id (r\d{1,18})
+TAG_WORST = " · 30 Sep 00:00:00"    # views.tag_now: its longest form
 
 
 class Undisplayed(RuntimeError):
@@ -74,14 +74,28 @@ def nothing_to_check(conn, q) -> str:
     wm = binding.get(conn)["watermark"]
     books, wq, ql = dates.long_day(wm), dates.quarter_of(wm), dates.quarter_label(q)
     if q < wq:
-        return (f"Nothing to check for {ql}: the books start {books}. Say 'start from {ql}' "
-                "to include it.")
+        return before_books(conn, q)
     if q == wq:
-        prev = dates.quarter_label(dates.quarter_of(dates.add_months(
-            dates.quarter_bounds(wq)[0], -3)))
+        prev = dates.quarter_of(dates.add_months(dates.quarter_bounds(wq)[0], -3))
         return (f"Nothing to check for {ql} yet: the bank has no payment in it (the books "
-                f"start {books}). Say 'start from {prev}' to include {prev}.")
+                f"start {books}). Ask me to do {_qn(prev)} to include it.")
     return f"Nothing to check for {ql} yet: the bank has no payment in it."
+
+
+def before_the_books(conn, q) -> bool:
+    """Issue #55: quarter `q` lies before the books' start (the binding's watermark)."""
+    import binding
+    b = binding.get(conn)
+    return b is not None and q < dates.quarter_of(b["watermark"])
+
+
+def before_books(conn, q) -> str:
+    """Issue #55 (the approved script, 1c): where a quarter before the books stands."""
+    import binding
+    wm = binding.get(conn)["watermark"]
+    ql, first = dates.quarter_label(q), dates.quarter_bounds(q)[0]
+    return (f"{ql} isn't in the books yet: they start {dates.long_day(wm)}. Ask me to do "
+            f"{_qn(q)} and I'll start the books from {dates.short_day(first)}.")
 
 
 def checked_line(conn, q) -> str:
@@ -260,12 +274,30 @@ def _doc_word(doc) -> str:
         views.KIND_WORD.get(doc["kind"], "document")
 
 
+def _purchase(doc):
+    """Issue #52: a document's purchase (#48's unit: the same issuer and number,
+    db.purchase_key; a document with no number is a purchase of its own)."""
+    return ((db.purchase_key(doc["issuer"]), db.purchase_key(doc["number"]))
+            if db.purchase_key(doc.get("number")) else ("doc", doc["doc_id"]))
+
+
 def _purchases(offered) -> int:
-    """Issue #52: how many purchases the offered documents are (#48's unit: the same issuer
-    and number, db.purchase_key; a document with no number is a purchase of its own)."""
-    return len({(db.purchase_key(c["doc"]["issuer"]), db.purchase_key(c["doc"]["number"]))
-                if db.purchase_key(c["doc"].get("number")) else ("doc", c["doc"]["doc_id"])
-                for c in offered})
+    """How many purchases the offered documents are."""
+    return len({_purchase(c["doc"]) for c in offered})
+
+
+def _one_per_purchase(offered) -> list:
+    """The offered documents, one per purchase, in offer order (#52 on the Review card):
+    the current document when its purchase holds it, else the purchase's invoice, else its
+    first. The others are neither displayed nor bound."""
+    groups: dict = {}
+    for c in offered:
+        groups.setdefault(_purchase(c["doc"]), []).append(c)
+    out = []
+    for cs in groups.values():
+        out.append(next((c for c in cs if c["match_id"] is not None), None)
+                   or next((c for c in cs if c["doc"]["kind"] == "invoice"), cs[0]))
+    return out
 
 
 def _proposal_line(conn, i, d) -> str:
@@ -300,7 +332,7 @@ def _fits(lines) -> bool:
     measured on the real lines, never on an estimate)."""
     if not lines:
         return True
-    text = "\n".join([lines[0] + TAG_WORST] + list(lines[1:]))
+    text = "\n".join([lines[0] + TAG_WORST] + list(lines[1:]) + ["x" * LEGEND_MAX])
     return views.utf16_len(text) <= views.BODY_LIMIT and views.fits_proposal(text)
 
 
@@ -338,7 +370,11 @@ def _store(conn, kind, lines, scope, bound, states, docs=None) -> str:
     item_state. If the fit (views.fit_lines) would print a bound line less than whole,
     nothing is stored: Undisplayed."""
     rid = f"r{db.next_seq(conn)}"
-    out, whole = views.fit_lines(lines, tag=views.tag_for(rid))
+    pre = {"names": {}, "refs": {}, "proposed": [], "offers": [], "next": None,
+           "walk": None, "pid": None, "pos": -1, "scheduled": False, **scope}
+    key = legend(kind, pre)
+    lines = list(lines) + ([key] if key else [])
+    out, whole = views.fit_lines(lines, tag=views.tag_now())
     late = [pid for pid, i in bound.items() if i >= whole] + [
         (pid, m) for pid, ms in (docs or {}).items() for m, i in ms.items() if i >= whole]
     if late:
@@ -424,10 +460,15 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
         return _store(conn, kind, lines, scope, bound, states, docs=docs)
 
 
+def _nonzero(*parts) -> str:
+    """The approved script: counts that are zero are not shown."""
+    return " · ".join(f"{n} {word}" for n, word in parts if n)
+
+
 def _counts_line(c) -> str:
-    out = (f"{c['matched']} matched · {c['not_needed']} need no invoice · "
-           f"{c['proposed']} to confirm · {c['missing']} missing")
-    return out + (f" · {c['pending']} pending" if c["pending"] else "")
+    return _nonzero((c["matched"], "matched"), (c["not_needed"], "need no invoice"),
+                    (c["proposed"], "to confirm"), (c["missing"], "missing"),
+                    (c["pending"], "pending"))
 
 
 def _ready_scope(conn, quarters) -> dict:
@@ -450,7 +491,7 @@ def _receipts(conn, docs) -> tuple:
         held = [p for p, how in hs if p not in paired]
         if paired:
             d = work.describe(conn, paired[0])
-            head.append(f"Filed. Paired with {views.field(d['counterparty'])} · "
+            head.append(f"Filed. Matched to {views.field(d['counterparty'])} · "
                         f"{_day(d['date'])} · {_money(d['amount_minor'], d['currency'])}")
             continue
         if conn.execute("SELECT 1 FROM replace_questions WHERE new_doc_id=? AND state='open'",
@@ -541,7 +582,8 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
             if not receipts:
                 return None
         earlier = len(st["proposals"]) + len(open_missing) - len(new_props) - len(new_miss)
-        head = [f"{_qn(q)} · new: {len(new_props)} to confirm · {len(new_miss)} missing"]
+        head = [f"{_qn(q)} · new: " + _nonzero((len(new_props), "to confirm"),
+                                                (len(new_miss), "missing"))]
         if earlier:
             head.append(f"{_s(earlier, 'earlier item')} still open")
         head += _fit_receipts(receipts, head, _confirm_room(new_props) + tail)
@@ -563,36 +605,64 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
             first += _fit_receipts(receipts, first, rest)
             return _summary(conn, "end", q, first, [], [], rest, reported,
                             scheduled=False, extra_scope=extra_scope, questions=qs)
-    earlier = []
+    # d1 (Astra S2): the approved script's 2a card is the 1a card — the run's quarter's own
+    # items, every other quarter one line
+    props = [d for d in st["proposals"] if d["quarter"] == q]
+    mine = [d for d in open_missing if d["quarter"] == q]
+    qs = [x for x in qs if work.describe(conn, x["pid"])["quarter"] == q]
+    earlier = _other_quarters(st, open_missing, q)
+    if not n:
+        head = [stopped or views.esc(nothing_to_check(conn, q))]
+    elif not props and not mine and not qs and not c["pending"]:
+        head = [stopped or f"{_qn(q)} checked · {_s(n, 'payment')} · all accounted for."]
+    else:
+        head = [stopped or f"{_qn(q)} checked · {_s(n, 'payment')}", _counts_line(c)]
+    head += _fit_receipts(receipts, head, _confirm_room(props) + earlier + tail)
+    extra_scope["package"] = bool(n)
+    return _summary(conn, "end", q, head, props, _vendor_items(mine),
+                    earlier + tail, reported, scheduled=False, extra_scope=extra_scope,
+                    questions=qs)
+
+
+def _other_quarters(st, open_missing, q) -> list:
+    """One line per OTHER quarter with open items, non-zero parts only (the approved
+    script): "Q2 still open: …" before `q`, "Q4 so far: …" after it."""
+    out = []
     for eq in sorted(st["counts"]):
         if eq == q:
             continue
         a = sum(1 for d in st["proposals"] if d["quarter"] == eq)
         b = sum(1 for d in open_missing if d["quarter"] == eq)
         if a or b:
-            earlier.append(f"{_qn(eq, q)} · still open: {a} to confirm · {b} missing")
-    head = [stopped or f"{_qn(q)} checked · {_s(n, 'payment')}", _counts_line(c)]
-    head += _fit_receipts(receipts, head, _confirm_room(st["proposals"]) + earlier + tail)
-    return _summary(conn, "end", q, head, st["proposals"], _vendor_items(open_missing),
-                    earlier + tail, reported, scheduled=False, extra_scope=extra_scope,
-                    questions=qs)
+            out.append(f"{_qn(eq, q)} {'still open' if eq < q else 'so far'}: "
+                       + _nonzero((a, "to confirm"), (b, "missing")))
+    return out
 
 
 def compose_open(conn, quarter, *, scheduled=False) -> str:
-    """The open-items card (§1, r11): the end-message composer over the current full state.
-    `b` counts the unanswered missing payments only ([Leave missing] is an answer)."""
+    """The quarter status card (#55, the approved script 1a/1b; the open-items card of §1
+    r11): where `quarter` stands — its payments and non-zero counts, ITS proposals and
+    missing invoices (Review walks only those), one line per other quarter with open items,
+    and [Get package] only when the quarter has a payment in the books. `b` counts the
+    unanswered missing payments only ([Leave missing] is an answer)."""
     st = state(conn)
     open_missing = [d for ds in st["missing"].values() for d in ds if not _answered(d)]
-    reported = {d["pid"]: item_state(d) for d in st["proposals"] + open_missing}
-    qs = replace.open_ones(conn)
-    if not st["proposals"] and not open_missing and not qs:
-        head = [f"{_qn(quarter)} · all answered"]
+    props = [d for d in st["proposals"] if d["quarter"] == quarter]
+    mine = [d for d in open_missing if d["quarter"] == quarter]
+    reported = {d["pid"]: item_state(d) for d in props + mine}
+    qs = [x for x in replace.open_ones(conn)
+          if work.describe(conn, x["pid"])["quarter"] == quarter]
+    c = st["counts"].get(quarter, collections.Counter())
+    n = sum(c.values())
+    if not n:
+        head = [views.esc(nothing_to_check(conn, quarter))]
+    elif not props and not mine and not qs and not c["pending"]:
+        head = [f"{_qn(quarter)} · {_s(n, 'payment')} · all accounted for"]
     else:
-        head = [f"{_qn(quarter)} · still open: {len(st['proposals'])} to confirm · "
-                f"{len(open_missing)} missing"]
-    return _summary(conn, "open-items", quarter, head, st["proposals"],
-                    _vendor_items(open_missing), [], reported, scheduled=scheduled,
-                    questions=qs)
+        head = [f"{_qn(quarter)} · {_s(n, 'payment')}", _counts_line(c)]
+    return _summary(conn, "open-items", quarter, head, props, _vendor_items(mine),
+                    _other_quarters(st, open_missing, quarter), reported,
+                    scheduled=scheduled, questions=qs, extra_scope={"package": bool(n)})
 
 
 def compose_ready(conn, quarters: list, extra=(), alerts=(), receipts=()) -> str:
@@ -636,7 +706,7 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
     d = work.describe(conn, pid)
     if d["status"] != "proposed":
         return None
-    offered = _offered(conn, d)
+    offered = _one_per_purchase(_offered(conn, d))
     with views.named([{**d, "candidates": [{"document": c["doc"]} for c in offered]}],
                      quarter):
         head = [f"Card {pos + 1} of {n} · to confirm", views.headline(d, quarter)]
@@ -659,7 +729,7 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
                  "alternatives": [c["doc"]["doc_id"] for c in shown if c["match_id"] is None],
                  "picks": [[c["doc"]["doc_id"],
                             _label(f"{c['doc'].get('number') or views.KIND_WORD.get(c['doc']['kind'], 'document')}"
-                                   f" · {_day(c['doc']['date'])}")]
+                                   f" ({_day(c['doc']['date'])})")]
                            for c in shown] if picks else [],
                  "proposed": [pid] if d["current"] is not None and shown else [],
                  **_grammar([d])}
@@ -879,8 +949,12 @@ def buttons(conn, r) -> list:
     """The stored calls of a cards rendering, in order, as (label, tool, args, key_spec);
     key_spec is (action, pid, doc_id) (D16: every tap is a keyed `verdict`), and [Get
     package] — the one unkeyed call (#1303) — is always last."""
-    scope = json.loads(r["scope_json"])
-    rid, kind = r["render_id"], r["kind"]
+    return _buttons(r["render_id"], r["kind"], json.loads(r["scope_json"]))
+
+
+def _buttons(rid, kind, scope) -> list:
+    """buttons() from a rendering's id, kind and scope: _store reads the labels before the
+    row exists, for the legend line (the approved script)."""
 
     def v(label, action, pid=None, doc_id=None):
         args = {"render_id": rid, "action": action}
@@ -889,16 +963,17 @@ def buttons(conn, r) -> list:
         if doc_id is not None:
             args["doc_id"] = doc_id
         return (label, "verdict", args, (action, pid, doc_id))
-    get = ("Get package", "get_package", {"quarter": scope["quarter"]}, None)
+    get = [("Get package", "get_package", {"quarter": scope["quarter"]}, None)] \
+        if scope.get("package", True) else []
     if kind in ("end", "open-items"):
         out = []
         if scope.get("order"):
-            out.append(v(f"Review {len(scope['order'])}", "review"))
+            out.append(v(f"Review ({len(scope['order'])})", "review"))
         if scope.get("confirm_all"):
-            out.append(v(f"Confirm all {scope['confirm_all']}", "confirm-all"))
-        return out + [get]
+            out.append(v(f"Confirm all ({scope['confirm_all']})", "confirm-all"))
+        return out + get
     if kind == "ready":
-        return [get]
+        return get
     if kind == "replace":
         pid, doc = scope["pid"], scope["new_doc_id"]
         return [v("Keep current", "keep-current", pid, doc), v("Use new", "use-new", pid, doc)]
@@ -921,6 +996,43 @@ def buttons(conn, r) -> list:
             out.append(v("Next page", "next-page"))
         return out
     raise ValueError(kind)
+
+
+LEGEND = {"review": "Review: see each open item and decide",
+          "confirm-all": "Confirm all: accept the invoices listed above",
+          "pick": "{label}: use this document",
+          "confirm": "Confirm: this invoice is right",
+          "wrong": "Wrong: not this one, keep looking",
+          "leave": "Leave for now: decide later",
+          "exempt-these": "No invoice needed: these need none",
+          "never": "{label}: {vendor} never sends one",
+          "leave-missing": "Leave missing: stop looking, keep them missing",
+          "next-page": "Next page: the rest of this vendor",
+          "keep-current": "Keep current: keep the filed invoice",
+          "use-new": "Use new: use the new one"}
+PICKS_WORD = "A document"
+
+
+def legend(kind, scope) -> str:
+    """The approved script: a card that carries buttons ends with ONE short plain line
+    saying what each button shown does — the buttons actually shown, in order, from the
+    same function that makes them. Picks share one entry."""
+    parts = []
+    for label, tool, args, _ in _buttons("r0", kind, scope):
+        if tool == "get_package":
+            parts.append(f"Get package: the {_qn(scope['quarter'])} zip for your accountant")
+            continue
+        action = args["action"]
+        if action == "pick":
+            if any(p.startswith(PICKS_WORD) for p in parts):
+                continue
+            label = PICKS_WORD if len(scope.get("picks") or []) > 1 else label
+        parts.append(LEGEND[action].format(label=label,
+                                           vendor=views.field(scope.get("vendor") or "")))
+    return " · ".join(parts)
+
+
+LEGEND_MAX = 400          # the longest legend line: the vendor page's, its name clipped
 
 
 def deposit_of(conn, rid) -> dict:

@@ -502,8 +502,13 @@ class TestRenderLog(Base):
 
     def test_same_store_same_bytes(self):
         self.add()
-        # binding V2: two renderings of one unchanged store differ only by their tag
-        a, b = self.render(), self.render()
+        # binding V2 / #53: two renderings of one unchanged store differ only by their tag
+        # (the composition second: composed a second apart here)
+        import datetime as dt
+        with self.patch_clock(dt.datetime(2026, 10, 7, 12, 0, 1, tzinfo=dt.timezone.utc)):
+            a = self.render()
+        with self.patch_clock(dt.datetime(2026, 10, 7, 12, 0, 2, tzinfo=dt.timezone.utc)):
+            b = self.render()
         self.assertNotEqual(a["text"], b["text"])
         self.assertEqual(untag(a["text"]), untag(b["text"]))
 
