@@ -39,7 +39,7 @@ class Surface(StoreCase):
         for f in ("README.md", "CHANGELOG.md"):
             text = (ROOT / f).read_text()
             self.assertIn("#1301, #1302 and #1303", text, f)
-            self.assertIn("v0.344.38", text, f)
+            self.assertIn("v0.344.39", text, f)
             self.assertIn("quietWhenScheduled", text, f)
         log = (ROOT / "CHANGELOG.md").read_text()
         self.assertNotIn("never released", log)

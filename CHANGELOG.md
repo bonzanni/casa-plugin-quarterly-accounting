@@ -5,11 +5,12 @@
 The simple loop. Casa v0.344.37 carries the three features: #1301 `quietWhenScheduled`
 (v0.344.36), #1302 a tap's receipt posts the next card (v0.344.35), #1303 a file-delivering
 button (v0.344.37). v0.344.38 (#1308): a tap's pinned turn is the operator's tap, not a
-delegation (stored-call taps no longer refuse on the specialist's role scope). There is no
+delegation (stored-call taps no longer refuse on the specialist's role scope). v0.344.39
+(#1312): a re-posted plugin message with a known `key` is not sent twice. There is no
 Casa min-version field: an older Casa refuses the manifest (`casa.jobs invalid: entry 1 field
 quietWhenScheduled`) and the plugin does not load.
 
-Requires Casa v0.344.38 or newer (the release carrying #1301, #1302 and #1303).
+Requires Casa v0.344.39 or newer (the release carrying #1301, #1302 and #1303, and #1312).
 
 0.10.0 was released separately as the S7 work (quarterly accounting off Ellen); this release
 builds on it.
@@ -51,10 +52,9 @@ builds on it.
   was last mirrored, in plain note text, in grouped calls (`record_mirror`, after each chunk
   of 8); rows that left scope lose their tags. A cut inside a chunk may repeat up to 8 calls:
   a repeated tag call changes nothing, a repeated note call adds an identical line.
-- **One delivery per message.** Every view and results deposit carries a key (`view:<render
-  id>`, `results:<render ids>`): with Casa #1312, a message re-posted after Casa cut the batch
-  before its delivery was marked is not sent twice. Until the Casa floor includes #1312 that
-  is a known residual (about 1 run in 80); an older Casa ignores the key.
+- **One delivery per message.** Every view and results deposit carries a key (`view:<store
+  id>:<render id>`, `results:<store id>:<render ids>`): with Casa #1312, a message re-posted after Casa cut the batch
+  before its delivery was marked is not sent twice (Casa v0.344.39).
 - **The end message and its cards.** One message ends a run, with a Review order, paged vendor
   cards and an open-items card; a tap's receipt posts the next card (#1302), and the ready
   notice announces a finished package.

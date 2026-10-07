@@ -153,7 +153,8 @@ def main(path) -> int:
         b = rec["body"]
         ref, err = store.deposit(client_id="c", slot=b["slot"], value=b["value"],
                                  caption=b.get("caption"), label=b.get("label"),
-                                 kind=b.get("kind"), filename=b.get("filename"))
+                                 kind=b.get("kind"), filename=b.get("filename"),
+                                 key=b.get("key"))        # Casa #1312 (floor v0.344.39)
         if err:
             bad.append((n, err, rec["case"]))
             continue

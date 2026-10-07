@@ -22,11 +22,13 @@ emailed. `job_status` answers, read-only, whether the job may end; `set_aside` c
 item no other write closes (an attachment that is no invoice, a row bank-feed still has).
 
 ## Requirements
-- **Casa v0.344.38 or newer** (the release carrying #1301, #1302 and #1303, and #1308). #1301
+- **Casa v0.344.39 or newer** (the release carrying #1301, #1302 and #1303, #1308 and #1312). #1301
   lets the job run silently when the scheduler starts it (`quietWhenScheduled`), #1302 lets a
   tap's receipt post the next card, #1303 lets a [Get package] button deliver the file, and
   #1308 (v0.344.38): a tap's pinned turn is the operator's tap, not a delegation (stored-call
-  taps no longer refuse on the specialist's role scope). An older Casa refuses this
+  taps no longer refuse on the specialist's role scope). #1312 (v0.344.39): a message the
+  job re-posts after Casa cut the batch before its delivery was marked is not sent twice
+  (each deposit carries a `key`). An older Casa refuses this
   plugin's manifest (`casa.jobs invalid: entry 1 field quietWhenScheduled`): the plugin does
   not load. There is no Casa min-version field and no fallback.
 - bank-feed **0.20.0** or newer (casa-specialist-finance component 0.21.0) installed on the
@@ -51,7 +53,7 @@ The package name and the start quarter are defaulted and changeable by asking.
 ## Upgrade notes
 - **0.10 → 0.11:** schema 12. The first run writes one plain note per bank-ledger row (the
   notes are plain text now). Buttons on the S7 renderings already posted go stale once.
-  Package requests still open at the upgrade are told so. Requires Casa v0.344.38 (see
+  Package requests still open at the upgrade are told so. Requires Casa v0.344.39 (see
   Requirements).
 - **0.9 → 0.10: remove the old prompt cron.** The weekly prompt trigger
   `quarterly_accounting_pass` on the main assistant (the 0.9 install's

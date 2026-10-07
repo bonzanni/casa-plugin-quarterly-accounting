@@ -31,7 +31,7 @@ class Surface(StoreCase):
         import version
         self.assertEqual(version.PLUGIN_VERSION, "0.11.0")
         readme = (ROOT / "README.md").read_text()
-        self.assertIn("Casa v0.344.38 or newer", readme)
+        self.assertIn("Casa v0.344.39 or newer", readme)
         self.assertIn("specialist:finance", readme)
         self.assertIn('job: "quarterly-accounting:work"', readme)
 
