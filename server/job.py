@@ -199,7 +199,11 @@ def run_end(conn, job_id) -> tuple:
                      " p.pass_id=u.pass_id WHERE u.job_id=? AND p.ended_at IS NOT NULL",
                      (job_id,)).fetchone()
     if r is None or r["outcome"] == "complete":
-        # issue #47: what happened, for whoever started the run (an assistant relays it)
+        # issue #47: what happened, for whoever started the run (an assistant relays it);
+        # h3: as it was said at completion (runs.end_text), never re-derived later
+        kept = conn.execute("SELECT end_text FROM runs WHERE job_id=?", (job_id,)).fetchone()
+        if kept is not None and kept[0]:
+            return kept[0], loop.WORDS["complete"]
         import binding, cards
         if binding.get(conn) is None:
             return RUN_FINISHED, loop.WORDS["complete"]

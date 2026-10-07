@@ -183,7 +183,7 @@ def amount_unknown(doc) -> bool:
     return doc["amount_minor"] is None or not doc["currency"] or bool(doc["amount_conflict"])
 
 
-def _reread(conn, doc_id, amount_minor, currency) -> None:
+def _reread(conn, doc_id, amount_minor, currency, withdrawn=False) -> None:
     """Q2 run 1 (PLAY, BRAIN: a reading that copies the payment): a reading of the document's
     amount — the same bytes filed again with one, or the job's update_document_metadata. The
     one rule for both (h1, Astra S1), field by field (d1, Astra S1: a partial reading too):
@@ -191,8 +191,10 @@ def _reread(conn, doc_id, amount_minor, currency) -> None:
     conflict for good (f1, Terra/Astra S1: a third reading never restores it): the amount is
     unknown, the document can only be proposed, never matched by the job
     (matches._floor_doc), and a machine match holding it shows as a proposal (reducer). The
-    same reading changes nothing. A reading given is recorded (read_at), conflicting or not."""
-    if amount_minor is None and not currency:
+    same reading changes nothing. A reading given is recorded (read_at), conflicting or not.
+    `withdrawn` (h3, Astra S1): the reading explicitly clears the amount or the currency — it
+    disagrees with any held value, so a held one makes the readings conflict."""
+    if amount_minor is None and not currency and not withdrawn:
         return
     d = conn.execute("SELECT amount_minor, currency, amount_conflict, read_at FROM documents"
                      " WHERE doc_id=?", (doc_id,)).fetchone()
@@ -202,7 +204,8 @@ def _reread(conn, doc_id, amount_minor, currency) -> None:
         return
     clash = ((amount_minor is not None and d["amount_minor"] is not None
               and amount_minor != d["amount_minor"])
-             or (currency and d["currency"] and currency != d["currency"]))
+             or (currency and d["currency"] and currency != d["currency"])
+             or (withdrawn and (d["amount_minor"] is not None or bool(d["currency"]))))
     if clash:
         conn.execute("UPDATE documents SET amount_minor=NULL, currency=NULL, amount_conflict=1"
                      " WHERE doc_id=?", (doc_id,))
@@ -341,8 +344,10 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         # h1/h2: every write of a document's amount goes through the one sticky conflict
         # rule (_reread), with the pass_token or without (h2, Astra S1: a job reading sent
         # without it matched a disagreeing amount; no other caller writes an amount)
-        amount = fields.pop("amount_minor", None), fields.pop("currency", None)
-        _reread(conn, doc_id, *amount)
+        withdrawn = (("amount_minor" in fields and fields["amount_minor"] is None)
+                     or ("currency" in fields and not (fields["currency"] or "").strip()))
+        amount = fields.pop("amount_minor", None), fields.pop("currency", None) or None
+        _reread(conn, doc_id, *amount, withdrawn=withdrawn)
         if token is not None:
             # the job's reading (read_document, then Read), with any fields or none, records
             # the reading

@@ -50,6 +50,21 @@ class EmptyCheck(StoreCase):
                          "(the books start 1 Jul 2026). Say 'start from Q2 2026' to include "
                          "Q2 2026.")
 
+    def test_a_completed_runs_line_never_changes_with_a_later_run(self):
+        """h3 (Astra S2): job_status of a completed run re-derived its line from the store
+        as it is now, so a later run's quarter replaced it. The line is kept at completion."""
+        import job
+        self.bind(watermark="2026-04-01")
+        drv = JobDriver(self, payments=0)
+        drv.pay_once("Zapier", 1000, "2026-05-05")
+        drv.gmail.invoice("Zapier", 1000, "EUR", "2026-05-05", "ZAP-Q2")
+        a = drv.run_job("47474747-06", started_by="agent")[-1]["text"]
+        self.assertTrue(a.startswith("Q2 2026 checked: 1 matched"), a)
+        drv.pay_once("Zapier", 2000, "2026-07-05")
+        drv.gmail.invoice("Zapier", 2000, "EUR", "2026-07-05", "ZAP-Q3")
+        drv.run_job("47474747-07", started_by="agent")
+        self.assertEqual(job.run_end(self.conn, "47474747-06")[0], a)
+
     def test_a_named_quarter_before_the_books_says_how_to_include_it(self):
         units, end = self.run_it("agent", "47474747-02", quarter="2026-Q2")
         self.assertEqual(units[-1]["text"],

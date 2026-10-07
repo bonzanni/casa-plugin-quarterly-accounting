@@ -112,6 +112,32 @@ class ReadOwed(StoreCase):
                                            " documents WHERE doc_id=?", (doc,)).fetchone()[:],
                          (None, 1))
 
+    def test_withdrawing_a_held_currency_or_amount_makes_the_amount_unknown(self):
+        """h3 (Astra S1): currency="" (through the tool) or amount_minor=None withdraws a
+        held value — a reading that disagrees, so the amount is unknown for good."""
+        import documents, qa_server, tools  # noqa: F401
+        for how in ("tool-currency", "direct-amount"):
+            with self.subTest(how=how):
+                self.setUp()
+                doc = self._filed_unread(amount=1000)
+                if how == "tool-currency":
+                    qa_server.TOOLS["update_document_metadata"]["fn"](
+                        {"doc_id": doc, "currency": ""})
+                else:
+                    documents.update_document_metadata(self.conn, doc, amount_minor=None)
+                d = self.conn.execute("SELECT amount_minor, currency, amount_conflict FROM"
+                                      " documents WHERE doc_id=?", (doc,)).fetchone()
+                self.assertEqual(d["amount_conflict"], 1)
+                self.assertTrue(documents.amount_unknown(d))
+
+    def test_withdrawing_nothing_held_changes_nothing(self):
+        import documents
+        doc = self._filed_unread()
+        documents.update_document_metadata(self.conn, doc, token=self.claim_token(),
+                                           currency="")
+        self.assertEqual(self.conn.execute("SELECT amount_conflict FROM documents WHERE"
+                                           " doc_id=?", (doc,)).fetchone()[0], 0)
+
     def test_a_tokenless_reading_closes_the_refs_too(self):
         import documents, work
         doc = self._filed_unread()
@@ -143,6 +169,7 @@ class Migration(StoreCase):
         clash = self.doc(amount_minor=None, currency=None, amount_conflict=1)
         with db.tx(self.conn):                                     # the schema-13 store
             self.conn.execute("ALTER TABLE documents DROP COLUMN read_at")
+            self.conn.execute("ALTER TABLE runs DROP COLUMN end_text")
             self.conn.execute("UPDATE meta SET value='13' WHERE key='schema_version'")
         db.migrate(self.conn)
         got = {r[0]: r[1] is not None for r in self.conn.execute(

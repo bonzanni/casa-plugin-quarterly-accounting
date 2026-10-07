@@ -693,7 +693,10 @@ def _choose(conn, token, job_id, logs) -> dict:
     conn.execute("UPDATE runs SET completed_at=coalesce(completed_at, ?) WHERE job_id=?",
                  (db.now(), job_id))
     import job
-    return {"unit": "complete", "text": job.run_end(conn, job_id)[0]}
+    # h3 (Astra S2): the line is kept as first said — a later run never re-derives it
+    conn.execute("UPDATE runs SET end_text=coalesce(end_text, ?) WHERE job_id=?",
+                 (job.run_end(conn, job_id)[0], job_id))
+    return {"unit": "complete", "text": _run(conn, job_id)["end_text"]}
 
 
 def _report_owed(conn, token, job_id):

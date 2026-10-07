@@ -84,7 +84,9 @@ RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
   end_render_id TEXT,                       -- the end message's rendering (§1); '' = none
   partial INTEGER NOT NULL DEFAULT 0,       -- the run ended partial (§3 "Run")
   quarter TEXT,                             -- the run's main quarter, when a check named it
-  hand_unit TEXT, hand_seq INTEGER);        -- queues: the last unit handed (queues.settle), at this seq"""
+  -- queues: the last unit handed (queues.settle), at this seq; h3: end_text is the
+  -- completion's line, kept as it was said
+  hand_unit TEXT, hand_seq INTEGER, end_text TEXT);"""
 
 WORK_REQUESTS_DDL = """CREATE TABLE IF NOT EXISTS work_requests (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -588,6 +590,7 @@ MIGRATIONS: dict[int, list[str]] = {
     # carrying a reading (an amount, or readings that disagreed) was read; one without may be
     # a document a cut left unread (Terra d1 S1): it stays owed, never backfilled as read.
     13: ["ALTER TABLE documents ADD COLUMN read_at TEXT",
+         "ALTER TABLE runs ADD COLUMN end_text TEXT",
          "UPDATE documents SET read_at=ingested_at WHERE amount_minor IS NOT NULL OR"
          " amount_conflict=1"],
     12: ["ALTER TABLE claims ADD COLUMN said_seq INTEGER",
