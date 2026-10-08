@@ -108,6 +108,8 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
    than `files`, or `decided: true`: then `job_next`.
 2. **Judge the candidates from their reading** (`unread`: read it first, as above); open
    one (`read_document(doc_id)`, then `Read` its path) only when in doubt.
+   **Invoice + its receipt in one email:** decide with the invoice, never name the receipt
+   (`doc_id`, `alternatives`); file it as a receipt. Unsure which is the invoice? Propose.
 3. **Nothing fits:** search the vendor's mail (a learned hint first: `from:<hint_sender>` and
    the `hint_subject` words; then the remittance's reference or order number, no dates; then
    the plain vendor-and-dates search over `search_window`, then wider), at most

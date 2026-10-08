@@ -1,8 +1,8 @@
 # Quarterly accounting: what the operator says and sees (APPROVED 2026-10-08, 0.11.2)
 
 Approved by the operator through BRAIN on 2026-10-08, with their changes folded in (incl. the
-button-legend correction, the no-count-on-buttons rule, the invoice-wins rule and the
-quarter-only vendor card). This page is the reviewers' spec, alongside correctness.
+button-legend correction, the no-count-on-buttons rule, the invoice-over-receipt
+judgment, the quarter-only vendor card and its one switch). This page is the reviewers' spec, alongside correctness.
 
 Ellen reads intent from whatever the operator says, in any wording or language. The
 sentences below are **illustrations, never triggers**. There are two intents about a
@@ -80,26 +80,39 @@ Twilio · EUR 20.00 · 14 Aug
 No invoice needed: these need none · Never for Twilio: Twilio never sends one · Leave missing: stop looking, keep them missing
 ⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧
 ```
-When the vendor also has missing payments in OTHER quarters, the card says how many, and
-offers the same answers for all of them:
+When the vendor also has missing payments in OTHER quarters, the card says how many and adds
+one switch, ⟦Apply to all quarters⟧ (operator ruling 2026-10-08: one toggle):
 ```
 Card 2 of 2 · missing invoices · Twilio · 8 Oct 21:10:03
 Twilio · EUR 20.00 · 14 Aug
 Also missing in other quarters: 2 (Q2, Q4)
-No invoice needed: these need none · No invoice needed, all quarters: these and the 2 in other quarters · Never for Twilio: Twilio never sends one, in any quarter · Leave missing: stop looking, keep them missing · Leave missing, all quarters: these and the 2 in other quarters
-⟦No invoice needed for these⟧ ⟦No invoice needed, all quarters⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧ ⟦Leave missing, all quarters⟧
+No invoice needed: these need none · Never for Twilio: Twilio never sends one, in any quarter · Leave missing: stop looking, keep them missing · Apply to all quarters: your next answer here also covers the 2 in other quarters
+⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧ ⟦Apply to all quarters⟧
 ```
+Tapping the switch, on screen (Casa v0.344.46, measured: a tap's answer is a receipt, and
+the next card follows it, never in its place; Casa clears the tapped card's buttons and adds
+"☑ <the button>"):
+1. The old card loses its buttons and ends `☑ Apply to all quarters`.
+2. One short line from Finance: `All quarters on.`
+3. The same card again, switched on:
+```
+Card 2 of 2 · missing invoices · Twilio · 8 Oct 21:10:41
+Twilio · EUR 20.00 · 14 Aug
+Also missing in other quarters: 2 (Q2, Q4) · answers will cover them
+No invoice needed: these and the 2 in other quarters need none · … · Leave missing: these and the 2 in other quarters · Only this quarter: switch back
+⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧ ⟦✓ All quarters⟧
+```
+Switching back is the same sequence: `☑ ✓ All quarters`, then `This quarter only.`, then the
+card switched off.
 
 When the operator sends the PDF in the chat: `Filed. Checking it against the payments —
 I'll post what I find.`, then one card with what changed.
 
-**An invoice and its own receipt: the invoice is the purchase's document** (#52, operator
-ruling 2026-10-08: "it should be the invoice"). When one email carries an invoice and its
-own receipt and they can be told apart, the receipt is set aside: never proposed, never
-matched, never offered as an alternative, never a line. If the receipt was already the
-job's choice for a payment, the job decides that payment again with the invoice. If the
-operator confirmed the receipt, it stays and the invoice is set aside: the operator's
-decision is never undone. When they can't be told apart, nothing changes.
+**An invoice and its own receipt: the invoice is used** (#52, operator ruling 2026-10-08:
+"is there an invoice? Use it. You're not really sure which is the invoice? Ask the
+operator"). When one email carries both, the job decides with the invoice and never offers
+the receipt. When it isn't sure which is the invoice, it doesn't guess: the payment comes
+as a proposal to confirm, the ordinary Review card. A judgment, not a guarantee.
 
 ## 4. Getting the package
 

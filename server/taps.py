@@ -9,6 +9,7 @@ import authority
 import binding
 import db
 import keys
+import lineage
 import matches
 import reply
 import views
@@ -18,10 +19,12 @@ ACTIONS = ("all-good", "right", "wrong", "no-invoice")
 # simple loop §1: the cards' taps (cards.buttons), each valid on its own kind of card only
 CARD_ACTIONS = ("review", "confirm-all", "confirm", "wrong", "leave", "pick",
                 "exempt-these", "leave-missing", "never", "next-page",
+                "all-quarters", "this-quarter",              # 0.11.2 §B: the one switch
                 "keep-current", "use-new")             # rev 18.4 §R18.3
 _ON_KIND = {"end": ("review", "confirm-all"), "open-items": ("review", "confirm-all"),
             "review": ("confirm", "wrong", "leave", "pick"),
-            "vendor-page": ("exempt-these", "leave-missing", "never", "next-page"),
+            "vendor-page": ("exempt-these", "leave-missing", "never", "next-page",
+                            "all-quarters", "this-quarter"),
             "replace": ("keep-current", "use-new")}
 CARD_CHANGED = "That changed since it was shown — nothing applied. Here it is as it is now."
 LIST_CHANGED = "That list changed since it was shown — nothing applied. Here it is as it is now."
@@ -177,6 +180,15 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
             return _answer(conn, f"Page {page + 1} of {len(pages)}.", nxt)
         return _answer(conn, f"Nothing is left on page {page + 1}: answered meanwhile.",
                        cards.next_after(conn, review_of, pos))
+    if action in ("all-quarters", "this-quarter"):
+        # §B: a switch writes nothing; the same card comes back switched (Casa #1302: the
+        # receipt is required, so it is the shortest plain phrase)
+        on = action == "all-quarters"
+        nxt = cards.switched(conn, rid, on)
+        if nxt is None:
+            return _answer(conn, "Nothing is left on this card: answered meanwhile.",
+                           cards.next_after(conn, review_of, pos))
+        return _answer(conn, "All quarters on." if on else "This quarter only.", nxt)
     if action == "leave":
         return _answer(conn, f"Left for now: {views.headline(work.describe(conn, pid))}.",
                        cards.next_after(conn, review_of, pos))
@@ -257,7 +269,7 @@ def _vendor_answer(conn, rid, scope, action, grant):
     if action == "never":
         if _changed(conn, rid, listed):          # Never binds every line it displayed
             return None
-        union = set(listed)
+        union = set(listed) | {int(p) for p in scope.get("others") or {}}   # §B: stated
         for p in scope.get("prior") or []:
             union |= set(views.render_items(conn, p))
         changes = cards.never_set(conn, scope["vendor"])
@@ -272,14 +284,25 @@ def _vendor_answer(conn, rid, scope, action, grant):
     acts = [p for p in listed if p in set(scope.get("missing", listed))]
     if not acts or _changed(conn, rid, acts):   # bound to the missing lines it acts on
         return None
+    revs = {p: _item(conn, rid, p)["projection_revision"] for p in acts}
+    if scope.get("all_quarters"):
+        # §B: the switch on — plus the other quarters' missing payments the card stated
+        # (bound to its count line), at the revisions frozen on page 1 and recorded by
+        # this card: one that moved since refuses the whole answer
+        frozen = scope.get("others_rev") or {}
+        more = list(scope.get("others_missing") or [])
+        if _changed(conn, rid, more) or any(
+                lineage.projection(conn, p)["revision"] != frozen.get(str(p)) for p in more):
+            return None
+        revs.update({p: _item(conn, rid, p)["projection_revision"] for p in more})
     if action == "exempt-these":
-        for p in acts:
+        for p, rev in revs.items():
             matches.set_exemption_in_tx(conn, grant=grant, pid=p, exempt=True,
-                                        expected_revision=_item(conn, rid, p)["projection_revision"],
-                                        render_id=rid, bind="rendered")
-        return f"No invoice needed for {_plural(len(acts), vendor + ' payment')}.", "onward"
-    work.leave_missing_in_tx(conn, acts, grant=grant)
-    return f"Left missing: {_plural(len(acts), vendor + ' payment')}.", "onward"
+                                        expected_revision=rev, render_id=rid,
+                                        bind="rendered")
+        return f"No invoice needed for {_plural(len(revs), vendor + ' payment')}.", "onward"
+    work.leave_missing_in_tx(conn, list(revs), grant=grant)
+    return f"Left missing: {_plural(len(revs), vendor + ' payment')}.", "onward"
 
 
 def _confirm_all(conn, r, scope, grant) -> dict:

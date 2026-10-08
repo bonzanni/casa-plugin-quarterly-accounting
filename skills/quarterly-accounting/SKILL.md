@@ -96,6 +96,8 @@ is filed by you, without being asked:
    credit-note, sales-invoice, statement, payslip, other>, source="manual-telegram",
    extraction_author="desk", counterparty=…, document_date=…, amount_minor=…,
    currency=…)` — your provisional reading, from the file itself.
+   An invoice sent together with its own receipt: file both, each as what it is (`invoice`,
+   `receipt`); the job uses the invoice.
 3. `request_work(kind="handover", trigger="operator", doc_ids=[<every doc_id filed>])`,
    then `start_job` as above. The job posts what it finds.
 

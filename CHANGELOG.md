@@ -26,24 +26,26 @@ the operator-approved conversation script (`docs/superpowers/specs/
   " · 8 Oct 21:04:37", the moment it was composed, in CASA_TZ, then TZ, then UTC; it
   replaces the bare render number. Residual (operator ruling): the same card shown twice in
   the same second (within a year) is refused visibly when replied to, never bound wrongly.
-- **One purchase is one line (#52), and a purchase is found by its email too (#48).** A
-  purchase is everything linked, directly or through each other, by the same issuer and
-  number OR the email an invoice and its own receipt came in (any email the bytes were filed
-  from): exactly one invoice and one receipt with that issuer and read amount and currency
-  in the email, nothing wider (`documents.purchase`, the one definition; after every job write that can
-  change a purchase, its payments must have backed one purchase before, or the write is
-  refused): prod read each receipt with its own
-  number, so issuer + number alone left an invoice and its own receipt apart (an August card
-  offered July's and October's receipts). The proposal line counts purchases. The Review
-  card shows one line and one button per purchase: the current document, else the
-  purchase's invoice. #48's floor uses the same definition.
+- **One purchase is one line (#52).** The proposal line counts purchases (issuer +
+  number, #48's unit), so an invoice and a receipt with the same number read as one
+  document, and the Review card shows one line and one button per purchase. When one email
+  carries an invoice and its own receipt, the job uses the invoice and never offers the
+  receipt; when unsure which is the invoice it proposes, so the operator confirms (a skill
+  judgment, operator ruling — no server rule; the #48 floor is 0.11.1's). A stored
+  alternative set aside since it was stored is no longer offered.
+- **A quarter's vendor card lists only that quarter.** The vendor's payments of other
+  quarters are a frozen count on the card ("Also missing in other quarters: 2 (Q2, Q4)"),
+  bound like a line; [Never] binds the shown and the counted. One switch, ⟦Apply to all
+  quarters⟧, makes the card's next answer ([No invoice needed for these], [Leave missing])
+  cover the other quarters' missing ones too: a short receipt ("All quarters on.") and the
+  same card switched on (⟦✓ All quarters⟧, "· answers will cover them"). An answer refuses
+  when a counted payment moved.
 - **Whole lines (#54).** No fixed-width hard breaks: `views._wrap` and `WIDTH` are gone, and
   every line is one item that the client wraps.
 - **Plain words and buttons.** Zero counts are not shown. Buttons carry no counts
   (⟦Review⟧ ⟦Confirm all⟧ ⟦Get package⟧), and every card that carries buttons (and a
   reading, and the account choice) ends with one line saying what each button shown does:
-  "Review: go through the 5 to confirm and the missing invoices of 6 vendors, one at a
-  time". A run that took
+  "Review: go through the 5 to confirm and the 12 missing, one at a time". A run that took
   an operator's check gets the operator's card, whoever started it. Corrections
   read "Remove the match for …", "Rule out …", "Matched to …"; a proposal reads
   "Suggested: …".
