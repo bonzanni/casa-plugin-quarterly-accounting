@@ -28,9 +28,10 @@ the operator-approved conversation script (`docs/superpowers/specs/
   the same second (within a year) is refused visibly when replied to, never bound wrongly.
 - **One purchase is one line (#52), and a purchase is found by its email too (#48).** A
   purchase is everything linked, directly or through each other, by the same issuer and
-  number OR the same email (any email the bytes were filed from) with the same read amount
-  and currency (`documents.purchase`, the one definition; every write that can grow a held
-  document's purchase is checked against the job's floor): prod read each receipt with its own
+  number OR, for an invoice and its own receipt, the same email (any email the bytes were
+  filed from) with the same issuer and the same read amount and currency (`documents.purchase`, the one definition; after every job write that can
+  change a purchase, its payments must have backed one purchase before, or the write is
+  refused): prod read each receipt with its own
   number, so issuer + number alone left an invoice and its own receipt apart (an August card
   offered July's and October's receipts). The proposal line counts purchases. The Review
   card shows one line and one button per purchase: the current document, else the

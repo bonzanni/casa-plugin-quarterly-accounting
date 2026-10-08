@@ -324,3 +324,14 @@ class LegendMatchesTheWalk(_Cards):
                         legend)
         scope = json.loads(self.row_of(rid)["scope_json"])
         self.assertEqual(sum(1 for o in scope["order"] if "v" in o), 1)
+
+
+class EmptyQuarterEndCard(_Cards):
+    """r2 (Astra S2): a quarter with no payment offers no package, on every end-card branch."""
+
+    def test_nothing_to_check_offers_no_package(self):
+        import cards
+        rid = self.c(cards.compose_end, self.job_id, scheduled=False)
+        self.assertTrue(self.text(rid).startswith("Nothing to check for Q"), self.text(rid))
+        self.assertNotIn("Get package", self.labels(rid))
+        self.assertNotIn("zip", self.text(rid))

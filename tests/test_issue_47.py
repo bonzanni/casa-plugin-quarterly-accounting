@@ -73,9 +73,12 @@ class EmptyCheck(StoreCase):
         drv = JobDriver(self, payments=0)
         drv.pay_once("Zapier", 1000, "2026-05-05")
         drv.gmail.invoice("Zapier", 1000, "EUR", "2026-05-05", "ZAP-Q2")
+        # r2 (Astra S2): a run whose end card was NOT delivered completes with its checked
+        # line — the line h3 freezes (a delivered card's CARD_POSTED is constant)
+        drv.deliver = False
         a = drv.run_job("47474747-06", started_by="agent")[-1]["text"]
-        # 0.11.2: the run's end card was delivered, so its completion says only that
-        self.assertEqual(a, job.CARD_POSTED)
+        drv.deliver = True
+        self.assertEqual(a, "Q2 2026 checked: 1 matched, 0 to confirm, 0 missing")
         self.assertTrue(untag(self.end_text("47474747-06")).startswith("Q2"),
                         self.end_text("47474747-06"))
         drv.pay_once("Zapier", 2000, "2026-07-05")

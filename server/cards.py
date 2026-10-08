@@ -600,6 +600,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
                         questions=new_qs)       # e1 (Astra S2): only this run's new ones
     c = st["counts"].get(q, collections.Counter())
     n = sum(c.values())
+    extra_scope["package"] = bool(n)     # r2 (Astra S2): every branch, the early ones too
     qs = replace.open_ones(conn)
     if not st["proposals"] and not open_missing:
         if ready and not qs:
@@ -626,7 +627,6 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     else:
         head = [stopped or f"{_qn(q)} checked · {_s(n, 'payment')}", _counts_line(c)]
     head += _fit_receipts(receipts, head, _confirm_room(props) + earlier + tail)
-    extra_scope["package"] = bool(n)
     return _summary(conn, "end", q, head, props, _vendor_items(mine),
                     earlier + tail, reported, scheduled=False, extra_scope=extra_scope,
                     questions=qs)

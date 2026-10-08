@@ -125,10 +125,13 @@ def _messages(conn, doc_id) -> set:
 
 
 def _same_email(conn, d) -> list:
-    """The documents filed from one of `d`'s email messages with the same READ amount and
-    currency (the amount keeps a digest email's other purchases apart); none when `d`'s
-    amount or currency is unread."""
-    if d["amount_minor"] is None or not d["currency"]:
+    """The documents filed from one of `d`'s email messages that are its other half: the
+    same READ amount and currency, the same issuer, and another kind (an invoice and its own
+    receipt, r2 Terra S1: two invoices in one digest email are never one purchase by their
+    email — a refiled copy of the same invoice links by its number). None when `d`'s amount,
+    currency or issuer is unread."""
+    issuer = db.purchase_issuer(d["issuer"], d["counterparty"])
+    if d["amount_minor"] is None or not d["currency"] or not issuer:
         return []
     out = set()
     for msg in _messages(conn, d["doc_id"]):
@@ -140,8 +143,9 @@ def _same_email(conn, d) -> list:
     out.discard(d["doc_id"])
     return [r[0] for r in conn.execute(
         "SELECT doc_id FROM documents WHERE doc_id IN (%s) AND amount_minor=? AND currency=?"
-        % ",".join("?" * len(out)), (*sorted(out), d["amount_minor"], d["currency"]))] \
-        if out else []
+        " AND purchase_issuer(issuer, counterparty)=? AND kind<>?"
+        % ",".join("?" * len(out)),
+        (*sorted(out), d["amount_minor"], d["currency"], issuer, d["kind"]))] if out else []
 
 
 def _linked(conn, d) -> list:
@@ -156,7 +160,7 @@ def _linked(conn, d) -> list:
     return out + _same_email(conn, d)
 
 
-def purchase(conn, doc_id: int) -> list:
+def purchase(conn, doc_id: int, exclude=()) -> list:
     """Issue #48, the ONE definition of a purchase (0.11.2): `doc_id` first, then every
     document reachable from it through either link — the same issuer and the same document
     number (compared as `collisions` compares them, one normalisation, both sides), or the
@@ -166,7 +170,7 @@ def purchase(conn, doc_id: int) -> list:
     through the original invoice). A document with neither link is a purchase of its own.
     Ownership, not duplicates: an irrelevant document or the same bytes filed twice count
     too."""
-    seen, todo = {doc_id}, [doc_id]
+    seen, todo = {doc_id} | set(exclude), [doc_id]
     while todo:
         d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (todo.pop(),)).fetchone()
         if d is None:
@@ -175,7 +179,7 @@ def purchase(conn, doc_id: int) -> list:
             if other not in seen:
                 seen.add(other)
                 todo.append(other)
-    return [doc_id] + sorted(seen - {doc_id})
+    return [doc_id] + sorted(seen - {doc_id} - set(exclude))
 
 
 def ingest_document(conn, *, source_path, kind, source, extraction_author, counterparty=None,
@@ -231,10 +235,10 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                         *_amount_said(amount_minor, currency, filing=True))
                 if _operator_ref(conn, source, source_ref, existing[0]) and token is not None:
                     decide.note_progress(conn, token)   # d2: a newly filed ref is progress
-                if token is not None and purchase(conn, existing[0]) != before:
-                    # r1 (Astra S1): the same bytes filed from another email (or with an
-                    # amount) can join a purchase another payment backs: the job's floor
-                    _one_purchase_one_payment(conn, existing[0])
+                if token is not None:
+                    # r1/r2: the same bytes filed from another email (or with an amount)
+                    # can join a purchase another payment backs: the job's floor
+                    _one_purchase_one_payment(conn, existing[0], before)
                 if vendor is not None:
                     # a vendor group that found it again names it, where none was recorded
                     conn.execute("UPDATE documents SET vendor=? WHERE doc_id=? AND vendor IS"
@@ -257,6 +261,9 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                  db.now() if amount_minor is not None or currency else None))
             doc_id = cur.lastrowid
             _operator_ref(conn, source, source_ref, doc_id)
+            if token is not None:
+                # r2 (Astra + Terra S1): a new filing can bridge two held purchases
+                _one_purchase_one_payment(conn, doc_id, [doc_id])
             if token is not None:
                 decide.note_progress(conn, token)      # §2.2 `progressed`: a document filed
             return {"doc_id": doc_id, "sha256": sha, "created": True,
@@ -460,8 +467,8 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         if fields:
             conn.execute("UPDATE documents SET %s WHERE doc_id=?"
                          % ", ".join(f"{k}=?" for k in fields), (*fields.values(), doc_id))
-        if token is not None and purchase(conn, doc_id) != before:
-            _one_purchase_one_payment(conn, doc_id)
+        if token is not None:
+            _one_purchase_one_payment(conn, doc_id, before)
         if "document_date" in fields:
             # issue #22: a date written here was read on the document (the specialist
             # after opening it, or the operator's own words): the file is named by it. A
@@ -476,25 +483,43 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
                 "amount_conflict": bool(d["amount_conflict"])}
 
 
-def _one_purchase_one_payment(conn, doc_id) -> None:
-    """Issue #48 (d1 Terra S1): the job's reading never makes one purchase back two payments
-    — an issuer or number that moves a HELD document into a purchase another payment's
-    document backs is refused (the caller's transaction rolls back), naming that payment.
-    Called only when the reading changed the document's purchase: a purchase that already
-    backed two payments before (a 0.11.0 store) never refuses a reading that joins nothing.
-    The operator's words (no pass token) are not limited."""
+def _lineages(conn, docs) -> dict:
+    """{resolved payment: a document of `docs` it holds} — the payments backing `docs`."""
     import lineage
     import matches
-    held = matches.purchase_holders(conn, doc_id)
-    own = {lineage.resolve_pid(conn, p) for p, _how, d in held if d == doc_id}
-    other = next(((p, d) for p, _how, d in held
-                  if own and lineage.resolve_pid(conn, p) not in own), None)
-    if other is None:
+    out = {}
+    for d in docs:
+        for p, _how in matches.holders(conn, d):
+            out.setdefault(lineage.resolve_pid(conn, p), d)
+    return out
+
+
+def _one_purchase_one_payment(conn, doc_id, before) -> None:
+    """Issue #48's floor as ONE invariant (r2 Astra + Terra S1: a write to an UNHELD document,
+    or a new filing, could bridge two held purchases): after a job write to `doc_id` (its
+    reading, the same bytes filed again, a new filing), the payments backing its purchase
+    must all have backed ONE purchase that existed before — `before`, the document's own
+    purchase captured before the write ([doc_id] for a new filing), or the purchase of a
+    document the write joined, taken without `doc_id` (the write changed only `doc_id`'s
+    links, so that is exactly its purchase before). A purchase that already backed two
+    payments (a 0.11.0 store) never refuses a write that joins nothing new to it. Refused:
+    the caller's transaction rolls back, naming a payment. The operator's words and
+    filings (no pass token) are not limited."""
+    import matches
+    after = purchase(conn, doc_id)
+    backing = _lineages(conn, after)
+    if len(backing) <= 1:
         return
-    other, twin = other
-    raise db.Refusal(f"that reading makes document #{doc_id} the same purchase as document "
-                     f"#{twin}, which already backs {matches._payment_words(conn, other)}: "
-                     "one purchase backs one payment — check the number and issuer you read")
+    olds = [set(_lineages(conn, before))] + [
+        set(_lineages(conn, purchase(conn, x, exclude=(doc_id,))))
+        for x in after if x not in before]
+    if any(set(backing) <= old for old in olds):
+        return
+    first = next(iter(_lineages(conn, before) or backing))
+    other, twin = next((p, d) for p, d in backing.items() if p != first)
+    raise db.Refusal(f"that makes document #{doc_id} the same purchase as document #{twin}, "
+                     f"which already backs {matches._payment_words(conn, other)}: one purchase "
+                     "backs one payment — check the number, issuer and amount you read")
 
 
 def mark_irrelevant(conn, doc_id: int, irrelevant: bool = True, token=None) -> dict:

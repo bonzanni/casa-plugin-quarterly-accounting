@@ -164,3 +164,82 @@ class R1Bridges(LoopCase):
                                                amount_minor=2200, currency="USD")
         self.assertIsNone(self.conn.execute("SELECT amount_minor FROM documents WHERE"
                                             " doc_id=?", (rec,)).fetchone()[0])
+
+
+class R2Floor(LoopCase):
+    """r2 (Astra + Terra S1): the floor is one invariant over the whole purchase — a job write
+    (a new filing, the same bytes again, a reading) never leaves a purchase backing two
+    payments that did not already back one purchase; an UNHELD bridge included."""
+    C = dict(issuer="Eleven Labs Inc.", document_date="2026-07-01", amount_minor=2200,
+             currency="USD")
+
+    def held_pair(self):
+        """Payment 1 holds A (INV-1, email m1); payment 2 holds B (receipt REC-1, email m2)."""
+        import matches
+        p1 = self.pay("Elevenlabs.io", 1958, "2026-07-01")
+        p2 = self.pay("Elevenlabs.io", 1958, "2026-07-02")
+        a = self.doc(document_number="INV-1", source_ref="m1:1", **self.C)
+        b = self.doc(kind="receipt", document_number="REC-1", source_ref="m2:2", **self.C)
+        for p, d in ((p1, a), (p2, b)):
+            matches.propose_match(self.conn, pid=p, doc_id=d, expected_revision=self.rev(p),
+                                  token=self.token, document_date="2026-07-01")
+        return a, b
+
+    def file(self, name, ref, **over):
+        import documents
+        kw = dict(source_path=self.publish(name, ("%PDF-1.4 " + name).encode()), kind="invoice",
+                  source="gmail", extraction_author="specialist", counterparty=self.C["issuer"],
+                  document_number="INV-1", source_ref=ref, token=self.token, **self.C)
+        kw.update(over)
+        return documents.ingest_document(self.conn, **kw)
+
+    def count(self):
+        return self.conn.execute("SELECT count(*) FROM documents").fetchone()[0]
+
+    def test_a_new_filing_cannot_bridge_two_held_purchases(self):
+        self.held_pair()
+        n = self.count()
+        with self.assertRaises(db.Refusal):
+            self.file("bridge.pdf", "m2:1")            # A's issuer+number, B's email
+        self.assertEqual(self.count(), n)
+
+    def test_a_reading_of_an_unheld_bridge_cannot_either(self):
+        import documents
+        self.held_pair()
+        c = self.doc(document_number="INV-1", source_ref="m2:1",
+                     **{**self.C, "amount_minor": None, "currency": None})
+        with self.assertRaises(db.Refusal):
+            documents.update_document_metadata(self.conn, c, token=self.token,
+                                               amount_minor=2200, currency="USD")
+
+    def test_a_filing_that_bridges_nothing_held_twice_is_filed(self):
+        self.held_pair()
+        out = self.file("receipt-of-a.pdf", "m1:2", kind="receipt", document_number="REC-9")
+        self.assertTrue(out["created"])
+
+    def test_two_invoices_in_one_digest_email_are_two_purchases(self):
+        """r2 Terra S1: same email, same amount, two different invoices."""
+        import documents
+        x = self.doc(document_number="X-1", source_ref="digest:1", **self.C)
+        y = self.doc(document_number="Y-1", source_ref="digest:2", **self.C)
+        self.assertEqual(documents.purchase(self.conn, x), [x])
+        self.assertEqual(documents.purchase(self.conn, y), [y])
+
+    def test_another_issuer_in_the_same_email_is_another_purchase(self):
+        import documents
+        x = self.doc(document_number="X-1", source_ref="digest:1", **self.C)
+        y = self.doc(kind="receipt", document_number="Y-1", source_ref="digest:2",
+                     **{**self.C, "issuer": "Other Vendor BV"})
+        self.assertEqual(documents.purchase(self.conn, x), [x])
+
+    def test_a_purchase_that_already_backed_two_payments_takes_a_filing_that_joins_nothing(self):
+        """A 0.11.0 store: one purchase already backs two payments. A filing that joins it
+        and nothing else is not refused (it adds no payment)."""
+        p1 = self.pay("Elevenlabs.io", 1958, "2026-07-01")
+        p2 = self.pay("Elevenlabs.io", 1958, "2026-07-02")
+        a = self.doc(document_number="INV-1", source_ref="m1:1", **self.C)
+        b = self.doc(document_number="INV-1", source_ref="m9:1", **self.C)
+        self.machine_entry(p1, a)
+        self.machine_entry(p2, b)
+        out = self.file("receipt.pdf", "m1:2", kind="receipt", document_number="REC-7")
+        self.assertTrue(out["created"])
