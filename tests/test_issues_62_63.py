@@ -23,18 +23,31 @@ class DomainNames(StoreCase):
         out, prop = self.propose("no invoices ever for Twilio.com")
         self.assertIsNotNone(prop, out)
 
-    def test_a_period_between_sentences_still_splits(self):
+    def test_a_known_dotted_name_stays_whole_in_any_case(self):
         import reply
-        self.assertEqual(reply._clauses("Zapier is fine.Adobe is wrong"),
-                         ["zapier is fine", "adobe is wrong"])
-        # r1 (Astra, Terra): a capitalised word after a period is a new sentence
-        for text in ("Zapier is fine.De Bijenkorf is wrong", "Zapier is fine.AI is wrong",
-                     "Zapier is fine.Io is wrong"):
-            self.assertEqual(len(reply._clauses(text)), 2, text)
-        self.assertEqual(reply._clauses("no invoices ever for TWILIO.COM"),
+        keep = ["twilio.com", "fsprg.nl via checkout.com", "elevenlabs.io"]
+        self.assertEqual(reply._clauses("no invoices ever for TWILIO.COM", keep),
                          ["no invoices ever for twilio.com"])
-        self.assertEqual(reply._clauses("fsprg.nl via Checkout.com is wrong. Elevenlabs.io too"),
+        self.assertEqual(reply._clauses("fsprg.nl via Checkout.com is wrong. Elevenlabs.io too",
+                                        keep),
                          ["fsprg.nl via checkout.com is wrong", "elevenlabs.io too"])
+
+    def test_a_period_between_sentences_splits_as_in_0_11_3(self):
+        """r1/r2 (Astra, Terra): no rule guesses a domain from the text."""
+        import reply
+        keep = ["twilio.com"]
+        for text in ("Zapier is fine.De Bijenkorf is wrong", "Zapier is fine.AI is wrong",
+                     "Zapier is OK.AI is wrong", "Zapier is fine.de Bijenkorf is wrong",
+                     "Zapier is BAD.AI is wrong", "Zapier is fine.Com is wrong"):
+            self.assertEqual(len(reply._clauses(text, keep)), 2, text)
+        # an unknown dotted word is split exactly as 0.11.3 split it
+        self.assertEqual(reply._clauses("no invoices ever for Twilio.com"),
+                         ["no invoices ever for twilio", "com"])
+
+    def test_the_store_supplies_the_kept_names(self):
+        import reply
+        self.sheet_fixture(payee="Twilio.com", guesses=1)
+        self.assertIn("twilio.com", reply._dotted_names(self.conn, reply._open_items(self.conn)))
 
 
 class CreditNoteLegend(StoreCase):

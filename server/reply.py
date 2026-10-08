@@ -130,22 +130,29 @@ CLASS_SCOPES = {"payslips": ("salary", "payroll"), "statements": ("fees", "inter
 # ("Zapier is fine.Adobe is wrong" must stay two sentences) (fix round 3).
 _EXTENSIONS = ("zip", "pdf", "csv", "xlsx", "xls", "txt", "png", "jpg", "jpeg", "heic",
                "doc", "docx", "xml", "json", "eml")
-# #62: a vendor printed as a domain ("Twilio.com", "Elevenlabs.io", "fsprg.nl") keeps its
-# period: a period before one of these endings is part of the name, not a sentence end
-_DOMAINS = ("com", "io", "nl", "net", "org", "de", "eu", "co", "ai", "app", "dev", "be", "fr",
-            "uk", "us", "me")
-# r1 (Astra, Terra): only a lowercase ending ("Twilio.com"), or an all-caps one right after a
-# capital ("TWILIO.COM"), is a domain — "Zapier is fine.De Bijenkorf is wrong" and
-# "… fine.AI is wrong" stay two sentences
-_DOMAIN = "|".join(_DOMAINS)
-_SENTENCE_END = re.compile(
-    r"(?:(?<!\d)\.|\.(?!\d))(?!(?:%s)\b)(?!(?-i:(?:%s))\b)(?!(?<=(?-i:[A-Z])\.)(?-i:(?:%s))\b)"
-    r"|;|\n|(?<=\?)" % ("|".join(_EXTENSIONS), _DOMAIN, _DOMAIN.upper()), re.I)
+_SENTENCE_END = re.compile(r"(?:(?<!\d)\.|\.(?!\d))(?!(?:%s)\b)|;|\n|(?<=\?)"
+                           % "|".join(_EXTENSIONS), re.I)
+# #62 (generalized after r1/r2): a period inside a vendor name the store knows ("Twilio.com",
+# "fsprg.nl via Checkout.com") is part of that name, never a sentence end. Only known names are
+# kept whole — no rule guesses a domain from the text, so a reply 0.11.3 split still splits.
+_KEPT_DOT = "\x00"
 _ESCAPE_LEAD = re.compile(r"^accounting\s*[:,\-\u2013\u2014]\s*")
 _ESCAPE_TAIL = re.compile(r"\s*,\s*accounting$")
 
 
-def _clauses(text: str) -> list:
+def _dotted_names(conn, items=()) -> list:
+    """#62: every name with a period that a reply may print whole — the open items' names
+    (_names) and the knowledge base's names and patterns — longest first."""
+    names = set()
+    for d in items:
+        names |= {n for n in _names(d) if "." in n}
+    for r in conn.execute("SELECT name, patterns_json FROM counterparties"):
+        names |= {kb.norm(n) for n in [r["name"], *json.loads(r["patterns_json"] or "[]")]
+                  if n and "." in n}
+    return sorted(names, key=len, reverse=True)
+
+
+def _clauses(text: str, keep=()) -> list:
     """Sentences, lower-cased; a sentence ending in "?" keeps its "?" so the
     caller can tell a question from a correction.
 
@@ -155,10 +162,14 @@ def _clauses(text: str) -> list:
     inside a clause's content ("the ABC Accounting Services one", fix round 2).
     A period ends a sentence only before whitespace or the end, so a name like
     "accounting.zip" and an amount like "99.00" stay whole."""
-    parts = re.split(_SENTENCE_END, text.strip())
+    text = text.strip()
+    for name in keep:            # #62: a known dotted name keeps its periods
+        text = re.sub(r"(?<!\w)%s(?!\w)" % r"\s+".join(map(re.escape, name.split())),
+                      lambda m: m.group(0).replace(".", _KEPT_DOT), text, flags=re.I)
+    parts = re.split(_SENTENCE_END, text)
     out = []
     for p in parts:
-        c = re.sub(r"\s+", " ", p).strip(" ,:").lower()
+        c = re.sub(r"\s+", " ", p.replace(_KEPT_DOT, ".")).strip(" ,:").lower()
         c = _ESCAPE_TAIL.sub("", _ESCAPE_LEAD.sub("", c)).strip(" ,:")
         if c and c != "accounting":
             out.append(_polite(c))
@@ -660,14 +671,15 @@ def _run(conn, text, grant, bound, quoted=False) -> "_Run":
     `grant` and inside a savepoint of its clause, bound to `bound` (a renders row or None):
     its open items are the only ones a description resolves to (binding §2 #4)."""
     run = _Run(conn, grant, bound, quoted)
-    clauses = _clauses(text)
+    items = _open_items(conn)
+    clauses = _clauses(text, _dotted_names(conn, items))
     # spec §"Asking between passes": a question is never a correction. A
     # message of questions only is not a reply; a question beside a correction
     # changes nothing for itself and the correction still applies.
     if not clauses or all(c.endswith("?") for c in clauses):
         run.not_a_reply = True
         return run
-    run.all_items = _open_items(conn)
+    run.all_items = items
     items = [d for d in run.all_items if d["pid"] in run.scope.pids]
     parsed = [(c, *_parse(c)) for c in clauses]
     # R3/R4 (Astra): a reply is split into clauses, so a qualification of a sheet-wide
@@ -742,7 +754,7 @@ def _refused(conn, text, exc) -> dict:
     read, and the recovery is a fresh rendering (`show_view`). Words that are only
     questions are still not a reply."""
     run = _Run(conn, None, None, True)
-    clauses = _clauses(text)
+    clauses = _clauses(text, _dotted_names(conn))
     if not clauses or all(c.endswith("?") for c in clauses):
         run.not_a_reply = True
     else:
