@@ -243,3 +243,33 @@ class R2Floor(LoopCase):
         self.machine_entry(p2, b)
         out = self.file("receipt.pdf", "m1:2", kind="receipt", document_number="REC-7")
         self.assertTrue(out["created"])
+
+
+class R3UnambiguousPair(LoopCase):
+    """r3 escalation (Astra S2, the third same-shape finding): the email link is exactly one
+    invoice and one receipt of one issuer and amount in that email; nothing wider."""
+    C = dict(issuer="Acme BV", document_date="2026-07-01", amount_minor=10000, currency="EUR")
+
+    def test_a_statement_never_bridges_two_invoices(self):
+        import documents
+        a = self.doc(document_number="INV-A", source_ref="e1:1", **self.C)
+        b = self.doc(document_number="INV-B", source_ref="e1:2", **self.C)
+        st = self.doc(kind="statement", document_number="SUMMARY", source_ref="e1:3", **self.C)
+        for d in (a, b, st):
+            self.assertEqual(documents.purchase(self.conn, d), [d])
+
+    def test_two_pairs_in_one_email_make_no_email_link(self):
+        import documents
+        i1 = self.doc(document_number="INV-1", source_ref="e2:1", **self.C)
+        r1 = self.doc(kind="receipt", document_number="REC-1", source_ref="e2:2", **self.C)
+        self.doc(document_number="INV-2", source_ref="e2:3", **self.C)
+        self.doc(kind="receipt", document_number="REC-2", source_ref="e2:4", **self.C)
+        self.assertEqual(documents.purchase(self.conn, i1), [i1])
+        self.assertEqual(documents.purchase(self.conn, r1), [r1])
+
+    def test_the_measured_pair_still_links(self):
+        import documents
+        i = self.doc(document_number="INV-1", source_ref="e3:1", **self.C)
+        r = self.doc(kind="receipt", document_number="2062-6406-1116", source_ref="e3:2",
+                     **self.C)
+        self.assertEqual(documents.purchase(self.conn, i), [i, r])

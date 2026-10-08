@@ -601,9 +601,11 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     c = st["counts"].get(q, collections.Counter())
     n = sum(c.values())
     extra_scope["package"] = bool(n)     # r2 (Astra S2): every branch, the early ones too
-    qs = replace.open_ones(conn)
+    all_qs = replace.open_ones(conn)
+    # r3 (Astra S2): the card's questions are its quarter's, on every branch
+    qs = [x for x in all_qs if work.describe(conn, x["pid"])["quarter"] == q]
     if not st["proposals"] and not open_missing:
-        if ready and not qs:
+        if ready and not all_qs:
             return compose_ready(conn, ready, extra, alerts=alerts, receipts=receipts)
         if not c["pending"]:
             # issue #47: no payment at all in the quarter says why, never "all accounted for"
@@ -618,7 +620,6 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     # items, every other quarter one line
     props = [d for d in st["proposals"] if d["quarter"] == q]
     mine = [d for d in open_missing if d["quarter"] == q]
-    qs = [x for x in qs if work.describe(conn, x["pid"])["quarter"] == q]
     earlier = _other_quarters(st, open_missing, q)
     if not n:
         head = [stopped or views.esc(nothing_to_check(conn, q))]
@@ -1008,7 +1009,7 @@ def _buttons(rid, kind, scope) -> list:
 
 LEGEND = {"review": "Review: go through {walk}, one at a time",
           "confirm-all": "Confirm all: accept the invoices listed above",
-          "pick": "{label}: use that document",
+          "pick": "{label}: use this document",
           "confirm": "Confirm: this invoice is right",
           "wrong": "Wrong: not this one, keep looking",
           "leave": "Leave for now: decide later",
@@ -1018,23 +1019,25 @@ LEGEND = {"review": "Review: go through {walk}, one at a time",
           "next-page": "Next page: the rest of this vendor",
           "keep-current": "Keep current: keep the filed invoice",
           "use-new": "Use new: use the new one"}
-PICKS_WORD = "Each document"
 
 
 def legend(kind, scope) -> str:
     """The approved script: a card that carries buttons ends with ONE short plain line
     saying what each button shown does — the buttons actually shown, in order, from the
     same function that makes them. Picks share one entry."""
-    parts = []
+    parts, picked = [], False
     for label, tool, args, _ in _buttons("r0", kind, scope):
         if tool == "get_package":
             parts.append(f"Get package: the {_qn(scope['quarter'])} zip for your accountant")
             continue
         action = args["action"]
         if action == "pick":
-            if any(p.startswith(PICKS_WORD) for p in parts):
+            # r3 (Terra S2): one entry naming every pick button shown
+            if picked:
                 continue
-            label = PICKS_WORD if len(scope.get("picks") or []) > 1 else label
+            picked = True
+            label = ", ".join(lb for lb, t, a, _ in _buttons("r0", kind, scope)
+                              if t == "verdict" and a["action"] == "pick")
         parts.append(LEGEND[action].format(label=label, walk=_walk_words(scope),
                                            vendor=views.field(scope.get("vendor") or "")))
     return " · ".join(parts)

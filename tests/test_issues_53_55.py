@@ -335,3 +335,26 @@ class EmptyQuarterEndCard(_Cards):
         self.assertTrue(self.text(rid).startswith("Nothing to check for Q"), self.text(rid))
         self.assertNotIn("Get package", self.labels(rid))
         self.assertNotIn("zip", self.text(rid))
+
+
+class QuestionsAreTheQuartersOnEveryBranch(_Cards):
+    """r3 (Astra S2): a Q3 end card with nothing open never offers a Q4 payment's question."""
+
+    def test_a_q4_replace_question_stays_off_the_q3_card(self):
+        import cards, replace
+        p = self.pay("Notion", 900, "2026-10-02")
+        old = self.doc(issuer="Notion", document_number="NO-1", amount_minor=900)
+        self.machine_entry(p, old)
+        new = self.doc(issuer="Notion", document_number="NO-2", amount_minor=900)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE runs SET quarter='2026-Q3' WHERE job_id=?",
+                              (self.job_id,))
+        with db.tx(self.conn):        # the job's replace answer to a handover (ask_in_tx)
+            mid = replace.current(self.conn, p)[0]
+            self.conn.execute("INSERT INTO replace_questions(job_id, pid, match_id, new_doc_id,"
+                              " state, created_seq) VALUES (?,?,?,?, 'open', ?)",
+                              (self.job_id, p, mid, new, db.next_seq(self.conn)))
+        self.assertEqual(len(self.c(lambda conn: replace.open_ones(conn))), 1)
+        rid = self.c(cards.compose_end, self.job_id, scheduled=False)
+        scope = json.loads(self.row_of(rid)["scope_json"])
+        self.assertEqual([o for o in scope["order"] if "q" in o], [])

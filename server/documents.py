@@ -125,27 +125,32 @@ def _messages(conn, doc_id) -> set:
 
 
 def _same_email(conn, d) -> list:
-    """The documents filed from one of `d`'s email messages that are its other half: the
-    same READ amount and currency, the same issuer, and another kind (an invoice and its own
-    receipt, r2 Terra S1: two invoices in one digest email are never one purchase by their
-    email — a refiled copy of the same invoice links by its number). None when `d`'s amount,
-    currency or issuer is unread."""
+    """`d`'s other half by email (r3 escalation, the third same-shape finding: the link is
+    the measured fact and nothing wider): an invoice and its own receipt travel in one email.
+    In each email `d` was filed from, the documents with `d`'s issuer and READ amount and
+    currency must be exactly one invoice and one receipt, `d` one of them; then the other is
+    linked. Anything else in that email — a statement, a second invoice, two pairs — makes
+    no email link there (a refiled copy of an invoice still links by its number). None when
+    `d` is not an invoice or a receipt, or its amount, currency or issuer is unread."""
     issuer = db.purchase_issuer(d["issuer"], d["counterparty"])
-    if d["amount_minor"] is None or not d["currency"] or not issuer:
+    if (d["kind"] not in ("invoice", "receipt") or d["amount_minor"] is None
+            or not d["currency"] or not issuer):
         return []
     out = set()
     for msg in _messages(conn, d["doc_id"]):
         args = (msg, msg, msg)
-        out |= {r[0] for r in conn.execute(
+        ids = {r[0] for r in conn.execute(
             "SELECT doc_id FROM documents WHERE source IN (?, ?) AND " + _MSG.format(c="source_ref")
             + " UNION SELECT doc_id FROM operator_refs WHERE source IN (?, ?) AND "
             + _MSG.format(c="ref"), (*EMAIL_SOURCES, *args, *EMAIL_SOURCES, *args))}
-    out.discard(d["doc_id"])
-    return [r[0] for r in conn.execute(
-        "SELECT doc_id FROM documents WHERE doc_id IN (%s) AND amount_minor=? AND currency=?"
-        " AND purchase_issuer(issuer, counterparty)=? AND kind<>?"
-        % ",".join("?" * len(out)),
-        (*sorted(out), d["amount_minor"], d["currency"], issuer, d["kind"]))] if out else []
+        same = conn.execute(
+            "SELECT doc_id, kind FROM documents WHERE doc_id IN (%s) AND amount_minor=? AND"
+            " currency=? AND purchase_issuer(issuer, counterparty)=?" % ",".join("?" * len(ids)),
+            (*sorted(ids), d["amount_minor"], d["currency"], issuer)).fetchall() if ids else []
+        if sorted(k for _i, k in same) == ["invoice", "receipt"] \
+                and d["doc_id"] in {i for i, _k in same}:
+            out |= {i for i, _k in same if i != d["doc_id"]}
+    return sorted(out)
 
 
 def _linked(conn, d) -> list:
