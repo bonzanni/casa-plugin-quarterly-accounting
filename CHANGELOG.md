@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.11.3
+
+Cards that read right, and the invoice links. Same store schema and Casa floor (v0.344.39);
+the in-place updates need Casa v0.344.48 (#1339) and fall back to a receipt and a new card
+on an older Casa.
+
+- **[Invoice links] (#57).** The quarter's card ([Review] [Confirm all] [Get package]) has
+  one more button while the quarter has missing invoices. Tapping it turns the same card
+  into the card plus "Where to download the missing invoices:", one line per vendor with
+  its download link and link note, or "no link known". The links are the ones the check
+  learns for a vendor whose invoices sit behind a login. The card's other buttons stay.
+- **One card, updated in place (Casa #1339).** [Next page], [Apply to all quarters],
+  [Only this quarter] and [Invoice links] change only what the card shows, so the tapped
+  card becomes the new one: no receipt, no second card. Taps that decide something keep
+  their receipt and post the next card as before.
+- **Readable vendor names (#59).** A card names a vendor by the name given in the
+  knowledge base, else by the issuer printed on a document matched to another of its
+  payments, else by the bank's text ("Google Cloud EMEA" rather than
+  "Google*workspace Lesin"). A payment's own suggested or matched document never names
+  it. Rules ([Never for …]) still apply to the bank's payee.
+- **Plainer vendor cards (#59).** The download link reads "Where to download: …". A vendor
+  whose missing documents are credit notes reads "missing credit notes", with [No document
+  needed for these] and its legend and receipt naming credit notes. "Also in other
+  quarters: 7 payments (Q2)" adds "· Never for X would also change them".
+- **No narration after a card (#59).** The desk's reply after a reading or a view is
+  `<silent/>` only, with no sentence saying that something was posted.
+- **Not in this release: the proposed document's PDF (#56).** A file button's tap ends
+  the card it sits on (Casa settles the whole keyboard and posts no next card after a
+  file), so [See PDF] would leave the to-confirm card without [Confirm]. It waits on a
+  Casa change.
+
 ## 0.11.2
 
 The card the operator reads, from the first prod "check Q3" on 0.11.1 (2026-10-08), and

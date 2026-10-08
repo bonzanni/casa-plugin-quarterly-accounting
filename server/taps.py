@@ -17,12 +17,13 @@ import work
 
 ACTIONS = ("all-good", "right", "wrong", "no-invoice")
 # simple loop §1: the cards' taps (cards.buttons), each valid on its own kind of card only
-CARD_ACTIONS = ("review", "confirm-all", "confirm", "wrong", "leave", "pick",
+CARD_ACTIONS = ("review", "confirm-all", "links", "confirm", "wrong", "leave", "pick",
                 "exempt-these", "leave-missing", "never", "next-page",
                 "all-quarters", "this-quarter",              # 0.11.2 §B: the one switch
                 "leave-vendor",
                 "keep-current", "use-new")             # rev 18.4 §R18.3
-_ON_KIND = {"end": ("review", "confirm-all"), "open-items": ("review", "confirm-all"),
+_ON_KIND = {"end": ("review", "confirm-all", "links"),
+            "open-items": ("review", "confirm-all", "links"),
             "review": ("confirm", "wrong", "leave", "pick"),
             "vendor-page": ("exempt-these", "leave-missing", "never", "next-page",
                             "all-quarters", "this-quarter", "leave-vendor"),
@@ -140,12 +141,18 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
     return {"receipt": views.fit_message(lines), "applied": applied}
 
 
-def _answer(conn, receipt, next_rid) -> dict:
-    """#1302: the receipt (a non-blank sentence), then the card Casa posts after it."""
+def _answer(conn, receipt, next_rid, in_place=False) -> dict:
+    """#1302: the receipt (a non-blank sentence), then the card Casa posts after it.
+    `in_place` (Casa #1339, v0.344.48): a tap that only changes the card's own view — a
+    page turn, the switch, the invoice links — asks Casa to edit the tapped card into the
+    next one; a landed edit sends no receipt, anything else is the receipt and the card."""
     import cards
     if not receipt.strip() or next_rid is None:
         raise RuntimeError("#1302: every card answer is a receipt and a next card")
-    return {"receipt": views.fit_message(receipt), "next": cards.deposit_of(conn, next_rid)}
+    out = {"receipt": views.fit_message(receipt), "next": cards.deposit_of(conn, next_rid)}
+    if in_place:
+        out["in_place"] = True
+    return out
 
 
 def _plural(n, word) -> str:
@@ -183,11 +190,15 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
                        cards.next_after(conn, rid, -1))
     if action == "confirm-all":
         return _confirm_all(conn, r, scope, grant)
+    if action == "links":
+        # issue #57: the quarter's card again, with where to download each missing invoice
+        return _answer(conn, "Invoice links: on the card below.",
+                       cards.compose_open(conn, scope["quarter"], links=True), in_place=True)
     if action == "next-page":
         nxt = later_page()
         if nxt is not None:
             at = json.loads(_row_scope(conn, nxt))["page"]
-            return _answer(conn, f"Page {at} of {len(pages)}.", nxt)
+            return _answer(conn, f"Page {at} of {len(pages)}.", nxt, in_place=True)
         return _answer(conn, "Nothing is left on the later pages: answered meanwhile.",
                        cards.next_after(conn, review_of, pos))
     if action in ("all-quarters", "this-quarter"):
@@ -198,10 +209,11 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
         if nxt is None:
             return _answer(conn, "Nothing is left on this card: answered meanwhile.",
                            cards.next_after(conn, review_of, pos))
-        return _answer(conn, "All quarters on." if on else "This quarter only.", nxt)
+        return _answer(conn, "All quarters on." if on else "This quarter only.", nxt,
+                       in_place=True)
     if action == "leave-vendor":
         # PLAY 0.11.2: a vendor card's non-answer, as on a to-confirm card
-        return _answer(conn, f"Left for now: {views.field(scope['vendor'])}.",
+        return _answer(conn, f"Left for now: {views.field(cards.vendor_name(scope))}.",
                        cards.next_after(conn, review_of, pos))
     if action == "leave":
         return _answer(conn, f"Left for now: {views.headline(work.describe(conn, pid))}.",
@@ -281,7 +293,7 @@ def _vendor_answer(conn, rid, scope, action, grant):
     import cards
     import kb
     listed = views.render_items(conn, rid)
-    vendor = views.field(scope["vendor"])
+    vendor = views.field(cards.vendor_name(scope))
     if not listed:
         return None
     if action == "never":
@@ -296,7 +308,8 @@ def _vendor_answer(conn, rid, scope, action, grant):
             return None
         kb.set_expectation_in_tx(conn, scope_type="counterparty", scope=scope["vendor"],
                                  kind="none", author="operator", render_id=rid, grant=grant)
-        return (f"{vendor} never needs an invoice: {_plural(len(changes), 'payment')} "
+        return (f"{vendor} never needs {views._a(scope.get('noun', 'invoice'))}: "
+                f"{_plural(len(changes), 'payment')} "
                 "changed.", "next")
     # the page's missing lines only: a pending, proposed, matched or exempted line is
     # listed because Never would change it (d1 ruling), never to be exempted or left
@@ -326,7 +339,7 @@ def _vendor_answer(conn, rid, scope, action, grant):
             matches.set_exemption_in_tx(conn, grant=grant, pid=p, exempt=True,
                                         expected_revision=rev, render_id=rid,
                                         bind="rendered")
-        return f"No invoice needed ({vendor}): {named}.", "onward"
+        return f"No {scope.get('noun', 'invoice')} needed ({vendor}): {named}.", "onward"
     work.leave_missing_in_tx(conn, list(revs), grant=grant)
     return f"Left missing ({vendor}): {named}.", "onward"
 

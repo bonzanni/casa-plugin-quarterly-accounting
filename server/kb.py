@@ -57,6 +57,32 @@ def display_name(conn, bank_counterparty) -> str:
     return cp["name"] if cp is not None else (bank_counterparty or "Unknown payee")
 
 
+def readable_name(conn, bank_counterparty, cp=None, pid=None) -> str:
+    """Issue #59 (1): the name a person reads for a payee — the KB entry's name when it is a
+    name someone gave (not the bank's own text), else the issuer printed on the latest
+    document matched to another of its payments (never payment `pid`'s own pairing, so a
+    pairing never names the payment it is judged against), else display_name. Display
+    only: grouping, rule scopes and reply matching keep display_name."""
+    cp = cp if cp is not None else counterparty_for(conn, bank_counterparty)
+    texts = {norm(bank_counterparty)} - {""}
+    if cp is not None:
+        pats = {norm(p) for p in json.loads(cp["patterns_json"])}
+        if norm(cp["name"]) not in texts | pats:
+            return cp["name"]
+        texts |= pats | {norm(cp["name"])}
+    if texts:
+        r = conn.execute(
+            "SELECT d.issuer FROM match_state m JOIN documents d ON d.doc_id=m.doc_id"
+            " JOIN projections p ON p.pid=m.pid JOIN bank_rows b ON b.row_id=p.dest_row_id"
+            " WHERE m.state='matched' AND trim(coalesce(d.issuer, ''))<>'' AND m.pid<>? AND"
+            " lower(trim(b.counterparty)) IN (%s) ORDER BY m.match_id DESC LIMIT 1"
+            % ",".join("?" * len(texts)),
+            (pid if pid is not None else -1, *sorted(texts))).fetchone()
+        if r is not None:
+            return r[0].strip()
+    return cp["name"] if cp is not None else (bank_counterparty or "Unknown payee")
+
+
 def _entry(conn, name):
     for r in conn.execute("SELECT * FROM counterparties"):
         if norm(r["name"]) == norm(name):

@@ -28,7 +28,10 @@ item no other write closes (an attachment that is no invoice, a row bank-feed st
   #1308 (v0.344.38): a tap's pinned turn is the operator's tap, not a delegation (stored-call
   taps no longer refuse on the specialist's role scope). #1312 (v0.344.39): a message the
   job re-posts after Casa cut the batch before its delivery was marked is not sent twice
-  (each deposit carries a `key`). An older Casa refuses this
+  (each deposit carries a `key`). **Casa v0.344.48 or newer** (#1339) for a page turn, the
+  quarter switch and [Invoice links] to update the tapped card in place; an older Casa
+  ignores the request and posts the receipt and a new card instead. An older Casa than
+  v0.344.39 refuses this
   plugin's manifest (`casa.jobs invalid: entry 1 field quietWhenScheduled`): the plugin does
   not load. There is no Casa min-version field and no fallback.
 - bank-feed **0.20.0** or newer (casa-specialist-finance component 0.21.0) installed on the

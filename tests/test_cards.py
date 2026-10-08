@@ -37,7 +37,9 @@ class Cards(LoopCase):
         self.assertIn("2 to confirm · 1 missing", text)
         self.assertIn("1. ", text)
         self.assertIn("(other currency)", text)
-        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
+        # #57: [Invoice links] while the quarter has a missing invoice
+        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Invoice links",
+                                            "Get package"])
         self.assertEqual([("p" in o) for o in scope["order"]], [True, True, False])
 
     def test_confirm_all_is_left_out_at_25_proposals(self):
@@ -636,7 +638,8 @@ class Cards(LoopCase):
             posting.show_view(self.conn, render_id=end)
             posting.show_view(self.conn, view="open")
         first, second = b.proposal(0), b.proposal(1)
-        self.assertEqual([x["label"] for x in first["buttons"]], ["Review", "Get package"])
+        self.assertEqual([x["label"] for x in first["buttons"]],
+                         ["Review", "Invoice links", "Get package"])       # #57
         self.assertEqual(first["revision"], "walk:" + end)
         self.assertEqual(untag(second["text"]).split("\n")[:2], ["Q3 · 1 payment", "1 missing"])
         self.assertEqual(second["buttons"][-1]["call"],

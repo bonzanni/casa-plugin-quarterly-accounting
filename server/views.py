@@ -53,7 +53,8 @@ def utf16_len(text: str) -> int:
 # everything that identifies it (D3). A whole line is never clipped: that cut
 # the amount and date, or a second candidate, off lines that stayed bound.
 FIELD_MAX = 60
-LINK_MAX = 200
+LINK_MAX = 500              # = kb.LINK_MAX (#57): a stored link prints whole — a
+                            # clipped URL is a wrong link; only older, longer ones clip
 
 
 MARK = "\u00b7"             # reserved: only generated text prints it (round 6)
@@ -234,6 +235,7 @@ def names_for(items, view_quarter=None, payee=True) -> _Names:
         docs = {}
         for d in items:
             values.add(d["counterparty"] or "")
+            values.add(shown(d) or "")
             for c in ([d["current"]] if d["current"] else []) + d["candidates"]:
                 doc = c["document"]
                 docs[doc["doc_id"]] = doc
@@ -270,11 +272,17 @@ def _money(d) -> str:
     return amounts.fmt(d["amount_minor"], d["currency"]) if d.get("amount_minor") is not None else "?"
 
 
+def shown(d: dict) -> str:
+    """Issue #59 (1): the payee's name as the operator reads it (work.describe's
+    `readable`), else its stored name."""
+    return d.get("readable") or d["counterparty"]
+
+
 def headline(d: dict, view_quarter=None, payee=True) -> str:
     """`payee=False` (PLAY 0.11.2): a vendor card's line — its head names the vendor once;
     the generated ref still tells two otherwise-equal payments apart (names_for is composed
     with the same `payee`)."""
-    parts = ([field(d["counterparty"])] if payee else []) + [_money(d), _day(d["date"])]
+    parts = ([field(shown(d))] if payee else []) + [_money(d), _day(d["date"])]
     kind = d["expectation"]["kind"]
     if kind and kind not in ("invoice", "none"):
         parts.append(KIND_WORD[kind])
@@ -446,6 +454,11 @@ def _needs_check(d):
             and d["current"]["author"] != "operator" and d["current"]["labels"] != ["clean"])
 
 
+def link_line(link) -> str:
+    """Issue #59 (2): a vendor's download link, saying what it is."""
+    return f"Where to download: {field(link, LINK_MAX)}"
+
+
 def _missing_detail(d) -> list:
     if d["identity_question"]:
         return ["Who was this payment to?"]
@@ -456,7 +469,7 @@ def _missing_detail(d) -> list:
     elif d["search"].get("incomplete"):
         out.append("Search incomplete — resumes next pass.")
     if d["link"]:
-        out.append(field(d["link"], LINK_MAX))
+        out.append(link_line(d["link"]))
     if d["search_state"] == "accepted-missing":
         out.append("No longer chased.")
     return out
@@ -1184,7 +1197,7 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
         # the payee name each bound payment was SHOWN as: a reply resolves names
         # against what the operator saw, as well as the stored names (round 7)
         by_pid = {d["pid"]: d for d in items}
-        seen = {str(p): field_raw(by_pid[p]["counterparty"]) for p in printed if p in by_pid}
+        seen = {str(p): field_raw(shown(by_pid[p])) for p in printed if p in by_pid}
         if seen:
             scope["names"] = seen
     # r5: every grammar-read field (FACT_FIELDS) is stored, an empty one explicitly — a
