@@ -54,10 +54,16 @@ class EmptyCheck(StoreCase):
         # 0.11.2: the operator's ask posts its end card; the completion says only that
         import job
         self.assertEqual(units[-1]["text"], job.CARD_POSTED)
-        import cards
-        self.assertEqual(cards.checked_line(self.conn, "2026-Q3"),
-                         "Nothing to check for Q3 2026 yet: the bank has no payment in it "
-                         "(the books start 1 Jul 2026). Ask me to do Q2 to include it.")
+        # r1 (Astra S2): pinned on the card the operator got — the quarter's plain sentence,
+        # the later quarter's payment summarised, no package for an empty quarter
+        card = drv.posted_end("47474747-05")
+        text = views.unesc(card["text"])
+        self.assertTrue(text.startswith("Nothing to check for Q3 2026 yet: the bank has no "
+                                        "payment in it (the books start 1 Jul 2026). Ask me to "
+                                        "do Q2 to include it."), text)
+        self.assertIn("Q4 so far: 1 missing", text)
+        self.assertNotIn("checked ·", text)
+        self.assertNotIn("Get package", [b["label"] for b in card["buttons"]])
 
     def test_a_completed_runs_line_never_changes_with_a_later_run(self):
         """h3 (Astra S2): job_status of a completed run re-derived its line from the store
@@ -82,11 +88,13 @@ class EmptyCheck(StoreCase):
         # first day; the (empty) quarter's end card says so plainly
         import job
         units, end = self.run_it("agent", "47474747-02", quarter="2026-Q2")
-        import cards
         self.assertEqual(units[-1]["text"], job.CARD_POSTED)
-        self.assertEqual(cards.checked_line(self.conn, "2026-Q2"),
-                         "Nothing to check for Q2 2026 yet: the bank has no payment in it (the "
-                         "books start 1 Apr 2026). Ask me to do Q1 to include it.")
+        # r1 (Astra S2): pinned on the card the operator got
+        self.assertTrue(views.unesc(end).startswith(
+            "Nothing to check for Q2 2026 yet: the bank has no payment in it (the books start "
+            "1 Apr 2026). Ask me to do Q1 to include it."), end)
+        self.assertNotIn("checked ·", end)
+        self.assertNotIn("Q2 zip", end)
 
     def test_the_operators_empty_check_posts_the_same_plain_sentence(self):
         units, end = self.run_it("operator", "47474747-03", quarter="2026-Q2")
@@ -108,5 +116,7 @@ class EmptyCheck(StoreCase):
         # (the completion without a delivered card) still counts the quarter
         import cards, job
         self.assertEqual(units[-1]["text"], job.CARD_POSTED)
-        self.assertEqual(cards.checked_line(self.conn, "2026-Q3"),
-                         "Q3 2026 checked: 2 matched, 0 to confirm, 1 missing")
+        # r1 (Astra S2): the counts are pinned on the card the operator got, not recomputed
+        lines = drv.posted_end("47474747-04")["text"].split("\n")
+        self.assertTrue(lines[0].startswith("Q3 checked · 3 payments · "), lines)
+        self.assertEqual(lines[1], "2 matched · 1 missing")

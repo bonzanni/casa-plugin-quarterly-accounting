@@ -27,8 +27,10 @@ the operator-approved conversation script (`docs/superpowers/specs/
   replaces the bare render number. Residual (operator ruling): the same card shown twice in
   the same second (within a year) is refused visibly when replied to, never bound wrongly.
 - **One purchase is one line (#52), and a purchase is found by its email too (#48).** A
-  purchase is the same issuer and number, OR the same email with the same read amount and
-  currency (`documents.purchase`, the one definition): prod read each receipt with its own
+  purchase is everything linked, directly or through each other, by the same issuer and
+  number OR the same email (any email the bytes were filed from) with the same read amount
+  and currency (`documents.purchase`, the one definition; every write that can grow a held
+  document's purchase is checked against the job's floor): prod read each receipt with its own
   number, so issuer + number alone left an invoice and its own receipt apart (an August card
   offered July's and October's receipts). The proposal line counts purchases. The Review
   card shows one line and one button per purchase: the current document, else the
@@ -38,7 +40,8 @@ the operator-approved conversation script (`docs/superpowers/specs/
 - **Plain words and buttons.** Zero counts are not shown. Buttons carry no counts
   (⟦Review⟧ ⟦Confirm all⟧ ⟦Get package⟧), and every card that carries buttons (and a
   reading, and the account choice) ends with one line saying what each button shown does:
-  "Review: go through the 5 to confirm and the 12 missing, one at a time". A run that took
+  "Review: go through the 5 to confirm and the missing invoices of 6 vendors, one at a
+  time". A run that took
   an operator's check gets the operator's card, whoever started it. Corrections
   read "Remove the match for …", "Rule out …", "Matched to …"; a proposal reads
   "Suggested: …".

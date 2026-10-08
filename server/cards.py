@@ -460,7 +460,7 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
         scope = {"quarter": quarter, "scheduled": scheduled, "proposed": chosen,
                  "confirm_all": len(chosen) if confirm_all else 0,
                  "walk_counts": {"confirm": len(proposals), "questions": len(questions),
-                                 "missing": sum(len(v["pids"]) for v in vendors)},
+                                 "vendors": len(vendors)},
                  "order": [{"q": q["question_id"]} for q in questions]
                  + [{"p": d["pid"]} for d in proposals] + list(vendors),
                  **_grammar(listed), **(extra_scope or {})}
@@ -1043,18 +1043,17 @@ def legend(kind, scope) -> str:
 def _walk_words(scope) -> str:
     """BRAIN/operator 2026-10-08: a count on a button must be a number the card shows, so
     [Review] carries none and its legend says what the walk covers, in the card's own units:
-    the proposals listed, the unanswered missing payments of its vendor cards, the
-    handed-over documents to check."""
+    the proposals listed, the handed-over documents to check, and the vendors whose missing
+    invoices it walks — vendors, not payments: a vendor's card lists that vendor's missing
+    payments of every quarter (r1 Astra S2)."""
     w = scope.get("walk_counts") or {}
-    parts = [f"{n} {word}" for n, word in ((w.get("confirm", 0), "to confirm"),
-                                           (w.get("missing", 0), "missing"),
-                                           (w.get("questions", 0), "handed-over documents"
-                                            if w.get("questions", 0) != 1
-                                            else "handed-over document")) if n]
+    q, v = w.get("questions", 0), w.get("vendors", 0)
+    parts = ([f"the {w['confirm']} to confirm"] if w.get("confirm") else []) \
+        + ([f"the {q} handed-over document{'s' if q != 1 else ''}"] if q else []) \
+        + ([f"the missing invoices of {v} vendor{'s' if v != 1 else ''}"] if v else [])
     if not parts:
         return "each open item"
-    return "the " + (" and the ".join(parts) if len(parts) <= 2
-                     else ", the ".join(parts[:-1]) + " and the " + parts[-1])
+    return " and ".join(parts) if len(parts) <= 2 else ", ".join(parts[:-1]) + " and " + parts[-1]
 
 
 LEGEND_MAX = 400          # the longest legend line: the vendor page's, its name clipped

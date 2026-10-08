@@ -32,7 +32,7 @@ Q3 · 3 payments · 8 Oct 21:04:37
 To confirm:
 1. Zapier · 1 Sep · EUR 19.58 ↔ invoice ZAP-114 · EUR 19.58
 Q4 so far: 1 to confirm
-Review: go through the 1 to confirm and the 1 missing, one at a time · Confirm all: accept the invoices listed above · Get package: the Q3 zip for your accountant
+Review: go through the 1 to confirm and the missing invoices of 1 vendor, one at a time · Confirm all: accept the invoices listed above · Get package: the Q3 zip for your accountant
 ⟦Review⟧ ⟦Confirm all⟧ ⟦Get package⟧
 ```
 - The card lists only Q3's items. Another quarter with open items gets one line.

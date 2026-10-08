@@ -86,3 +86,81 @@ class PurchaseByEmail(LoopCase):
             matches.propose_match(self.conn, pid=aug, doc_id=j_rec,
                                   expected_revision=self.rev(aug), token=self.token,
                                   document_date="2026-07-01")
+
+    def test_the_purchase_is_closed_over_both_links(self):
+        """r1 (Terra S1): the receipt (email with the original invoice) and a refiled invoice
+        (the original's issuer and number, another email) are one purchase: the original
+        bridges them. The job's floor sees the whole purchase."""
+        import documents, matches
+        common = dict(issuer="Eleven Labs Inc.", document_date="2026-07-01", amount_minor=2200,
+                      currency="USD")
+        orig = self.doc(document_number="CUWVSRB8-0004", source_ref="m1:1", **common)
+        rec = self.doc(kind="receipt", document_number="2062-6406-1116", source_ref="m1:2",
+                       **common)
+        refiled = self.doc(document_number="CUWVSRB8-0004", source_ref="m2:1", **common)
+        for d in (orig, rec, refiled):
+            self.assertEqual(sorted(documents.purchase(self.conn, d)),
+                             sorted([orig, rec, refiled]), d)
+        p1 = self.pay("Elevenlabs.io", 1958, "2026-07-01")
+        p2 = self.pay("Elevenlabs.io", 1958, "2026-07-02")
+        self.machine_entry(p1, rec)
+        with self.assertRaises(db.Refusal):
+            matches.propose_match(self.conn, pid=p2, doc_id=refiled,
+                                  expected_revision=self.rev(p2), token=self.token,
+                                  document_date="2026-07-01")
+
+
+class R1Bridges(LoopCase):
+    """r1 (Astra S1 ×3): every way a purchase grows is seen by the job's floor."""
+    C = dict(issuer="Eleven Labs Inc.", document_date="2026-07-01", amount_minor=2200,
+             currency="USD")
+
+    def propose(self, pid, doc_id):
+        import matches
+        return matches.propose_match(self.conn, pid=pid, doc_id=doc_id,
+                                     expected_revision=self.rev(pid), token=self.token,
+                                     document_date="2026-07-01")
+
+    def two(self):
+        return (self.pay("Elevenlabs.io", 1958, "2026-07-01"),
+                self.pay("Elevenlabs.io", 1958, "2026-07-02"))
+
+    def test_a_chat_invoice_bridges_through_an_emailed_copy_to_its_receipt(self):
+        p1, p2 = self.two()
+        a = self.doc(document_number="CUWVSRB8-0004", source="manual-telegram",
+                     source_ref=None, **self.C)
+        self.doc(document_number="cuwvsrb8-0004 ", source_ref="m2:1", **self.C)
+        c = self.doc(kind="receipt", document_number="2062-6406-1116", source_ref="m2:2",
+                     **self.C)
+        self.machine_entry(p1, a)
+        with self.assertRaises(db.Refusal):
+            self.propose(p2, c)
+
+    def test_the_same_bytes_filed_again_from_an_email_join_its_purchase(self):
+        import documents
+        p1, p2 = self.two()
+        a = self.doc(document_number="CUWVSRB8-0004", source="manual-telegram",
+                     source_ref=None, **self.C)
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO operator_refs(ref, source, doc_id, filed_at)"
+                              " VALUES ('m3:1', 'gmail', ?, 'x')", (a,))
+        r = self.doc(kind="receipt", document_number="2062-6406-1116", source_ref="m3:2",
+                     **self.C)
+        self.assertEqual(sorted(documents.purchase(self.conn, a)), sorted([a, r]))
+        self.machine_entry(p1, a)
+        with self.assertRaises(db.Refusal):
+            self.propose(p2, r)
+
+    def test_an_amount_read_later_cannot_join_a_purchase_another_payment_backs(self):
+        import documents
+        p1, p2 = self.two()
+        inv = self.doc(document_number="CUWVSRB8-0004", source_ref="m4:1", **self.C)
+        rec = self.doc(kind="receipt", document_number="2062-6406-1116", source_ref="m4:2",
+                       **{**self.C, "amount_minor": None, "currency": None})
+        self.machine_entry(p1, inv)
+        self.propose(p2, rec)                       # not linked yet: its amount is unread
+        with self.assertRaises(db.Refusal):
+            documents.update_document_metadata(self.conn, rec, token=self.token,
+                                               amount_minor=2200, currency="USD")
+        self.assertIsNone(self.conn.execute("SELECT amount_minor FROM documents WHERE"
+                                            " doc_id=?", (rec,)).fetchone()[0])

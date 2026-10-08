@@ -99,8 +99,8 @@ class StatusCard(_Cards):
         self.assertNotIn("Notion", self.text(rid).split("Q4 so far")[0])
         self.assertIn("Q4 so far: 1 to confirm", lines)
         self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
-        self.assertEqual(lines[-1], "Review: go through the 1 to confirm and the 1 missing, one "
-                                    "at a time · Confirm all: "
+        self.assertEqual(lines[-1], "Review: go through the 1 to confirm and the missing "
+                                    "invoices of 1 vendor, one at a time · Confirm all: "
                                     "accept the invoices listed above · Get package: the Q3 zip "
                                     "for your accountant")
         scope = json.loads(self.row_of(rid)["scope_json"])
@@ -297,7 +297,8 @@ class WalkLegend(_Cards):
         rid = self.c(cards.compose_open, "2026-Q3")
         self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
         self.assertTrue(self.text(rid).split("\n")[-1].startswith(
-            "Review: go through the 1 to confirm and the 2 missing, one at a time · "))
+            "Review: go through the 1 to confirm and the missing invoices of 2 vendors, one at "
+            "a time · "))
 
     def test_a_proposal_reads_as_suggested_not_matched(self):
         import cards
@@ -307,3 +308,19 @@ class WalkLegend(_Cards):
         rid = self.c(cards.card, end, 0)
         self.assertIn("Suggested: invoice ZAP\\-114", self.text(rid))
         self.assertNotIn("Matched to", self.text(rid))
+
+
+class LegendMatchesTheWalk(_Cards):
+    """r1 (Astra S2): a vendor's card walks that vendor's missing payments of every quarter,
+    so the legend counts vendors (the walk's own unit), never a quarter's payments."""
+
+    def test_two_quarters_one_vendor(self):
+        import cards
+        self.pay("Adobe", 2000, "2026-08-14")
+        self.pay("Adobe", 2100, "2026-10-14")
+        rid = self.c(cards.compose_open, "2026-Q3")
+        legend = self.text(rid).split("\n")[-1]
+        self.assertTrue(legend.startswith("Review: go through the missing invoices of 1 vendor,"),
+                        legend)
+        scope = json.loads(self.row_of(rid)["scope_json"])
+        self.assertEqual(sum(1 for o in scope["order"] if "v" in o), 1)

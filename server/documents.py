@@ -108,43 +108,74 @@ def collisions(conn, doc_id: int) -> list:
         + _SAME_PURCHASE + " ORDER BY doc_id", (doc_id, d["sha256"], *key))]
 
 
-def _email_of(d):
-    """(message id, amount, currency) a document's email ties it by (BRAIN ruling
-    2026-10-08: prod read each receipt with its OWN number, so issuer + number alone left an
-    invoice and its own receipt apart): a document filed from an email (source_ref
-    `<message id>:<attachment id>`) with its amount and currency read; else None."""
-    ref = d["source_ref"] or ""
-    if d["source"] not in ("gmail", "manual-email") or ":" not in ref \
-            or d["amount_minor"] is None or not d["currency"]:
-        return None
-    return ref.rsplit(":", 1)[0], d["amount_minor"], d["currency"]
+EMAIL_SOURCES = ("gmail", "manual-email")
+_MSG = ("substr({c}, 1, length(?) + 1)=? || ':' AND instr(substr({c}, length(?) + 2), ':')=0")
 
 
-def purchase(conn, doc_id: int) -> list:
-    """Issue #48, the ONE definition of a purchase (0.11.2): the documents of `doc_id`'s
-    purchase, itself first — every document with the same issuer and the same document
-    number (compared as `collisions` compares them, one normalisation, both sides), and every
-    document filed from the same email with the same read amount and currency (an invoice and
-    its own receipt, however each number was read; the amount keeps a digest email's other
-    purchases apart). A document with neither link is a purchase of its own. Ownership, not
-    duplicates: an irrelevant document or the same bytes filed twice count too."""
-    d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
-    if d is None:
-        return [doc_id]
-    key, email = _purchase_of(d), _email_of(d)
+def _messages(conn, doc_id) -> set:
+    """The email messages a document was filed from (BRAIN ruling 2026-10-08): every ref
+    `<message id>:<attachment id>` it holds from an email source — its own source_ref and,
+    when the same bytes were filed again from another email, the operator_refs row that
+    filing recorded (r1 Astra S1)."""
+    refs = [r[0] for r in conn.execute(
+        "SELECT source_ref FROM documents WHERE doc_id=? AND source IN (?, ?) UNION"
+        " SELECT ref FROM operator_refs WHERE doc_id=? AND source IN (?, ?)",
+        (doc_id, *EMAIL_SOURCES, doc_id, *EMAIL_SOURCES))]
+    return {r.rsplit(":", 1)[0] for r in refs if r and ":" in r}
+
+
+def _same_email(conn, d) -> list:
+    """The documents filed from one of `d`'s email messages with the same READ amount and
+    currency (the amount keeps a digest email's other purchases apart); none when `d`'s
+    amount or currency is unread."""
+    if d["amount_minor"] is None or not d["currency"]:
+        return []
+    out = set()
+    for msg in _messages(conn, d["doc_id"]):
+        args = (msg, msg, msg)
+        out |= {r[0] for r in conn.execute(
+            "SELECT doc_id FROM documents WHERE source IN (?, ?) AND " + _MSG.format(c="source_ref")
+            + " UNION SELECT doc_id FROM operator_refs WHERE source IN (?, ?) AND "
+            + _MSG.format(c="ref"), (*EMAIL_SOURCES, *args, *EMAIL_SOURCES, *args))}
+    out.discard(d["doc_id"])
+    return [r[0] for r in conn.execute(
+        "SELECT doc_id FROM documents WHERE doc_id IN (%s) AND amount_minor=? AND currency=?"
+        % ",".join("?" * len(out)), (*sorted(out), d["amount_minor"], d["currency"]))] \
+        if out else []
+
+
+def _linked(conn, d) -> list:
+    """The documents directly linked to document row `d`: the same issuer and number, or
+    the same email message with the same read amount and currency."""
+    key = _purchase_of(d)
     out = []
     if key is not None:
         out += [r[0] for r in conn.execute(
-            "SELECT doc_id FROM documents WHERE doc_id<>? AND " + _SAME_PURCHASE
-            + " ORDER BY doc_id", (doc_id, *key))]
-    if email is not None:
-        msg, amount, currency = email
-        out += [r[0] for r in conn.execute(
-            "SELECT doc_id FROM documents WHERE doc_id<>? AND source IN ('gmail',"
-            " 'manual-email') AND substr(source_ref, 1, length(?) + 1)=? || ':' AND"
-            " instr(substr(source_ref, length(?) + 2), ':')=0 AND amount_minor=? AND"
-            " currency=? ORDER BY doc_id", (doc_id, msg, msg, msg, amount, currency))]
-    return [doc_id] + sorted(set(out))
+            "SELECT doc_id FROM documents WHERE doc_id<>? AND " + _SAME_PURCHASE,
+            (d["doc_id"], *key))]
+    return out + _same_email(conn, d)
+
+
+def purchase(conn, doc_id: int) -> list:
+    """Issue #48, the ONE definition of a purchase (0.11.2): `doc_id` first, then every
+    document reachable from it through either link — the same issuer and the same document
+    number (compared as `collisions` compares them, one normalisation, both sides), or the
+    same email with the same read amount and currency (an invoice and its own receipt,
+    however each number was read; the amount keeps a digest email's other purchases apart).
+    Closed over both links (r1 Terra S1: a receipt and a refiled invoice are one purchase
+    through the original invoice). A document with neither link is a purchase of its own.
+    Ownership, not duplicates: an irrelevant document or the same bytes filed twice count
+    too."""
+    seen, todo = {doc_id}, [doc_id]
+    while todo:
+        d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (todo.pop(),)).fetchone()
+        if d is None:
+            continue
+        for other in _linked(conn, d):
+            if other not in seen:
+                seen.add(other)
+                todo.append(other)
+    return [doc_id] + sorted(seen - {doc_id})
 
 
 def ingest_document(conn, *, source_path, kind, source, extraction_author, counterparty=None,
@@ -195,10 +226,15 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 # (re)installed under the held name, never beside it as a second copy no
                 # row names (fix wave F)
                 _install(data, sha, "." + existing["ext"])
+                before = purchase(conn, existing[0])
                 _reread(conn, existing[0],                      # h1: before the ref
                         *_amount_said(amount_minor, currency, filing=True))
                 if _operator_ref(conn, source, source_ref, existing[0]) and token is not None:
                     decide.note_progress(conn, token)   # d2: a newly filed ref is progress
+                if token is not None and purchase(conn, existing[0]) != before:
+                    # r1 (Astra S1): the same bytes filed from another email (or with an
+                    # amount) can join a purchase another payment backs: the job's floor
+                    _one_purchase_one_payment(conn, existing[0])
                 if vendor is not None:
                     # a vendor group that found it again names it, where none was recorded
                     conn.execute("UPDATE documents SET vendor=? WHERE doc_id=? AND vendor IS"
@@ -407,6 +443,9 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         # rule (_reread), with the pass_token or without (h2, Astra S1: a job reading sent
         # without it matched a disagreeing amount; no other caller writes an amount)
         cleared = any(k in fields and fields[k] is None for k in ("amount_minor", "currency"))
+        # r1 (Astra S1): the purchase before ANY write of this reading — an amount completed
+        # here can join an email's purchase too
+        before = purchase(conn, doc_id)
         _reread(conn, doc_id, *_amount_said(fields.pop("amount_minor", None),
                                             fields.pop("currency", None), cleared))
         if token is not None:
@@ -418,7 +457,6 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         if _read(conn, doc_id) and _close_read_refs(conn, doc_id) and token is not None:
             import decide
             decide.note_progress(conn, token)
-        before = purchase(conn, doc_id)
         if fields:
             conn.execute("UPDATE documents SET %s WHERE doc_id=?"
                          % ", ".join(f"{k}=?" for k in fields), (*fields.values(), doc_id))
