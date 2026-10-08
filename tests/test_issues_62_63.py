@@ -27,6 +27,12 @@ class DomainNames(StoreCase):
         import reply
         self.assertEqual(reply._clauses("Zapier is fine.Adobe is wrong"),
                          ["zapier is fine", "adobe is wrong"])
+        # r1 (Astra, Terra): a capitalised word after a period is a new sentence
+        for text in ("Zapier is fine.De Bijenkorf is wrong", "Zapier is fine.AI is wrong",
+                     "Zapier is fine.Io is wrong"):
+            self.assertEqual(len(reply._clauses(text)), 2, text)
+        self.assertEqual(reply._clauses("no invoices ever for TWILIO.COM"),
+                         ["no invoices ever for twilio.com"])
         self.assertEqual(reply._clauses("fsprg.nl via Checkout.com is wrong. Elevenlabs.io too"),
                          ["fsprg.nl via checkout.com is wrong", "elevenlabs.io too"])
 

@@ -134,8 +134,13 @@ _EXTENSIONS = ("zip", "pdf", "csv", "xlsx", "xls", "txt", "png", "jpg", "jpeg", 
 # period: a period before one of these endings is part of the name, not a sentence end
 _DOMAINS = ("com", "io", "nl", "net", "org", "de", "eu", "co", "ai", "app", "dev", "be", "fr",
             "uk", "us", "me")
-_SENTENCE_END = re.compile(r"(?:(?<!\d)\.|\.(?!\d))(?!(?:%s)\b)|;|\n|(?<=\?)"
-                           % "|".join(_EXTENSIONS + _DOMAINS), re.I)
+# r1 (Astra, Terra): only a lowercase ending ("Twilio.com"), or an all-caps one right after a
+# capital ("TWILIO.COM"), is a domain — "Zapier is fine.De Bijenkorf is wrong" and
+# "… fine.AI is wrong" stay two sentences
+_DOMAIN = "|".join(_DOMAINS)
+_SENTENCE_END = re.compile(
+    r"(?:(?<!\d)\.|\.(?!\d))(?!(?:%s)\b)(?!(?-i:(?:%s))\b)(?!(?<=(?-i:[A-Z])\.)(?-i:(?:%s))\b)"
+    r"|;|\n|(?<=\?)" % ("|".join(_EXTENSIONS), _DOMAIN, _DOMAIN.upper()), re.I)
 _ESCAPE_LEAD = re.compile(r"^accounting\s*[:,\-\u2013\u2014]\s*")
 _ESCAPE_TAIL = re.compile(r"\s*,\s*accounting$")
 
