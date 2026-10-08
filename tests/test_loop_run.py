@@ -183,7 +183,7 @@ class Carries(StoreCase):
                 drv.do(rest[-1], drv.token)
         self.assertEqual([u["unit"] for u in rest].count("payment"), 1)
         (row,) = self.conn.execute("SELECT why, outcome, attempts FROM run_work").fetchall()
-        self.assertEqual(tuple(row), ("handover", "match", 0))
+        self.assertEqual(tuple(row), ("handover", "propose", 0))   # #67: the operator confirms
 
     def test_an_alert_raised_between_runs_is_in_the_run_message_and_sent_on_delivery(self):
         """Carries 5 and 10: compose_end binds the alert ids it prints (scope['alerts']); a
@@ -402,7 +402,8 @@ class ReviewRound1(StoreCase):
                                     handover_docs=docs)
         text = self.render_text(rid)
         self.assertLessEqual(views.utf16_len(text), views.BODY_LIMIT)
-        shown = text.count("Filed. No payment fits it yet")
+        shown = sum(1 for ln in text.split("\n")               # #67: one line per document
+                    if ": not matched yet." in ln or "so it was not matched." in ln)
         import re
         (more,) = re.findall(r"… and (\d+) more filed\.", text)
         self.assertGreater(shown, 0)

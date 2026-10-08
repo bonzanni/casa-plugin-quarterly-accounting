@@ -43,6 +43,10 @@ def request_work(conn, kind, trigger, doc_ids=None, quarter=None) -> dict:
                 "not among the filed documents: pass the ids the filing gave you. Nothing "
                 "was asked")
         line = LINES[kind]
+        if kind == "handover" and len(set(ids)) > 1:
+            # #67: the operator sees the ask covers every file they sent
+            line = (f"Filed {len(set(ids))} documents. Checking them against the payments — "
+                    "I'll post what I find.")
         if quarter is not None and trigger == "operator" and cards.before_the_books(conn, quarter):
             # #55 (operator ruling 2026-10-08, "just do it, no question"): getting a quarter
             # before the books' start done moves the start to its first day, then checks it

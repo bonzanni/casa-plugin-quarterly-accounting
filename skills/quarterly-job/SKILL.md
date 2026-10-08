@@ -95,6 +95,10 @@ number, then `read_document(doc_id)`, `Read` the path it names, and
 with only what is printed on it — never a value from the payment; an amount you cannot read
 stays out. Call it even with nothing readable: it records the reading.
 
+### `reading`
+
+Each of `docs` (handed over, unread): **Reading a document**. Then `job_next`.
+
 ### `payment`
 
 ONE payment: its facts and `revision`, its `candidates` — filed documents WITH their stored
@@ -137,6 +141,8 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
    **`why: handover` with `holds`:** the payment already has a document and the operator
    handed one over (`handed_over`). It belongs to this payment →
    `outcome: "replace", doc_id` (the operator is asked); it does not → `outcome: "keep"`.
+   A handed-over document that belongs to a payment without `holds`: `"propose"` (the
+   operator confirms).
 5. **Save what worked:** when a search found an invoice and `kb` has no such hint,
    `upsert_counterparty(name=<vendor>, hint_sender=<the sender address>, hint_subject=<a subject pattern>, pass_token)`.
 

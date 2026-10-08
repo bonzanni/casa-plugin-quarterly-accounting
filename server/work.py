@@ -120,9 +120,13 @@ def _search_unit(conn, job_id, pids, refs, effort) -> str:
                          "pid]): call job_next")
     n = conn.execute("SELECT searches FROM run_work WHERE job_id=? AND pid=?",
                      (job_id, pid)).fetchone()[0]
-    if effort and n >= loop.SEARCHES_MAX:
-        raise db.Refusal(f"this payment had its {loop.SEARCHES_MAX} searches this run: "
-                         "decide it now")
+    cap = loop.searches_max(conn, job_id)
+    if effort and n >= cap:
+        if not cap:
+            # #67: a run that took only handovers judges the handed documents, no mail
+            raise db.Refusal("this check only matches the documents the operator handed "
+                             "over: no mail search — decide it from its candidates now")
+        raise db.Refusal(f"this payment had its {cap} searches this run: decide it now")
     return unit
 
 

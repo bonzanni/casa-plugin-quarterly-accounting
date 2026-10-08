@@ -157,7 +157,7 @@ class Queues(StoreCase):
         kinds = [u["unit"] for u in rest]
         self.assertLess(kinds.index("payment"), kinds.index("view"))
         self.assertEqual(self.conn.execute("SELECT status FROM projections").fetchone()[0],
-                         "matched")
+                         "proposed")                      # #67: a handed document is proposed
 
     def test_a_mirror_call_never_reported_is_given_up_failed(self):
         drv = JobDriver(self, payments=1)

@@ -21,7 +21,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -203,6 +203,14 @@ RUN_ITEMS_DDL = """CREATE TABLE IF NOT EXISTS run_items (
   attempts INTEGER NOT NULL DEFAULT 0, hand_seq INTEGER,
   seq INTEGER NOT NULL, closed_seq INTEGER, reason TEXT,
   PRIMARY KEY (job_id, unit, kind, key));"""
+# #67 (schema 16): each document a run's pass took as a handover — how often its reading was
+# handed out (the `reading` unit, at most loop.READ_OFFERS) and when its fits joined the list
+RUN_DOCS_DDL = """CREATE TABLE IF NOT EXISTS run_docs (
+  job_id TEXT NOT NULL, doc_id INTEGER NOT NULL,
+  offers INTEGER NOT NULL DEFAULT 0,      -- `reading` hand-outs of this document
+  fitted_seq INTEGER,                     -- its fits joined the run's work list
+  fits INTEGER,                           -- how many payments it could fit then
+  PRIMARY KEY (job_id, doc_id));"""
 # §1 "new state" (rounds 1-2): every state a rendering REPORTS — a payment it displays,
 # or one it only counts (an end message's "4 missing") — read by cards.seen_state. Binding
 # stays in render_items, which holds only the payments whose lines the text displays
@@ -412,7 +420,7 @@ CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at);
 """ + "\n".join((CLAIMS_DDL, WORK_REQUESTS_DDL, RUNS_DDL,
                          READINGS_DDL, RENDER_KEYS_DDL, ACCOUNT_CHOICES_DDL, POST_OFFERS_DDL,
                          RUN_WORK_DDL, RUN_MIRROR_DDL, RUN_ITEMS_DDL, REPLACE_QUESTIONS_DDL, QUARTER_NOTICES_DDL,
-                         RENDER_STATES_DDL)) + "\n"
+                         RENDER_STATES_DDL, RUN_DOCS_DDL)) + "\n"
 
 # Migrations from version N to N+1, appended when the schema changes. Each is
 # a list of statements applied inside the migrating transaction.
@@ -605,6 +613,8 @@ MIGRATIONS: dict[int, list[str]] = {
          " closed_seq, reason FROM run_items",
          "DROP TABLE run_items",
          "ALTER TABLE run_items_v15 RENAME TO run_items"],
+    # 15 -> 16 (#67): the handed documents of a run — their reading hand-outs and fits
+    15: [RUN_DOCS_DDL],
     12: ["ALTER TABLE claims ADD COLUMN said_seq INTEGER",
          "ALTER TABLE claims ADD COLUMN report_seq INTEGER",
          "ALTER TABLE documents ADD COLUMN amount_conflict INTEGER NOT NULL DEFAULT 0"],
