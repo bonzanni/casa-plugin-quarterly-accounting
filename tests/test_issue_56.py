@@ -48,8 +48,11 @@ class SeeButton(Case):
         rid, d = self.confirm_card()
         dep = self.deposit(rid)
         see = [b for b in dep["buttons"] if b["label"] == "See PDF"]
+        key = see[0]["call"]["arguments"].get("key", "")
+        self.assertRegex(key, r"^[0-9a-f]{32}$")            # #68: the operator's tap key
         self.assertEqual(see, [{"label": "See PDF", "keep_card": True,
-                                "call": {"tool": "get_document", "arguments": {"doc_id": d}}}])
+                                "call": {"tool": "get_document",
+                                         "arguments": {"doc_id": d, "key": key}}}])
         # every other button is deposited exactly as before (no keep_card)
         self.assertTrue(all("keep_card" not in b for b in dep["buttons"] if b is not see[0]))
         self.assertIn("See PDF: the document, sent here; this card stays", dep["text"])
@@ -96,6 +99,12 @@ class SeeButton(Case):
 
 
 class GetDocument(Case):
+    def setUp(self):
+        super().setUp()
+        import loop                  # #68: no job pass open — the desk's get_document
+        with db.tx(self.conn):
+            loop.end_pass(self.conn, self.token, "complete")
+
     def test_the_filed_pdf_is_deposited_as_one_document_under_its_name(self):
         d = self.doc(issuer="Adobe", document_date="2026-07-02", amount_minor=4000)
         data = b"%PDF-1.4\nhello\n%%EOF\n"

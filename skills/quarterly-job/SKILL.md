@@ -161,7 +161,8 @@ No read-backs.
 ## Never
 
 You never speak to the operator, except to answer a message in the job's topic.
-Never call `request_work` or `start_job`: those asks are made at your desk (skill
+Never call `get_document` (it posts to the chat); read with `read_document`. Never call
+`request_work` or `start_job`: those asks are made at your desk (skill
 quarterly-accounting), not by the job. Never fetch or send a package. Never call
 `set_expectation` or a button's tool (`verdict`, `apply_reading`, `cancel_reading`, `bind_account`): binding,
 expectations and verdicts are the operator's, by their tap. Never call a protected tool

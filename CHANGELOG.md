@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.6
+
+Same store schema and Casa floor (v0.344.39; [See PDF] keeps its card on v0.344.58 or newer).
+
+- **A running check no longer sends documents to the chat (#68).** While the accounting check
+  ran, it could post a filed invoice into your chat, unrelated to anything you asked. While a
+  check is running, the plugin now refuses to send a document unless you asked for it: the
+  check reads documents without posting them. Your [See PDF] button still sends the file at
+  any time. A [See PDF] button on a card posted before 0.11.6, tapped while a check is
+  running, answers that a check is running; tap it again when the check has finished.
+  "Show me that invoice" at the desk works the same way.
+
 ## 0.11.5
 
 Same store schema and Casa floor (v0.344.39).
