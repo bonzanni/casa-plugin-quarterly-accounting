@@ -103,9 +103,9 @@ class Taps(_Tapping):
         # the keyboard; the test calls the stored call directly)
         # PLAY 0.11.2: the receipt names the payments acted on
         self.assertTrue(self.tap(page1, "No invoice needed for these")["receipt"]
-                        .startswith("No invoice needed: Adobe · EUR "))
+                        .startswith("No invoice needed (Adobe): EUR "))
         out = self.tap(page2, "No invoice needed for these")
-        self.assertTrue(out["receipt"].startswith("No invoice needed: Adobe · EUR "))
+        self.assertTrue(out["receipt"].startswith("No invoice needed (Adobe): EUR "))
         open_ = self.conn.execute("SELECT count(*) FROM projections WHERE status='open'"
                                   ).fetchone()[0]
         self.assertEqual(open_, 0)

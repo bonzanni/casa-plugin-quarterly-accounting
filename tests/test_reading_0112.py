@@ -64,7 +64,7 @@ class Reading(_Tapping):
                       lines)
         self.assertFalse(any("other quarters" in ln for ln in lines), lines)   # not twice
         out = self.tap(card, "Leave missing")
-        self.assertEqual(out["receipt"], "Left missing: Twilio · EUR 20.00 · 14 Aug.")
+        self.assertEqual(out["receipt"], "Left missing (Twilio): EUR 20.00 · 14 Aug.")
         del miss, matches
 
     def test_one_payee_form_on_a_vendor_card(self):
@@ -150,3 +150,26 @@ class R7Fixes(Reading):
         self.propose(p, kind="receipt", document_number="REC-1", amount_minor=1899)
         self.assertIn("Confirm all: accept the suggested documents listed above",
                       self.end()["text"])
+
+
+class R8Fixes(Reading):
+    def test_two_lines_that_read_the_same_without_the_payee_are_told_apart(self):
+        """r8 Astra S2: Belastingdienst / BELASTINGDIENST, same amount and day."""
+        self.pay("Belastingdienst", 2000, "2026-08-14")
+        self.pay("BELASTINGDIENST", 2000, "2026-08-14")
+        card = self.tap(self.end(), "Review")["next"]
+        body = untag(card["text"]).split("\n")[1:3]
+        self.assertEqual(len(set(body)), 2, body)
+        self.assertTrue(all(b.startswith("EUR 20.00 · 14 Aug · ref ") for b in body), body)
+
+    def test_a_full_vendor_receipt_names_every_payment(self):
+        """r8 Astra S2: the receipt names the vendor once and every payment whole."""
+        name = "*_" * 30
+        for i in range(25):
+            self.pay(name, 100000000 + i, "2026-08-14")
+        card = self.tap(self.end(), "Review")["next"]
+        out = self.tap(card, "Leave missing")
+        self.assertTrue(out["receipt"].startswith("Left missing ("), out["receipt"][:80])
+        for i in range(25):
+            self.assertIn(f"EUR 1,000,000.{i:02d}", out["receipt"])
+        self.assertEqual(out["receipt"].count(name.replace("*", "\\*").replace("_", "\\_")), 1)

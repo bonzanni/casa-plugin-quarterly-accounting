@@ -70,7 +70,7 @@ class VendorCardQuarter(_Tapping):
         on = self.tap(self.card(), "Apply to all quarters")["next"]
         out = self.tap(on, "Leave missing")
         self.assertEqual((self.state(q3), self.state(q4)), ("accepted-missing",) * 2)
-        self.assertEqual(out["receipt"], "Left missing: Twilio · EUR 20.00 · 14 Aug; and 1 "
+        self.assertEqual(out["receipt"], "Left missing (Twilio): EUR 20.00 · 14 Aug; and 1 "
                                          "payment in other quarters.")
 
     def test_leave_missing_switched_off_covers_only_the_quarter(self):

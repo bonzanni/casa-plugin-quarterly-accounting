@@ -826,9 +826,9 @@ def _mark(d) -> str:
 def _payee_free(d, quarter) -> str:
     """PLAY 0.11.2: a vendor card's line without the bank's payee text — the card's head
     names the vendor once (the bank writes it in several forms: "Belastingdienst",
-    "BELASTINGDIENST"); the rest of the headline (amount, date, kind, ref) identifies it."""
-    h, payee = views.headline(d, quarter), views.field(d["counterparty"])
-    return h[len(payee) + 3:] if payee and h.startswith(payee + " · ") else h
+    "BELASTINGDIENST"). Composed under views.named(..., payee=False), so a generated ref
+    tells apart two payments that read the same without it (r8 Astra S2)."""
+    return views.headline(d, quarter, payee=False)
 
 
 def _page_lines(vendor, ds, i, n, p, pages, link, quarter) -> list:
@@ -963,7 +963,7 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page, frozen
     link = next((d["link"] for d in order if d["link"]), None)
     extra = [] if scheduled else (_also_line(vendor, also)
                                   + _others_line(others, others_missing, quarter, on))
-    with views.named(order, quarter):
+    with views.named(order, quarter, payee=False):      # r8: the lines it prints
         if pages is None:
             worst = [] if scheduled else (_also_line(vendor, also)
                                           + _others_line(others, others_missing, quarter, True))

@@ -314,8 +314,11 @@ def _vendor_answer(conn, rid, scope, action, grant):
                 lineage.projection(conn, p)["revision"] != frozen.get(str(p)) for p in more):
             return None
         revs.update({p: _item(conn, rid, p)["projection_revision"] for p in more})
-    # PLAY 0.11.2: the receipt names the payments it acted on (the other quarters' counted)
-    named = "; ".join(views.headline(work.describe(conn, p)) for p in acts)
+    # PLAY 0.11.2: the receipt names the payments it acted on, as the card showed them
+    # (r8 Astra S2: the vendor once, then the card's own compact lines, so every payment
+    # fits whole); the other quarters' are counted
+    shown = scope.get("bound_lines") or {}
+    named = "; ".join(shown.get(str(p)) or views.headline(work.describe(conn, p)) for p in acts)
     more = len(revs) - len(acts)
     named += f"; and {_plural(more, 'payment')} in other quarters" if more else ""
     if action == "exempt-these":
@@ -323,9 +326,9 @@ def _vendor_answer(conn, rid, scope, action, grant):
             matches.set_exemption_in_tx(conn, grant=grant, pid=p, exempt=True,
                                         expected_revision=rev, render_id=rid,
                                         bind="rendered")
-        return f"No invoice needed: {named}.", "onward"
+        return f"No invoice needed ({vendor}): {named}.", "onward"
     work.leave_missing_in_tx(conn, list(revs), grant=grant)
-    return f"Left missing: {named}.", "onward"
+    return f"Left missing ({vendor}): {named}.", "onward"
 
 
 def _confirm_all(conn, r, scope, grant) -> dict:

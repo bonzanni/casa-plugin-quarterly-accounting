@@ -202,11 +202,11 @@ def _fixpoint(ents, render, raise_level, cap=17) -> None:
 
 
 @contextlib.contextmanager
-def named(items, view_quarter=None):
+def named(items, view_quarter=None, payee=True):
     """Compose under the disambiguation for `items` (what build_review does)."""
     global _NAMES
     saved = _NAMES
-    _NAMES = names_for(items, view_quarter)
+    _NAMES = names_for(items, view_quarter, payee)
     try:
         yield _NAMES
     finally:
@@ -224,7 +224,7 @@ def _doc_extra(doc, level) -> str:
     return " " + MARK + MARK.join(parts)
 
 
-def names_for(items, view_quarter=None) -> _Names:
+def names_for(items, view_quarter=None, payee=True) -> _Names:
     """The disambiguation for a rendering over `items` (every payment it may
     print: a superset of what it prints, so what it prints is distinct too)."""
     global _NAMES
@@ -256,7 +256,7 @@ def names_for(items, view_quarter=None) -> _Names:
         def raise_pid(p):
             level[p] = level.get(p, 0) + 1
             names.pids[p] = lineage_ref(p)[:4 * level[p]]
-        _fixpoint(list(by_pid), lambda p: headline(by_pid[p], view_quarter), raise_pid)
+        _fixpoint(list(by_pid), lambda p: headline(by_pid[p], view_quarter, payee), raise_pid)
     finally:
         _NAMES = saved
     return names
@@ -270,8 +270,11 @@ def _money(d) -> str:
     return amounts.fmt(d["amount_minor"], d["currency"]) if d.get("amount_minor") is not None else "?"
 
 
-def headline(d: dict, view_quarter=None) -> str:
-    parts = [field(d["counterparty"]), _money(d), _day(d["date"])]
+def headline(d: dict, view_quarter=None, payee=True) -> str:
+    """`payee=False` (PLAY 0.11.2): a vendor card's line — its head names the vendor once;
+    the generated ref still tells two otherwise-equal payments apart (names_for is composed
+    with the same `payee`)."""
+    parts = ([field(d["counterparty"])] if payee else []) + [_money(d), _day(d["date"])]
     kind = d["expectation"]["kind"]
     if kind and kind not in ("invoice", "none"):
         parts.append(KIND_WORD[kind])

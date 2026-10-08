@@ -85,7 +85,7 @@ class NeverIsRehearsed(_Tapping):
         pdng = self.pending()
         page = self.tap(self.end(), "Review")["next"]
         out = self.tap(page, "No invoice needed for these")
-        self.assertEqual(out["receipt"], "No invoice needed: Adobe · EUR 1.00 · 2 Sep.")
+        self.assertEqual(out["receipt"], "No invoice needed (Adobe): EUR 1.00 · 2 Sep.")
         self.assertEqual(self.status(missing)["status"], "exempt")
         self.assertEqual(self.status(pdng)["status"], "open")
 
@@ -112,7 +112,7 @@ class NeverIsRehearsed(_Tapping):
         documents.update_document_metadata(self.conn, doc, document_number="AGAIN")
         self.assertNotEqual(self.rev(matched), rev)
         out = self.tap(page, "No invoice needed for these")
-        self.assertEqual(out["receipt"], "No invoice needed: Adobe · EUR 1.00 · 2 Sep.")
+        self.assertEqual(out["receipt"], "No invoice needed (Adobe): EUR 1.00 · 2 Sep.")
         self.assertEqual(self.status(missing)["status"], "exempt")
         self.assertEqual(self.status(matched)["status"], "matched")
 
