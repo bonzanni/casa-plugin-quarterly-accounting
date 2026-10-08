@@ -30,7 +30,9 @@ item no other write closes (an attachment that is no invoice, a row bank-feed st
   job re-posts after Casa cut the batch before its delivery was marked is not sent twice
   (each deposit carries a `key`). **Casa v0.344.48 or newer** (#1339) for a page turn, the
   quarter switch and [Invoice links] to update the tapped card in place; an older Casa
-  ignores the request and posts the receipt and a new card instead. An older Casa than
+  ignores the request and posts the receipt and a new card instead. **Casa v0.344.58 or
+  newer** (#1362) for [See PDF] to leave the to-confirm card's buttons live; an older Casa
+  sends the document and closes the card's buttons. An older Casa than
   v0.344.39 refuses this
   plugin's manifest (`casa.jobs invalid: entry 1 field quietWhenScheduled`): the plugin does
   not load. There is no Casa min-version field and no fallback.

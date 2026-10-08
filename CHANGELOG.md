@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.4
+
+See the proposed document. Same store schema and Casa floor (v0.344.39); [See PDF] keeps its
+card only on Casa v0.344.58 or newer (#1362).
+
+- **[See PDF] on a to-confirm card (#56).** A card that proposes one document has a
+  [See PDF] button ([See document] for an image). Tapping it sends the filed document into the
+  chat, and the card stays as it was: [Confirm], [Wrong] and [Leave for now] still work, so
+  you can look and then answer. At the desk, "show me that invoice" sends it the same way.
+  Nothing is recorded: showing a document is not a delivery. On a Casa older than v0.344.58
+  the tap still sends the document, but the card's buttons close as for [Get package].
+- **Vendors named like a website (#62).** A reply that names a vendor as the card prints it,
+  such as "no invoices ever for Twilio.com", is read with the name whole. A period before a
+  common domain ending (.com, .io, .nl and a few more) no longer ends the sentence.
+- **Credit-note card legend (#63).** On a vendor card whose missing documents are credit
+  notes, the legend's first entry now names the button that is there ("No document needed:
+  these need none").
+
 ## 0.11.3
 
 Cards that read right, and the invoice links. Same store schema and Casa floor (v0.344.39);

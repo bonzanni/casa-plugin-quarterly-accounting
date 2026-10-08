@@ -760,6 +760,18 @@ def t_post_package(args):
     return posting.post_package(conn(), _int(args, "delivery_id"))
 
 
+@register("get_document",
+          "One filed document as a file in the chat (a PDF, or an image), so the operator "
+          "can look at it. A [See PDF] button on a to-confirm card calls it; at the desk, "
+          "call it when the operator asks to see a document. Sends nothing else and changes "
+          "nothing. Never in the job.",
+          obj({"doc_id": {"type": "integer"}}, ["doc_id"]))
+@capability("document", receipt=True)
+def t_get_document(args):
+    import posting
+    return posting.get_document(conn(), args.get("doc_id"))
+
+
 @register("get_package",
           "The quarter's package as a file, built now from the store's latest state, with "
           "one caption line. A [Get package] button calls it; at the desk, call it for "

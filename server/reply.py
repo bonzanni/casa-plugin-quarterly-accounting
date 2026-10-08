@@ -130,8 +130,12 @@ CLASS_SCOPES = {"payslips": ("salary", "payroll"), "statements": ("fees", "inter
 # ("Zapier is fine.Adobe is wrong" must stay two sentences) (fix round 3).
 _EXTENSIONS = ("zip", "pdf", "csv", "xlsx", "xls", "txt", "png", "jpg", "jpeg", "heic",
                "doc", "docx", "xml", "json", "eml")
+# #62: a vendor printed as a domain ("Twilio.com", "Elevenlabs.io", "fsprg.nl") keeps its
+# period: a period before one of these endings is part of the name, not a sentence end
+_DOMAINS = ("com", "io", "nl", "net", "org", "de", "eu", "co", "ai", "app", "dev", "be", "fr",
+            "uk", "us", "me")
 _SENTENCE_END = re.compile(r"(?:(?<!\d)\.|\.(?!\d))(?!(?:%s)\b)|;|\n|(?<=\?)"
-                           % "|".join(_EXTENSIONS), re.I)
+                           % "|".join(_EXTENSIONS + _DOMAINS), re.I)
 _ESCAPE_LEAD = re.compile(r"^accounting\s*[:,\-\u2013\u2014]\s*")
 _ESCAPE_TAIL = re.compile(r"\s*,\s*accounting$")
 

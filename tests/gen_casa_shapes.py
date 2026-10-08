@@ -70,10 +70,12 @@ class _Store(LoopCase):
 
 # each posting tool's delivered slot and its kind (§3)
 SLOTS = {"show_view": "view", "propose_reading": "reading", "propose_account": "accounts",
-         "post_results": "results", "post_package": "package", "get_package": "package"}
+         "post_results": "results", "post_package": "package", "get_package": "package",
+         "get_document": "document"}
 KINDS = {"show_view": "operator_proposal", "propose_reading": "operator_proposal",
          "propose_account": "operator_proposal", "post_results": "operator_message",
-         "post_package": "operator_file", "get_package": "operator_file"}
+         "post_package": "operator_file", "get_package": "operator_file",
+         "get_document": "operator_file"}
 PROPOSALS = {t for t, k in KINDS.items() if k == "operator_proposal"}
 
 
@@ -118,7 +120,8 @@ class Shapes:
         if KINDS[tool] == "operator_file" and display is True:
             display = "a file caption is sent as plain text"
         rec = {"case": self._unique(case), "tool": tool, "body": body}
-        if KINDS[tool] == "operator_file":
+        if KINDS[tool] == "operator_file" and tool != "get_document":
+            # #56: a shown document has no caption rendering (nothing to quote back)
             # #44: the file's caption is a rendering of its own, quoted as Casa composes it
             rid = st.conn.execute("SELECT render_id FROM renders WHERE kind='package-file'"
                                   " ORDER BY rowid DESC LIMIT 1").fetchone()[0]
@@ -875,13 +878,31 @@ def gen_get_package(sh, st, b):
         raise AssertionError(f"get_package:file: posted {body}")
 
 
+def gen_get_document(sh, st, b):
+    """#56: [See PDF]'s stored call (keep_card) — the filed PDF itself, as one document."""
+    import hashlib, db, documents
+    loop_store(st)
+    data = b"%PDF-1.4\n%%EOF\n"
+    doc_id = st.doc(counterparty=hostile(0), issuer=hostile(0), amount_minor=4200)
+    with db.tx(st.conn):
+        st.conn.execute("UPDATE documents SET sha256=?, ext='pdf' WHERE doc_id=?",
+                        (hashlib.sha256(data).hexdigest(), doc_id))
+    path = documents.path_of(st.conn, doc_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    body = sh.call(st, b, "get_document:file", "get_document", {"doc_id": doc_id},
+                   display="a file has no text")
+    if body.get("kind") != "document" or not body.get("filename", "").endswith(".pdf"):
+        raise AssertionError(f"get_document:file: posted {body}")
+
+
 SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_single,
           gen_show_view_setup_stop, gen_legacy_rendering, gen_propose_reading,
           gen_propose_account, gen_post_results, gen_post_package,
           gen_end_message_operator, gen_end_message_scheduled, gen_end_message_nothing_to_ask,
           gen_end_message_handover, gen_end_message_with_completion, gen_open_items,
           gen_all_answered, gen_ready_notice, gen_review_cards, gen_vendor_pages,
-          gen_vendor_pages_scheduled, gen_get_package, gen_replace_cards]
+          gen_vendor_pages_scheduled, gen_get_package, gen_get_document, gen_replace_cards]
 
 
 def generate(stores=None) -> Shapes:

@@ -30,6 +30,9 @@ CAPABILITY_ENTRIES = {
     # simple loop §1 (#1303): a [Get package] button's stored call
     "get_package": {"result": "capability", "provides": ["package"],
                     "delivers": {"package": "operator_file"}, "filename": True},
+    # #56: a [See PDF] button's stored call (Casa #1362 keep_card)
+    "get_document": {"result": "capability", "provides": ["document"],
+                     "delivers": {"document": "operator_file"}, "filename": True},
 }
 
 

@@ -77,6 +77,9 @@ names no quarter: `get_package()` sends the quarter the operator last checked. I
 the file itself, built now from what the last check knew; say nothing more after it. If it
 refuses, say its words. "Email me the package": say "Packages come here as a file now —
 forward it from Telegram.", then `get_package`. The job never sends a package.
+"Show me that invoice", "send me the PDF": `get_document(doc_id=…)` sends that filed
+document as a file; say nothing more after it. A to-confirm card's [See PDF] calls it, and
+the card keeps its buttons.
 
 After `request_work`, say its `line` and stop when its `start_job` is null (nothing was
 asked). Otherwise always `start_job` with the ask's `start_job` exactly. Read its result:
