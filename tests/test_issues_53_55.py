@@ -358,3 +358,26 @@ class QuestionsAreTheQuartersOnEveryBranch(_Cards):
         rid = self.c(cards.compose_end, self.job_id, scheduled=False)
         scope = json.loads(self.row_of(rid)["scope_json"])
         self.assertEqual([o for o in scope["order"] if "q" in o], [])
+
+
+class OtherQuartersStayUnseen(_Cards):
+    """r4 (Astra S1): a Q3 card's "Q4 so far" count never marks Q4's proposal seen, so the
+    §1 new-state rule still owes it its card."""
+
+    def test_q4s_proposal_is_not_reported_by_the_q3_card(self):
+        import cards, views
+        q3 = self.pay("Zapier", 1958, "2026-09-01")
+        self.propose(q3, issuer="Zapier", document_number="ZAP-114", amount_minor=1958)
+        q4 = self.pay("Notion", 900, "2026-10-02")
+        self.propose(q4, issuer="Notion", document_number="NO-1", amount_minor=900)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE runs SET quarter='2026-Q3' WHERE job_id=?",
+                              (self.job_id,))
+        rid = self.c(cards.compose_end, self.job_id, scheduled=False)
+        views.mark_rendering_delivered(self.conn, rid)
+        states = {r[0] for r in self.conn.execute(
+            "SELECT pid FROM render_states WHERE render_id=?", (rid,))}
+        self.assertIn(q3, states)
+        self.assertNotIn(q4, states)
+        d = self.c(lambda conn: __import__("work").describe(conn, q4))
+        self.assertFalse(self.c(lambda conn: cards.seen_state(conn, q4, cards.item_state(d))))

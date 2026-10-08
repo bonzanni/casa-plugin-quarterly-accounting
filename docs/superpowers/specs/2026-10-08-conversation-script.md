@@ -1,7 +1,8 @@
 # Quarterly accounting: what the operator says and sees (APPROVED 2026-10-08, 0.11.2)
 
 Approved by the operator through BRAIN on 2026-10-08, with their changes folded in (incl. the
-button-legend correction and the no-count-on-buttons rule). This page is the reviewers' spec, alongside correctness.
+button-legend correction, the no-count-on-buttons rule, the invoice-wins rule and the
+quarter-only vendor card). This page is the reviewers' spec, alongside correctness.
 
 Ellen reads intent from whatever the operator says, in any wording or language. The
 sentences below are **illustrations, never triggers**. There are two intents about a
@@ -32,7 +33,7 @@ Q3 · 3 payments · 8 Oct 21:04:37
 To confirm:
 1. Zapier · 1 Sep · EUR 19.58 ↔ invoice ZAP-114 · EUR 19.58
 Q4 so far: 1 to confirm
-Review: go through the 1 to confirm and the missing invoices of 1 vendor, one at a time · Confirm all: accept the invoices listed above · Get package: the Q3 zip for your accountant
+Review: go through the 1 to confirm and the 1 missing, one at a time · Confirm all: accept the invoices listed above · Get package: the Q3 zip for your accountant
 ⟦Review⟧ ⟦Confirm all⟧ ⟦Get package⟧
 ```
 - The card lists only Q3's items. Another quarter with open items gets one line.
@@ -71,19 +72,34 @@ for that quarter: Q2 gets done.
 
 ## 3. A missing invoice
 
-⟦Review⟧ walks the cards. A vendor with no invoice reads:
+⟦Review⟧ walks the cards. A vendor's card lists only THAT quarter's payments (operator
+ruling 2026-10-08). A vendor with no invoice reads:
 ```
 Card 2 of 2 · missing invoices · Twilio · 8 Oct 21:10:03
 Twilio · EUR 20.00 · 14 Aug
 No invoice needed: these need none · Never for Twilio: Twilio never sends one · Leave missing: stop looking, keep them missing
 ⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧
 ```
+When the vendor also has missing payments in OTHER quarters, the card says how many, and
+offers the same answers for all of them:
+```
+Card 2 of 2 · missing invoices · Twilio · 8 Oct 21:10:03
+Twilio · EUR 20.00 · 14 Aug
+Also missing in other quarters: 2 (Q2, Q4)
+No invoice needed: these need none · No invoice needed, all quarters: these and the 2 in other quarters · Never for Twilio: Twilio never sends one, in any quarter · Leave missing: stop looking, keep them missing · Leave missing, all quarters: these and the 2 in other quarters
+⟦No invoice needed for these⟧ ⟦No invoice needed, all quarters⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧ ⟦Leave missing, all quarters⟧
+```
 
 When the operator sends the PDF in the chat: `Filed. Checking it against the payments —
 I'll post what I find.`, then one card with what changed.
 
-**A proposal with an invoice and its own receipt is ONE line and one button** (#52). The
-receipt is the same purchase; it is never offered as a second choice.
+**An invoice and its own receipt: the invoice is the purchase's document** (#52, operator
+ruling 2026-10-08: "it should be the invoice"). When one email carries an invoice and its
+own receipt and they can be told apart, the receipt is set aside: never proposed, never
+matched, never offered as an alternative, never a line. If the receipt was already the
+job's choice for a payment, the job decides that payment again with the invoice. If the
+operator confirmed the receipt, it stays and the invoice is set aside: the operator's
+decision is never undone. When they can't be told apart, nothing changes.
 
 ## 4. Getting the package
 

@@ -604,6 +604,11 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     all_qs = replace.open_ones(conn)
     # r3 (Astra S2): the card's questions are its quarter's, on every branch
     qs = [x for x in all_qs if work.describe(conn, x["pid"])["quarter"] == q]
+    # r4 (Astra S1): the operator's card reports only its quarter's items — another
+    # quarter's are one count line, never shown, so never marked seen (the §1 new-state rule
+    # still owes them their own card)
+    reported = {p: v for p, v in reported.items()
+                if work.describe(conn, p)["quarter"] == q}
     if not st["proposals"] and not open_missing:
         if ready and not all_qs:
             return compose_ready(conn, ready, extra, alerts=alerts, receipts=receipts)

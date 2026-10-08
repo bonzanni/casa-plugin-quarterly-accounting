@@ -493,17 +493,30 @@ class TestGrammar(Base):
 
 class TestPreflightRulings(Base):
     def test_a_refused_setting_rides_in_the_same_receipt(self):
-        # R2: a clause that is not applied, after an earlier clause committed: the operator
-        # still gets one receipt with both. 0.11.2 (#55): "start from Q3" is no longer a
-        # reading at all, so it is the clause nothing is applied for
+        # R2: a setting refused after an earlier clause committed: the operator still gets
+        # one receipt with both (r4 Astra S2: re-aimed at a setting that survives 0.11.2 —
+        # the zip name — refused by the store, so the guard in _Run.setting is what runs)
+        import binding
+        z = self.item("Zapier", 9900, "2026-09-17")
+        self.deliver()
+
+        def refuse(conn, name, *, grant):
+            raise db.Refusal("the zip name cannot change right now")
+        self.patch(binding, "set_package_name_in_tx", refuse)
+        out = apply_now(self.conn, "the Zapier one is wrong; call the zips acme")
+        self.assertIsNone(self.author(z))
+        self.assertIn("Removed the match for Zapier · EUR 99.00 · 17 Sep.", out["receipt"])
+        self.assertIn("The zip name: not applied", out["receipt"])
+        self.assertEqual(len(out["applied"]), 1)
+
+    def test_a_clause_that_is_no_longer_a_reading_says_so(self):
+        # 0.11.2 (#55): "start from Q3" is no longer a reading at all
         z = self.item("Zapier", 9900, "2026-09-17")
         self.deliver()
         out = apply_now(self.conn, "the Zapier one is wrong; start from Q3")
         self.assertIsNone(self.author(z))
-        self.assertIn("Removed the match for Zapier · EUR 99.00 · 17 Sep.", out["receipt"])
         self.assertIn("I didn't understand \u201cstart from q3\u201d \u2014 nothing applied for it.",
                       out["receipt"])
-        self.assertNotIn("Not changing where the books start", out["receipt"])
         self.assertEqual(len(out["applied"]), 1)
 
     def test_every_setting_clause_is_guarded(self):
