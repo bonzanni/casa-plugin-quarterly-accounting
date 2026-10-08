@@ -792,6 +792,8 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
                                    f" ({_day(c['doc']['date'])})")]
                            for c in shown] if picks else [],
                  "proposed": [pid] if d["current"] is not None and shown else [],
+                 # #56: [See PDF] for the one document a Confirm card proposes
+                 **_see(conn, d, picks, shown),
                  # PLAY 0.11.2: the Confirm legend names the document's own kind
                  "doc_word": views.KIND_WORD.get(
                      (d["current"]["document"] if d["current"] is not None
@@ -799,6 +801,18 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
                  **_grammar([d])}
         return _store(conn, "review", lines, scope, {pid: 1}, {pid: item_state(d)},
                       docs={pid: docs})
+
+
+def _see(conn, d, picks, shown) -> dict:
+    """#56: `{"see": [doc_id, label]}` when the card proposes one document (a Confirm card)
+    Casa can send as a file; else nothing."""
+    import posting
+    if picks or d["current"] is None or not shown:
+        return {}
+    doc_id = d["current"]["document"]["doc_id"]
+    row = conn.execute("SELECT ext FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
+    label = posting.see_label(row["ext"]) if row is not None else None
+    return {"see": [doc_id, label]} if label else {}
 
 
 def live_question_card(conn, review_of, pos, pid):
@@ -1155,6 +1169,10 @@ def _buttons(rid, kind, scope) -> list:
             out = [v(label, "pick", pid, doc) for doc, label in scope["picks"]]
         else:
             out = [v("Confirm", "confirm", pid)]
+            if scope.get("see"):
+                # #56: the file only; Casa leaves the card live (#1362 keep_card)
+                doc_id, label = scope["see"]
+                out.append((label, "get_document", {"doc_id": doc_id}, None))
         return (out + [v("Wrong", "wrong", pid), v("Leave for now", "leave", pid)])[:6]
     if kind == "vendor-page":
         last = scope["page"] == len(scope["pages"])
@@ -1217,6 +1235,9 @@ def legend(kind, scope) -> str:
         if tool == "get_package":
             parts.append(f"Get package: the {_qn(scope['quarter'])} zip for your accountant")
             continue
+        if tool == "get_document":
+            parts.append(f"{label}: the document, sent here; this card stays")
+            continue
         action = args["action"]
         if action == "pick":
             # PLAY 0.11.2: one plain entry for every pick button
@@ -1230,7 +1251,8 @@ def legend(kind, scope) -> str:
         parts.append(LEGEND[action].format(label=label, walk=walk_words(scope),
                                            kind=scope.get("doc_word") or "document",
                                            others=len(scope.get("others_missing") or []),
-                                           exempt=f"No {noun} needed",
+                                           # #63: the button's own words
+                                           exempt=exempt_label(scope).removesuffix(" for these"),
                                            vendor=views.field(vendor_name(scope))))
     return " · ".join(parts)
 
@@ -1266,6 +1288,5 @@ def deposit_of(conn, rid) -> dict:
     out = posting._keyed(conn, rid, buttons(conn, r))
     conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?", (db.next_seq(conn), rid))
     return {"text": views.deposit_safe(r["text"]),
-            "buttons": [{"label": label, "call": {"tool": tool, "arguments": args}}
-                        for label, tool, args in out],
+            "buttons": [posting.button_json(label, tool, args) for label, tool, args in out],
             "revision": ("walk:" + scope["review_of"])[:64]}

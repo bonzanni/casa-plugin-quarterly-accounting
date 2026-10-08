@@ -180,7 +180,7 @@ class OnePurchaseOnTheReviewCard(_Cards):
         text = self.text(rid)
         self.assertEqual(text.count("CUWVSRB8"), 2, text)     # the candidate line + evidence
         self.assertNotIn("receipt", text.split("\n")[2])
-        self.assertEqual(self.labels(rid), ["Confirm", "Wrong", "Leave for now"])
+        self.assertEqual(self.labels(rid), ["Confirm", "See PDF", "Wrong", "Leave for now"])  # #56
         scope = json.loads(self.row_of(rid)["scope_json"])
         self.assertEqual(scope["alternatives"], [])
         self.assertTrue(text.split("\n")[-1].startswith("Confirm: "), text)

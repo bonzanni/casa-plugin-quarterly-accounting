@@ -108,7 +108,8 @@ class LinkAndNoun(_Q3):
         lines = untag(dep["text"]).split("\n")
         self.assertEqual(lines[0], "Card 1 of 1 · missing credit notes · Belastingdienst")
         self.assertIn("No document needed for these", self.labels(dep))
-        self.assertIn("No credit note needed: these need none", lines[-1])
+        # #63: the legend names the button that is there
+        self.assertIn("No document needed: these need none", lines[-1])
         out = self.tap(dep, "No document needed for these")
         self.assertTrue(out["receipt"].startswith("No credit note needed (Belastingdienst): "),
                         out["receipt"])

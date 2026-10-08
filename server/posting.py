@@ -13,9 +13,23 @@ import keys
 import views
 
 
+# #56 (Casa #1362, v0.344.57): a button calling one of these tools leaves its card live —
+# the file is sent and the card keeps [Confirm] and its other buttons. An older Casa ignores
+# the key and settles the card as it did before.
+KEEP_CARD_TOOLS = ("get_document",)
+
+
+def button_json(label, tool, args) -> dict:
+    """One deposited button: its stored call, and `keep_card` for a file it only shows."""
+    out = {"label": label, "call": {"tool": tool, "arguments": args}}
+    if tool in KEEP_CARD_TOOLS:
+        out["keep_card"] = True
+    return out
+
+
 def _proposal(text, buttons, revision) -> str:
     return json.dumps({"text": views.deposit_safe(text), "revision": revision,
-                       "buttons": [{"label": label, "call": {"tool": tool, "arguments": args}}
+                       "buttons": [button_json(label, tool, args)
                                    for label, tool, args in buttons]},
                       ensure_ascii=False)
 
@@ -213,6 +227,60 @@ def _deposit_package(conn, d, pk, line) -> str:
                 conn.execute("DELETE FROM renders WHERE render_id=? AND kind='package-file'",
                              (rid,))
         raise db.Refusal(PKG_REFUSED)
+
+
+# #56: the kinds Casa sends a document as (its media policies), by the filed extension
+SHOWN_AS = {"pdf": "document", "jpg": "photo", "jpeg": "photo", "png": "photo"}
+
+
+def see_label(ext) -> str | None:
+    """The [See …] label for a filed document of extension `ext`, or None when Casa cannot
+    send that kind of file."""
+    if ext not in SHOWN_AS:
+        return None
+    return "See PDF" if ext == "pdf" else "See document"
+
+
+def get_document(conn, doc_id) -> dict:
+    """#56: a [See PDF] tap's stored call (keep_card: the card stays live). The filed bytes,
+    checked against their hash, copied to a fresh outbox path and deposited as one file
+    under the document's package name. Nothing is recorded: showing a document is not a
+    delivery to the accountant. A deposit Casa refuses takes the copy back."""
+    import delivery, documents, package
+    if not isinstance(doc_id, int) or isinstance(doc_id, bool):
+        raise db.Refusal("get_document takes a document's doc_id")
+    d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
+    if d is None:
+        raise db.Refusal(f"there is no document #{doc_id}")
+    kind = SHOWN_AS.get(d["ext"])
+    if kind is None:
+        raise db.Refusal(f"document #{doc_id} is a .{d['ext']} file, which can't be sent "
+                         "here")
+    try:
+        data = documents.path_of(conn, doc_id).read_bytes()
+    except FileNotFoundError:
+        raise db.Refusal(f"document #{doc_id}'s file is missing — nothing was sent") from None
+    import hashlib
+    if hashlib.sha256(data).hexdigest() != d["sha256"]:
+        raise db.Refusal(f"document #{doc_id}'s file no longer matches what was filed — "
+                         "nothing was sent")
+    if kind == "document" and not data.startswith(b"%PDF-"):
+        # issue #8: a vendor's PDF can carry a prefix (a UTF-8 BOM); the copy shown starts
+        # at the header, as the reading copy does
+        at = data.find(b"%PDF-", 0, documents.PDF_HEADER_WINDOW)
+        if at < 0:
+            raise db.Refusal(f"document #{doc_id} is filed as a PDF but has no PDF header — "
+                             "it can't be shown")
+        data = data[at:]
+    name = package.doc_filename(dict(d), set(), (d["ingested_at"] or "")[:10])
+    with db.custody_lock():
+        path = delivery._to_outbox(delivery._fresh_path(conn, d["ext"]), data)
+    try:
+        ref = casa_broker.deposit("document", str(path), kind=kind, filename=name)
+    except casa_broker.DepositFailed:
+        delivery._remove_staged(path)
+        raise
+    return {"document": ref, "filename": name}
 
 
 NO_CHECK = "Nothing to package yet — ask me to check the bank first."

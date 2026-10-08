@@ -27,9 +27,9 @@ class Surface(StoreCase):
 
     def test_version_and_floor(self):
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(m["version"], "0.11.3")
+        self.assertEqual(m["version"], "0.11.4")
         import version
-        self.assertEqual(version.PLUGIN_VERSION, "0.11.3")
+        self.assertEqual(version.PLUGIN_VERSION, "0.11.4")
         readme = (ROOT / "README.md").read_text()
         self.assertIn("Casa v0.344.39 or newer", readme)
         self.assertIn("specialist:finance", readme)
