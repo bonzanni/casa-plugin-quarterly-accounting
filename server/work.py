@@ -340,6 +340,8 @@ def describe(conn, pid: int) -> dict:
         "direction": row.get("direction"), "pending": is_pending(row),
         "counterparty": kb.display_name(conn, row.get("counterparty")),
         "bank_counterparty": row.get("counterparty"),
+        # issue #59 (1): the name the operator reads (display only)
+        "readable": kb.readable_name(conn, row.get("counterparty"), cp, pid),
         "expectation": {"kind": p["exp_kind"], "tier": p["exp_tier"], "row": p["exp_row"]},
         "last_known_kind": p["last_known_kind"],
         "current": _match_summary(conn, p["current_match"]) if p["current_match"] else None,
@@ -347,6 +349,7 @@ def describe(conn, pid: int) -> dict:
         "search_state": p["search_state"], "search": json.loads(p["search_json"] or "{}"),
         "identity_question": bool(p["identity_question"]),
         "link": cp["document_link"] if cp is not None else None,
+        "link_note": cp["link_note"] if cp is not None else None,     # issue #57
         # the Gmail round's query ladder starts from the KB (issue #2): never from a reply
         "search_hint": cp["search_hint"] if cp is not None else None,
         "window_days": cp["window_days"] if cp is not None else 10,

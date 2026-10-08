@@ -98,11 +98,13 @@ class StatusCard(_Cards):
         self.assertIn("1. Zapier · 1 Sep · EUR 19.58 ↔ invoice ZAP\\-114 · EUR 19.58", lines)
         self.assertNotIn("Notion", self.text(rid).split("Q4 so far")[0])
         self.assertIn("Q4 so far: 1 to confirm", lines)
-        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
+        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Invoice links",
+                                            "Get package"])                  # #57
         self.assertEqual(lines[-1], "Review: go through the 1 to confirm and the missing invoices, "
                                     "one at a time · Confirm all: "
-                                    "accept the suggested documents listed above · Get package: the Q3 zip "
-                                    "for your accountant")
+                                    "accept the suggested documents listed above · Invoice links: "
+                                    "where to download each missing invoice · Get package: the Q3 "
+                                    "zip for your accountant")
         scope = json.loads(self.row_of(rid)["scope_json"])
         self.assertEqual([o.get("p") for o in scope["order"] if "p" in o], [q3])
 
@@ -296,7 +298,8 @@ class WalkLegend(_Cards):
         p = self.pay("Zapier", 1958, "2026-09-01")
         self.propose(p, issuer="Zapier", document_number="ZAP-114", amount_minor=1958)
         rid = self.c(cards.compose_open, "2026-Q3")
-        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
+        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Invoice links",
+                                            "Get package"])                  # #57
         self.assertTrue(self.text(rid).split("\n")[-1].startswith(
             "Review: go through the 1 to confirm and the missing invoices, one at a time · "))
 

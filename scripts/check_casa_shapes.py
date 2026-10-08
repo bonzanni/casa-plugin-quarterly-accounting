@@ -118,10 +118,17 @@ def main(path) -> int:
         rt, entry = by_wire[rec["tool"]]
         if "next" in rec:                     # #1302: judged as specialist_desk._post_next_card
             # Casa reads `next` only beside a non-blank receipt string (_receipt_of)
-            _, nxt = rb._receipt_of(json.dumps({"receipt": rec.get("receipt"),
-                                                "next": rec["next"]}, ensure_ascii=False))
+            got = rb._receipt_of(json.dumps({"receipt": rec.get("receipt"),
+                                             "next": rec["next"],
+                                             **({"in_place": True} if rec.get("in_place")
+                                                else {})}, ensure_ascii=False))
+            nxt = got[1]
             if not nxt:
                 bad.append((n, "the next card is not read beside a receipt", rec["case"]))
+                continue
+            # Casa #1339 (v0.344.48): _receipt_of returns (receipt, next, in_place)
+            if rec.get("in_place") and not (len(got) > 2 and got[2] is True):
+                bad.append((n, "in_place is not read beside the next card", rec["case"]))
                 continue
             call = types.SimpleNamespace(identity=_identity(enforcement_role="finance"),
                                          entry=entry, tool_use_id=f"t{n}", contract_map=cmap,
@@ -140,7 +147,7 @@ def main(path) -> int:
                         contract_map=cmap, protected={}, entry=entry)
         if "result" in rec:                   # #1303: a capability's no-post refusal
             call = store.close_call("c", f"t{n}")
-            receipt, _ = rb._receipt_of(json.dumps(rec["result"], ensure_ascii=False))
+            receipt = rb._receipt_of(json.dumps(rec["result"], ensure_ascii=False))[0]
             words = rec["result"].get("receipt") if isinstance(rec["result"], dict) else None
             if not store.is_no_link_result(call, rec["result"]):
                 bad.append((n, "not Casa's no-post shape", rec["case"]))

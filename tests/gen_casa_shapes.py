@@ -183,7 +183,9 @@ class Shapes:
         n = sum(1 for r in self.records if r["case"].startswith(name))
         self.records.append({"case": self._unique(name + (f":{n + 1}" if n else "")),
                              "tool": tool, "receipt": out.get("receipt"),
-                             "next": out["next"]})
+                             "next": out["next"],
+                             # Casa #1339: the card replaces the tapped one in place
+                             **({"in_place": True} if out.get("in_place") is True else {})})
         self._stored_calls(out["next"].get("buttons") or [])
 
     def tap(self, st, case, button, keep=False) -> dict:
@@ -638,12 +640,12 @@ def gen_end_message_operator(sh, st, b):
     _missing(st, [hostile(22)], day=Q2_DAY)
     end = _c(st, cards.compose_end, st.job_id, scheduled=False)
     labels = [x["label"] for x in _post(sh, st, b, "end:operator", end, "Q3 checked")]
-    if labels != ["Review", "Confirm all", "Get package"]:
+    if labels != ["Review", "Confirm all", "Invoice links", "Get package"]:
         raise AssertionError(f"end:operator: the buttons are {labels}")
     _proposals(st, 27, start=3)
     end = _c(st, cards.compose_end, st.job_id, scheduled=False)
     labels = [x["label"] for x in _post(sh, st, b, "end:operator-full", end, "more to confirm")]
-    if labels != ["Review", "Get package"]:
+    if labels != ["Review", "Invoice links", "Get package"]:
         raise AssertionError(f"end:operator-full: the buttons are {labels}")
 
 
@@ -718,7 +720,7 @@ def gen_open_items(sh, st, b):
     _proposals(st, 2, alternatives=2)
     _missing(st, [hostile(20), hostile(21)])
     out = sh.call(st, b, "open-items", "show_view", {"view": "open", "quarter": QUARTER})
-    if [x["label"] for x in out] != ["Review", "Confirm all", "Get package"]:
+    if [x["label"] for x in out] != ["Review", "Confirm all", "Invoice links", "Get package"]:
         raise AssertionError(f"open-items: the buttons are {[x['label'] for x in out]}")
 
 

@@ -324,7 +324,7 @@ def _proposal_line(conn, i, d) -> str:
         doc += f" · {_money(c['amount_minor'], c['currency'])}"
         if c.get("currency") and d["currency"] and c["currency"] != d["currency"]:
             doc += " (other currency)"
-    return (f"{i}. {views.field(d['vendor'])} · {_day(d['date'])} · "
+    return (f"{i}. {views.field(views.shown(d))} · {_day(d['date'])} · "
             f"{_money(d['amount_minor'], d['currency'])} ↔ {doc}")
 
 
@@ -357,7 +357,7 @@ def _fit_count(before, items, closing, after=(), total=None) -> int:
 def _grammar(ds) -> dict:
     """The S7 grammar fields for the payments a rendering binds (views.FACT_FIELDS): the
     payee each was shown as, and the generated refs printed on them."""
-    names = {str(d["pid"]): views.field_raw(d["counterparty"]) for d in ds}
+    names = {str(d["pid"]): views.field_raw(views.shown(d)) for d in ds}
     refs: dict = {}
     for d in sorted(ds, key=lambda x: x["pid"]):
         ref = views.printed_ref(d["pid"])
@@ -510,7 +510,7 @@ def _receipts(conn, docs) -> tuple:
         held = [p for p, how in hs if p not in paired]
         if paired:
             d = work.describe(conn, paired[0])
-            head.append(f"Filed. Matched to {views.field(d['counterparty'])} · "
+            head.append(f"Filed. Matched to {views.field(views.shown(d))} · "
                         f"{_day(d['date'])} · {_money(d['amount_minor'], d['currency'])}")
             continue
         if conn.execute("SELECT 1 FROM replace_questions WHERE new_doc_id=? AND state='open'",
@@ -580,6 +580,8 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     ready = sorted(set(ready))
     tail = [_ready_line(r, q) for r in ready] + list(extra)
     sent = {"alerts": sorted(alerts)} if alerts else {}
+    # issue #57: [Invoice links] while the quarter has missing invoices
+    offer = {"links_offer": any(d["quarter"] == q for d in open_missing)}
     if stopped and not scheduled:
         tail = [stopped] + tail if handover_docs and standalone else tail
         extra = [stopped] + list(extra)
@@ -588,7 +590,8 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     receipts = _receipts(conn, handover_docs)[0] if handover_docs else []
     reported = {d["pid"]: item_state(d) for d in st["proposals"]}
     reported.update({d["pid"]: "missing" for ds in st["missing"].values() for d in ds})
-    extra_scope = {"job_id": job_id, **sent, **(_ready_scope(conn, ready) if ready else {})}
+    extra_scope = {"job_id": job_id, **sent, **offer,
+                   **(_ready_scope(conn, ready) if ready else {})}
     if scheduled:
         new_props = [d for d in st["proposals"]
                      if not seen_state(conn, d["pid"], item_state(d))]
@@ -665,12 +668,39 @@ def _other_quarters(st, open_missing, q) -> list:
     return out
 
 
-def compose_open(conn, quarter, *, scheduled=False) -> str:
+LINKS_HEAD = "Where to download the missing invoices:"
+
+
+def _links_lines(conn, mine, before, after, quarter) -> list:
+    """Issue #57: one line per vendor of the quarter's missing invoices (`mine`), with
+    where its invoices can be downloaded (the KB's document link and link note), or "no
+    link known"; as many as fit whole between `before` and `after`, the rest counted."""
+    if not mine:
+        return [f"Nothing is missing in {_qn(quarter)} any more."]
+    firsts: dict = {}
+    for d in mine:
+        firsts.setdefault(kb.norm(d["vendor"]), d)
+    ds = sorted(firsts.values(), key=lambda d: (kb.norm(views.shown(d)), d["pid"]))
+    lines = []
+    for d in ds:
+        where = ([views.field(d["link"], views.LINK_MAX)] if d["link"] else []) \
+            + ([views.field(d["link_note"])] if d.get("link_note") else [])
+        lines.append(f"{views.field(views.shown(d))}: " + (" — ".join(where) or
+                                                          "no link known"))
+
+    def more(left):
+        return f"… and {_s(left, 'more vendor')}"
+    k = _fit_count(list(before) + [LINKS_HEAD], lines, more, after)
+    return [LINKS_HEAD] + lines[:k] + ([more(len(lines) - k)] if k < len(lines) else [])
+
+
+def compose_open(conn, quarter, *, scheduled=False, links=False) -> str:
     """The quarter status card (#55, the approved script 1a/1b; the open-items card of §1
     r11): where `quarter` stands — its payments and non-zero counts, ITS proposals and
     missing invoices (Review walks only those), one line per other quarter with open items,
     and [Get package] only when the quarter has a payment in the books. `b` counts the
-    unanswered missing payments only ([Leave missing] is an answer)."""
+    unanswered missing payments only ([Leave missing] is an answer). `links` (issue #57,
+    the [Invoice links] tap): the same card with where to download each missing invoice."""
     st = state(conn)
     open_missing = [d for ds in st["missing"].values() for d in ds if not _answered(d)]
     props = [d for d in st["proposals"] if d["quarter"] == quarter]
@@ -686,9 +716,13 @@ def compose_open(conn, quarter, *, scheduled=False) -> str:
         head = [f"{_qn(quarter)} · {_s(n, 'payment')} · all accounted for"]
     else:
         head = [f"{_qn(quarter)} · {_s(n, 'payment')}", _counts_line(c)]
+    tail = _other_quarters(st, open_missing, quarter)
+    if links:
+        tail += _links_lines(conn, mine, head + _confirm_room(props), tail, quarter)
     return _summary(conn, "open-items", quarter, head, props, _vendor_items(mine),
-                    _other_quarters(st, open_missing, quarter), reported,
-                    scheduled=scheduled, questions=qs, extra_scope={"package": bool(n)})
+                    tail, reported, scheduled=scheduled, questions=qs,
+                    extra_scope={"package": bool(n), "links_offer": bool(mine),
+                                 "links": links})
 
 
 def compose_ready(conn, quarters: list, extra=(), alerts=(), receipts=()) -> str:
@@ -831,17 +865,27 @@ def _payee_free(d, quarter) -> str:
     return views.headline(d, quarter, payee=False)
 
 
-def _page_lines(vendor, ds, i, n, p, pages, link, quarter) -> list:
+def wanted(ds) -> str:
+    """Issue #59 (3): what a vendor card's missing payments lack — "invoice" when they
+    expect invoices, the one other kind they all expect ("credit note"), else
+    "document"."""
+    kinds = {d["expectation"]["kind"] or "invoice" for d in ds if _bucket(d) == "missing"}
+    if kinds <= {"invoice"}:
+        return "invoice"
+    return views.KIND_WORD.get(kinds.pop(), "document") if len(kinds) == 1 else "document"
+
+
+def _page_lines(vendor, ds, i, n, p, pages, link, quarter, noun="invoice") -> list:
     """A vendor page's FINAL lines — what _store fits and what _pages measures (one
-    function, so the measure is the text)."""
-    head = f"Card {i} of {n} · missing invoices · {views.field(vendor)}"
+    function, so the measure is the text). `vendor` is the name the operator reads."""
+    head = f"Card {i} of {n} · missing {noun}s · {views.field(vendor)}"
     if pages > 1:
         head += f" · page {p} of {pages}"
     body = [_payee_free(d, quarter) + _mark(d) for d in ds]
-    return [head] + body + ([views.field(link, views.LINK_MAX)] if link else [])
+    return [head] + body + ([views.link_line(link)] if link else [])
 
 
-def _pages(vendor, ds, i, n, link, quarter, extra=()) -> list:
+def _pages(vendor, ds, i, n, link, quarter, extra=(), noun="invoice") -> list:
     """Greedy pages of ≤ PAGE_LINES payments, each measured on its COMPLETE final text: the
     page's real lines (_page_lines: escaped vendor name, "· left missing" suffixes, the
     link) with the worst-case page numbers and the worst-case rendering tag (plan round 7,
@@ -852,7 +896,7 @@ def _pages(vendor, ds, i, n, link, quarter, extra=()) -> list:
     def fits(trial):
         # r5 (Astra S2): with the lines a page carries after its payments (§B's count line,
         # in its longest, switched-on form), so the fit never drops a frozen page's payment
-        return _fits(_page_lines(vendor, trial, i, n, worst, worst, link, quarter)
+        return _fits(_page_lines(vendor, trial, i, n, worst, worst, link, quarter, noun)
                      + list(extra))
     pages, cur = [], []
     for d in ds:
@@ -889,18 +933,23 @@ def _vendor_pages_of(conn, review_of, pos, page):
     return first, [first["render_id"]] + prior
 
 
-def _others_line(others, others_missing, quarter, on) -> list:
+def _others_line(others, others_missing, quarter, on, vendor="") -> list:
     """§B: the vendor's payments of OTHER quarters a quarter's card counts (operator ruling
     2026-10-08), stated plainly — every one [Never] would change (d2 Astra + Terra S1), and
-    how many are missing; with the switch on, that the answers cover the missing ones."""
+    how many are missing; with the switch on, that the answers cover the missing ones.
+    Issue #59 (4): when they are not all missing, the line says why it is there."""
     if not others:
         return []
     qs = ", ".join(_qn(q, quarter) for q in sorted(set(others.values())))
     n, m = len(others), len(others_missing)
     line = (f"Also missing in other quarters: {m} ({qs})" if m == n
             else f"Also in other quarters: {_s(n, 'payment')}"
-                 + (f", {m} missing" if m else "") + f" ({qs})")
-    return [line + (" · answers will cover them" if on and m else "")]
+                 + (f", {m} missing" if m else "") + f" ({qs}) · Never for "
+                 f"{views.field(vendor)} would also change "
+                 + ("it" if n == 1 else "them"))
+    if on and m:
+        line += " · answers will cover them" if m == n else f" · answers will cover the {m} missing"
+    return [line]
 
 
 def _also_line(vendor, also) -> list:
@@ -961,18 +1010,24 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page, frozen
     ds = {p: work.describe(conn, p) for p in pids}
     order = sorted(ds.values(), key=lambda d: (d["date"] or "", d["pid"]))
     link = next((d["link"] for d in order if d["link"]), None)
-    extra = [] if scheduled else (_also_line(vendor, also)
-                                  + _others_line(others, others_missing, quarter, on))
+    # issue #59 (1, 3): the name the operator reads, and what the payments lack — fixed on
+    # page 1 like the pages, so every page and every answer reads the same
+    name = src["vendor_name"] if src is not None and src.get("vendor_name") \
+        else views.shown(order[0])
+    noun = src["noun"] if src is not None and src.get("noun") else wanted(order)
+    extra = [] if scheduled else (_also_line(name, also)
+                                  + _others_line(others, others_missing, quarter, on, name))
     with views.named(order, quarter, payee=False):      # r8: the lines it prints
         if pages is None:
-            worst = [] if scheduled else (_also_line(vendor, also)
-                                          + _others_line(others, others_missing, quarter, True))
-            pages = _pages(vendor, order, pos + 1, n, link, quarter, worst)
+            worst = [] if scheduled else (_also_line(name, also)
+                                          + _others_line(others, others_missing, quarter, True,
+                                                         name))
+            pages = _pages(name, order, pos + 1, n, link, quarter, worst, noun)
         page = max(1, min(page, len(pages)))
         mine = [ds[p] for p in pages[page - 1] if p in ds]
         if not mine:
             return None
-        lines = _page_lines(vendor, mine, pos + 1, n, page, len(pages), link, quarter)
+        lines = _page_lines(name, mine, pos + 1, n, page, len(pages), link, quarter, noun)
         # a later page whose payments changed since page 1 froze it may no longer fit: it
         # binds what it displays whole, and Never then sees a changed union (fresh page 1)
         k = len(mine)
@@ -987,9 +1042,9 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page, frozen
                  "others": {str(p): q for p, q in others.items()},
                  "others_rev": {str(p): r for p, r in others_rev.items()},
                  "others_missing": others_missing, "all_quarters": on, "also": also,
-                 **_grammar(shown)}
+                 "vendor_name": name, "noun": noun, **_grammar(shown)}
         bound = {d["pid"]: 1 + j for j, d in enumerate(shown)}
-        also_line = _also_line(vendor, also)
+        also_line = _also_line(name, also)
         if also_line and also_line[0] in lines:
             # PLAY 0.11.2: the quarter's other payments Never would change are stated on one
             # line and bound to it at their revision now, so Never refuses one that changed
@@ -1086,6 +1141,8 @@ def _buttons(rid, kind, scope) -> list:
             out.append(v("Review", "review"))
         if scope.get("confirm_all"):
             out.append(v("Confirm all", "confirm-all"))
+        if scope.get("links_offer") and not scope.get("links"):
+            out.append(v("Invoice links", "links"))
         return out + get
     if kind == "ready":
         return get
@@ -1102,9 +1159,9 @@ def _buttons(rid, kind, scope) -> list:
     if kind == "vendor-page":
         last = scope["page"] == len(scope["pages"])
         acts = scope.get("missing", True)       # a page with no missing line: no exemption
-        out = [v("No invoice needed for these", "exempt-these")] if acts else []
+        out = [v(exempt_label(scope), "exempt-these")] if acts else []
         if last and not scope.get("scheduled"):
-            out.append(v(_label(f"Never for {scope['vendor']}"), "never"))
+            out.append(v(_label(f"Never for {vendor_name(scope)}"), "never"))
         if acts:
             out.append(v("Leave missing", "leave-missing"))
         if not last:
@@ -1118,15 +1175,27 @@ def _buttons(rid, kind, scope) -> list:
     raise ValueError(kind)
 
 
+def vendor_name(scope) -> str:
+    """Issue #59 (1): a vendor card's name as the operator reads it (renderings stored
+    before 0.11.3 carry only the vendor)."""
+    return scope.get("vendor_name") or scope.get("vendor") or ""
+
+
+def exempt_label(scope) -> str:
+    """Issue #59 (3): [No invoice needed for these] names what is missing."""
+    return ("No invoice needed for these" if scope.get("noun", "invoice") == "invoice"
+            else "No document needed for these")
+
+
 LEGEND = {"review": "Review: go through {walk}, one at a time",
           "confirm-all": "Confirm all: accept the suggested documents listed above",
+          "links": "Invoice links: where to download each missing invoice",
           "pick": "{label}: use this document",
           "confirm": "Confirm: this {kind} is right",
           "wrong": "Wrong: not this one, keep looking",
           "leave": "Leave for now: decide later",
-          "exempt-these": "No invoice needed: these need none",
-          "exempt-these-all": "No invoice needed: these and the {others} in other quarters "
-                              "need none",
+          "exempt-these": "{exempt}: these need none",
+          "exempt-these-all": "{exempt}: these and the {others} in other quarters need none",
           "never": "{label}: {vendor} never sends one, in any quarter",
           "leave-missing": "Leave missing: stop looking, keep them missing",
           "leave-missing-all": "Leave missing: these and the {others} in other quarters",
@@ -1157,10 +1226,12 @@ def legend(kind, scope) -> str:
             continue
         if action in ("exempt-these", "leave-missing") and scope.get("all_quarters"):
             action += "-all"
+        noun = scope.get("noun", "invoice")
         parts.append(LEGEND[action].format(label=label, walk=walk_words(scope),
                                            kind=scope.get("doc_word") or "document",
                                            others=len(scope.get("others_missing") or []),
-                                           vendor=views.field(scope.get("vendor") or "")))
+                                           exempt=f"No {noun} needed",
+                                           vendor=views.field(vendor_name(scope))))
     return " · ".join(parts)
 
 
