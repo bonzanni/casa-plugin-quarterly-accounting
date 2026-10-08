@@ -901,7 +901,16 @@ def gen_get_document(sh, st, b):
     path = documents.path_of(st.conn, doc_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
-    body = sh.call(st, b, "get_document:file", "get_document", {"doc_id": doc_id},
+    # #68: a job pass is open (loop_store's run) — the job's call posts nothing, a refusal
+    # Casa reads as words; the operator's [See PDF] tap carries its key and sends the file
+    import keys, posting
+    out = sh.refusal(b, "get_document:job-running", "get_document", {"doc_id": doc_id})
+    if out.get("receipt") != posting.JOB_RUNNING:
+        raise AssertionError(f"get_document:job-running: {out}")
+    key = keys.mint()
+    with db.tx(st.conn):
+        keys.store_render(st.conn, "r-see", "see", None, key, doc_id=doc_id)
+    body = sh.call(st, b, "get_document:file", "get_document", {"doc_id": doc_id, "key": key},
                    display="a file has no text")
     if body.get("kind") != "document" or not body.get("filename", "").endswith(".pdf"):
         raise AssertionError(f"get_document:file: posted {body}")

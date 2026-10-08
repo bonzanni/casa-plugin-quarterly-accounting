@@ -1172,7 +1172,9 @@ def _buttons(rid, kind, scope) -> list:
             if scope.get("see"):
                 # #56: the file only; Casa leaves the card live (#1362 keep_card)
                 doc_id, label = scope["see"]
-                out.append((label, "get_document", {"doc_id": doc_id}, None))
+                # #68: keyed — the operator's tap is the one get_document a running job
+                # pass lets through (posting.get_document); the key is never spent
+                out.append((label, "get_document", {"doc_id": doc_id}, ("see", pid, doc_id)))
         return (out + [v("Wrong", "wrong", pid), v("Leave for now", "leave", pid)])[:6]
     if kind == "vendor-page":
         last = scope["page"] == len(scope["pages"])

@@ -764,12 +764,13 @@ def t_post_package(args):
           "One filed document as a file in the chat (a PDF, or an image), so the operator "
           "can look at it. A [See PDF] button on a to-confirm card calls it; at the desk, "
           "call it when the operator asks to see a document. Sends nothing else and changes "
-          "nothing. Never in the job.",
-          obj({"doc_id": {"type": "integer"}}, ["doc_id"]))
+          "nothing. Never in the job: refused while a check runs (read a document with "
+          "read_document).",
+          obj({"doc_id": {"type": "integer"}, "key": S}, ["doc_id"]))
 @capability("document", receipt=True)
 def t_get_document(args):
     import posting
-    return posting.get_document(conn(), args.get("doc_id"))
+    return posting.get_document(conn(), args.get("doc_id"), args.get("key"))
 
 
 @register("get_package",

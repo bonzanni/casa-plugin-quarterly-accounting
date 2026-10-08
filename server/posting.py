@@ -241,14 +241,32 @@ def see_label(ext) -> str | None:
     return "See PDF" if ext == "pdf" else "See document"
 
 
-def get_document(conn, doc_id) -> dict:
+JOB_RUNNING = ("a check is running, so no document is sent to the chat now. Inside the "
+               "check, read a document with read_document(doc_id); at the desk, ask again "
+               "when the check has finished")
+
+
+def _tap_key(conn, key, doc_id) -> bool:
+    """#68: `key` is a [See PDF] button's key for this document (minted into the deposit
+    only, never returned by a tool). Never spent: the button stays usable."""
+    if not isinstance(key, str) or not keys.KEY_RE.fullmatch(key):
+        return False
+    return conn.execute("SELECT 1 FROM render_keys WHERE key=? AND action='see' AND doc_id=?",
+                        (key, doc_id)).fetchone() is not None
+
+
+def get_document(conn, doc_id, key=None) -> dict:
     """#56: a [See PDF] tap's stored call (keep_card: the card stays live). The filed bytes,
     checked against their hash, copied to a fresh outbox path and deposited as one file
     under the document's package name. Nothing is recorded: showing a document is not a
-    delivery to the accountant. A deposit Casa refuses takes the copy back."""
-    import delivery, documents, package
+    delivery to the accountant. A deposit Casa refuses takes the copy back.
+    #68: while a job pass is open nothing is sent but the operator's own tap (its key) — a
+    job reads a document with read_document, never by posting it to the chat."""
+    import delivery, documents, job, package
     if not isinstance(doc_id, int) or isinstance(doc_id, bool):
         raise db.Refusal("get_document takes a document's doc_id")
+    if job.live_job_pass(conn) is not None and not _tap_key(conn, key, doc_id):
+        raise db.Refusal(JOB_RUNNING)
     d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
     if d is None:
         raise db.Refusal(f"there is no document #{doc_id}")
