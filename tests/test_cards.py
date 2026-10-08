@@ -231,9 +231,9 @@ class Cards(LoopCase):
         self.assertEqual(self.labels(rids[-1])[1], views.clip("Never for " + vendor, 32))
         self.assertEqual(self.labels(rids[-1]), ["No invoice needed for these",
                                                  views.clip("Never for " + vendor, 32),
-                                                 "Leave missing"])
+                                                 "Leave missing", "Leave for now"])
         self.assertEqual(self.labels(first), ["No invoice needed for these", "Leave missing",
-                                              "Next page"])
+                                              "Next page", "Leave for now"])
 
     WIDE = "*_" * 30          # 60 characters, every one escaped: the widest field there is
 
@@ -243,6 +243,11 @@ class Cards(LoopCase):
         import cards, work
         pids = [self.pay(self.WIDE, 100000000 + i, "2026-%02d-%02d" % (7 + i % 3, i % 28 + 1))
                 for i in range(30)]
+        # PLAY 0.11.2: a vendor line no longer carries the payee, so 25 lines fit a real
+        # card; a smaller body limit keeps the real-lines measure under test
+        from unittest import mock
+        import views
+        self.enterContext(mock.patch.object(views, "BODY_LIMIT", 1400))
         self.granted(lambda c, grant: work.leave_missing_in_tx(c, pids, grant=grant))
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         self.assertEqual(self.rendering(end)[1]["order"], [])    # all answered: no item
@@ -263,11 +268,15 @@ class Cards(LoopCase):
         import cards, work
         pids = [self.pay(self.WIDE, 100000000 + i, "2026-%02d-%02d" % (7 + i % 3, i % 28 + 1))
                 for i in range(50)]
+        # PLAY 0.11.2: a vendor line no longer carries the payee, so a real card holds 25
+        # grown lines; a smaller body limit keeps the growth past the fit under test
+        from unittest import mock
+        import views
+        self.enterContext(mock.patch.object(views, "BODY_LIMIT", 1400))
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         first = self.c(cards.card, end, 0)
         pages = self.rendering(first)[1]["pages"]
-        # 0.11.2: _fits reserves LEGEND_MAX for the legend line, so a full page holds 22
-        self.assertEqual(len(pages[1]), 22)
+        self.assertEqual(len(pages[1]), cards.PAGE_LINES)
         self.granted(lambda c, grant: work.leave_missing_in_tx(c, pages[1], grant=grant))
         second = self.c(cards.card, end, 0, page=2)
         self.assert_binds_exactly_what_it_shows(second)
@@ -279,9 +288,9 @@ class Cards(LoopCase):
     def test_a_later_page_marks_a_payment_matched_meanwhile_and_never_exempts_it(self):
         """Review round 1, ported for d1 (Never's set is the rehearsed rule): page 1 froze
         50 payments over two pages; a page-2 payment is machine-matched meanwhile. The rule
-        still changes it (its expectation), so page 2 prints it marked "· matched" and binds
-        it for Never — but its exemption and Leave missing act only on the missing lines
-        (scope "missing"), so a matched payment is never exempted."""
+        still changes it (its expectation); PLAY 0.11.2: page 2 lists only missing payments,
+        so it is no line there and Never on page 2 refuses (fresh card, `also` states it);
+        exemption and Leave missing act only on the missing lines."""
         import cards
         pids = [self.pay("Adobe", 100 + i, "2026-%02d-%02d" % (7 + i % 3, i % 28 + 1))
                 for i in range(50)]
@@ -298,13 +307,37 @@ class Cards(LoopCase):
         r, scope = self.rendering(second)
         self.assert_binds_exactly_what_it_shows(second)
         bound = sorted(int(p) for p in scope["bound_lines"])
-        self.assertEqual(bound, sorted(pages[1]))
-        self.assertTrue(scope["bound_lines"][str(gone)].endswith("· matched"))
+        # PLAY 0.11.2: a vendor page lists only missing payments; the matched one is no
+        # line any more (and was not in page 1's frozen `also`: it was missing then)
+        self.assertEqual(bound, sorted(p for p in pages[1] if p != gone))
+        self.assertNotIn(str(gone), scope["bound_lines"])
+        self.assertEqual(scope["also"], [])
         self.assertEqual(sorted(scope["missing"]), sorted(p for p in pages[1] if p != gone))
         self.assertEqual(scope["pages"], pages)                  # still page 1's frozen pages
-        union = set(pages[0]) | set(bound)                       # what the walk displayed
-        self.assertEqual(sorted(union), cards.never_set(self.conn, "Adobe"))
-        self.assertEqual(sorted(union), sorted(pids))
+        union = set(pages[0]) | set(bound) | set(scope["also"])  # what the walk stated
+        self.assertEqual(sorted(union | {gone}), cards.never_set(self.conn, "Adobe"))
+        self.assertEqual(sorted(union | {gone}), sorted(pids))
+        # so Never there does not cover the matched one: it refuses, writing nothing, with
+        # a fresh first page that states it in `also`, where Never binds all 50
+        import qa_server, tools  # noqa: F401
+
+        def tap(rid, label):
+            with db.tx(self.conn):
+                dep = cards.deposit_of(self.conn, rid)
+            b = next(b for b in dep["buttons"] if b["label"] == label)
+            return qa_server.TOOLS[b["call"]["tool"]]["fn"](dict(b["call"]["arguments"]))
+        out = tap(second, "Never for Adobe")
+        self.assertNotIn("never needs an invoice", out["receipt"])
+        import work
+        self.assertEqual({work.describe(self.conn, p)["expectation"]["kind"] for p in pids},
+                         {"invoice"})                            # nothing written
+        fresh = out["next"]["buttons"][0]["call"]["arguments"]["render_id"]
+        self.assertIn(gone, self.rendering(fresh)[1]["also"])
+        while "Next page" in self.labels(fresh):
+            fresh = tap(fresh, "Next page")["next"]["buttons"][0]["call"]["arguments"][
+                "render_id"]
+        self.assertEqual(tap(fresh, "Never for Adobe")["receipt"],
+                         "Adobe never needs an invoice: 50 payments changed.")
 
     def test_a_closing_open_items_card_counts_as_seen_once_posted(self):
         """Review round 1 ruling: Wrong during a walk turns a proposal into a missing item;
@@ -385,7 +418,7 @@ class Cards(LoopCase):
         import cards
         p, mids = self.legacy_set(6)
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
-        self.assertIn("6 invoices fit", self.rendering(end)[0]["text"])
+        self.assertIn("6 documents fit", self.rendering(end)[0]["text"])
         self.assertEqual(self.labels(end), ["Review", "Get package"])   # no chosen one
         rid = self.c(cards.card, end, 0)
         r, scope = self.rendering(rid)
@@ -415,7 +448,7 @@ class Cards(LoopCase):
                               token=self.token, document_date="2026-08-02",
                               alternatives=[alt])
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
-        self.assertIn("2 invoices fit; chose INV\\-88 (2 Aug)", self.rendering(end)[0]["text"])
+        self.assertIn("2 documents fit; chose INV\\-88 (2 Aug)", self.rendering(end)[0]["text"])
         self.assertEqual(self.labels(end), ["Review", "Confirm all", "Get package"])
         rid = self.c(cards.card, end, 0)
         r, scope = self.rendering(rid)
@@ -485,7 +518,7 @@ class Cards(LoopCase):
         rid = self.c(cards.compose_end, self.job_id, scheduled=False)
         lines = self.rendering(rid)[0]["text"].split("\n")
         self.assertTrue(lines[0].startswith("Q3 checked · 3 payments"))
-        self.assertEqual(lines[1], "1 matched · 1 missing · 1 pending")
+        self.assertEqual(lines[1], "1 matched · 1 missing · 1 waiting on the bank")
         self.assertEqual(lines[2], "Q2 still open: 1 missing")
         # 0.11.2: the end card walks only its quarter's items; Q2 is the one line above
         self.assertEqual(self.rendering(rid)[1]["order"], [{"v": "Open", "pids": [old - 1]}])

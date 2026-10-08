@@ -101,10 +101,11 @@ class Taps(_Tapping):
         page2 = self.tap(page1, "Next page")["next"]       # page 2 posted before page 1's answer
         # plugin keys are per button: page 1's other button is still its own (Casa clears
         # the keyboard; the test calls the stored call directly)
-        self.assertIn("No invoice needed for", self.tap(page1, "No invoice needed for these")
-                      ["receipt"])
+        # PLAY 0.11.2: the receipt names the payments acted on
+        self.assertTrue(self.tap(page1, "No invoice needed for these")["receipt"]
+                        .startswith("No invoice needed: Adobe · EUR "))
         out = self.tap(page2, "No invoice needed for these")
-        self.assertIn("No invoice needed for", out["receipt"])
+        self.assertTrue(out["receipt"].startswith("No invoice needed: Adobe · EUR "))
         open_ = self.conn.execute("SELECT count(*) FROM projections WHERE status='open'"
                                   ).fetchone()[0]
         self.assertEqual(open_, 0)
@@ -377,13 +378,19 @@ class TapsMore(_Tapping):
                                      " p ON p.dest_row_id=b.row_id WHERE p.pid=?",
                                      (p,)).fetchone()[0]),
                                  expected_revision=self.rev(p), token=self.token)
+        # PLAY 0.11.2: a vendor page lists only missing payments, so a later page whose
+        # payments were all matched meanwhile has nothing left to list (Task 7 carry)
         out = self.tap(page1, "Next page")
-        self.assertEqual(out["receipt"], "Page 2 of 2.")
-        lines = out["next"]["text"].splitlines()
-        self.assertEqual(sum(ln.endswith("· matched") for ln in lines), len(later))
-        self.assertEqual([b["label"] for b in out["next"]["buttons"]], ["Never for Adobe"])
-        self.assertEqual(self.scope_of(out["next"])["missing"], [])
-        done = self.tap(out["next"], "Never for Adobe")
+        self.assertEqual(out["receipt"], "Nothing is left on page 2: answered meanwhile.")
+        # the vendor's card as it is now states the matched ones in `also`, and Never there
+        # still binds all 30 (the matched ones by membership)
+        card = self.tap(self.end(), "Review")["next"]
+        sc = self.scope_of(card)
+        self.assertEqual(sorted(sc["also"]), sorted(later))
+        self.assertFalse(set(later) & {p for pg in sc["pages"] for p in pg})
+        self.assertIn("Never for Adobe would also change 5 more payments of this quarter.",
+                      card["text"].splitlines())
+        done = self.tap(card, "Never for Adobe")
         self.assertEqual(done["receipt"], "Adobe never needs an invoice: 30 payments changed.")
         self.assertEqual(len(pids), 30)
 

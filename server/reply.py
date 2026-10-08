@@ -354,7 +354,8 @@ REBUILD_BLOCKED = ("Not rebuilding yet: a correction in this message did not app
 # value is a field (views.field; views.headline already takes its fields through it)
 PHRASE = {
     "confirm": ("Confirm {h}.", "Confirmed {h}."),
-    "unpair": ("Remove the match for {h}.", "Removed the match for {h}."),
+    # PLAY 0.11.2: a proposal is rejected, a match is removed (plain words for what it is)
+    "unpair": ("{act} {h}.", "{done} {h}."),
     "set_aside": ("Rule out {n} for {h}.", "Ruled out {n} for {h}."),
     "exempt": ("{h}: needs no document{drop}.", "{h}: needs no document{dropped}."),
     "lift": ("{h}: needs a document again.", "{h}: needs a document again."),
@@ -367,6 +368,9 @@ PHRASE = {
     "name": ("Call the zips {slug}-….zip.", "The zips are now called {slug}-….zip."),
     "ledger_reset": ("{note}", "{note}"),
 }
+UNPAIR_WORDS = {True: {"act": "Reject the suggested document for",
+                        "done": "Rejected the suggested document for"},
+                False: {"act": "Remove the match for", "done": "Removed the match for"}}
 _LIVE = "SELECT pid, revision FROM projections WHERE merged_into IS NULL AND ended IS NULL"
 
 
@@ -1041,7 +1045,7 @@ def _one(conn, run, verb, d, m):
                             conn, grant=run.grant, match_id=p["match_id"],
                             expected_revision=p["rev"], render_id=p["render_id"],
                             bind=p["bind"]),
-                        {"h": h})
+                        {"h": h, **UNPAIR_WORDS[d["status"] == "proposed"]})
         elif d["candidates"]:
             n = len(d["candidates"])
             run.guarded(d, "set_aside", lambda: _bind_candidates(conn, run, d),

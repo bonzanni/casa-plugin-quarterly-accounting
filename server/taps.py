@@ -20,11 +20,12 @@ ACTIONS = ("all-good", "right", "wrong", "no-invoice")
 CARD_ACTIONS = ("review", "confirm-all", "confirm", "wrong", "leave", "pick",
                 "exempt-these", "leave-missing", "never", "next-page",
                 "all-quarters", "this-quarter",              # 0.11.2 §B: the one switch
+                "leave-vendor",
                 "keep-current", "use-new")             # rev 18.4 §R18.3
 _ON_KIND = {"end": ("review", "confirm-all"), "open-items": ("review", "confirm-all"),
             "review": ("confirm", "wrong", "leave", "pick"),
             "vendor-page": ("exempt-these", "leave-missing", "never", "next-page",
-                            "all-quarters", "this-quarter"),
+                            "all-quarters", "this-quarter", "leave-vendor"),
             "replace": ("keep-current", "use-new")}
 CARD_CHANGED = "That changed since it was shown — nothing applied. Here it is as it is now."
 LIST_CHANGED = "That list changed since it was shown — nothing applied. Here it is as it is now."
@@ -77,7 +78,9 @@ def _apply_one(conn, grant, render_id, action, d) -> tuple:
         res = matches.reject_in_tx(conn, grant=grant, match_id=cur["match_id"],
                                    expected_revision=mrevs.get(str(cur["match_id"]), -1),
                                    render_id=render_id, bind="rendered")
-        return res, f"Removed the match for {views.headline(d)}."
+        return res, (f"Rejected the suggested document for {views.headline(d)}."
+                      if d["status"] == "proposed"
+                      else f"Removed the match for {views.headline(d)}.")
     if action == "wrong":
         shown = [c["match_id"] for c in d["candidates"] if str(c["match_id"]) in mrevs]
         if not shown:
@@ -170,7 +173,8 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
         return cards.card(conn, review_of, pos, 1) or cards.next_after(conn, review_of, pos)
 
     if action == "review":
-        return _answer(conn, f"Reviewing {_plural(len(scope.get('order') or []), 'item')}.",
+        # PLAY 0.11.2: the counts line's own numbers, never a count of cards
+        return _answer(conn, f"Reviewing {cards.walk_words(scope, ', then ')}.",
                        cards.next_after(conn, rid, -1))
     if action == "confirm-all":
         return _confirm_all(conn, r, scope, grant)
@@ -189,6 +193,10 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
             return _answer(conn, "Nothing is left on this card: answered meanwhile.",
                            cards.next_after(conn, review_of, pos))
         return _answer(conn, "All quarters on." if on else "This quarter only.", nxt)
+    if action == "leave-vendor":
+        # PLAY 0.11.2: a vendor card's non-answer, as on a to-confirm card
+        return _answer(conn, f"Left for now: {views.field(scope['vendor'])}.",
+                       cards.next_after(conn, review_of, pos))
     if action == "leave":
         return _answer(conn, f"Left for now: {views.headline(work.describe(conn, pid))}.",
                        cards.next_after(conn, review_of, pos))
@@ -245,8 +253,8 @@ def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:
     matches.reject_alternatives_in_tx(conn, grant=grant, pid=pid, doc_ids=shown_alts,
                                       render_id=rid)
     if shown_alts:
-        line = (f"Removed the match for {views.headline(d)} and ruled out its "
-                f"{_plural(len(shown_alts), 'other invoice')}.")
+        line = (f"Rejected the suggested document for {views.headline(d)} and ruled out its "
+                f"{_plural(len(shown_alts), 'other document')}.")
     return line
 
 
@@ -269,7 +277,8 @@ def _vendor_answer(conn, rid, scope, action, grant):
     if action == "never":
         if _changed(conn, rid, listed):          # Never binds every line it displayed
             return None
-        union = set(listed) | {int(p) for p in scope.get("others") or {}}   # §B: stated
+        union = set(listed) | {int(p) for p in scope.get("others") or {}} \
+            | {int(p) for p in scope.get("also") or []}      # §B, PLAY 0.11.2: stated
         for p in scope.get("prior") or []:
             union |= set(views.render_items(conn, p))
         changes = cards.never_set(conn, scope["vendor"])
@@ -295,14 +304,18 @@ def _vendor_answer(conn, rid, scope, action, grant):
                 lineage.projection(conn, p)["revision"] != frozen.get(str(p)) for p in more):
             return None
         revs.update({p: _item(conn, rid, p)["projection_revision"] for p in more})
+    # PLAY 0.11.2: the receipt names the payments it acted on (the other quarters' counted)
+    named = "; ".join(views.headline(work.describe(conn, p)) for p in acts)
+    more = len(revs) - len(acts)
+    named += f"; and {_plural(more, 'payment')} in other quarters" if more else ""
     if action == "exempt-these":
         for p, rev in revs.items():
             matches.set_exemption_in_tx(conn, grant=grant, pid=p, exempt=True,
                                         expected_revision=rev, render_id=rid,
                                         bind="rendered")
-        return f"No invoice needed for {_plural(len(revs), vendor + ' payment')}.", "onward"
+        return f"No invoice needed: {named}.", "onward"
     work.leave_missing_in_tx(conn, list(revs), grant=grant)
-    return f"Left missing: {_plural(len(revs), vendor + ' payment')}.", "onward"
+    return f"Left missing: {named}.", "onward"
 
 
 def _confirm_all(conn, r, scope, grant) -> dict:

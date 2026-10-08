@@ -31,13 +31,15 @@ class VendorCardQuarter(_Tapping):
         q4 = self.pay("Twilio", 2100, "2026-10-14")
         dep = self.card()
         lines = untag(dep["text"]).split("\n")
-        self.assertIn("Twilio · EUR 20.00 · 14 Aug", lines)
+        self.assertIn("EUR 20.00 · 14 Aug", lines)          # PLAY 0.11.2: no payee
         self.assertNotIn("21.00", dep["text"])
         self.assertIn("Also missing in other quarters: 1 (Q4)", lines)
         self.assertEqual(self.labels(dep), ["No invoice needed for these", "Never for Twilio",
-                                            "Leave missing", "Apply to all quarters"])
+                                            "Leave missing", "Apply to all quarters",
+                                            "Leave for now"])
         self.assertTrue(lines[-1].endswith("Apply to all quarters: your next answer here also "
-                                           "covers the 1 in other quarters"), lines[-1])
+                                           "covers the 1 in other quarters · Leave for now: "
+                                           "decide later"), lines[-1])
         self.assertEqual(self.scope_of(dep)["others_missing"], [q4])
         self.assertNotIn(q4, self.scope_of(dep)["missing"])
         del q3
@@ -56,9 +58,9 @@ class VendorCardQuarter(_Tapping):
         on = out["next"]
         self.assertIn("Also missing in other quarters: 1 (Q4) · answers will cover them",
                       untag(on["text"]))
-        self.assertIn("✓ All quarters", self.labels(on))
+        self.assertIn("Only this quarter", self.labels(on))
         self.assertEqual(self.scope_of(on)["others_missing"], [q4])
-        back = self.tap(on, "✓ All quarters")
+        back = self.tap(on, "Only this quarter")
         self.assertEqual(back["receipt"], "This quarter only.")
         self.assertIn("Apply to all quarters", self.labels(back["next"]))
 
@@ -68,7 +70,8 @@ class VendorCardQuarter(_Tapping):
         on = self.tap(self.card(), "Apply to all quarters")["next"]
         out = self.tap(on, "Leave missing")
         self.assertEqual((self.state(q3), self.state(q4)), ("accepted-missing",) * 2)
-        self.assertIn("2 Twilio payments", out["receipt"])
+        self.assertEqual(out["receipt"], "Left missing: Twilio · EUR 20.00 · 14 Aug; and 1 "
+                                         "payment in other quarters.")
 
     def test_leave_missing_switched_off_covers_only_the_quarter(self):
         q3 = self.pay("Twilio", 2000, "2026-08-14")
@@ -122,7 +125,9 @@ class VendorCardQuarter(_Tapping):
             self.pay("Twilio", amount, "2026-08-14")
         self.pay("Twilio", 2200, "2026-10-14")
         end = self.end()
-        self.assertIn("Review: go through the 2 missing, one at a time", end["text"])
+        # PLAY 0.11.2: the counts line carries the number; the legend names no count
+        self.assertEqual(untag(end["text"]).split("\n")[1], "2 missing")
+        self.assertIn("Review: go through the missing invoices, one at a time", end["text"])
 
 
 class OfferedDropsSetAside(_Tapping):
@@ -171,4 +176,6 @@ class R5Fixes(VendorCardQuarter):
         a = self.pay("Twilio", 2000, "2026-08-14")
         self.pay("Twilio", 2100, "2026-08-15")
         self.granted(work.leave_missing_in_tx, [a])
-        self.assertIn("Review: go through the 2 missing, one at a time", self.end()["text"])
+        end = self.end()
+        self.assertEqual(untag(end["text"]).split("\n")[1], "2 missing")
+        self.assertIn("Review: go through the missing invoices, one at a time", end["text"])

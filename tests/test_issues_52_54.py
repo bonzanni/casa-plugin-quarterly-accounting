@@ -42,7 +42,7 @@ class ProposalLineCountsPurchases(LoopCase):
                                document_date="2026-08-04", amount_minor=4120)
         self.propose(p, alternatives=[alt, alt_receipt], issuer="AWS",
                      document_number="INV-88", document_date="2026-08-02", amount_minor=4120)
-        self.assertIn("2 invoices fit; chose INV\\-88 (2 Aug)", self.proposal_line())
+        self.assertIn("2 documents fit; chose INV\\-88 (2 Aug)", self.proposal_line())
 
     def test_documents_with_no_number_stay_purchases_of_their_own(self):
         p = self.pay("Bakker", 4550, "2026-09-01")
@@ -50,7 +50,7 @@ class ProposalLineCountsPurchases(LoopCase):
                        amount_minor=4550)
         self.propose(p, alternatives=[alt], issuer="Bakker", document_number=None,
                      amount_minor=4550)
-        self.assertIn("2 invoices fit; chose invoice", self.proposal_line())
+        self.assertIn("2 documents fit; chose invoice", self.proposal_line())
 
     def test_a_joint_set_of_one_purchase_names_it(self):
         """A legacy joint set (no chosen one, D3) holding one purchase's two documents."""

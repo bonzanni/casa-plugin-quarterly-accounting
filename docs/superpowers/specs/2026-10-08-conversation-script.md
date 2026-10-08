@@ -33,7 +33,7 @@ Q3 · 3 payments · 8 Oct 21:04:37
 To confirm:
 1. Zapier · 1 Sep · EUR 19.58 ↔ invoice ZAP-114 · EUR 19.58
 Q4 so far: 1 to confirm
-Review: go through the 1 to confirm and the 1 missing, one at a time · Confirm all: accept the invoices listed above · Get package: the Q3 zip for your accountant
+Review: go through the 1 to confirm and the missing invoices, one at a time · Confirm all: accept the invoices listed above · Get package: the Q3 zip for your accountant
 ⟦Review⟧ ⟦Confirm all⟧ ⟦Get package⟧
 ```
 - The card lists only Q3's items. Another quarter with open items gets one line.
@@ -76,34 +76,34 @@ for that quarter: Q2 gets done.
 ruling 2026-10-08). A vendor with no invoice reads:
 ```
 Card 2 of 2 · missing invoices · Twilio · 8 Oct 21:10:03
-Twilio · EUR 20.00 · 14 Aug
-No invoice needed: these need none · Never for Twilio: Twilio never sends one · Leave missing: stop looking, keep them missing
-⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧
+EUR 20.00 · 14 Aug
+No invoice needed: these need none · Never for Twilio: Twilio never sends one · Leave missing: stop looking, keep them missing · Leave for now: decide later
+⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧ ⟦Leave for now⟧
 ```
 When the vendor also has missing payments in OTHER quarters, the card says how many and adds
 one switch, ⟦Apply to all quarters⟧ (operator ruling 2026-10-08: one toggle):
 ```
 Card 2 of 2 · missing invoices · Twilio · 8 Oct 21:10:03
-Twilio · EUR 20.00 · 14 Aug
+EUR 20.00 · 14 Aug
 Also missing in other quarters: 2 (Q2, Q4)
-No invoice needed: these need none · Never for Twilio: Twilio never sends one, in any quarter · Leave missing: stop looking, keep them missing · Apply to all quarters: your next answer here also covers the 2 in other quarters
-⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧ ⟦Apply to all quarters⟧
+No invoice needed: these need none · Never for Twilio: Twilio never sends one, in any quarter · Leave missing: stop looking, keep them missing · Apply to all quarters: your next answer here also covers the 2 in other quarters · Leave for now: decide later
+⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧ ⟦Apply to all quarters⟧ ⟦Leave for now⟧
 ```
 Tapping the switch, on screen (Casa v0.344.46, measured: a tap's answer is a receipt, and
 the next card follows it, never in its place; Casa clears the tapped card's buttons and adds
 "☑ <the button>"):
 1. The old card loses its buttons and ends `☑ Apply to all quarters`.
 2. One short line from Finance: `All quarters on.`
-3. The same card again, switched on:
+3. The same card again, switched on (the switch now reads ⟦Only this quarter⟧):
 ```
 Card 2 of 2 · missing invoices · Twilio · 8 Oct 21:10:41
-Twilio · EUR 20.00 · 14 Aug
+EUR 20.00 · 14 Aug
 Also missing in other quarters: 2 (Q2, Q4) · answers will cover them
-No invoice needed: these and the 2 in other quarters need none · … · Leave missing: these and the 2 in other quarters · Only this quarter: switch back
-⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧ ⟦✓ All quarters⟧
+No invoice needed: these and the 2 in other quarters need none · … · Leave missing: these and the 2 in other quarters · Only this quarter: switch back · Leave for now: decide later
+⟦No invoice needed for these⟧ ⟦Never for Twilio⟧ ⟦Leave missing⟧ ⟦Only this quarter⟧ ⟦Leave for now⟧
 ```
-Switching back is the same sequence: `☑ ✓ All quarters`, then `This quarter only.`, then the
-card switched off.
+Switching back is the same sequence: `☑ Only this quarter`, then `This quarter only.`, then
+the card switched off.
 
 When the operator sends the PDF in the chat: `Filed. Checking it against the payments —
 I'll post what I find.`, then one card with what changed.
@@ -121,17 +121,28 @@ The zip arrives as a file, captioned with the quarter. Nothing else is posted.
 
 ## 5. A correction
 
-The operator says something like "the Zapier one is wrong" (swiped on the card, or not):
+The operator says something like "the Zapier one is wrong" (swiped on the card, or not). On
+a proposal (not confirmed yet):
 ```
 I read this as:
-· Remove the match for Zapier · EUR 19.58 · 1 Sep.
+· Reject the suggested document for Zapier · EUR 19.58 · 1 Sep.
 Apply: make this change · Cancel: change nothing
 ⟦Apply⟧ ⟦Cancel⟧
 ```
-⟦Apply⟧ → `Removed the match for Zapier · EUR 19.58 · 1 Sep.`
+⟦Apply⟧ → `Rejected the suggested document for Zapier · EUR 19.58 · 1 Sep.` (On a confirmed
+match the words are "Remove the match for …".)
 
 Every verb shown to the operator is a plain one. Internal verbs (pair, unpair, set aside)
 are never shown.
+
+**PLAY's reading rules (live check 2026-10-08).** One thing, one number: a card and its walk
+never print two different numbers for the same thing (the legend and the "Reviewing …" line
+print only the counts line's numbers). A vendor card's subject is its missing payments, the
+bank's payee text is not repeated on each line, and the payments [Never] would also change
+are one line ("Never for X would also change 6 more payments of this quarter."). Every card
+has a way to move on without answering (⟦Leave for now⟧). Receipts name the payments they
+acted on. Words say what a thing is: "documents fit", "this receipt is right", "pending at
+the bank". No button label starts with a mark (Casa adds "☑ <label>").
 
 ---
 **Residual (#53, the operator's pick).** The same card shown twice within one second

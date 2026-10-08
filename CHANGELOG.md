@@ -40,6 +40,16 @@ the operator-approved conversation script (`docs/superpowers/specs/
   cover the other quarters' missing ones too: a short receipt ("All quarters on.") and the
   same card switched on (⟦✓ All quarters⟧, "· answers will cover them"). An answer refuses
   when a counted payment moved.
+- **Reading fixes from PLAY's live check.**
+  - One number per thing: the legend and the "Reviewing …" receipt print only the counts
+    line's numbers.
+  - A vendor card lists its missing payments, without the bank's payee text on each line,
+    and puts the others [Never] would change on one line. It also has ⟦Leave for now⟧, and
+    its receipts name the payments.
+  - Words: "documents fit", the document's own kind in the Confirm legend, "Reject the
+    suggested document for …" on a proposal, "waiting on the bank".
+  - The switch-back button reads ⟦Only this quarter⟧.
+  - The pick legend reads "A document button: use that document".
 - **Whole lines (#54).** No fixed-width hard breaks: `views._wrap` and `WIDTH` are gone, and
   every line is one item that the client wraps.
 - **Plain words and buttons.** Zero counts are not shown. Buttons carry no counts

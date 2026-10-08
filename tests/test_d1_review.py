@@ -34,14 +34,19 @@ class NeverIsRehearsed(_Tapping):
 
     def test_terras_sequence_the_pending_payment_is_listed_and_bound(self):
         """Terra d1 S1, exactly: one booked missing Adobe payment and one PDNG Adobe
-        payment; the vendor card; Never. The card lists both (the pending one marked) and
-        Never changes exactly those two."""
+        payment; the vendor card; Never. PLAY 0.11.2: the card lists the missing one and
+        states the pending one in its `also` line; Never changes exactly those two."""
         booked = self.pay("Adobe", 100)
         pdng = self.pending()
         page = self.tap(self.end(), "Review")["next"]
         _, bound = self.page_of(page)
+        # PLAY 0.11.2 (r7 fix): the stated `also` payment is bound to its summary line
         self.assertEqual(bound, sorted([booked, pdng]))
-        self.assertEqual(len([ln for ln in page["text"].splitlines() if "· pending" in ln]), 1)
+        self.assertEqual(self.scope_of(page)["missing"], [booked])
+        self.assertEqual(self.scope_of(page)["also"], [pdng])
+        self.assertIn("Never for Adobe would also change 1 more payment of this quarter.",
+                      page["text"].splitlines())
+        self.assertNotIn("· pending", page["text"])
         out = self.tap(page, "Never for Adobe")
         self.assertEqual(out["receipt"], "Adobe never needs an invoice: 2 payments changed.")
         self.assertEqual(tuple(self.status(booked)), ("no-document", "none"))
@@ -60,12 +65,15 @@ class NeverIsRehearsed(_Tapping):
         page = self.tap(end, "Review")["next"]                  # the proposal card first
         page = self.tap(page, "Leave for now")["next"]            # then Adobe's vendor card
         rid, bound = self.page_of(page)
+        # PLAY 0.11.2: only the missing one is a line; the others are frozen in `also` and
+        # bound to its summary line (r7 fix: Never refuses one that changed)
         self.assertEqual(bound, sorted([missing, pdng, proposed]))
         lines = page["text"].splitlines()
-        self.assertEqual(sum("· pending" in ln for ln in lines), 1)
-        self.assertEqual(sum("· to confirm" in ln for ln in lines), 1)
+        self.assertIn("Never for Adobe would also change 2 more payments of this quarter.",
+                      lines)
         scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
                                              " render_id=?", (rid,)).fetchone()[0])
+        self.assertEqual(sorted(scope["also"]), sorted([pdng, proposed]))
         self.assertEqual(scope["missing"], [missing])             # what the exemption binds
         out = self.tap(page, "Never for Adobe")
         self.assertEqual(out["receipt"], "Adobe never needs an invoice: 3 payments changed.")
@@ -77,7 +85,7 @@ class NeverIsRehearsed(_Tapping):
         pdng = self.pending()
         page = self.tap(self.end(), "Review")["next"]
         out = self.tap(page, "No invoice needed for these")
-        self.assertEqual(out["receipt"], "No invoice needed for 1 Adobe payment.")
+        self.assertEqual(out["receipt"], "No invoice needed: Adobe · EUR 1.00 · 2 Sep.")
         self.assertEqual(self.status(missing)["status"], "exempt")
         self.assertEqual(self.status(pdng)["status"], "open")
 
@@ -91,7 +99,9 @@ class NeverIsRehearsed(_Tapping):
         doc = self.doc(amount_minor=400)
         self.machine_match(matched, doc, self.token)
         page = self.tap(self.end(), "Review")["next"]
+        # PLAY 0.11.2: the matched one is no line; it is stated in `also`, bound to that line
         self.assertEqual(self.page_of(page)[1], sorted([missing, matched]))
+        self.assertEqual(self.scope_of(page)["also"], [matched])
         rev = self.rev(matched)
         documents.update_document_metadata(self.conn, doc, document_number="RENUMBERED")
         self.assertNotEqual(self.rev(matched), rev)              # the matched line moved
@@ -102,7 +112,7 @@ class NeverIsRehearsed(_Tapping):
         documents.update_document_metadata(self.conn, doc, document_number="AGAIN")
         self.assertNotEqual(self.rev(matched), rev)
         out = self.tap(page, "No invoice needed for these")
-        self.assertEqual(out["receipt"], "No invoice needed for 1 Adobe payment.")
+        self.assertEqual(out["receipt"], "No invoice needed: Adobe · EUR 1.00 · 2 Sep.")
         self.assertEqual(self.status(missing)["status"], "exempt")
         self.assertEqual(self.status(matched)["status"], "matched")
 
@@ -118,7 +128,10 @@ class NeverIsRehearsed(_Tapping):
                                             " name='Adobe'").fetchone())
         self.assertNotEqual(self.status(new)["exp_kind"], "none")
         self.assertIn("missing invoices · Adobe", out["next"]["text"])
-        self.assertIn(new, self.page_of(out["next"])[1])
+        # PLAY 0.11.2: the fresh page 1 lists the missing ones and states the newcomer
+        # (pending or proposed, not missing) in its frozen `also`
+        self.assertNotIn(new, self.scope_of(out["next"])["missing"])     # no line of its own
+        self.assertIn(new, self.scope_of(out["next"])["also"])
         return out
 
     def test_never_on_a_card_that_omitted_a_pending_payment_refuses(self):
@@ -130,7 +143,8 @@ class NeverIsRehearsed(_Tapping):
             self.propose(p, amount_minor=300)
             return p
         out = self._refuses(proposed)
-        self.assertIn("· to confirm", out["next"]["text"])
+        self.assertIn("Never for Adobe would also change 1 more payment of this quarter.",
+                      out["next"]["text"].splitlines())
 
     def test_the_rehearsal_leaves_nothing_behind(self):
         import cards

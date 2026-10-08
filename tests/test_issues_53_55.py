@@ -99,7 +99,7 @@ class StatusCard(_Cards):
         self.assertNotIn("Notion", self.text(rid).split("Q4 so far")[0])
         self.assertIn("Q4 so far: 1 to confirm", lines)
         self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
-        self.assertEqual(lines[-1], "Review: go through the 1 to confirm and the 1 missing, "
+        self.assertEqual(lines[-1], "Review: go through the 1 to confirm and the missing invoices, "
                                     "one at a time · Confirm all: "
                                     "accept the invoices listed above · Get package: the Q3 zip "
                                     "for your accountant")
@@ -195,8 +195,9 @@ class PlainWords(_Cards):
         views.mark_rendering_delivered(self.conn, end)
         res = apply_now(self.conn, "the Zapier one is wrong",
                         "\U0001f4ca Alex\n" + views.unesc(self.text(end)))
-        self.assertIn("Remove the match for Zapier · EUR 19.58 · 1 Sep.", res["proposal"])
-        self.assertEqual(res["receipt"], "Removed the match for Zapier · EUR 19.58 · 1 Sep.")
+        self.assertIn("Reject the suggested document for Zapier · EUR 19.58 · 1 Sep.", res["proposal"])
+        self.assertEqual(res["receipt"],
+                         "Rejected the suggested document for Zapier · EUR 19.58 · 1 Sep.")
 
 
 class GetItDoneWhileARunIsLive(_Cards):
@@ -297,7 +298,7 @@ class WalkLegend(_Cards):
         rid = self.c(cards.compose_open, "2026-Q3")
         self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
         self.assertTrue(self.text(rid).split("\n")[-1].startswith(
-            "Review: go through the 1 to confirm and the 2 missing, one at a time · "))
+            "Review: go through the 1 to confirm and the missing invoices, one at a time · "))
 
     def test_a_proposal_reads_as_suggested_not_matched(self):
         import cards
@@ -319,7 +320,7 @@ class LegendMatchesTheWalk(_Cards):
         self.pay("Adobe", 2100, "2026-10-14")
         rid = self.c(cards.compose_open, "2026-Q3")
         legend = self.text(rid).split("\n")[-1]
-        self.assertTrue(legend.startswith("Review: go through the 1 missing, one at a time"),
+        self.assertTrue(legend.startswith("Review: go through the missing invoices, one at a time"),
                         legend)
 
 
