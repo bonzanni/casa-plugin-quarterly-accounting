@@ -381,7 +381,7 @@ class TapsMore(_Tapping):
         # PLAY 0.11.2: a vendor page lists only missing payments, so a later page whose
         # payments were all matched meanwhile has nothing left to list (Task 7 carry)
         out = self.tap(page1, "Next page")
-        self.assertEqual(out["receipt"], "Nothing is left on page 2: answered meanwhile.")
+        self.assertEqual(out["receipt"], "Nothing is left on the later pages: answered meanwhile.")
         # the vendor's card as it is now states the matched ones in `also`, and Never there
         # still binds all 30 (the matched ones by membership)
         card = self.tap(self.end(), "Review")["next"]

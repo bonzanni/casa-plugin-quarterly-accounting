@@ -158,14 +158,19 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
     rid, review_of, pos = r["render_id"], scope["review_of"], scope.get("pos", -1)
     page, pages = scope.get("page", 1), scope.get("pages") or []
 
-    def onward():
-        """The next page of this vendor, else the next item (cards.card is None when a
-        later page has nothing left: Task 7 carry)."""
-        if pages and page < len(pages):
-            nxt = cards.card(conn, review_of, pos, page + 1)
+    def later_page():
+        """The first later page of this vendor that still has something to show (r7 Astra
+        S1: a page answered meanwhile is skipped, never the end of the vendor), or None."""
+        for p in range(page + 1, len(pages) + 1):
+            nxt = cards.card(conn, review_of, pos, p)
             if nxt is not None:
                 return nxt
-        return cards.next_after(conn, review_of, pos)
+        return None
+
+    def onward():
+        """The next page of this vendor that has something left, else the next item
+        (cards.card is None when a later page has nothing left: Task 7 carry)."""
+        return later_page() or cards.next_after(conn, review_of, pos)
 
     def fresh():
         """The same item as it is now (a fresh first page for a vendor, r10/r11), else the
@@ -179,10 +184,11 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
     if action == "confirm-all":
         return _confirm_all(conn, r, scope, grant)
     if action == "next-page":
-        nxt = cards.card(conn, review_of, pos, page + 1)
+        nxt = later_page()
         if nxt is not None:
-            return _answer(conn, f"Page {page + 1} of {len(pages)}.", nxt)
-        return _answer(conn, f"Nothing is left on page {page + 1}: answered meanwhile.",
+            at = json.loads(_row_scope(conn, nxt))["page"]
+            return _answer(conn, f"Page {at} of {len(pages)}.", nxt)
+        return _answer(conn, "Nothing is left on the later pages: answered meanwhile.",
                        cards.next_after(conn, review_of, pos))
     if action in ("all-quarters", "this-quarter"):
         # §B: a switch writes nothing; the same card comes back switched (Casa #1302: the
@@ -233,6 +239,10 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
     nxt = {"fresh": fresh, "onward": onward,
            "next": lambda: cards.next_after(conn, review_of, pos)}[then]()
     return _answer(conn, receipt, nxt)
+
+
+def _row_scope(conn, rid) -> str:
+    return conn.execute("SELECT scope_json FROM renders WHERE render_id=?", (rid,)).fetchone()[0]
 
 
 def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:

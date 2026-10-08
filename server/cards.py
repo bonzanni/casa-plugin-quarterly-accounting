@@ -1119,7 +1119,7 @@ def _buttons(rid, kind, scope) -> list:
 
 
 LEGEND = {"review": "Review: go through {walk}, one at a time",
-          "confirm-all": "Confirm all: accept the invoices listed above",
+          "confirm-all": "Confirm all: accept the suggested documents listed above",
           "pick": "{label}: use this document",
           "confirm": "Confirm: this {kind} is right",
           "wrong": "Wrong: not this one, keep looking",

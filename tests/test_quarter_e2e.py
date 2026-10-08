@@ -149,7 +149,7 @@ class Quarter(StoreCase):
                                    (figma,)).fetchone()[0]
         self.assertEqual([t for t in self.drv.bf.tags(row_id) if t.startswith("acct::")], [])
         self.assertFalse([n for n in self.drv.bf.notes(row_id) if n.startswith("Accounting")])
-        self.assertIn("1 pending", self.end_text("eeeeeeee-1"))
+        self.assertIn("1 waiting on the bank", self.end_text("eeeeeeee-1"))
         import loop
         self.assertFalse(loop.complete(self.conn, "2026-Q3"))
         self.drv.book(row_no=7)                         # a later fetch books the row
@@ -317,7 +317,7 @@ class CheckQ2(StoreCase):
         self.assertFalse(loop.complete(self.conn, "2026-Q2"))
         end = self.drv.posted_end("aaaaaaaa-3")["text"]
         self.assertTrue(end.startswith("Q2 "), end)
-        self.assertIn("1 pending", end)
+        self.assertIn("1 waiting on the bank", end)
         self.assertNotIn("complete", end)
         row = self.drv.row_id_of(late)
         self.assertEqual(([t for t in self.drv.bf.tags(row) if t.startswith("acct::")],

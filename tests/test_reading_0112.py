@@ -130,3 +130,23 @@ class Reading(_Tapping):
         card = self.tap(self.end(), "Review")["next"]
         self.assertTrue(self.legend(card).startswith("A document button: use that document · "),
                         self.legend(card))
+
+
+class R7Fixes(Reading):
+    def test_an_answered_middle_page_does_not_end_the_vendors_walk(self):
+        """r7 Astra S1: page 2's payments matched meanwhile; Next page goes on to page 3."""
+        pids = [self.pay("Adobe", 100 + i, "2026-08-14") for i in range(60)]
+        card = self.tap(self.end(), "Review")["next"]
+        pages = self.scope_of(card)["pages"]
+        self.assertEqual(len(pages), 3)
+        for p in pages[1]:
+            self.machine_entry(p, self.doc(issuer="Adobe", document_number=f"A-{p}",
+                                           amount_minor=100 + pids.index(p)))
+        out = self.tap(card, "Next page")
+        self.assertIn("page 3 of 3", out["next"]["text"])
+
+    def test_confirm_all_says_documents(self):
+        p = self.pay("Elevenlabs.io", 1899, "2026-09-01")
+        self.propose(p, kind="receipt", document_number="REC-1", amount_minor=1899)
+        self.assertIn("Confirm all: accept the suggested documents listed above",
+                      self.end()["text"])

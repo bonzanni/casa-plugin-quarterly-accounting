@@ -101,7 +101,7 @@ class StatusCard(_Cards):
         self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
         self.assertEqual(lines[-1], "Review: go through the 1 to confirm and the missing invoices, "
                                     "one at a time · Confirm all: "
-                                    "accept the invoices listed above · Get package: the Q3 zip "
+                                    "accept the suggested documents listed above · Get package: the Q3 zip "
                                     "for your accountant")
         scope = json.loads(self.row_of(rid)["scope_json"])
         self.assertEqual([o.get("p") for o in scope["order"] if "p" in o], [q3])
