@@ -95,6 +95,7 @@ class Shapes:
     def __init__(self):
         self.records: list = []
         self.taps = 0
+        self.ticks = 0                  # #60: seconds since CLOCK (Shapes.tick)
         self.shape = None               # the running shape: its store copy is named after it
 
     # -- recording -----------------------------------------------------------------
@@ -110,6 +111,7 @@ class Shapes:
         import tools                                    # noqa: F401 — registers the tools
         import views
         n0 = len(broker.deposits)
+        self.tick()
         out = qa_server.TOOLS[tool]["fn"](dict(args))
         if not (isinstance(out, dict) and isinstance(out.get(SLOTS[tool]), str)):
             raise AssertionError(f"{case}: {tool}({args}) posted nothing: {out}")
@@ -157,6 +159,15 @@ class Shapes:
         for b in buttons:
             self.records.append({"case": "stored_call", "tool": b["call"]["tool"],
                                  "arguments": b["call"]["arguments"]})
+
+    def tick(self):
+        """#60: each posting is a step of its own, a second after the last — the render
+        tag is the moment to the second (#53), so a frozen clock would compose renderings
+        no quote can tell apart, which no operator ever sees."""
+        import db
+        self.ticks += 1
+        at = CLOCK + dt.timedelta(seconds=self.ticks)
+        db._clock = lambda: at
 
     def _unique(self, case) -> str:
         if any(r["case"] == case for r in self.records):
