@@ -149,7 +149,7 @@ class Quarter(StoreCase):
                                    (figma,)).fetchone()[0]
         self.assertEqual([t for t in self.drv.bf.tags(row_id) if t.startswith("acct::")], [])
         self.assertFalse([n for n in self.drv.bf.notes(row_id) if n.startswith("Accounting")])
-        self.assertIn("1 pending", self.end_text("eeeeeeee-1"))
+        self.assertIn("1 waiting on the bank", self.end_text("eeeeeeee-1"))
         import loop
         self.assertFalse(loop.complete(self.conn, "2026-Q3"))
         self.drv.book(row_no=7)                         # a later fetch books the row
@@ -235,7 +235,7 @@ class Quarter(StoreCase):
         self.assertEqual((got[adobe], got[adobe_aug]), ("matched", "matched"))
         end = self.drv.posted_end("eeeeeeee-4")
         self.assertIn("1 handed-over document to check — Review shows it.", end["text"])
-        card = self.drv.tap(end, "Review 1")["next"]
+        card = self.drv.tap(end, "Review")["next"]
         self.assertIn("already has an invoice.", card["text"])
         self.assertIn("(matched by the job)", card["text"])
         self.assertIn("(from you)", card["text"])
@@ -252,10 +252,10 @@ class Quarter(StoreCase):
 
     def test_confirm_all_after_a_review_answer(self):
         end = self.drv.posted_end("eeeeeeee-1")             # the end message's deposit
-        card = self.drv.tap(end, "Review 2")["next"]        # OpenRouter's card, then Twilio's
+        card = self.drv.tap(end, "Review")["next"]        # OpenRouter's card, then Twilio's
         self.assertIn("OpenRouter", card["text"])
         self.drv.tap(card, "Wrong")
-        out = self.drv.tap(end, "Confirm all 1")
+        out = self.drv.tap(end, "Confirm all")
         self.assertIn("Confirmed 0 of 1", out["receipt"])   # the one listed was answered
         self.assertEqual(self.conn.execute("SELECT count(*) FROM match_state WHERE pid=? AND"
                                            " state='matched'", (self.rows[3],)).fetchone()[0],
@@ -317,7 +317,7 @@ class CheckQ2(StoreCase):
         self.assertFalse(loop.complete(self.conn, "2026-Q2"))
         end = self.drv.posted_end("aaaaaaaa-3")["text"]
         self.assertTrue(end.startswith("Q2 "), end)
-        self.assertIn("1 pending", end)
+        self.assertIn("1 waiting on the bank", end)
         self.assertNotIn("complete", end)
         row = self.drv.row_id_of(late)
         self.assertEqual(([t for t in self.drv.bf.tags(row) if t.startswith("acct::")],

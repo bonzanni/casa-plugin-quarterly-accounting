@@ -456,7 +456,7 @@ def _require_unheld(conn, doc_id, pid) -> None:
     other = next(((p, how) for p, how in holders(conn, doc_id) if p != pid), None)
     if other is None:
         return
-    raise db.Refusal(f"that document has since been paired with payment #{other[0]}")
+    raise db.Refusal(f"that document has since been matched to payment #{other[0]}")
 
 
 def pick_in_tx(conn, *, grant, pid, doc_id, render_id, mrevs: dict,
@@ -477,7 +477,7 @@ def pick_in_tx(conn, *, grant, pid, doc_id, render_id, mrevs: dict,
                                         "show the current facts")
     shown_alts = [int(a) for a in alternatives_shown]
     if doc_id not in {c.doc_id for c in own} | set(shown_alts):
-        raise db.Refusal("that candidate was not on the card the operator saw")
+        raise db.Refusal("that document was not on the card the operator saw")
     _require_unheld(conn, doc_id, pid)
     for c in own:
         if c.doc_id != doc_id:

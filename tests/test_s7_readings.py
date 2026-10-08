@@ -35,12 +35,12 @@ class Readings(StoreCase):
         out, prop = self.propose(f"the {fx['payee']} one is wrong")
         self.assertRegex(out["reading"], r"^casa-cap-")
         self.assertTrue(prop["text"].startswith("I read this as:"))
-        self.assertIn("Unpair", prop["text"])
+        self.assertIn("Remove the match for", prop["text"])
         self.assertEqual([b["label"] for b in prop["buttons"]], ["Apply", "Cancel"])
         self.assertEqual(prop["revision"], "reading")
         self.assertEqual(self.operator_rows(), 0)
         rec = self.tap(prop, "Apply")
-        self.assertIn("Unpaired", rec["receipt"])
+        self.assertIn("Removed the match for", rec["receipt"])
         self.assertEqual(self.operator_rows(), 1)
 
     def test_cancel_applies_nothing_and_spends_the_key(self):
@@ -99,14 +99,19 @@ class Readings(StoreCase):
         """Two sheets delivered; the operator swipe-replied "all good" on the OLDER one.
         The reading confirms the older sheet's guesses, not the newer one's."""
         import views
+        import datetime as dt
         a = self.sheet_fixture(guesses=1)
-        older = views.build_review(self.conn, view="check")
+        # #53: the tag is the composition second; the two sheets are composed seconds apart
+        with self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, 1, tzinfo=dt.timezone.utc)):
+            older = views.build_review(self.conn, view="check")
         views.mark_rendering_delivered(self.conn, older["render_id"])
         b = self.add_guess()                          # a second guessed pairing, a new sheet
-        newer = views.build_review(self.conn, view="check")
+        with self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, 2, tzinfo=dt.timezone.utc)):
+            newer = views.build_review(self.conn, view="check")
         views.mark_rendering_delivered(self.conn, newer["render_id"])
         quoted = "📊 Finance\n" + views.unesc(older["text"])[:300]
         out, prop = self.propose("all good", quoted=quoted)
+        self.assertIsNotNone(prop, out)
         self.assertEqual(prop["text"].count("Confirm "), 1)
 
     def test_the_proposal_never_carries_the_key_in_the_result(self):

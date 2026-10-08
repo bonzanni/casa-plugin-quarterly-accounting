@@ -171,9 +171,10 @@ class TestStopChasing(Base):
 
 class TestWatermark(Base):
     def test_earlier_only_and_the_next_import_admits(self):
-        with self.assertRaises(db.Refusal):
-            self.granted(work.set_watermark_in_tx, "2026-Q4")
-        self.granted(work.set_watermark_in_tx, "2026-Q2")
+        with self.assertRaises(db.Refusal), db.tx(self.conn):
+            work.start_from_in_tx(self.conn, "2026-Q4")
+        with db.tx(self.conn):
+            work.start_from_in_tx(self.conn, "2026-Q2")
         out = ledger.import_ledger_export(self.conn, token=self.token, ledger_instance=self.LEDGER,
                                           acq=self.acq,
                                           path=self.export_csv([

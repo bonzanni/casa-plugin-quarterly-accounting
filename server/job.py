@@ -189,6 +189,8 @@ TOPIC_MAX = 200     # one topic line: Casa keeps a summary's or completion's fir
                     # at 300 characters; the full stop line is posted by the job (S7 §5)
 
 
+CARD_POSTED = "The result card is posted in the chat; there is nothing to add."
+
 def run_end(conn, job_id) -> tuple:
     """THE closing words of job run `job_id` (PLAY T7 F2): (the completion's text, its
     progress summary), shared by job_next's `complete` and job_status. The run has one pass
@@ -207,6 +209,12 @@ def run_end(conn, job_id) -> tuple:
         import binding, cards
         if binding.get(conn) is None:
             return RUN_FINISHED, loop.WORDS["complete"]
+        shown = conn.execute("SELECT 1 FROM runs u JOIN renders r ON r.render_id="
+                             "u.end_render_id WHERE u.job_id=? AND r.delivered_at IS NOT NULL",
+                             (job_id,)).fetchone()
+        if shown is not None:
+            # 0.11.2 (one answer per ask; Casa #1332): the end card says it all
+            return CARD_POSTED, loop.WORDS["complete"]
         line = views.clip(cards.checked_line(conn, cards.main_quarter(conn, job_id)),
                           TOPIC_MAX)
         return line, loop.WORDS["complete"]

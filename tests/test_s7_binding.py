@@ -22,6 +22,21 @@ NOW = dt.datetime(2026, 9, 15, 12, tzinfo=dt.timezone.utc)
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 LABEL = "\U0001f4ca Finance\n"
 
+TAG_RE = re.compile(r" \u00b7 \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d$")   # #53: views.tag_now
+
+
+def _ticking_clock(case):
+    """#53: the tag is the composition second, so two renderings differ only when composed
+    at different seconds (the same-second identical text is the accepted AMBIGUOUS
+    residual). db._clock reads `case.now` (NOW at first); `case.tick()` moves it on."""
+    import db
+    case.now = NOW
+    case.patch(db, "_clock", lambda: case.now)
+
+
+def _tick(case, seconds=1):
+    case.now += dt.timedelta(seconds=seconds)
+
 
 def call(name, **args):
     import qa_server
@@ -37,9 +52,9 @@ def tap(prop, label):
 class _Q3(StoreCase):
     def setUp(self):
         super().setUp()
-        cm = self.patch_clock(NOW)
-        cm.__enter__()
-        self.addCleanup(cm.__exit__, None, None, None)
+        _ticking_clock(self)
+
+    tick = _tick
 
     def propose(self, text, quoted=None):
         import posting
@@ -101,10 +116,9 @@ class _Q3(StoreCase):
             for rid in render_ids:
                 text = self.render_text(rid)
                 first, _, rest = text.partition("\n")
-                tag = f" · {rid[1:]}"
-                assert first.endswith(tag), (rid, first)
+                assert TAG_RE.search(first), (rid, first)
                 self.conn.execute("UPDATE renders SET text=? WHERE render_id=?",
-                                  (first[:-len(tag)] + ("\n" + rest if _ else ""), rid))
+                                  (TAG_RE.sub("", first) + ("\n" + rest if _ else ""), rid))
 
 
 # ---------------------------------------------------------------------------------------
@@ -205,6 +219,7 @@ class PostedOnlyQuote(_Q3):
         a = self.add_guess()
         self._fixture_guess = ("Twin", 9900, "2026-09-17", 0)
         self.add_guess()
+        self.tick()                    # #53: composed a second after the fixture's sheet
         with FakeBroker() as b:
             call("show_view", view="status", quarter="2026-Q3")
             sheet = tap(b.proposal(), "Anything to check?")
@@ -224,6 +239,7 @@ class PostedOnlyQuote(_Q3):
 
     def test_posted_broad(self):
         f = self.sheet_fixture()
+        self.tick()                    # #53: composed a second after the fixture's sheet
         with FakeBroker() as b:
             sh = call("show_view", view="check", quarter="2026-Q3")
             prop = b.proposal()
@@ -333,7 +349,9 @@ class ContinuedPages(StoreCase):
         cm.__enter__()
         self.addCleanup(cm.__exit__, None, None, None)
         import views
-        self.patch(views, "BODY_LIMIT", 200)
+        # one candidate per page; 0.11.2 (#53): +13 for the time tag (" · 15 Sep 12:00:00"
+        # is 13 characters longer than the render-id tag " · NN" this budget was set for)
+        self.patch(views, "BODY_LIMIT", 213)
         import work
         self.row(1, counterparty="Adobe", amount_minor=5445, booking_date="2026-09-14",
                  value_date="2026-09-14")
@@ -517,9 +535,7 @@ class _Long(StoreCase):
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id,"
                               " bank_through) VALUES ('p', 'x', 0, 0, '2026-09-20')")
-        cm = self.patch_clock(NOW)
-        cm.__enter__()
-        self.addCleanup(cm.__exit__, None, None, None)
+        _ticking_clock(self)
         self.pids = []
         for i in range(self.N):
             self.row(i + 1, counterparty="Vendor%02d" % i, amount_minor=10000 + i,
@@ -540,6 +556,8 @@ class _Long(StoreCase):
             documents.update_document_metadata(self.conn, did, token=self.token,
                                                document_number="INV%02d" % i
                                                + "A" * (30 if i == 0 else 45))
+
+    tick = _tick
 
     def deliver(self, view="all", **kw):
         import views
@@ -567,10 +585,12 @@ class RawTruncation(_Long):
         import documents
         import views
         self.deliver()
+        self.tick()                    # #53: each rendering composed in its own second
         a = self.deliver()
         documents.update_document_metadata(self.conn, self.docs[-1], token=self.token,
                                            document_number="INV14B" + "A" * 44)
         for _ in range(4):
+            self.tick()
             b = self.deliver()
             self.assertEqual(views.bound_rendering(self.conn, self.quote(b["render_id"]))
                              ["render_id"], b["render_id"])
@@ -589,12 +609,14 @@ class LegacyAmbiguity(_Long):
         import db
         import views
         self.deliver(page=1)                 # the first review's announcements, once
+        self.tick()
         a = self.deliver(page=1)
         text_a = views._bnorm(self.text_of(a["render_id"]))
         last = max(self.pids, key=lambda p: text_a.find("Vendor%02d" % (p - self.pids[0])))
         mid = self.conn.execute("SELECT match_id FROM match_state WHERE pid=? AND state IN"
                                 " ('matched','proposed')", (last,)).fetchone()[0]
         self.repair_late(last, mid)
+        self.tick()
         b = self.deliver(page=1)
         self.make_legacy_both(a["render_id"], b["render_id"])
         na, nb = (views._bnorm(self.text_of(r)) for r in (a["render_id"], b["render_id"]))
@@ -609,10 +631,11 @@ class LegacyAmbiguity(_Long):
                                            ).fetchone()[0], 0)
         rec = [i for i in out["instructions"] if isinstance(i, dict) and "show_view" in i]
         self.assertEqual(len(rec), 1)
+        self.tick()
         with FakeBroker() as br:
             fresh = call("show_view", **rec[0]["show_view"])
             ftext = br.proposal()["text"]
-        self.assertTrue(views.unesc(ftext).split("\n")[0].endswith(f" · {fresh['render_id'][1:]}"))
+        self.assertRegex(views.unesc(ftext).split("\n")[0], TAG_RE)
         self.assertEqual(views.bound_rendering(self.conn, LABEL + ftext)["render_id"],
                          fresh["render_id"])
         self.assertTrue(db)
@@ -632,9 +655,14 @@ class LegacyAmbiguity(_Long):
 
     def test_two_s7_renderings_of_one_unchanged_view_differ(self):
         self.deliver(page=1)                 # the first review's announcements, once
+        # #53: renderings composed in different seconds differ (by their tag alone)
+        self.tick()
         a = self.deliver(page=1)
+        self.tick()
         b = self.deliver(page=1)
         self.assertNotEqual(self.render_text(a["render_id"]), self.render_text(b["render_id"]))
+        self.assertEqual(TAG_RE.sub("", self.render_text(a["render_id"]).split("\n")[0]),
+                         TAG_RE.sub("", self.render_text(b["render_id"]).split("\n")[0]))
 
 
 class SameFactsLegacy(_Q3):
@@ -679,6 +707,7 @@ class IdenticalSheets(_Q3):
         doc = self.conn.execute("SELECT * FROM documents WHERE doc_id=?",
                                 (f["doc_id"],)).fetchone()
         new = self.repair(f["pid"], doc["document_number"], issuer="Other issuer")
+        self.tick()                    # #53: B composed a second after A (distinct tags)
         b = self.refused_show(view="check", quarter="2026-Q3")
         self.assertIsNotNone(b["posted_seq"])
         return f, new, b
@@ -708,6 +737,7 @@ class IdenticalSheets(_Q3):
                           self.operator_rows(new["match_id"])], [0, 0])
         rec = next(i["show_view"] for i in out["instructions"]
                    if isinstance(i, dict) and "show_view" in i)
+        self.tick()
         with FakeBroker() as br:
             fresh = call("show_view", **rec)
             text = br.proposal()["text"]
@@ -908,7 +938,7 @@ class Tags(_Q3):
             r = views.build_review(self.conn, view=view, **kw)
             first = r["text"].split("\n")[0]
             with self.subTest(view=view):
-                self.assertTrue(first.endswith(f" · {r['render_id'][1:]}"), first)
+                self.assertRegex(first, TAG_RE)                 # #53: the composition time
                 for word in views.FORBIDDEN:
                     self.assertNotIn(word, first)
                 self.assertEqual(views.esc(views.unesc(first)), first)
@@ -917,18 +947,20 @@ class Tags(_Q3):
     def test_the_fit_never_cuts_the_tag(self):
         import views
         self.sheet_fixture()
-        self.patch(views, "BODY_LIMIT", 60)
+        # 0.11.2 (#53): +13 for the time tag (13 characters longer than " · NN")
+        self.patch(views, "BODY_LIMIT", 73)
         r = views.build_review(self.conn, view="status", quarter="2026-Q3")
-        self.assertTrue(r["text"].split("\n")[0].endswith(f" · {r['render_id'][1:]}"),
-                        r["text"])
-        self.assertLessEqual(views.utf16_len(r["text"]), 60)
+        self.assertRegex(r["text"].split("\n")[0], TAG_RE)
+        self.assertLessEqual(views.utf16_len(r["text"]), 73)
 
     def test_a_repost_keeps_the_tag(self):
         f = self.sheet_fixture()
         with FakeBroker() as b:
             call("show_view", render_id=f["render_id"])
             text = b.proposal()["text"]
-        self.assertTrue(text.split("\n")[0].endswith(f" · {f['render_id'][1:]}"), text)
+        # #53: the repost is the stored text, its tag the original composition time
+        self.assertEqual(text.split("\n")[0], self.render_text(f["render_id"]).split("\n")[0])
+        self.assertRegex(text.split("\n")[0], TAG_RE)
 
 
 # ---------------------------------------------------------------------------------------

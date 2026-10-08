@@ -188,7 +188,7 @@ class MigratedDeliveredStates(StoreCase):
         pids = self.v11(change=second)
         posted = self.scheduled("d3d3d3d3-b3")
         self.assertEqual(len(posted), 1)
-        self.assertIn("new: 0 to confirm · 1 missing", posted[0]["text"])
+        self.assertIn("new: 1 missing", posted[0]["text"])
         self.assertEqual([r[0] for r in self.conn.execute(
             "SELECT pid FROM render_states WHERE render_id='legacy-1'")], [pids[0]])
 

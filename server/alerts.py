@@ -201,17 +201,17 @@ def _units(conn, rows) -> list:
                 paren = f" ({detail})" if detail else ""
                 text = (GMAIL_ABSENT if a["kind"] == "gmail" and c.get("absent")
                         else COLLECTION[a["kind"]].format(paren=paren))
-            out.append((a["alert_id"], None, views._wrap(text)))
+            out.append((a["alert_id"], None, [text]))
         elif a["kind"] == "run-stopped":
             reason = views.field(json.loads(a["detail"]).get("reason", "").rstrip(". "), 300)
-            out.append((a["alert_id"], None, views._wrap(STOPPED.format(reason=reason))))
+            out.append((a["alert_id"], None, [STOPPED.format(reason=reason)]))
         elif a["kind"] == "run-incomplete":
-            out.append((a["alert_id"], None, [w for line in json.loads(a["detail"])["lines"]
-                                              for w in views._wrap(views.clip(line, 300))]))
+            out.append((a["alert_id"], None, [views.clip(line, 300) for line
+                                              in json.loads(a["detail"])["lines"]]))
     failed = tuple(a["alert_id"] for a in rows if a["kind"] == "mirror-failed")
     if failed:                  # d1: every refused mirror write pending, said as one line
-        out.append((failed, None, views._wrap(MIRROR_FAILED.format(
-            n=len(failed), s="" if len(failed) == 1 else "s"))))
+        out.append((failed, None, [MIRROR_FAILED.format(
+            n=len(failed), s="" if len(failed) == 1 else "s")]))
     for a in rows:
         if a["kind"] in PACKAGE or a["kind"] == "package-uncertain":
             c = json.loads(a["detail"])
@@ -223,15 +223,15 @@ def _units(conn, rows) -> list:
                 fname = conn.execute("SELECT filename FROM packages WHERE package_id=?",
                                      (c["package_id"],)).fetchone()[0]
                 lines = delivery.offer_lines(fname) if why is None \
-                    else views._wrap(f"{views.field(fname)} may not have arrived — {why}.")
+                    else [f"{views.field(fname)} may not have arrived — {why}."]
             elif a["kind"] == "package-send-failed" and why is not None:
-                lines = views._wrap(f"The {dates.quarter_label(c['quarter'])} package didn't go "
-                                    f"out — {why}.")
+                lines = [f"The {dates.quarter_label(c['quarter'])} package didn't go "
+                                    f"out — {why}."]
             else:
                 reason = views.field((c.get("reason") or "").rstrip(". "), 300)
-                lines = views._wrap(PACKAGE[a["kind"]].format(
+                lines = [PACKAGE[a["kind"]].format(
                     quarter=dates.quarter_label(c["quarter"]), reason=reason,
-                    why=f" ({reason})" if reason else ""))
+                    why=f" ({reason})" if reason else "")]
             out.append((a["alert_id"], None, lines))
     changed = []
     for a in rows:
@@ -242,7 +242,7 @@ def _units(conn, rows) -> list:
         pid = conn.execute("SELECT pid FROM aliases WHERE row_id=?", (c["row_id"],)).fetchone()
         head = views.headline(work.describe(conn, pid[0])) if pid else f"payment #{c['row_id']}"
         word = CHANGE_WORD.get(c["change"], c["change"])
-        out.append((a["alert_id"], (pkg, c["quarter"]), views._wrap(f"{head} — {word}")))
+        out.append((a["alert_id"], (pkg, c["quarter"]), [f"{head} — {word}"]))
     return out
 
 
@@ -252,9 +252,8 @@ def _lines(units) -> tuple:
     lines, owners, pkg = [], [], None
 
     def put(text, owner=None):
-        for w in views._wrap(text):
-            lines.append(w)
-            owners.append(owner)
+        lines.append(text)
+        owners.append(owner)
 
     def close():
         q = pkg[1].split("-")[1]

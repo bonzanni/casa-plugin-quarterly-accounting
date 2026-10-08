@@ -157,7 +157,7 @@ class ImportDoesNotStaleAReading(_Q3):
             self.conn.execute("UPDATE binding SET row_high_water=row_high_water+7,"
                               " watermark_announced=1, package_name_announced=1")
         rec = self.tap(prop, "Apply")
-        self.assertIn("Unpaired", rec["receipt"])
+        self.assertIn("Removed the match for", rec["receipt"])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE author='operator'"
                                            ).fetchone()[0], 1)
 

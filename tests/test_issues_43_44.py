@@ -65,7 +65,8 @@ class SendItAgainOnThePackage(StoreCase):
         r = self.conn.execute("SELECT * FROM renders WHERE kind='package-file'").fetchone()
         sc = json.loads(r["scope_json"])
         self.assertEqual(sc["offers"], [pkg])
-        self.assertTrue(r["text"].endswith(views.tag_for(r["render_id"])), r["text"])
+        # #53: the tag is the composition time (" · 8 Oct 21:04:37")
+        self.assertRegex(r["text"], r" \u00b7 \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d$")
         self.assertIsNotNone(r["posted_seq"])
         # simple loop §1: the caption is the whole message — no package note follows
         self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE"
@@ -140,7 +141,7 @@ class DeskNames(StoreCase):
         fx = self.sheet_fixture(payee="Snelstart Software", guesses=3)
         out, prop = self.propose("the SnelStart one is wrong")
         self.assertIsNotNone(prop, out)
-        self.assertIn("Unpair", prop["text"])
+        self.assertIn("Remove the match for", prop["text"])
         self.tap(prop, "Apply")
         self.assertEqual(self.conn.execute("SELECT state FROM match_state WHERE match_id=?",
                                            (fx["match_id"],)).fetchone()[0], "rejected")

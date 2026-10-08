@@ -638,12 +638,12 @@ def gen_end_message_operator(sh, st, b):
     _missing(st, [hostile(22)], day=Q2_DAY)
     end = _c(st, cards.compose_end, st.job_id, scheduled=False)
     labels = [x["label"] for x in _post(sh, st, b, "end:operator", end, "Q3 checked")]
-    if labels != ["Review 6", "Confirm all 3", "Get package"]:
+    if labels != ["Review", "Confirm all", "Get package"]:
         raise AssertionError(f"end:operator: the buttons are {labels}")
     _proposals(st, 27, start=3)
     end = _c(st, cards.compose_end, st.job_id, scheduled=False)
     labels = [x["label"] for x in _post(sh, st, b, "end:operator-full", end, "more to confirm")]
-    if labels != ["Review 33", "Get package"]:
+    if labels != ["Review", "Get package"]:
         raise AssertionError(f"end:operator-full: the buttons are {labels}")
 
 
@@ -693,7 +693,7 @@ def gen_end_message_handover(sh, st, b):
     _missing(st, [hostile(3)])                                  # not shown: not handed
     end = _c(st, cards.compose_end, st.job_id, scheduled=False,
              handover_docs=[filed, held, lone])
-    _post(sh, st, b, "end:handover", end, "Filed. Paired with")
+    _post(sh, st, b, "end:handover", end, "Filed. Matched to")
 
 
 def gen_end_message_with_completion(sh, st, b):
@@ -718,7 +718,7 @@ def gen_open_items(sh, st, b):
     _proposals(st, 2, alternatives=2)
     _missing(st, [hostile(20), hostile(21)])
     out = sh.call(st, b, "open-items", "show_view", {"view": "open", "quarter": QUARTER})
-    if [x["label"] for x in out] != ["Review 4", "Confirm all 2", "Get package"]:
+    if [x["label"] for x in out] != ["Review", "Confirm all", "Get package"]:
         raise AssertionError(f"open-items: the buttons are {[x['label'] for x in out]}")
 
 
@@ -729,7 +729,7 @@ def gen_all_answered(sh, st, b):
     left = _missing(st, [hostile(20)])
     st.granted(lambda c, grant: work.leave_missing_in_tx(c, left, grant=grant))
     sh.call(st, b, "all-answered", "show_view", {"view": "open", "quarter": QUARTER})
-    if "all answered" not in next(r for r in sh.records
+    if "all accounted for" not in next(r for r in sh.records
                                   if r["case"] == "all-answered")["display_expect"]:
         raise AssertionError("all-answered: the card does not say so")
 
@@ -807,7 +807,7 @@ def gen_replace_cards(sh, st, b):
         rows.append(pid)
     end = _c(st, cards.compose_end, st.job_id, scheduled=False)
     labels = [x["label"] for x in _post(sh, st, b, "end:replace", end, "to check")]
-    if labels != ["Review 2", "Get package"]:
+    if labels != ["Review", "Get package"]:
         raise AssertionError(f"end:replace: the buttons are {labels}")
     for k, case in ((0, "replace:job"), (1, "replace:operator")):
         buttons = _post(sh, st, b, case, _c(st, cards.card, end, k), "already has an invoice")

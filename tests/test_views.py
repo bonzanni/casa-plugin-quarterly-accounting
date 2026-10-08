@@ -135,7 +135,8 @@ class TestSheet(Base):
         all_text = self.render("all")["text"]
         self.assertIn("Vendor00", all_text)
 
-    def test_phone_width_no_numbering_no_machinery(self):
+    def test_whole_lines_no_numbering_no_machinery(self):
+        """#54: no fixed-width hard break; a headline stays one line, the client wraps."""
         for i in range(12):
             self.add(amount_minor=100 + i, counterparty="A very long vendor name that goes on %d" % i)
         for v in views.VIEWS:
@@ -143,8 +144,8 @@ class TestSheet(Base):
                 continue
             text = self.render(v)["text"]
             for line in text.splitlines():
-                if not line.startswith("http"):
-                    self.assertLessEqual(len(line), views.WIDTH, (v, line))
+                if line.startswith("A very long vendor name"):
+                    self.assertIn(" · ", line, (v, line))      # its amount and date with it
                 self.assertIsNone(re.match(r"^\s*\d+[.)]\s", line), (v, line))
             for word in views.FORBIDDEN:
                 self.assertNotIn(word, text, (v, word))
@@ -176,7 +177,7 @@ class TestSheet(Base):
         self.add()
         r = self.render()
         self.assertIn("First review", r["text"])
-        self.assertIn('say "start from Q2" to go further back', r["text"])
+        self.assertIn('ask me to do Q2 to go further back', r["text"])
         views.mark_rendering_delivered(self.conn, r["render_id"])
         again = self.render()["text"]
         self.assertNotIn("First review", again)
@@ -501,8 +502,13 @@ class TestRenderLog(Base):
 
     def test_same_store_same_bytes(self):
         self.add()
-        # binding V2: two renderings of one unchanged store differ only by their tag
-        a, b = self.render(), self.render()
+        # binding V2 / #53: two renderings of one unchanged store differ only by their tag
+        # (the composition second: composed a second apart here)
+        import datetime as dt
+        with self.patch_clock(dt.datetime(2026, 10, 7, 12, 0, 1, tzinfo=dt.timezone.utc)):
+            a = self.render()
+        with self.patch_clock(dt.datetime(2026, 10, 7, 12, 0, 2, tzinfo=dt.timezone.utc)):
+            b = self.render()
         self.assertNotEqual(a["text"], b["text"])
         self.assertEqual(untag(a["text"]), untag(b["text"]))
 

@@ -88,7 +88,6 @@ PATTERNS = [
     ("class_none", re.compile(r"(?P<k>payslips|statements|receipts) don'?t matter")),
     ("identity", re.compile(_T + r"\s+is\s+(?P<who>(?:my|our)\s+.+)")),
     ("stop", re.compile(r"stop chasing\s+(?P<q>q[1-4](?:\s+\d{4})?)")),
-    ("start", re.compile(r"start from\s+(?P<q>q[1-4](?:\s+\d{4})?)")),
     ("name", re.compile(r"call the zips\s+(?P<n>.+)")),
     ("ledger_reset", re.compile(r"the bank ledger was (?:reset|wiped)")),
     ("revive", re.compile(r"have another look at\s+(?:the\s+)?(?P<t>.+?)(?:\s+one)?")),
@@ -355,8 +354,9 @@ REBUILD_BLOCKED = ("Not rebuilding yet: a correction in this message did not app
 # value is a field (views.field; views.headline already takes its fields through it)
 PHRASE = {
     "confirm": ("Confirm {h}.", "Confirmed {h}."),
-    "unpair": ("Unpair {h}.", "Unpaired {h}."),
-    "set_aside": ("Set aside {n} for {h}.", "Set aside {n} for {h}."),
+    # PLAY 0.11.2: a proposal is rejected, a match is removed (plain words for what it is)
+    "unpair": ("{act} {h}.", "{done} {h}."),
+    "set_aside": ("Rule out {n} for {h}.", "Ruled out {n} for {h}."),
     "exempt": ("{h}: needs no document{drop}.", "{h}: needs no document{dropped}."),
     "lift": ("{h}: needs a document again.", "{h}: needs a document again."),
     "revive": ("{h}: look again at the next check.", "{h}: I'll look again at the next check."),
@@ -365,11 +365,12 @@ PHRASE = {
     "class_none": ("{kind} are no longer needed.", "{kind} are no longer needed."),
     "stop": ("Stop chasing {q}: {n} still missing, no longer searched.",
              "Stopped chasing {q}: {n} still missing, no longer searched."),
-    "start": ("Start from {q}; its payments come in at the next check.",
-              "Starting from {q}; its payments come in at the next check."),
     "name": ("Call the zips {slug}-….zip.", "The zips are now called {slug}-….zip."),
     "ledger_reset": ("{note}", "{note}"),
 }
+UNPAIR_WORDS = {True: {"act": "Reject the suggested document for",
+                        "done": "Rejected the suggested document for"},
+                False: {"act": "Remove the match for", "done": "Removed the match for"}}
 _LIVE = "SELECT pid, revision FROM projections WHERE merged_into IS NULL AND ended IS NULL"
 
 
@@ -580,7 +581,7 @@ class _Run:
         return res
 
     def setting(self, op, params, fn, phrase_args, what):
-        """A store-wide setting (stop chasing, start from, the zip name, the
+        """A store-wide setting (stop chasing, the zip name, the
         ledger reset) — guarded like _broad, so a refusal rides in the same
         receipt beside the other clauses (pre-flight R2; spec §Flows,
         "the exceptions ride in the same receipt")."""
@@ -888,13 +889,6 @@ def _apply(conn, run, verb, m, items):
                        f"Still chasing {dates.quarter_label(q)}"):
             run.touched_quarters.add(q)        # "rebuild it" then rebuilds that quarter
         return
-    if verb == "start":
-        q = _quarter(m.group("q"))
-        run.setting("start", {"day": dates.quarter_bounds(q)[0]},
-                    lambda: work.set_watermark_in_tx(conn, q, grant=run.grant),
-                    {"q": dates.quarter_label(q)},
-                    f"Not changing where the books start ({dates.quarter_label(q)})")
-        return
     if verb == "name":
         run.setting("name", {"slug": binding.slug(m.group("n"))},
                     lambda: binding.set_package_name_in_tx(conn, m.group("n"), grant=run.grant),
@@ -1051,19 +1045,19 @@ def _one(conn, run, verb, d, m):
                             conn, grant=run.grant, match_id=p["match_id"],
                             expected_revision=p["rev"], render_id=p["render_id"],
                             bind=p["bind"]),
-                        {"h": h})
+                        {"h": h, **UNPAIR_WORDS[d["status"] == "proposed"]})
         elif d["candidates"]:
             n = len(d["candidates"])
             run.guarded(d, "set_aside", lambda: _bind_candidates(conn, run, d),
                         lambda p: _set_aside_all(conn, run, p),
-                        {"h": h, "n": "both candidates" if n == 2 else
-                         f"{n} candidate{'s' if n != 1 else ''}"})
+                        {"h": h, "n": "both invoices" if n == 2 else
+                         f"{n} invoice{'s' if n != 1 else ''}"})
         else:
-            run.note(f"{h} has nothing paired to remove — say it needs no "
+            run.note(f"{h} has no match to remove — say it needs no "
                      "document, or hand me the invoice.")      # a no-op blocks its rebuild
     elif verb == "confirm":
         if cur is None:
-            run.note(f"{h} has no single pairing to approve.")
+            run.note(f"{h} has no single match to confirm.")
         elif not run.recorded(d, cur):
             run.note(f"{h}: the pairing on that sheet has changed since — nothing applied.")
         elif not views._needs_check(d):
@@ -1073,8 +1067,8 @@ def _one(conn, run, verb, d, m):
     elif verb in ("exempt", "lift"):
         def phrase(res):
             dropped = any(e.startswith("unpaired") for e in res.get("effects", ()))
-            return {"h": h, "drop": "; drop its pairing" if dropped else "",
-                    "dropped": "; dropped its pairing" if dropped else ""}
+            return {"h": h, "drop": "; remove its match" if dropped else "",
+                    "dropped": "; removed its match" if dropped else ""}
         run.guarded(d, verb, lambda: _projection_params(conn, run, d),
                     lambda p: matches.set_exemption_in_tx(
                         conn, grant=run.grant, pid=p["pid"], exempt=(verb == "exempt"),

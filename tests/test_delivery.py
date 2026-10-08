@@ -126,8 +126,9 @@ class TestTelegram(Base):
             text = views.build_review(self.conn, view=view, quarter="2026-Q3", page=page)["text"]
             self.assertIn('say "send it again"', text, view)
             self.assertLessEqual(views.utf16_len(text), views.BODY_LIMIT)
-            for line in text.splitlines():
-                self.assertLessEqual(len(line), views.WIDTH, (view, line))
+            # #54: the offer is one whole line; the client wraps it
+            self.assertTrue(any(ln.endswith('may not have arrived — say "send it again".')
+                                for ln in text.splitlines()), (view, text))
             for word in views.FORBIDDEN:
                 self.assertNotIn(word, text, (view, word))
         # a view that does not fit is cut by the final fit, never extended after it

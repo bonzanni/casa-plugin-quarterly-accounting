@@ -194,7 +194,7 @@ class TestOperatorWrites(Base):
         moved = self.machine_entry(other, d)
         self.assertEqual(self.state(moved), "matched")
         rid = self.show(self.pid)
-        with self.assertRaisesRegex(db.Refusal, "since been paired"):
+        with self.assertRaisesRegex(db.Refusal, "since been matched"):
             self.granted(matches.confirm_in_tx, match_id=a, expected_revision=self.rev(match_id=a),
                          render_id=rid)
 

@@ -202,7 +202,7 @@ class Verdict(_Q3):
         self.assertEqual([x["label"] for x in item["buttons"]],
                          ["Right", "Wrong", "No invoice needed"])       # §4: no walk Next
         out = self.tap(item, "Wrong")
-        self.assertIn("Unpaired", out["receipt"])
+        self.assertIn("Removed the match for", out["receipt"])
 
     def test_after_right_the_item_is_paired_not_proposed(self):
         """T5b / spec 7.3: a verdict acts on PROPOSED pairings; an operator-confirmed pairing
@@ -279,7 +279,7 @@ class Verdict(_Q3):
         fx = self.sheet_fixture()
         _, prop = self.item(fx["pid"])
         out = self.tap(prop, "No invoice needed")
-        self.assertIn("needs no document; dropped its pairing.", out["receipt"])
+        self.assertIn("needs no document; removed its match.", out["receipt"])
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM log WHERE author='operator' AND kind='exempt'").fetchone()[0], 1)
         _, again = self.item(fx["pid"])
@@ -332,6 +332,6 @@ class Verdict(_Q3):
         with db.tx(self.conn):
             res, line = taps._apply_one(self.conn, self.grant(), out["render_id"], "wrong", d)
         self.assertEqual(sorted(res["set_aside"]), sorted(mids))
-        self.assertTrue(line.startswith("Set aside both candidates for "), line)
+        self.assertTrue(line.startswith("Ruled out both invoices for "), line)
         self.assertEqual(sorted(r[0] for r in self.conn.execute(
             "SELECT match_id FROM log WHERE kind='unpair' AND author='operator'")), sorted(mids))

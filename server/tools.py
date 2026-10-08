@@ -452,8 +452,9 @@ def t_job_status(args):
           "Your desk's way to start the accounting check, also when a delegate asks you to "
           "start or run it (even naming quarterly-accounting:work). "
           "Record a check (kind=check, trigger=operator) or a filed document handed over "
-          "(kind=handover, trigger=operator, doc_ids) BEFORE start_job — a check the operator "
-          "named a quarter for (\"check Q2\") carries quarter; then start_job with "
+          "(kind=handover, trigger=operator, doc_ids) BEFORE start_job — getting a quarter "
+          "done carries quarter (one before the books' start moves the start, no question "
+          "asked; a null start_job: say `line`, nothing was asked); then start_job with "
           "the returned start_job; then say the result's reading: "
           "pending → `line`; job_busy → ask_state(kind, request_id) and say its line; "
           "anything else → \"I couldn't start the check (<Casa's message>). Ask again in "
@@ -622,8 +623,9 @@ def t_review(args):
 @register("show_view",
           "Post a view to the operator, with its buttons (Casa posts it, labelled; never "
           "retell it). view: status, missing, check, rest, older, all, item (with pid), "
-          "quarter, open (the card of what is still open, with its buttons: \"what's "
-          "open\", \"review\"; at most a quarter); page/after/prev from a previous "
+          "quarter, open (where a quarter stands: one card with its state and buttons; at "
+          "most a quarter; for a quarter before the books it answers `say` and posts "
+          "nothing: say that line); page/after/prev from a previous "
           "`next`, unchanged. render_id: post that stored rendering again (the job's "
           "`view` unit). After Casa's receipt (casa_delivery.status delivered), call "
           "mark_rendering_delivered(render_id).",

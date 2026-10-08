@@ -22,8 +22,8 @@ def request_work(conn, kind, trigger, doc_ids=None, quarter=None) -> dict:
         raise db.Refusal("kind is 'check' or 'handover'")
     if trigger not in ("cron", "operator"):
         raise db.Refusal("trigger is 'cron' or 'operator'")
+    import cards, dates, work
     if quarter is not None:
-        import dates
         if kind != "check":
             raise db.Refusal("quarter goes with a check")
         dates.parse_quarter(quarter)
@@ -42,11 +42,25 @@ def request_work(conn, kind, trigger, doc_ids=None, quarter=None) -> dict:
                 f"{', '.join(str(i) for i in unknown)} {'are' if len(unknown) > 1 else 'is'} "
                 "not among the filed documents: pass the ids the filing gave you. Nothing "
                 "was asked")
+        line = LINES[kind]
+        if quarter is not None and trigger == "operator" and cards.before_the_books(conn, quarter):
+            # #55 (operator ruling 2026-10-08, "just do it, no question"): getting a quarter
+            # before the books' start done moves the start to its first day, then checks it
+            if _live_run(conn):
+                # d1 (Astra S2): a running check already read the bank from the old start;
+                # its list cannot take the newly included payments, so nothing moves and
+                # nothing is asked: the operator asks again when it has finished
+                return {"request_id": None, "kind": "work", "start_job": None,
+                        "line": f"A check is running right now. When it has finished, ask "
+                                f"me again to do {cards._qn(quarter)}."}
+            first = work.start_from_in_tx(conn, quarter)
+            line = (f"Starting the books from {dates.long_day(first)} and checking "
+                    f"{cards._qn(quarter)} — I'll post the result here.")
         rid = conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json, created_seq,"
                            " created_at, state, quarter) VALUES (?,?,?,?,?, 'queued', ?)",
                            (kind, trigger, json.dumps(ids), db.next_seq(conn),
                             db.now(), quarter)).lastrowid
-    return {"request_id": rid, "kind": "work", "line": LINES[kind], "start_job": dict(START)}
+    return {"request_id": rid, "kind": "work", "line": line, "start_job": dict(START)}
 
 
 def _live_run(conn) -> bool:

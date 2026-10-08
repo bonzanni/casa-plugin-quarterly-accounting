@@ -9,6 +9,7 @@ import authority
 import binding
 import db
 import keys
+import lineage
 import matches
 import reply
 import views
@@ -18,10 +19,13 @@ ACTIONS = ("all-good", "right", "wrong", "no-invoice")
 # simple loop §1: the cards' taps (cards.buttons), each valid on its own kind of card only
 CARD_ACTIONS = ("review", "confirm-all", "confirm", "wrong", "leave", "pick",
                 "exempt-these", "leave-missing", "never", "next-page",
+                "all-quarters", "this-quarter",              # 0.11.2 §B: the one switch
+                "leave-vendor",
                 "keep-current", "use-new")             # rev 18.4 §R18.3
 _ON_KIND = {"end": ("review", "confirm-all"), "open-items": ("review", "confirm-all"),
             "review": ("confirm", "wrong", "leave", "pick"),
-            "vendor-page": ("exempt-these", "leave-missing", "never", "next-page"),
+            "vendor-page": ("exempt-these", "leave-missing", "never", "next-page",
+                            "all-quarters", "this-quarter", "leave-vendor"),
             "replace": ("keep-current", "use-new")}
 CARD_CHANGED = "That changed since it was shown — nothing applied. Here it is as it is now."
 LIST_CHANGED = "That list changed since it was shown — nothing applied. Here it is as it is now."
@@ -74,7 +78,9 @@ def _apply_one(conn, grant, render_id, action, d) -> tuple:
         res = matches.reject_in_tx(conn, grant=grant, match_id=cur["match_id"],
                                    expected_revision=mrevs.get(str(cur["match_id"]), -1),
                                    render_id=render_id, bind="rendered")
-        return res, f"Unpaired {views.headline(d)}."
+        return res, (f"Rejected the suggested document for {views.headline(d)}."
+                      if d["status"] == "proposed"
+                      else f"Removed the match for {views.headline(d)}.")
     if action == "wrong":
         shown = [c["match_id"] for c in d["candidates"] if str(c["match_id"]) in mrevs]
         if not shown:
@@ -83,14 +89,14 @@ def _apply_one(conn, grant, render_id, action, d) -> tuple:
                                            grant=grant)
         n = len(shown)
         return ({"set_aside": shown, "effects": effects},
-                f"Set aside {'both' if n == 2 else n} candidate{'s' if n != 1 else ''} for "
+                f"Ruled out {'both' if n == 2 else n} invoice{'s' if n != 1 else ''} for "
                 f"{views.headline(d)}.")
     res = matches.set_exemption_in_tx(conn, grant=grant, pid=d["pid"], exempt=True,
                                       expected_revision=it["projection_revision"],
                                       render_id=render_id, bind="rendered")
     dropped = [e for e in res["effects"] if e.startswith("unpaired")]
     return res, (f"{views.headline(d)}: needs no document"
-                 + ("; dropped its pairing." if dropped else "."))
+                 + ("; removed its match." if dropped else "."))
 
 
 def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
@@ -152,14 +158,19 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
     rid, review_of, pos = r["render_id"], scope["review_of"], scope.get("pos", -1)
     page, pages = scope.get("page", 1), scope.get("pages") or []
 
-    def onward():
-        """The next page of this vendor, else the next item (cards.card is None when a
-        later page has nothing left: Task 7 carry)."""
-        if pages and page < len(pages):
-            nxt = cards.card(conn, review_of, pos, page + 1)
+    def later_page():
+        """The first later page of this vendor that still has something to show (r7 Astra
+        S1: a page answered meanwhile is skipped, never the end of the vendor), or None."""
+        for p in range(page + 1, len(pages) + 1):
+            nxt = cards.card(conn, review_of, pos, p)
             if nxt is not None:
                 return nxt
-        return cards.next_after(conn, review_of, pos)
+        return None
+
+    def onward():
+        """The next page of this vendor that has something left, else the next item
+        (cards.card is None when a later page has nothing left: Task 7 carry)."""
+        return later_page() or cards.next_after(conn, review_of, pos)
 
     def fresh():
         """The same item as it is now (a fresh first page for a vendor, r10/r11), else the
@@ -167,15 +178,30 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
         return cards.card(conn, review_of, pos, 1) or cards.next_after(conn, review_of, pos)
 
     if action == "review":
-        return _answer(conn, f"Reviewing {_plural(len(scope.get('order') or []), 'item')}.",
+        # PLAY 0.11.2: the counts line's own numbers, never a count of cards
+        return _answer(conn, f"Reviewing {cards.walk_words(scope, ', then ')}.",
                        cards.next_after(conn, rid, -1))
     if action == "confirm-all":
         return _confirm_all(conn, r, scope, grant)
     if action == "next-page":
-        nxt = cards.card(conn, review_of, pos, page + 1)
+        nxt = later_page()
         if nxt is not None:
-            return _answer(conn, f"Page {page + 1} of {len(pages)}.", nxt)
-        return _answer(conn, f"Nothing is left on page {page + 1}: answered meanwhile.",
+            at = json.loads(_row_scope(conn, nxt))["page"]
+            return _answer(conn, f"Page {at} of {len(pages)}.", nxt)
+        return _answer(conn, "Nothing is left on the later pages: answered meanwhile.",
+                       cards.next_after(conn, review_of, pos))
+    if action in ("all-quarters", "this-quarter"):
+        # §B: a switch writes nothing; the same card comes back switched (Casa #1302: the
+        # receipt is required, so it is the shortest plain phrase)
+        on = action == "all-quarters"
+        nxt = cards.switched(conn, rid, on)
+        if nxt is None:
+            return _answer(conn, "Nothing is left on this card: answered meanwhile.",
+                           cards.next_after(conn, review_of, pos))
+        return _answer(conn, "All quarters on." if on else "This quarter only.", nxt)
+    if action == "leave-vendor":
+        # PLAY 0.11.2: a vendor card's non-answer, as on a to-confirm card
+        return _answer(conn, f"Left for now: {views.field(scope['vendor'])}.",
                        cards.next_after(conn, review_of, pos))
     if action == "leave":
         return _answer(conn, f"Left for now: {views.headline(work.describe(conn, pid))}.",
@@ -215,6 +241,10 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
     return _answer(conn, receipt, nxt)
 
 
+def _row_scope(conn, rid) -> str:
+    return conn.execute("SELECT scope_json FROM renders WHERE render_id=?", (rid,)).fetchone()[0]
+
+
 def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:
     """confirm | wrong | pick on one proposal card, bound to what it displayed."""
     d = work.describe(conn, pid)
@@ -223,7 +253,7 @@ def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:
         mrevs = json.loads(_item(conn, rid, pid)["match_revisions_json"])
         matches.pick_in_tx(conn, grant=grant, pid=pid, doc_id=doc_id, render_id=rid,
                            mrevs=mrevs, alternatives_shown=shown_alts)
-        return f"Paired {views.headline(d)}."
+        return f"Matched {views.headline(d)}."
     if action == "confirm":
         return _apply_one(conn, grant, rid, "right", d)[1]
     # D3 / plan round 2 (Astra S1): Wrong answers every candidate the card displayed — the
@@ -233,8 +263,8 @@ def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:
     matches.reject_alternatives_in_tx(conn, grant=grant, pid=pid, doc_ids=shown_alts,
                                       render_id=rid)
     if shown_alts:
-        line = (f"Unpaired {views.headline(d)} and set aside its "
-                f"{_plural(len(shown_alts), 'other candidate')}.")
+        line = (f"Rejected the suggested document for {views.headline(d)} and ruled out its "
+                f"{_plural(len(shown_alts), 'other document')}.")
     return line
 
 
@@ -257,7 +287,8 @@ def _vendor_answer(conn, rid, scope, action, grant):
     if action == "never":
         if _changed(conn, rid, listed):          # Never binds every line it displayed
             return None
-        union = set(listed)
+        union = set(listed) | {int(p) for p in scope.get("others") or {}} \
+            | {int(p) for p in scope.get("also") or []}      # §B, PLAY 0.11.2: stated
         for p in scope.get("prior") or []:
             union |= set(views.render_items(conn, p))
         changes = cards.never_set(conn, scope["vendor"])
@@ -272,14 +303,32 @@ def _vendor_answer(conn, rid, scope, action, grant):
     acts = [p for p in listed if p in set(scope.get("missing", listed))]
     if not acts or _changed(conn, rid, acts):   # bound to the missing lines it acts on
         return None
+    revs = {p: _item(conn, rid, p)["projection_revision"] for p in acts}
+    if scope.get("all_quarters"):
+        # §B: the switch on — plus the other quarters' missing payments the card stated
+        # (bound to its count line), at the revisions frozen on page 1 and recorded by
+        # this card: one that moved since refuses the whole answer
+        frozen = scope.get("others_rev") or {}
+        more = list(scope.get("others_missing") or [])
+        if _changed(conn, rid, more) or any(
+                lineage.projection(conn, p)["revision"] != frozen.get(str(p)) for p in more):
+            return None
+        revs.update({p: _item(conn, rid, p)["projection_revision"] for p in more})
+    # PLAY 0.11.2: the receipt names the payments it acted on, as the card showed them
+    # (r8 Astra S2: the vendor once, then the card's own compact lines, so every payment
+    # fits whole); the other quarters' are counted
+    shown = scope.get("bound_lines") or {}
+    named = "; ".join(shown.get(str(p)) or views.headline(work.describe(conn, p)) for p in acts)
+    more = len(revs) - len(acts)
+    named += f"; and {_plural(more, 'payment')} in other quarters" if more else ""
     if action == "exempt-these":
-        for p in acts:
+        for p, rev in revs.items():
             matches.set_exemption_in_tx(conn, grant=grant, pid=p, exempt=True,
-                                        expected_revision=_item(conn, rid, p)["projection_revision"],
-                                        render_id=rid, bind="rendered")
-        return f"No invoice needed for {_plural(len(acts), vendor + ' payment')}.", "onward"
-    work.leave_missing_in_tx(conn, acts, grant=grant)
-    return f"Left missing: {_plural(len(acts), vendor + ' payment')}.", "onward"
+                                        expected_revision=rev, render_id=rid,
+                                        bind="rendered")
+        return f"No invoice needed ({vendor}): {named}.", "onward"
+    work.leave_missing_in_tx(conn, list(revs), grant=grant)
+    return f"Left missing ({vendor}): {named}.", "onward"
 
 
 def _confirm_all(conn, r, scope, grant) -> dict:

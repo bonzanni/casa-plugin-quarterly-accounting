@@ -551,11 +551,11 @@ S7_EMPTY_SCOPE = ('{"names": {}, "next": null, "offers": [], "pid": null, "propo
 
 
 def untag(text: str) -> str:
-    """A rendering's text without its first-line tag (binding V2: " · <n>", the render id's
-    digits) — for pins of composed text that predate the tag."""
+    """A rendering's text without its first-line tag (" · <d Mon> <HH:MM:SS>", the composition
+    time) — for pins of composed text that predate the tag."""
     import re
     first, sep, rest = text.partition("\n")
-    return re.sub(r" \u00b7 \d+$", "", first) + sep + rest
+    return re.sub(r" \u00b7 \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d$", "", first) + sep + rest
 
 
 def apply_now(conn, text, quoted=None) -> dict:

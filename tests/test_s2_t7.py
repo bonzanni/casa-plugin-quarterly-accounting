@@ -12,9 +12,11 @@ import views  # noqa: E402
 
 A, B, C, D = "aaaaaaaa-1", "bbbbbbbb-2", "cccccccc-3", "dddddddd-4"
 DEAD_LINK = "HTTP 404 not_found; cached data unchanged"      # casa-test's dead bank link
-# issue #47: a finished run completes with what it checked (cards.checked_line)
+# issue #47: a finished run completes with what it checked (cards.checked_line); 0.11.2:
+# after a delivered end card, job.CARD_POSTED
 FINISHED_RE = (r"^(Q\d \d{4} checked: \d+ matched, \d+ to confirm, \d+ missing(, \d+ pending)?"
-               r"|Nothing to check .*)$")
+               r"|Nothing to check .*"
+               r"|The result card is posted in the chat; there is nothing to add\.)$")
 NO_TOOLS = ("Accounting check stopped: bank-feed's tools are not available to the finance "
             "specialist.")
 

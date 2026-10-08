@@ -37,6 +37,10 @@ def _keyed(conn, render_id, specs) -> list:
     return out
 
 
+# the approved script: a card that carries buttons ends with one line saying what they do
+READING_LEGEND = "Apply: make this change · Cancel: change nothing"
+ACCOUNT_LEGEND = "Account n: that one is the business account"
+
 def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
               render_id=None, prev=None) -> dict:
     """§7.1: render exactly as build_review does (or, with render_id, re-post that stored
@@ -60,6 +64,11 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
         elif view == "open":
             if any(v is not None for v in (pid, page, after, prev)):
                 raise db.Refusal("the open items are one card: name at most its quarter")
+            if quarter is not None and cards.before_the_books(conn, quarter):
+                # #55 (the approved script, 1c): one line, nothing deposited or stored; the
+                # null slot is Casa's no-deposit statement (#1015 addendum, INV-PLUG-028),
+                # so the result reaches the desk unchanged
+                return {"view": None, "say": cards.before_books(conn, quarter)}
             rid = cards.compose_open(conn, quarter or cards.main_quarter(conn))
             r = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
         else:
@@ -176,7 +185,7 @@ def _deposit_package(conn, d, pk, line) -> str:
         # caption in the dialect (a plain caption's backslashes doubled: unesc gives back
         # exactly what Telegram shows), seen once deposited (posted_seq)
         rid = f"r{db.next_seq(conn)}"
-        tag = views.tag_for(rid)
+        tag = views.tag_now()
         caption = views.clip(views.caption_safe(views.esc(line, plain=True)),
                              CAPTION_MAX - views.utf16_len(tag)) + tag
         conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
@@ -277,6 +286,7 @@ def propose_reading(conn, text, quoted=None) -> dict:
         if out["unresolved"]:
             body += ["", "Not included:"] + [f"· {x}" for x in out["unresolved"]]
         body += [x for x in out["receipt"] if x.startswith("Not rebuilding yet")]
+        body.append(READING_LEGEND)
         text_ = "\n".join(body)
         if not views.fits_proposal(text_):
             raise db.Refusal(READING_TOO_LONG)
@@ -344,6 +354,7 @@ def propose_account(conn, after=0) -> dict:
         more = len(company) > (after + 1) * ACCOUNTS_PER_PAGE
         if more:
             buttons.append(("More", "propose_account", {"after": after + 1}))
+        lines.append(ACCOUNT_LEGEND + (" · More: the next accounts" if more else ""))
         text = "\n".join(lines)
         assert views.fits_proposal(text)   # 6 lines of ≤ 2×60+20 units: far within budget
         value = _proposal(text, buttons, "accounts")

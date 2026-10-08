@@ -17,7 +17,6 @@ import contextlib
 import hashlib
 import json
 import re
-import textwrap
 import unicodedata
 
 import amounts
@@ -27,7 +26,6 @@ import db
 import lineage
 import work
 
-WIDTH = 64
 CAP = 8
 TELEGRAM_LIMIT = 4096
 LABEL_ALLOWANCE = 64       # Casa's "📊 <display name>" label line: the plugin cannot read it
@@ -91,11 +89,21 @@ def printed_ref(pid):
     return _NAMES.pids.get(pid) if _NAMES is not None else None
 
 
-def tag_for(render_id: str) -> str:
-    """Binding V2: every rendering composed after S7 ends its first line with " · <n>", its
-    render id's digits — a separator and digits only, no machinery word — so two post-S7
-    renderings never match one quote, whatever Casa's raw truncation does to the rest."""
-    return f" {MARK} {render_id[1:]}"
+def tag_now() -> str:
+    """#53 (operator ruling 2026-10-08, the day added by BRAIN's ruling on d1 Terra S2): every
+    rendering's first line ends with " · 8 Oct 21:04:37", the moment it is composed in the
+    operator's zone (CASA_TZ, then TZ, then UTC: Casa's
+    timekeeping.resolve_tz order). A reply quoting a card binds the card it quotes; two
+    renderings with the same text composed in the same second (within a year) share it, and a quote of them
+    with differing facts is refused visibly (AMBIGUOUS), never bound to the wrong one."""
+    import os
+    from zoneinfo import ZoneInfo
+    try:
+        tz = ZoneInfo(os.environ.get("CASA_TZ") or os.environ.get("TZ") or "UTC")
+    except Exception:           # an unknown or malformed zone name: Casa falls back to UTC
+        tz = ZoneInfo("UTC")
+    t = db._clock().astimezone(tz)
+    return f" {MARK} {dates.short_day(t.date().isoformat())} {t.strftime('%H:%M:%S')}"
 
 
 def _limit() -> int:
@@ -194,11 +202,11 @@ def _fixpoint(ents, render, raise_level, cap=17) -> None:
 
 
 @contextlib.contextmanager
-def named(items, view_quarter=None):
+def named(items, view_quarter=None, payee=True):
     """Compose under the disambiguation for `items` (what build_review does)."""
     global _NAMES
     saved = _NAMES
-    _NAMES = names_for(items, view_quarter)
+    _NAMES = names_for(items, view_quarter, payee)
     try:
         yield _NAMES
     finally:
@@ -216,7 +224,7 @@ def _doc_extra(doc, level) -> str:
     return " " + MARK + MARK.join(parts)
 
 
-def names_for(items, view_quarter=None) -> _Names:
+def names_for(items, view_quarter=None, payee=True) -> _Names:
     """The disambiguation for a rendering over `items` (every payment it may
     print: a superset of what it prints, so what it prints is distinct too)."""
     global _NAMES
@@ -248,29 +256,10 @@ def names_for(items, view_quarter=None) -> _Names:
         def raise_pid(p):
             level[p] = level.get(p, 0) + 1
             names.pids[p] = lineage_ref(p)[:4 * level[p]]
-        _fixpoint(list(by_pid), lambda p: headline(by_pid[p], view_quarter), raise_pid)
+        _fixpoint(list(by_pid), lambda p: headline(by_pid[p], view_quarter, payee), raise_pid)
     finally:
         _NAMES = saved
     return names
-
-
-def _wrap(line: str) -> list:
-    if len(line) <= WIDTH:
-        return [line]
-    out, cur = [], ""
-    for part in line.split(" · "):
-        cand = part if not cur else cur + " · " + part
-        if len(cand) <= WIDTH:
-            cur = cand
-            continue
-        if cur:
-            out.append(cur)
-        pieces = textwrap.wrap(part, WIDTH, break_long_words=False, break_on_hyphens=False) or [""]
-        out.extend(pieces[:-1])
-        cur = pieces[-1]
-    if cur:
-        out.append(cur)
-    return out
 
 
 def _day(d):
@@ -281,8 +270,11 @@ def _money(d) -> str:
     return amounts.fmt(d["amount_minor"], d["currency"]) if d.get("amount_minor") is not None else "?"
 
 
-def headline(d: dict, view_quarter=None) -> str:
-    parts = [field(d["counterparty"]), _money(d), _day(d["date"])]
+def headline(d: dict, view_quarter=None, payee=True) -> str:
+    """`payee=False` (PLAY 0.11.2): a vendor card's line — its head names the vendor once;
+    the generated ref still tells two otherwise-equal payments apart (names_for is composed
+    with the same `payee`)."""
+    parts = ([field(d["counterparty"])] if payee else []) + [_money(d), _day(d["date"])]
     kind = d["expectation"]["kind"]
     if kind and kind not in ("invoice", "none"):
         parts.append(KIND_WORD[kind])
@@ -341,14 +333,15 @@ def evidence(d: dict, cands=None) -> list:
         doc = cur["document"]
         name = _docname(doc)
         if "facts-changed" in d["reasons"]:
-            out.append("The bank changed this payment after it was paired — still right?")
+            out.append("The bank changed this payment after it was matched — still right?")
         if "amount-unknown" in d["reasons"]:
             out.append("The invoice's amount was read two different ways — check it.")
         labels = cur["labels"]
         if "guessed" not in labels or cur["author"] == "operator":
             # a line that asks for a verdict names what it is asking about (round p7:
             # a no-ref line never named its invoice, yet "all good" confirmed it)
-            out.insert(0, f"Paired with {ident(doc)}.")
+            out.insert(0, f"{'Suggested' if d['status'] == 'proposed' else 'Matched to'}"
+                          f"{':' if d['status'] == 'proposed' else ''} {ident(doc)}.")
         if "guessed" in labels and cur["author"] != "operator":
             rs = cur["runners_up"]
             others = "; ".join(field(x) for x in rs[:RUNNERS_MAX])
@@ -711,8 +704,8 @@ def _compose(conn, view, q, items, members, lead):
         start_q = dates.quarter_of(b["watermark"])
         n = dates.parse_quarter(start_q)[1]
         before = f"Q{n - 1}" if n > 1 else "Q4"
-        parts["announce"].append(f"Starting from {dates.quarter_label(start_q)} — say \"start "
-                                 f"from {before}\" to go further back")
+        parts["announce"].append(f"Starting from {dates.quarter_label(start_q)} — ask me to do "
+                                 f"{before} to go further back")
     secs = parts["sections"]
     if view in ("status", "all"):
         res, parts["silent"] = _residue_blocks(conn)
@@ -784,20 +777,16 @@ def _compose(conn, view, q, items, members, lead):
                 out.append(f'Tell me if one is wrong — "the {field(printed_guessed[0])} one is '
                            'wrong".')
         if view in ("status", "all", "missing") and missing:
-            out.append("Download the PDFs and email them to yourself, then")
-            out.append('say "check emailed invoices" to file them now.')
+            out.append('Download the PDFs and email them to yourself, then say "check emailed '
+                       'invoices" to file them now.')
         return out
     parts["tail"] = tail
     return parts
 
 
 def _text(lines) -> str:
-    """The lines, each wrapped to WIDTH — but while a rendering is composed (binding V2) its
-    first line is kept whole: the tag ends it, and a tag spliced into a wrapped headline
-    would split the identity it binds (_bindable)."""
-    return "\n".join(w for i, line in enumerate(lines)
-                     for w in ([line] if i == 0 and _TAG and line else
-                               _wrap(line) if line else [""]))
+    """The lines, one logical item each: the client wraps them (#54)."""
+    return "\n".join(lines)
 
 
 def _emit(parts, picks, *, announce, more=None, cap=None, all_sections_empty_msgs=True):
@@ -1097,7 +1086,7 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
     # binding V2: the render id is minted before composing — its tag ends line 1, counted
     # inside every page budget (_limit), and this page's `next` names it as `prev` (V1)
     rid = f"r{db.next_seq(conn)}"
-    _TAG = tag_for(rid)
+    _TAG = tag_now()
     lead = _lead(conn)                  # may record the pass's gate
     # Compose and persist under ONE write lock, so the revisions recorded are
     # exactly those of the facts the text shows (round p1, Astra S1: a write

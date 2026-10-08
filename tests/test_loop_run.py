@@ -160,7 +160,9 @@ class Carries(StoreCase):
             self.assertEqual(st["missing"], {})
             self.assertEqual([d["pid"] for d in st["pending"]], [pid])
             rid = cards.compose_end(self.conn, self.job_id, scheduled=False)
-        self.assertIn("0 missing · 1 pending", self.render_text(rid))
+        # 0.11.2: the counts line prints non-zero parts only
+        self.assertIn("\n1 waiting on the bank\n", self.render_text(rid))   # PLAY 0.11.2 wording
+        self.assertNotIn("missing", self.render_text(rid))
 
     def test_a_handover_taken_mid_run_reopens_its_payment_once(self):
         """Carry 4: take_handovers gets only NEWLY taken handover documents."""
