@@ -463,7 +463,7 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
         scope = {"quarter": quarter, "scheduled": scheduled, "proposed": chosen,
                  "confirm_all": len(chosen) if confirm_all else 0,
                  "walk_counts": {"confirm": len(proposals), "questions": len(questions),
-                                 "missing": sum(len(v["pids"]) for v in vendors)},
+                                 "missing": _walk_missing(conn, vendors, quarter, scheduled)},
                  "order": [{"q": q["question_id"]} for q in questions]
                  + [{"p": d["pid"]} for d in proposals] + list(vendors),
                  **_grammar(listed), **(extra_scope or {})}
@@ -473,6 +473,16 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
 def _nonzero(*parts) -> str:
     """The approved script: counts that are zero are not shown."""
     return " · ".join(f"{n} {word}" for n, word in parts if n)
+
+
+def _walk_missing(conn, vendors, quarter, scheduled) -> int:
+    """r5 (Astra S2): the missing payments the walk's vendor cards show and answer — a
+    scheduled walk its items' own; an operator walk each vendor's missing payments of the
+    quarter, left-missing ones included (cards._vendor_page acts on exactly those)."""
+    if scheduled:
+        return sum(len(v["pids"]) for v in vendors)
+    return sum(1 for v in vendors for p in _missing_of(conn, v["v"])
+               if work.describe(conn, p)["quarter"] == quarter)
 
 
 def _counts_line(c) -> str:
@@ -819,7 +829,7 @@ def _page_lines(vendor, ds, i, n, p, pages, link, quarter) -> list:
     return [head] + body + ([views.field(link, views.LINK_MAX)] if link else [])
 
 
-def _pages(vendor, ds, i, n, link, quarter) -> list:
+def _pages(vendor, ds, i, n, link, quarter, extra=()) -> list:
     """Greedy pages of ≤ PAGE_LINES payments, each measured on its COMPLETE final text: the
     page's real lines (_page_lines: escaped vendor name, "· left missing" suffixes, the
     link) with the worst-case page numbers and the worst-case rendering tag (plan round 7,
@@ -828,7 +838,10 @@ def _pages(vendor, ds, i, n, link, quarter) -> list:
     worst = max(len(ds), 2)
 
     def fits(trial):
-        return _fits(_page_lines(vendor, trial, i, n, worst, worst, link, quarter))
+        # r5 (Astra S2): with the lines a page carries after its payments (§B's count line,
+        # in its longest, switched-on form), so the fit never drops a frozen page's payment
+        return _fits(_page_lines(vendor, trial, i, n, worst, worst, link, quarter)
+                     + list(extra))
     pages, cur = [], []
     for d in ds:
         trial = cur + [d]
@@ -925,7 +938,8 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page, frozen
     extra = [] if scheduled else _others_line(others, others_missing, quarter, on)
     with views.named(order, quarter):
         if pages is None:
-            pages = _pages(vendor, order, pos + 1, n, link, quarter)
+            worst = [] if scheduled else _others_line(others, others_missing, quarter, True)
+            pages = _pages(vendor, order, pos + 1, n, link, quarter, worst)
         page = max(1, min(page, len(pages)))
         mine = [ds[p] for p in pages[page - 1] if p in ds]
         if not mine:

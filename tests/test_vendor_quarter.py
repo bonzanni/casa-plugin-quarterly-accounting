@@ -137,3 +137,38 @@ class OfferedDropsSetAside(_Tapping):
         with db.tx(self.conn):
             offered = cards._offered(self.conn, work.describe(self.conn, p))
         self.assertNotIn(alt, [c["doc"]["doc_id"] for c in offered])
+
+
+class R5Fixes(VendorCardQuarter):
+    def test_a_full_vendor_walk_with_other_quarters_shows_every_payment(self):
+        """r5 Astra S2: the count line is sized into the pages, so none drops off."""
+        name = "V*_[](){}-!|#<>~" * 4                     # escapes double its width
+        pids = [self.pay(name, 100000 + i, "2026-08-14") for i in range(48)]
+        self.pay(name, 500000, "2026-10-14")
+        import cards, views
+        self.patch(cards, "LEGEND_MAX", 0)                    # isolate the count line's room
+        for limit in range(1500, 1700, 9):                    # some page ends up tight
+            self.patch(views, "BODY_LIMIT", limit)
+            dep, seen = self.card(), set()
+            while True:
+                seen |= set(self.c_items(dep))
+                if "Next page" not in self.labels(dep):
+                    break
+                dep = self.tap(dep, "Next page")["next"]
+            self.assertEqual(len(seen & set(pids)), len(pids), limit)
+        self.assertEqual(seen & set(pids), set(pids))
+
+    def c_items(self, dep):
+        rid = dep["buttons"][0]["call"]["arguments"]["render_id"]
+        sc = self.scope_of(dep)
+        return [p for p in (r[0] for r in self.conn.execute(
+            "SELECT pid FROM render_items WHERE render_id=?", (rid,)))
+                if str(p) not in (sc.get("others") or {})]
+
+    def test_the_legend_counts_what_the_vendor_card_answers(self):
+        """r5 Astra S2: a left-missing payment is on the card and answered, so it counts."""
+        import work
+        a = self.pay("Twilio", 2000, "2026-08-14")
+        self.pay("Twilio", 2100, "2026-08-15")
+        self.granted(work.leave_missing_in_tx, [a])
+        self.assertIn("Review: go through the 2 missing, one at a time", self.end()["text"])

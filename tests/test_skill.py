@@ -502,7 +502,7 @@ class TestJob(TempEnv):
                  "Record EACH `search_emails` **right after it ran and its listing, before "
                  "anything else**",
                  '`record_search(pid, search="hinted"', 'search="plain"', 'search="payment"',
-                 "File EVERY invoice", "4. **Decide it in ONE call:**",
+                 "File each of its answer's `files`", "4. **Decide it in ONE call:**",
                  "5. **Save what worked:**"]
         pos = [v.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
