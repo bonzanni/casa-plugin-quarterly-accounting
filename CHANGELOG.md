@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.5
+
+Same store schema and Casa floor (v0.344.39).
+
+- **A vendor card's legend shows the vendor's name as written (#60).** When a vendor's bank
+  text holds a character the chat reads as formatting, such as `*` or `_` ("PAYPAL *ACME"),
+  the legend's "Never for …" entry could show part of the name in italics or with characters
+  missing. It now reads exactly as the [Never for …] button does.
+
 ## 0.11.4
 
 See the proposed document. Same store schema and Casa floor (v0.344.39); [See PDF] keeps its

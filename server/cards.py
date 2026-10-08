@@ -1248,7 +1248,9 @@ def legend(kind, scope) -> str:
         if action in ("exempt-these", "leave-missing") and scope.get("all_quarters"):
             action += "-all"
         noun = scope.get("noun", "invoice")
-        parts.append(LEGEND[action].format(label=label, walk=walk_words(scope),
+        # #60: a label carries a vendor's name ([Never for X]); the legend is card text,
+        # so it is escaped as every dynamic field is (a button label is plain)
+        parts.append(LEGEND[action].format(label=views.esc(label), walk=walk_words(scope),
                                            kind=scope.get("doc_word") or "document",
                                            others=len(scope.get("others_missing") or []),
                                            # #63: the button's own words
