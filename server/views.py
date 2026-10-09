@@ -738,6 +738,7 @@ def _compose(conn, view, q, items, members, lead):
     older_open = [d for d in items if d["quarter"] and d["quarter"] < q and _open_required(d)]
     older_missing = [d for d in older_open if _is_missing(d)]
     older_unsearched = [d for d in older_open if _is_unsearched(d)]
+    older_unclassified = [d for d in older_open if _is_unclassified(d)]
     missing = [d for d in cur if _is_missing(d)]
     unsearched = [d for d in items if _is_unsearched(d)]
     guessed = [d for d in items if _needs_check(d)]
@@ -816,6 +817,8 @@ def _compose(conn, view, q, items, members, lead):
 
     def tail(printed_guessed):
         out = list(packages)
+        if view == "quarter" and uncl:              # #98 r1 (Astra): its own count here too
+            out += ["", f"{len(uncl)} not yet classified — the categories aren't in yet."]
         if view in ("status", "all", "missing"):
             counts = []
             if uncl:
@@ -833,7 +836,8 @@ def _compose(conn, view, q, items, members, lead):
                 out.append(f'+{len(nice)} nice-to-have — say "show the rest"')
             # missing and not-searched stay distinct states, each on its own line
             for ds, state in ((older_missing, "still missing"),
-                              (older_unsearched, "not searched yet")):
+                              (older_unsearched, "not searched yet"),
+                              (older_unclassified, "not classified yet")):      # #98 r1
                 if ds:
                     qs = sorted({dates.quarter_label(d["quarter"]).split()[0] for d in ds})
                     out.append(f'+{len(ds)} older {state} ({", ".join(qs)}) — say "show older"')

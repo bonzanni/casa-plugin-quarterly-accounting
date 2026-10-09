@@ -178,3 +178,25 @@ class JudgementBasis(_Loop):
         self.classify(pid, {"income", "refund"})                    # the old facts again
         self.settle(pid)
         self.assertEqual(self.proj(pid)["exp_tier"], "required")
+
+
+class UnclassifiedEverywhere(_Loop):
+    """r1 (Astra S2): an unclassified payment of another quarter is counted wherever its
+    quarter is summed up, never dropped."""
+
+    def test_an_older_unclassified_payment_is_counted_on_the_card_and_in_views(self):
+        import cards, views
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE binding SET watermark='2026-04-01'")
+        old = self.pay("Belastingdienst", 212000, "2026-05-26")
+        self.classify(old, set())
+        self.settle(old)
+        self.pay("Twilio", 2000)                              # a Q3 missing payment
+        end = self.c(cards.compose_end, self.job_id, scheduled=False)
+        text = self.conn.execute("SELECT text FROM renders WHERE render_id=?",
+                                 (end,)).fetchone()[0]
+        self.assertIn("Q2 still open: 1 not classified yet", text)
+        q2 = views.build_review(self.conn, "quarter", quarter="2026-Q2")["text"]
+        self.assertIn("1 not yet classified", q2)
+        status = views.build_review(self.conn, "status", quarter="2026-Q3")["text"]
+        self.assertIn("+1 older not classified yet (Q2)", status)

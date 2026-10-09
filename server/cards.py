@@ -749,7 +749,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     # still owes them their own card)
     reported = {p: v for p, v in reported.items()
                 if work.describe(conn, p)["quarter"] == q}
-    if not st["proposals"] and not open_missing and not c["unclassified"]:
+    if not st["proposals"] and not open_missing and not st["unclassified"]:
         if ready and not all_qs:
             return compose_ready(conn, ready, extra, alerts=alerts, receipts=receipts)
         if not c["pending"]:
@@ -787,9 +787,11 @@ def _other_quarters(st, open_missing, q) -> list:
             continue
         a = sum(1 for d in st["proposals"] if d["quarter"] == eq)
         b = sum(1 for d in open_missing if d["quarter"] == eq)
-        if a or b:
+        u = sum(1 for d in st["unclassified"] if d["quarter"] == eq)        # r1 (Astra)
+        if a or b or u:
             out.append(f"{_qn(eq, q)} {'still open' if eq < q else 'so far'}: "
-                       + _nonzero((a, "to confirm"), (b, "missing")))
+                       + _nonzero((a, "to confirm"), (b, "missing"),
+                                  (u, "not classified yet")))
     return out
 
 
