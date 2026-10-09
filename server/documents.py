@@ -397,6 +397,12 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
     with db.tx(conn):
         passes.check_token(conn, token)
         _doc(conn, doc_id)
+        mark = conn.execute("SELECT coalesce(max(seq), 0) FROM log").fetchone()[0]
+        if "document_date" in fields:
+            # #73 (r1, Terra S2): the date goes in before the amount's reading settles the
+            # holders, so the fit window is judged on the date this reading leaves
+            conn.execute("UPDATE documents SET document_date=? WHERE doc_id=?",
+                         (fields["document_date"], doc_id))
         # h1/h2: every write of a document's amount goes through the one sticky conflict
         # rule (_reread), with the pass_token or without (h2, Astra S1: a job reading sent
         # without it matched a disagreeing amount; no other caller writes an amount)
@@ -425,7 +431,6 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
             # payment's date, and the package says so
             conn.execute("UPDATE documents SET date_read_at=? WHERE doc_id=?",
                          (db.now() if fields["document_date"] else None, doc_id))
-        mark = conn.execute("SELECT coalesce(max(seq), 0) FROM log").fetchone()[0]
         lineage.settle_doc_holders(conn, doc_id)
         d = _doc(conn, doc_id)
         out = {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields,

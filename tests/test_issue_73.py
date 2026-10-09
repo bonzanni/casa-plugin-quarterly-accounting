@@ -93,3 +93,23 @@ class Redated(StoreCase):
             self.drv.run_job("dddddddd-4")
         self.assertEqual(self._holders(doc), [sep])
         self.assertIn("15 Sep", untag(self.drv.posted_end("dddddddd-4")["text"]))
+
+    def test_a_reading_of_amount_and_date_together_is_judged_on_the_new_date(self):
+        """r1 (Terra S2): a job proposal made on a wrong date (as before 0.11.8), corrected in
+        ONE reading to its amount and a date that fits — kept, not released on the old date."""
+        import documents, loop
+        doc = self.drv.file_unread("5004871233", "LinkedIn", 5784, document_date="2026-04-15")
+        documents.update_document_metadata(self.conn, doc, document_date="2026-04-15")
+        sep = self.drv.pid_of(self.nos[-1])
+        self.drv.claim("cccccccc-3")
+        real = loop.in_window
+        loop.in_window = lambda row, day: True              # as 0.11.7 allowed it
+        try:
+            self._pair("propose", sep, doc, None)
+        finally:
+            loop.in_window = real
+        self.assertEqual(self._holders(doc), [sep])
+        out = documents.update_document_metadata(self.conn, doc, amount_minor=5784,
+                                                 currency="EUR", document_date="2026-09-15")
+        self.assertEqual(self._holders(doc), [sep])
+        self.assertNotIn("released", out)
