@@ -75,6 +75,10 @@ def rename_vendor(conn, vendor, new_name=None) -> dict:
                              "is no invoice name to use; nothing was renamed")
         if target.strip() == v["name"].strip():
             lead = f"{views.field(v['name'].strip())} already has that name."
+            if v["cp"] is None or v["cp"]["named_at"] is None:
+                # #92 r1 (Astra): asked for, the name is kept from now on (named_at), also
+                # when it is already the one shown
+                kb.upsert_in_tx(conn, v["name"], new_name=target)
         else:
             kb.upsert_in_tx(conn, v["name"], new_name=target)
             lead = _line(v["name"], target)

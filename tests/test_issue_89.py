@@ -92,14 +92,16 @@ class OneVendor(_Case):
                          [f"{views.field(INFO_ISSUER)} is now called Informatique."])
         self.assertEqual(self.entries(), 1)
 
-    def test_already_that_name_posts_the_card_and_writes_nothing(self):
+    def test_already_that_name_posts_the_card_and_pins_the_name(self):
         self.pay("Coolblue B.V.", 40900, "2026-08-30")
         self.kb("Coolblue B.V.")
         with FakeBroker() as b:
             call("rename_vendor", {"vendor": "coolblue", "new_name": "Coolblue B.V."})
         self.assertEqual(json.loads(b.deposits[0]["value"])["pages"],
                          ["Coolblue B.V. already has that name."])
-        self.assertIsNone(self.entry("Coolblue B.V.")["named_at"])
+        # #92 r1: asked for, the name is pinned (named_at) though it was already shown
+        self.assertIsNotNone(self.entry("Coolblue B.V.")["named_at"])
+        self.assertEqual(self.entries(), 1)
 
     def test_several_vendors_fit_is_a_refusal_naming_them(self):
         for t in ("Ryanair H2n0", "Ryanair Mtw0", "Ryanair Zgx0"):

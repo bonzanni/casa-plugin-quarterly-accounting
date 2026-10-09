@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.16
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **"Call Informatique by the name on its invoice" renames it, also when its cards already
+  show that name (#92).** A vendor you have not named only borrows the name on its invoice,
+  so it could change with a later invoice; Finance took the shown name as done and changed
+  nothing. Now the rename happens and keeps the name.
+
 ## 0.11.15
 
 Same store schema (17) and Casa floor (v0.344.67).
