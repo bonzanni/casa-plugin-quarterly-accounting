@@ -30,7 +30,7 @@ def _texts(v) -> set:
     return {kb.norm(t) for t in held if kb.norm(t)}
 
 
-def resolve(conn, words) -> dict:
+def resolve(conn, words, pool=None, done="renamed", named_first=False) -> dict:
     """The one vendor the operator's words name: the same text as its name, one of its bank
     texts or the name on its invoice (case and spacing aside; r1 Terra S1: one level, since a
     card shows an unrenamed vendor under its invoice's name), else the one vendor whose name,
@@ -40,9 +40,17 @@ def resolve(conn, words) -> dict:
     w = kb.norm(words)
     if not w:
         raise db.Refusal("say which vendor: its name, part of it, or its bank text")
-    vs = [v for v in work.vendors(conn) if v["texts"]]
-    for hits in ([v for v in vs if w in _texts(v) | {kb.norm(v["invoice_name"])}],
-                 [v for v in vs if any(w in t for t in _texts(v) | {kb.norm(v["invoice_name"])})]):
+    vs = pool if pool is not None else [v for v in work.vendors(conn) if v["texts"]]
+
+    def held(v):
+        return _texts(v) | {kb.norm(v["invoice_name"])}
+    levels = [[v for v in vs if w in held(v)]]
+    if named_first:
+        # #90: a merge's target is named by its own name or bank text before any vendor
+        # whose invoice merely prints those words (Ryanair Mtw0's invoice says "Ryanair DAC")
+        levels.insert(0, [v for v in vs if w in _texts(v)])
+    levels.append([v for v in vs if any(w in t for t in held(v))])
+    for hits in levels:
         if len(hits) == 1:
             return hits[0]
         if hits:
@@ -50,9 +58,9 @@ def resolve(conn, words) -> dict:
             more = f" and {len(hits) - CANDIDATES_SHOWN} more" \
                 if len(hits) > CANDIDATES_SHOWN else ""
             raise db.Refusal(f"'{views.field(words)}' fits {len(hits)} vendors: {names}{more}. "
-                             "Nothing was renamed; name one of them")
+                             f"Nothing was {done}; name one of them")
     raise db.Refusal(f"no vendor's name or bank text contains '{views.field(words)}'; nothing "
-                     "was renamed")
+                     f"was {done}")
 
 
 def _line(old, new) -> str:
@@ -63,7 +71,6 @@ def _line(old, new) -> str:
 def rename_vendor(conn, vendor, new_name=None) -> dict:
     """One rename (a given name, or with new_name None the name on its invoice) and its post:
     the line before the vendor's card (its latest payment's item card), deposited LAST."""
-    import posting
     if new_name is not None and (not isinstance(new_name, str) or not new_name.strip()):
         raise db.Refusal("new_name is the name to give; leave it out for the name on its "
                          "invoice")
@@ -82,17 +89,69 @@ def rename_vendor(conn, vendor, new_name=None) -> dict:
         else:
             kb.upsert_in_tx(conn, v["name"], new_name=target)
             lead = _line(v["name"], target)
-        rid = posting._compose_list(conn, "item", None, max(v["pids"]), None, None, None)
-        r = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
-        line = _lead_rendering(conn, r, lead)
-        if not posting.has_actions(conn, r):
-            # #93: a card with nothing to act on goes, after its line, as plain messages
-            return {"view": None, **posting.plain_post(conn, r, line)}
-        value, _ = posting._view_value(conn, r, lead=lead)
-        key = posting.delivery_key(conn, "rename", [rid])
-    ref = casa_broker.deposit("view", value, key=key)
-    return {"view": ref, "render_id": rid,
+        out = _line_and_card(conn, max(v["pids"]), lead, "rename")
+    return _deposit(out)
+
+
+def _line_and_card(conn, pid, lead, what) -> dict:
+    """The line before the item card of payment `pid` (inside the caller's transaction): the
+    card composed, the line stored as its page; the deposit's value and key — or, when the
+    card has nothing to act on (#93), the plain post of the line and the card."""
+    import posting
+    rid = posting._compose_list(conn, "item", None, pid, None, None, None)
+    r = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
+    line = _lead_rendering(conn, r, lead)
+    if not posting.has_actions(conn, r):
+        return {"view": None, **posting.plain_post(conn, r, line)}
+    value, _ = posting._view_value(conn, r, lead=lead)
+    return {"rid": rid, "value": value, "key": posting.delivery_key(conn, what, [rid])}
+
+
+def _deposit(out) -> dict:
+    """The deposit, LAST (after the transaction); a plain post is returned as it is."""
+    if "post" in out:
+        return out
+    ref = casa_broker.deposit("view", out["value"], key=out["key"])
+    return {"view": ref, "render_id": out["rid"],
             "note": POSTED.format(after="mark_rendering_delivered(render_id); ")}
+
+
+def _entries_without_payments(conn, vendors) -> list:
+    """#90: a KB entry no live payment resolves to, as a vendor `into` may name (an entry made
+    for a name, e.g. "Ryanair DAC", before any payment of its own)."""
+    held = {v["cp"]["cp_id"] for v in vendors if v["cp"] is not None}
+    return [{"key": kb.norm(r["name"]), "name": r["name"], "texts": [], "pids": [], "cp": r,
+             "invoice_name": None}
+            for r in conn.execute("SELECT * FROM counterparties ORDER BY name")
+            if r["cp_id"] not in held]
+
+
+def merge_vendors(conn, vendor, into) -> dict:
+    """#90: the operator says two vendors are one: X (`vendor`) joins Y (`into`). Every bank
+    text and name X had resolves to Y's entry from now on (kb.merge_in_tx), so X's payments,
+    documents, rules and a running job's work follow; then "<X> is now part of <Y>." before
+    the merged vendor's card, deposited LAST."""
+    with db.tx(conn):
+        vs = [v for v in work.vendors(conn) if v["texts"]]
+        x = resolve(conn, vendor, vs, done="merged")
+        if kb.norm(into) in _texts(x):
+            raise db.Refusal(f"{views.field(x['name'].strip())} and "
+                             f"{views.field(into.strip())} are already one vendor; nothing "
+                             "was merged")
+        pool = [v for v in vs if v["key"] != x["key"]] + _entries_without_payments(conn, vs)
+        if kb.norm(into) == kb.norm(x["invoice_name"]) and not any(
+                kb.norm(into) in _texts(v) for v in pool):
+            # r1 (Astra S1): the words are X's own invoice name and no other vendor bears it —
+            # never a containment guess at a third vendor
+            raise db.Refusal(f"no other vendor is called '{views.field(into.strip())}'; "
+                             "nothing was merged")
+        y = resolve(conn, into, pool, done="merged", named_first=True)
+        kb.merge_in_tx(conn, x, y)
+        lead = (f"{views.field(x['name'].strip())} is now part of "
+                f"{views.field(y['name'].strip())}")
+        lead += "" if lead.endswith(".") else "."
+        out = _line_and_card(conn, max(x["pids"] + y["pids"]), lead, "merge")
+    return _deposit(out)
 
 
 def _lead_rendering(conn, card, text) -> str:
@@ -140,7 +199,9 @@ def rename_all(conn) -> dict:
                         kb.upsert_in_tx(conn, v["name"], new_name=target)
                     renamed.append(target)
                 except db.Refusal:
-                    kept.append(v["name"])
+                    # #90: with the vendor whose name (or bank text) the invoice name is
+                    owner = kb.counterparty_for(conn, target)
+                    kept.append((v["name"], owner["name"] if owner is not None else target))
     parts = []
     if renamed:
         parts.append(f"Renamed {len(renamed)} vendor{'s' if len(renamed) != 1 else ''} to the "
@@ -148,8 +209,11 @@ def rename_all(conn) -> dict:
     else:
         parts.append("No vendor needed a new name.")
     if kept:
+        pairs = [f"{views.field(a)} → {views.field(b)}" for a, b in kept[:LIST_SHOWN]]
+        more = f" and {len(kept) - LIST_SHOWN} more" if len(kept) > LIST_SHOWN else ""
         parts.append(f"{len(kept)} keep{'s' if len(kept) == 1 else ''} the bank name: the "
-                     f"invoice name belongs to another vendor ({_names(kept)}).")
+                     f"invoice name belongs to another vendor ({', '.join(pairs)}{more}). "
+                     "Ask to merge them if they are the same vendor.")
     if given:
         parts.append(f"Kept the names you gave: {_names(given)}.")
     if none:

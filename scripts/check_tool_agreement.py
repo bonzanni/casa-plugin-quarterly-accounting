@@ -38,6 +38,9 @@ CAPABILITY_ENTRIES = {
                       "delivers": {"view": "operator_proposal"}},
     "rename_vendors_to_invoice_names": {"result": "capability", "provides": ["results"],
                                         "delivers": {"results": "operator_message"}},
+    # #90: a merge posts its own outcome — the line and the merged vendor's card
+    "merge_vendors": {"result": "capability", "provides": ["view"],
+                      "delivers": {"view": "operator_proposal"}},
 }
 
 

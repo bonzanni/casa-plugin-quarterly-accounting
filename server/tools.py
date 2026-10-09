@@ -294,6 +294,22 @@ def t_rename_vendor(args):
     return naming.rename_vendor(conn(), args["vendor"], args.get("new_name"))
 
 
+@register("merge_vendors",
+          "The operator says two vendors are one: \"merge X into Y\", \"X and Y are the same "
+          "vendor\". vendor: their words for X (its name, part of it, a bank text, the name on "
+          "its invoice); into: their words for Y, the vendor that stays. X's bank texts, "
+          "documents and rules join Y, and its cards show Y's name. Casa posts \"<X> is now "
+          "part of <Y>.\" with the vendor's card to the operator; never retell it, add "
+          "nothing. After its receipt, mark_rendering_delivered(render_id); your whole reply "
+          "is <silent/>. `refused`: nothing was merged or posted; say its words.",
+          obj({"vendor": S, "into": S}, ("vendor", "into")))
+@capability("view")
+def t_merge_vendors(args):
+    import naming
+    _need(args, "vendor", "into")
+    return naming.merge_vendors(conn(), args["vendor"], args["into"])
+
+
 @register("rename_vendors_to_invoice_names",
           "The operator asks for the invoice names for all vendors: every vendor gets the name "
           "on its latest matched invoice, except a name the operator gave and a name that "

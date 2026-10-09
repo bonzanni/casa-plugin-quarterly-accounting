@@ -81,13 +81,12 @@ classify-transactions does, then offer a check; the ask (below) when they want o
 
 ## Naming a vendor
 
-The operator names a vendor: "call LINKEDIN 'LinkedIn'", the name on its invoice, or invoice
-names for all vendors. Not a reading. One vendor: `rename_vendor(vendor=<their words for
+The operator names a vendor ("call LINKEDIN 'LinkedIn'", by its invoice, all by invoice): not a reading. One vendor: `rename_vendor(vendor=<their words for
 it>, new_name=<the name they give; left out for the name on its invoice>)`, whatever an
 earlier conversation found, also when it already shows that name (the rename pins it).
-All vendors: `rename_vendors_to_invoice_names()`, once. Each posts its outcome to the operator itself: add nothing, your whole reply is `<silent/>`
-(after `rename_vendor`'s receipt, `mark_rendering_delivered(render_id)` first). `refused`:
-nothing was renamed; say its words. Never rename unasked.
+All vendors: `rename_vendors_to_invoice_names()`, once. Two vendors that are one ("merge X
+into Y"): `merge_vendors(vendor=<X>, into=<Y>)`. Each posts its outcome itself (its note says what to mark): add nothing, your whole reply is `<silent/>`. `refused`: nothing changed; say its words.
+Never rename or merge unasked.
 
 ## Asks: a check, a package
 

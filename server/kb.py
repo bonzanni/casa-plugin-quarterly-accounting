@@ -207,6 +207,49 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
     return out
 
 
+# #90: a merge moves each of these whole onto the kept entry when it holds none of its own
+MERGED_FIELDS = (("exp_kind", "exp_tier", "exp_author"),
+                 ("source", "document_link", "link_note"),
+                 ("hint_sender", "hint_subject"), ("search_hint",), ("notes",))
+
+
+def merge_in_tx(conn, x, y) -> None:
+    """#90: vendor x joins vendor y (work.vendors entries, or y a KB entry with no payment),
+    inside the caller's transaction. Every text x stood for (its bank texts, its entry's name
+    and patterns) becomes one of y's bank texts, so its payments, filed documents, cards' and
+    a running job's vendor names all resolve to y's entry (same_vendor, counterparty_for).
+    x's entry goes; its rules fill what y's entry lacks (y's own win; the wider search
+    window); y gets an entry when it had none, and its name is pinned (named_at)."""
+    import lineage
+    ex, ey = x["cp"], y["cp"]
+    texts = [*x["texts"], x["name"]]
+    if ex is not None:
+        texts += [ex["name"], *json.loads(ex["patterns_json"])]
+        conn.execute("DELETE FROM counterparties WHERE cp_id=?", (ex["cp_id"],))
+    if ey is None:
+        conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
+                     " VALUES (?, '[]', ?)", (y["name"].strip(), db.now()))
+        ey = _entry(conn, y["name"])
+    held = {}
+    for t in [*json.loads(ey["patterns_json"]), *texts]:
+        if norm(t) and norm(t) != norm(ey["name"]):
+            held.setdefault(norm(t), _spaced(t))
+    patterns = sorted(held.values())
+    _refuse_shared_bank_text(conn, ey, [ey["name"], *patterns])
+    sets = {"patterns_json": json.dumps(patterns), "updated_at": db.now()}
+    # d1 (Astra S2): y's name is the merged vendor's from now on — pinned, so its cards never
+    # show an invoice name of x's instead (readable_name)
+    sets["named_at"] = ey["named_at"] or sets["updated_at"]
+    if ex is not None:
+        for group in MERGED_FIELDS:
+            if all(ey[f] is None for f in group) and any(ex[f] is not None for f in group):
+                sets.update({f: ex[f] for f in group})
+        sets["window_days"] = max(ex["window_days"], ey["window_days"])
+    conn.execute("UPDATE counterparties SET %s WHERE cp_id=?"
+                 % ", ".join(f"{k}=?" for k in sets), (*sets.values(), ey["cp_id"]))
+    lineage.settle_all(conn)
+
+
 def same_vendor(conn, a, b) -> bool:
     """#84: two vendor names are one vendor — the same text, or texts the knowledge base
     resolves to one entry. A rename changes the display name (loop.vendor_of) while a filed
