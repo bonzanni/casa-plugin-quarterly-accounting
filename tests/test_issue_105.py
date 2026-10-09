@@ -107,3 +107,29 @@ class D1Folds(_Loop):
         self.classify(wage, {"taxes", "payroll"})                       # old facts again
         self.settle(wage)
         self.assertEqual(self.proj(wage)["status"], "open")
+
+
+class R1Folds(_Loop):
+    def test_a_left_missing_payment_whose_tags_now_conflict_is_walked_again(self):
+        import loop
+        p = self.tagged({"software"}, amount=1000)
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE projections SET search_state='accepted-missing'"
+                              " WHERE pid=?", (p,))
+        def why():
+            pr = self.proj(p)
+            row = self.conn.execute("SELECT * FROM bank_rows WHERE row_id=?",
+                                    (pr["dest_row_id"],)).fetchone()
+            return loop.why_work(self.conn, p, pr, dict(row))
+        self.assertIsNone(why())
+        self.classify(p, {"taxes", "payroll"})
+        self.settle(p)
+        self.assertIsNotNone(why())
+
+    def test_an_undecided_unsettled_payment_is_no_missing_line(self):
+        import loop
+        wage = self.tagged({"taxes", "payroll"})
+        with db.tx(self.conn):
+            self.conn.execute("INSERT INTO run_work(job_id, pid, vendor, why) VALUES"
+                              " (?, ?, 'Loon', 'open')", (self.job_id, wage))
+        self.assertEqual(loop.partial_lines(self.conn, self.job_id), [])

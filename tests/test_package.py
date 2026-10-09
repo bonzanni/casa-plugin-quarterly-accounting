@@ -133,7 +133,7 @@ class TestContents(Base):
         kb.upsert_counterparty(self.conn, "Adobe", document_link="https://adobe.example/invoices")
         out, z = self.build()
         st = {r["counterparty"]: r["status"] for r in self.ledger_rows(z)}
-        self.assertEqual(st, {"Adobe": "MISSING", "Mystery": "MISSING",
+        self.assertEqual(st, {"Adobe": "MISSING", "Mystery": "UNCLASSIFIED",
                               "Own account": "NO-DOCUMENT", "Payroll Co": "OPTIONAL-MISSING"})
         notes = z.read("notes.md").decode()
         self.assertLess(notes.index("## Missing"), notes.index("## Not yet classified"))
