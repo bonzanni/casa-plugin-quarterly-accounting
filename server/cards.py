@@ -537,6 +537,16 @@ def _doc_name(d) -> str:
     return " · ".join(parts)
 
 
+def _pending_of(conn, doc):
+    """#72: the earliest in-scope payment still pending at the bank of exactly the document's
+    amount and currency, inside its window (loop.in_window) — or None."""
+    rows = [row for _p, _proj, row in loop.in_scope(conn)
+            if row["status"] != "BOOK" and row["currency"] == doc["currency"]
+            and row["amount_minor"] == doc["amount_minor"]
+            and loop.in_window(row, doc["document_date"])]
+    return min(rows, key=lambda r: dates.effective_date(r) or "") if rows else None
+
+
 def _payment_words(d) -> str:
     return (f"{views.field(views.shown(d))} · {_day(d['date'])} · "
             f"{_money(d['amount_minor'], d['currency'])}")
@@ -576,8 +586,7 @@ def _receipts(conn, docs, job_id=None) -> tuple:
             continue
         d = work.describe(conn, held[0]) if held else None
         if d is not None and d["status"] == "proposed":
-            head.append(f"{name}: proposed for {views.field(views.shown(d))} — confirm "
-                        "below.")
+            head.append(f"{name}: proposed for {_payment_words(d)} — confirm below.")
             if all(x["pid"] != d["pid"] for x in props):
                 d["vendor"] = d["counterparty"]
                 props.append(d)
@@ -597,8 +606,16 @@ def _receipts(conn, docs, job_id=None) -> tuple:
             head.append(f"{name}: checked against {_s(n, 'payment')} it could fit — not "
                         "matched.")
         elif n == 0:
-            head.append(f"{name}: no payment of {money} in the books yet — it's matched when "
-                        "one comes in.")
+            waiting = _pending_of(conn, row)
+            if waiting is not None:
+                # #72 (d2, Astra S2): a payment of that amount the bank has not booked yet —
+                # named as a possibility, never as the document's own
+                head.append(f"{name}: not matched yet — a payment of {money} to "
+                            f"{views.field(loop.vendor_of(conn, waiting))} on "
+                            f"{_day(dates.effective_date(waiting))} is still pending at the bank.")
+            else:
+                head.append(f"{name}: no payment of {money} in the books yet — it's matched "
+                            "when one comes in.")
         else:
             head.append(f"{name}: not matched yet.")
     props.sort(key=_line_key)
@@ -905,6 +922,29 @@ def live_question_card(conn, review_of, pos, pid):
                          src["quarter"], bool(src.get("scheduled")), live[-1]["question_id"])
 
 
+DIFF_FIELDS = (("issuer", "issuer"), ("recipient", "recipient"),
+               ("document_number", "number"), ("document_date", "date"),
+               ("amount_minor", "amount"), ("currency", "currency"), ("kind", "kind"))
+
+
+def _differs(conn, old, new) -> str:
+    """#72: what the two readings say differently, so Keep current / Use new is a choice the
+    operator can see (a reissue often differs only in its recipient)."""
+    a, b = (conn.execute("SELECT * FROM documents WHERE doc_id=?", (x,)).fetchone()
+            for x in (old, new))
+    out = []
+    for col, word in DIFF_FIELDS:
+        if a[col] != b[col]:
+            def show(v):
+                if v is None or v == "":
+                    return "none"
+                if col == "amount_minor":
+                    return _money(v, b["currency"] or a["currency"])
+                return views.field(str(v), 60)
+            out.append(f"{word} {show(a[col])} → {show(b[col])}")
+    return ("Differs: " + "; ".join(out) + ".") if out else "Same reading as the current one."
+
+
 def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):
     """Rev 18.4 §R18.3: "<payment> already has an invoice. Current: … (matched by the job |
     confirmed by you | suggested by the job). New: … (from you)." [Keep current] [Use new].
@@ -931,7 +971,8 @@ def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):
     lines = [f"Card {pos + 1} of {n} · to check",
              f"{views.headline(d, quarter)} already has an invoice.",
              f"Current: {doc_line(old)} ({how}).",
-             f"New: {doc_line(qn['new_doc_id'])} (from you)."]
+             f"New: {doc_line(qn['new_doc_id'])} (from you).",
+             _differs(conn, old, qn["new_doc_id"])]
     scope = {"quarter": quarter, "scheduled": scheduled, "review_of": review_of, "pos": pos,
              "pid": qn["pid"], "question_id": qid, "new_doc_id": qn["new_doc_id"],
              "new_doc_fp": replace.new_doc_fp(conn, qn["new_doc_id"])}
@@ -1236,7 +1277,9 @@ def _buttons(rid, kind, scope) -> list:
             out.append(v("Confirm all", "confirm-all"))
         if scope.get("links_offer") and not scope.get("links"):
             out.append(v("Invoice links", "links"))
-        return out + get
+        # #72: Casa posts a card only with a button — a card with nothing to tap (a copy
+        # already filed, a document not read) carries Close (Casa v0.344.64, #1375)
+        return out + get or [("Close", None, None, None)]
     if kind == "ready":
         return get
     if kind == "replace":
@@ -1313,6 +1356,8 @@ def legend(kind, scope) -> str:
     same function that makes them. Picks share one entry."""
     parts, picked = [], False
     for label, tool, args, _ in _buttons("r0", kind, scope):
+        if tool is None:
+            continue                     # #72: Close says what it does
         if tool == "get_package":
             parts.append(f"Get package: the {_qn(scope['quarter'])} zip for your accountant")
             continue

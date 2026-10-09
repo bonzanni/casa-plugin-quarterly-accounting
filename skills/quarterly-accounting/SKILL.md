@@ -103,9 +103,9 @@ is filed by you, without being asked:
    An invoice sent together with its own receipt: file both, each as what it is (`invoice`,
    `receipt`); the job uses the invoice.
 3. ONE `request_work(kind="handover", trigger="operator", doc_ids=[<every doc_id filed>])`
-   for all the files of the turn, then `start_job` as above. The job reads each document
-   (whatever you could not), matches it only against the payments it could fit, and posts
-   one line per document.
+   for all the files of the turn, then `start_job` as above. The job reads each document,
+   matches it only against the payments it could fit, and posts one line per document.
+   Your reply is the ask's `line` and nothing else: no ids, no tool results.
 
 ## Sending again
 

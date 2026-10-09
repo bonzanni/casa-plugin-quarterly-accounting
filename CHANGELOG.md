@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.8
+
+Requires **Casa v0.344.64 or newer** (#1375, Casa's Close button). Same store schema (16).
+
+- **A handed-over invoice goes to the payment it belongs to (#72).** For a charge that repeats
+  every month at the same amount, a September invoice could be proposed for the April payment,
+  which then blocked the September one. An invoice is now only offered to a payment whose period
+  it can belong to (from two months before that payment's quarter to a month after it), and the
+  check weighs its reference, billing period and date among the payments it could fit.
+- **A payment still pending at the bank is named** ("not matched yet — a payment of EUR 0.46 to
+  modal.com on 26 Sep is still pending at the bank") instead of "no payment of EUR 0.46".
+- **Every hand-off result is posted.** A card with nothing to tap (an invoice already filed, one
+  that could not be read) carries a Close button; before, Casa refused it and you saw only a
+  generic line.
+- Each proposal line names the payment's date and amount ("proposed for LINKEDIN · 15 Sep ·
+  EUR 57.84"); the Keep current / Use new card says what differs ("Differs: recipient …"); the
+  assistant's reply to a hand-off is one short line.
+
 ## 0.11.7
 
 Store schema 16 (a run's handed-over documents; migrated on start). Same Casa floor (v0.344.39).

@@ -39,6 +39,11 @@ def ask_in_tx(conn, job_id, pid, doc_id) -> int:
         raise db.Refusal(f"there is no such document #{doc_id} to use")
     if any(h != pid for h, _ in matches.holders(conn, doc_id)):
         raise db.Refusal("that document is another payment's")
+    import lineage
+    # #72 (0118-r3, Astra S1): every job write that puts a document on a payment passes the
+    # one books guard — a replacement of another period is never asked
+    matches.in_window_or_refuse(conn, lineage.live_row(conn, lineage.projection(conn, pid)),
+                                doc_id, None)
     if matches.taken_elsewhere(conn, doc_id, pid):
         # issue #48 (d1 Astra S1): its purchase backs another payment through a twin
         raise db.Refusal(matches.taken_refusal(conn, doc_id, pid))

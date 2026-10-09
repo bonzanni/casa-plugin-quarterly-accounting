@@ -47,7 +47,8 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              # queues: a unit's handed items and the probe's / record_search's answer
              "files", "files_total", "rows", "snapshot_id", "refs", "search",
              # rev 18.4: the payment unit's fields
-             "searches_left", "holds", "why", "candidates", "handed_over", "decided"}
+             "searches_left", "holds", "why", "candidates", "handed_over", "decided",
+             "handed_fits"}                      # #72
 # §15: tools that left the surface in S7 (their functions stay server-side).
 REMOVED_S7 = ("job_report", "apply_reply", "confirm_match", "reject_match", "set_exemption",
               "stop_chasing", "set_watermark", "set_package_name")
@@ -372,7 +373,7 @@ class TestJob(TempEnv):
                      "vendor-and-dates search", "record_mirror", "record_not_found",
                      "certain", "reset_store", "set_aside(", "refs=["):
             self.assertIn(rule, text)
-        self.assertLessEqual(len(text), 10_800)    # queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90); 0.11.7: the reading unit, handed documents proposed (#67, +200)
+        self.assertLessEqual(len(text), 11_000)    # queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90); 0.11.7: the reading unit, handed documents proposed (#67, +200); 0.11.8: handed_fits, no commentary (#72, +170)
 
     def test_the_units_come_in_the_loops_order(self):
         """Simple loop §2: probes, snapshot, filing, vendor, mirror, the run's one post."""

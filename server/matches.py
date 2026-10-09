@@ -263,6 +263,30 @@ def decidable(conn, pid, expected_revision):
     return proj, row, exp
 
 
+def _date_of(conn, doc_id, date_read):
+    stored = conn.execute("SELECT document_date FROM documents WHERE doc_id=?",
+                          (doc_id,)).fetchone()
+    return date_read or (stored["document_date"] if stored is not None else None)
+
+
+def _in_window(conn, row, doc_id, date_read) -> bool:
+    import loop
+    return loop.in_window(row, _date_of(conn, doc_id, date_read))
+
+
+def in_window_or_refuse(conn, row, doc_id, date_read) -> None:
+    """#72: THE books guard for every job write that puts a document on a payment
+    (machine_in_tx: the pairing and every alternative; replace.ask_in_tx): a document dated
+    outside the payment's fit window (loop.fit_window) is refused. `date_read`: a date the
+    write itself leaves on the document, judged in place of the stored one."""
+    import loop
+    day = _date_of(conn, doc_id, date_read)
+    if not loop.in_window(row, day):
+        lo, hi = loop.fit_window(row)
+        raise db.Refusal(f"document #{doc_id} is dated {day}, outside this payment's window "
+                         f"(from {lo}, before {hi}): it belongs to another payment")
+
+
 def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=(),
                   labels=("clean",), rationale="", runners_up=(), document_date=None,
                   row_digest=None, row_snapshot=None) -> dict:
@@ -305,7 +329,10 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
         # §2.2 reopening (ruling, Task 3 review): a proposal that replaces the payment's own
         # machine pairing keeps the replaced document as one of its alternatives, so it stays
         # held by this payment and on its card; a match replaces it outright (G1)
-        kept = [c.doc_id for c in own if c.doc_id != doc_id and c.doc_id not in alts]
+        # #72 (0118-r3, Terra S1): a document of another period the payment held (a pairing
+        # made before 0.11.8) is released, never kept as an alternative
+        kept = [c.doc_id for c in own if c.doc_id != doc_id and c.doc_id not in alts
+                and _in_window(conn, row, c.doc_id, None)]
         if len(alts) + len(kept) > ALTERNATIVES_MAX:
             raise db.Refusal(
                 f"this proposal replaces the payment's own pairing of "
@@ -313,6 +340,9 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
                 f"name at most {ALTERNATIVES_MAX - len(kept)} other alternatives")
         alts += list(dict.fromkeys(kept))
     for d in [doc_id, *alts]:
+        # #72: the books guard, for every document the write attaches — the primary on the
+        # date the write leaves on it (0118-r1), each alternative on its stored date (r2)
+        in_window_or_refuse(conn, row, d, document_date if d == doc_id else None)
         _floor_doc(conn, kind, pid, row, exp, d, document_date if d == doc_id else None)
     want = "matched" if kind == "pair" else "proposed"
     current = (len(own) == 1 and own[0].fp is not None

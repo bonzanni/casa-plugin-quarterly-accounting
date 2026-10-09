@@ -1,6 +1,6 @@
 {
   "name": "quarterly-accounting",
-  "version": "0.11.7",
+  "version": "0.11.8",
   "description": "Quarterly accounting preparation: matches every business-account transaction to the document it needs, mirrors the decisions into bank-feed as acct:: tags and notes, answers from its own store, and builds a quarter's zip on request.",
   "author": {
     "name": "Nicola Bonzanni"
