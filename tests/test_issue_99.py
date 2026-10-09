@@ -250,3 +250,30 @@ class EveryShowButtonDecidesWhenTapped(StoreCase):
                 continue
             tools = [x["call"]["tool"] for x in b.proposal()["buttons"] if "call" in x]
             self.assertNotIn("show_view", tools, view)
+
+
+class PackageAfterAWalk(LoopCase):
+    """r3 (Terra, upheld by Astra's defence): Review clears the package card's keyboard, so
+    a walk started from a card answering a package request ends on the quarter's card with
+    [Get package]; any other walk ends on its receipt (#80)."""
+
+    def walk_end(self, package):
+        import posting, qa_server, tools  # noqa: F401
+        p = self.pay()
+        self.propose(p, document_date="2026-09-02")
+        with FakeBroker() as b:
+            posting.show_view(self.conn, view="open", quarter="2026-Q3", package=package)
+        card = b.proposal()
+
+        def tap(dep, label):
+            call = next(x["call"] for x in dep["buttons"] if x["label"] == label)
+            return qa_server.TOOLS[call["tool"]]["fn"](dict(call["arguments"]))
+        review = tap(card, "Review")["next"]
+        return tap(review, "Confirm")
+
+    def test_a_package_walk_ends_on_the_card_with_get_package(self):
+        out = self.walk_end(True)
+        self.assertIn("Get package", [x["label"] for x in out["next"]["buttons"]])
+
+    def test_any_other_walk_ends_on_its_receipt(self):
+        self.assertNotIn("next", self.walk_end(False))

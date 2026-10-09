@@ -1246,7 +1246,9 @@ def card(conn, review_of, pos, page=1):
 def next_after(conn, review_of, pos):
     """§1: every answer posts its successor — the next item of the stored Review order
     still unanswered, else None: after the walk's last card the receipt alone answers
-    (#80: no quarter card the operator did not ask for)."""
+    (#80: no quarter card the operator did not ask for) — unless the walk started from a
+    card answering the operator's package request (#99 r3): then its quarter's card, with
+    [Get package]."""
     scope = json.loads(_row(conn, review_of)["scope_json"])
     order = scope.get("order") or []
     for k in range(pos + 1, len(order)):
@@ -1266,6 +1268,11 @@ def next_after(conn, review_of, pos):
             rid = card(conn, review_of, k)
             if rid is not None:
                 return rid
+    if scope.get("package") and scope.get("quarter"):
+        # #99 r3 (Terra, defended): the walk started from a card that answered the operator's
+        # package request; a tap cleared that card's keyboard, so the walk ends on the
+        # quarter's card with [Get package] — asked for, so no card unasked (#80)
+        return compose_open(conn, scope["quarter"], package=True)
     return None
 
 
