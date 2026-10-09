@@ -62,19 +62,15 @@ def display_name(conn, bank_counterparty) -> str:
 
 
 def given_name(cp, bank_texts=()) -> bool:
-    """The entry's name is one someone gave, not a bank text it stands for: no text it
-    stands for reads the same, case aside — unless one of its patterns is that text in
-    other capitals (#84: "LinkedIn" renamed from the bank's "LINKEDIN" keeps "LINKEDIN" as a
-    pattern, so the case is the operator's; an entry nobody renamed reads as before, r1)."""
+    """The entry's name is one someone gave, not a bank text it stands for: the operator
+    renamed it (#84, named_at, r2: recorded, never inferred from its capitals), or no text it
+    stands for reads the same, case aside (0.11.12's rule, for every other entry)."""
     if cp is None:
         return False
-    pats = [p for p in json.loads(cp["patterns_json"]) if p]
-    texts = [t for t in bank_texts if t] + pats
-    name = _spaced(cp["name"])
-    if name in {_spaced(t) for t in texts}:
-        return False
-    return norm(name) not in {norm(t) for t in texts} or any(norm(p) == norm(name)
-                                                              for p in pats)
+    if cp["named_at"] is not None:
+        return True
+    texts = [t for t in (*bank_texts, *json.loads(cp["patterns_json"])) if t]
+    return norm(cp["name"]) not in {norm(t) for t in texts}
 
 
 def readable_name(conn, bank_counterparty, cp=None, pid=None) -> str:
@@ -157,6 +153,7 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
         # when there is no entry yet — a rename never lands on another vendor's entry
         _refuse_shared_bank_text(conn, current, [new_name.strip(), *patterns, *(
             json.loads(current["patterns_json"]) if current is not None else [])])
+        _refuse_unlearned_vendor(conn, current, name, new_name)
         if current is not None:
             conn.execute("UPDATE counterparties SET name=? WHERE cp_id=?",
                          (new_name.strip(), current["cp_id"]))
@@ -195,6 +192,8 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
               "hint_sender": hint_sender, "hint_subject": hint_subject}
     sets = {k: v for k, v in fields.items() if v is not None}
     sets["updated_at"] = db.now()
+    if new_name is not None:
+        sets["named_at"] = sets["updated_at"]
     conn.execute("UPDATE counterparties SET %s WHERE cp_id=?"
                  % ", ".join(f"{k}=?" for k in sets), (*sets.values(), existing["cp_id"]))
     lineage.settle_all(conn)
@@ -214,6 +213,25 @@ def same_vendor(conn, a, b) -> bool:
 
 def _texts(name, patterns) -> set:
     return {t for t in (norm(name), *(norm(p) for p in patterns)) if t}
+
+
+def _refuse_unlearned_vendor(conn, entry, name, new_name) -> None:
+    """r2 (Astra S1): a new name that is the bank text of another vendor no entry knows yet
+    would make this entry take that vendor's payments — refused like a shared bank text."""
+    import lineage
+    import views
+    mine = {norm(name)} | ({norm(entry["name"])} | {norm(p) for p in json.loads(
+        entry["patterns_json"])} if entry is not None else set())
+    target = norm(new_name)
+    if target in mine:
+        return
+    for pid in lineage.live_pids(conn):
+        p = lineage.projection(conn, pid)
+        row = lineage.live_row(conn, p) or json.loads(p["last_facts_json"] or "{}")
+        text = row.get("counterparty")
+        if norm(text) == target and counterparty_for(conn, text) is None:
+            raise db.Refusal(f"'{views.field(text.strip())}' is another vendor's bank text; "
+                             "give this one another name")
 
 
 def _refuse_shared_bank_text(conn, entry, texts) -> None:

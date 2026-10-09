@@ -11,7 +11,7 @@ class Schema12(StoreCase):
 
     def test_version_tables_and_columns(self):
         import db
-        self.assertEqual(db.SCHEMA_VERSION, 16)
+        self.assertEqual(db.SCHEMA_VERSION, 17)
         self.assertTrue({"job_id", "pid", "vendor", "why", "outcome", "reason", "attempts",
                          "searches", "searched_seq"}
                         <= self.cols("run_work"))

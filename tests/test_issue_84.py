@@ -146,6 +146,33 @@ class Rename(_Q3):
             self.assertEqual(work.describe(self.conn, q)["readable"],
                              "LinkedIn Ireland Unlimited Company")
 
+    def test_a_rename_onto_an_unlearned_vendors_bank_text_is_refused(self):
+        # r2 (Astra S1): "BANK B" has no entry; renaming Vendor A to it made A take B's
+        # payments (A's ruling then covered both)
+        kb.upsert_counterparty(self.conn, "Vendor A", patterns=["BANK A"])
+        self.pay("BANK A", 2100, "2026-08-02")
+        self.pay("BANK B", 2200, "2026-08-03")
+        with self.assertRaises(db.Refusal):
+            kb.upsert_counterparty(self.conn, "Vendor A", new_name="bank b")
+        self.assertEqual(kb.counterparty_for(self.conn, "Vendor A")["name"], "Vendor A")
+        self.assertIsNone(kb.counterparty_for(self.conn, "BANK B"))
+
+    def test_entries_nobody_renamed_read_as_in_0_11_12(self):
+        # r2 (Astra + Terra S2): whatever capitals an entry's name and patterns carry, only a
+        # rename makes its name win over the matched invoice's issuer
+        for name, pats, text in (("LinkedIn", ["LINKEDIN"], "LINKEDIN"),
+                                 ("LINKEDIN", ["Linkedin"], "Linkedin")):
+            with db.tx(self.conn):
+                self.conn.execute("DELETE FROM counterparties")
+            self.kb(name, patterns=pats)
+            done = self.pay(text, 5784, "2026-07-15")
+            self.matched_to(done, "LinkedIn Ireland Unlimited Company", amount_minor=5784,
+                            document_date="2026-07-15")
+            q = self.pay(text, 5784, "2026-08-15")
+            with db.tx(self.conn):
+                self.assertEqual(work.describe(self.conn, q)["readable"],
+                                 "LinkedIn Ireland Unlimited Company", name)
+
 
 class ListVendors(_Q3):
     def test_every_vendor_once_with_its_invoice_issuer(self):
@@ -204,3 +231,16 @@ class ListVendors(_Q3):
             {"name": "Aws Emea", "new_name": "Amazon Web Services EMEA SARL"})
         out = qa_server.TOOLS["list_vendors"]["fn"]({})
         self.assertEqual([v["name"] for v in out["vendors"]], ["Amazon Web Services EMEA SARL"])
+
+
+class Schema17(_Q3):
+    def test_16_to_17_adds_named_at_and_keeps_the_entries(self):
+        kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
+        with db.tx(self.conn):
+            self.conn.execute("ALTER TABLE counterparties DROP COLUMN named_at")
+            self.conn.execute("UPDATE meta SET value='16' WHERE key='schema_version'")
+        db.migrate(self.conn)
+        r = self.conn.execute("SELECT name, named_at FROM counterparties").fetchall()
+        self.assertEqual([tuple(x) for x in r], [("Zapier", None)])
+        self.assertEqual(self.conn.execute("SELECT value FROM meta WHERE key='schema_version'")
+                         .fetchone()[0], "17")

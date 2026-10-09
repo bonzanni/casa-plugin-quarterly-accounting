@@ -2,7 +2,7 @@
 
 ## 0.11.13
 
-Same store schema (16) and Casa floor (v0.344.67).
+Store schema 17 (a vendor records that you named it). Same Casa floor (v0.344.67).
 
 - **You can rename any vendor (#84).** Tell Finance "call LINKEDIN 'LinkedIn'", "call Aws Emea
   by the name on its invoice" or "use the invoice names for all my vendors". A vendor Finance
