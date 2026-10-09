@@ -1033,3 +1033,21 @@ class TestFreshnessProperty(RealLedger):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPackageUnsettledClassification(RealLedger):
+    """#105 d1 (Terra): an open payment whose tags conflict ships UNCLASSIFIED, as the cards
+    say "not classified yet" — never MISSING."""
+    def test_a_conflicting_payment_ships_unclassified(self):
+        bf = self.bf
+        bf.fetch([bf.row("2026-07-05", ref="W1", amount=148000, counterparty="Loon"),
+                  bf.row("2026-07-06", ref="Z1", amount=2000, counterparty="Zapier")])
+        ids = {r["provider_ref"]: r["row_id"] for r in self.active()}
+        self.tag(ids["W1"], "payroll")
+        self.tag(ids["W1"], "taxes")
+        self.tag(ids["Z1"], "software")
+        self.first_pass()
+        pkg, files, rows, z = self.zip_of()
+        st = {r["counterparty"]: r["status"] for r in rows}
+        self.assertEqual(st["Loon"], "UNCLASSIFIED")
+        self.assertEqual(st["Zapier"], "MISSING")

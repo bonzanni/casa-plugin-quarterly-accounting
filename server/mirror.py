@@ -69,6 +69,9 @@ def note_text(conn, pid):
     elif status == "proposed":            # D3: a joint machine set, the operator picks
         n = len(lineage.fold_of(conn, pid).machine_set())
         text = f"Accounting: proposed — {n} invoices fit, awaiting confirmation{SUFFIX}"
+    elif status == "open" and p["exp_kind"] is None:
+        # #105: its classification is not settled — the cards say the same, never missing
+        text = f"Accounting: not classified yet{SUFFIX}"
     elif status == "open":
         text = f"Accounting: invoice missing{SUFFIX}"
     else:                                 # exempt, no-document, optional

@@ -61,12 +61,16 @@ def why_work(conn, pid, p, row):
         return None                       # pending: not worked until booked; no document
     if p["status"] in _UNWORKED:
         return None                       # 0.00 rows are optional (#36): never on the list
+    if p["status"] == "open" and p["exp_row"] == 4:
+        return None                       # #105: untagged or parked — the classifier's first
     st = lineage.fold_of(conn, pid)
     if st.operator_current() is not None:
         return None                       # an operator-confirmed pairing is never reopened
     if p["status"] == "open" and not st.conflicted_ids():
-        if p["search_state"] == "accepted-missing":
-            return None                   # [Leave missing]: an explicit answer (D7)
+        if p["search_state"] == "accepted-missing" and p["exp_row"] != 5:
+            # [Leave missing]: an explicit answer (D7) — r1 (Terra): not for tags that came
+            # to conflict since; the job judges those (#105)
+            return None
         if p["search_state"] == "aged-out":
             import work
             if not work.rearmed(json.loads(p["search_json"] or "{}")):
@@ -1053,6 +1057,8 @@ def complete(conn, quarter) -> bool:
             return False                              # a pending payment keeps it open
         if p["status"] in ("matched", "exempt", "no-document", "optional"):
             continue
+        if p["status"] == "open" and p["exp_kind"] is None:
+            return False      # #105 d1 (Astra S1): unsettled — even one left missing earlier
         if p["status"] == "open" and p["search_state"] == "accepted-missing":
             continue                                  # [Leave missing] counts (ruled)
         return False                                  # proposed, or missing unanswered
@@ -1079,11 +1085,15 @@ def partial_lines(conn, job_id) -> list:
     incomplete" — and, once the run gave up any item a decision depends on (a found
     attachment, the own-mail search, an erase check), every payment it decided missing
     too; then one line per kind given up."""
-    n = conn.execute("SELECT count(*) FROM run_work WHERE job_id=? AND outcome IS NULL",
-                     (job_id,)).fetchone()[0]
+    # r1 (Astra): a payment whose classification is not settled is no missing invoice here
+    # either (#105) — the cards count it "not classified yet"
+    settled = (" AND pid NOT IN (SELECT pid FROM projections WHERE status='open' AND"
+               " exp_kind IS NULL)")
+    n = conn.execute("SELECT count(*) FROM run_work WHERE job_id=? AND outcome IS NULL"
+                     + settled, (job_id,)).fetchone()[0]
     if queues.gave_up_upstream(conn, job_id):
         n += conn.execute("SELECT count(*) FROM run_work WHERE job_id=? AND"
-                          " outcome='missing'", (job_id,)).fetchone()[0]
+                          " outcome='missing'" + settled, (job_id,)).fetchone()[0]
     out = []
     if n:
         out.append(f"{n} missing · search incomplete — the next check searches "

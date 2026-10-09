@@ -145,9 +145,10 @@ def _line_key(d):
 
 
 def unclassified(d) -> bool:
-    """#98: an open payment the classifier has not classified yet (expectation row 4: no
-    tag, or parked) — not a missing invoice: what it is, is not known yet."""
-    return d["status"] == "open" and d["expectation"]["row"] == 4
+    """#98, #105: an open payment whose classification is not settled — no tag or parked
+    (row 4), or tags that conflict (row 5): its expectation's kind is unknown, so it is no
+    missing invoice: what it is, is not known yet."""
+    return d["status"] == "open" and d["expectation"]["kind"] is None
 
 
 def _bucket(d) -> str:
@@ -220,7 +221,7 @@ def _missing_of(conn, vendor) -> list:
     return sorted(pid for pid, p, row in loop.in_scope(conn)
                   if kb.same_vendor(conn, loop.vendor_of(conn, row), vendor)
                   and p["status"] == "open" and p["exp_kind"] != "none"
-                  and p["exp_row"] != 4                  # #98: unclassified, not missing
+                  and p["exp_kind"] is not None          # #98 #105: unsettled, not missing
                   and row["status"] == "BOOK")
 
 

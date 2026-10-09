@@ -155,6 +155,8 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         r, d = ln["row"], ln["d"]
         status = "UNTRACKED" if d is None else STATUS.get(d["status"], "UNTRACKED")
         exp = d["expectation"] if d else {"kind": None, "tier": None}
+        if status == "MISSING" and exp["kind"] is None:
+            status = "UNCLASSIFIED"     # #105 d1 (Terra): unsettled, as the cards say
         # the kind the accountant's copy stands for (fix wave F): the one it ships under,
         # else — shipped unclassified — the last one known. The delivered kind check
         # compares against this, so a row shipped unread is not "categorised differently"

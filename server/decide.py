@@ -15,10 +15,15 @@ import passes
 ENTRIES_MAX = 30
 OUTCOMES = ("match", "propose", "missing",      # no `not-needed`: the operator's (§2.2, r9)
             "keep", "replace",                 # a handover onto a paired payment (rev 18.4)
-            "optional")                        # #97: nice-to-have, by the job's judgement
+            "optional",                        # #97: nice-to-have, by the job's judgement
+            "leave")                           # #105: an unsettled classification, left
 REASON_MAX = 200
 NOT_NEEDED = ("outcome is match, propose, missing or optional: \"no invoice needed\" is the "
               "operator's tap, a KB rule or an expectation of none, never the job's")
+UNSETTLED = ("its classification is not settled (no tags, parked, or tags that conflict), "
+             "so it is no missing invoice: match or propose a document that fits; for "
+             "conflicting tags, optional when its tags and history make clear it needs no "
+             "invoice (wage tax tagged payroll and taxes); otherwise leave it")
 DATE_READ = ("pass document_date: the date printed on the document you opened (its issue "
              "date), YYYY-MM-DD")
 
@@ -172,6 +177,21 @@ def _entry(conn, token, e, seen) -> dict:
         record_outcome(conn, token, pid, "settled", reason)
         seen.add(pid)
         return {"pid": pid, **out, "status": lineage.projection(conn, pid)["status"]}
+    if outcome in ("missing", "leave"):
+        unsettled = lineage.projection(conn, pid)["exp_kind"] is None
+        if outcome == "missing" and unsettled:
+            raise db.Refusal(UNSETTLED)
+        if outcome == "leave" and not unsettled:
+            raise db.Refusal("leave is for a payment whose classification is not settled; "
+                             "decide this one match, propose or missing")
+    if outcome == "leave":
+        reason = str(e.get("reason") or "").strip()[:REASON_MAX]
+        matches.decidable(conn, pid, rev)
+        _revoke_judgement(conn, pid)            # d1 (Astra S2): a later decision, as missing
+        record_outcome(conn, token, pid, "settled", reason or "classification not settled")
+        seen.add(pid)
+        return {"pid": pid, "applied": True, "wrote": False,
+                "status": lineage.projection(conn, pid)["status"]}
     if outcome == "missing":
         reason = str(e.get("reason") or "")[:REASON_MAX]
         _check_listed(conn, token, pid)

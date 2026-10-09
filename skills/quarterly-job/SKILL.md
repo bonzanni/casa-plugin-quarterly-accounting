@@ -136,6 +136,10 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
       - `"missing"` with a `reason` when nothing fits. Never "no invoice needed": that is the
      operator's. One exception: money coming back from a tax authority (whichever, however
      the bank names it) is nice-to-have — `"optional"` with a `reason` saying so.
+   - `expectation.row` 5 (its tags conflict): judge it from its tags, remittance and
+     history. No invoice needed by its nature (wage tax tagged payroll and taxes) →
+     `"optional"` with the reason; a document fits → match or propose; else `"leave"` with a
+     reason. Never `missing`: it is not classified yet.
    `document_date` is the date printed on the document: its issue date, not a due,
    delivery or email date. The server enforces the floor; no date window. Re-decide only
    a refused entry. Then `job_next`.

@@ -130,7 +130,10 @@ def derive(direction: str, tags, *, exempt: bool = False,
         return Expectation(None, "required", 4)
     chosen = decisive(tags, direction)
     if chosen is None:                                           # row 5
-        return Expectation(None, "required", 5, conflict=True)
+        # #105: the job judged the conflicting tags' payment nice-to-have (wage tax tagged
+        # payroll and taxes): optional, its kind still unknown
+        return Expectation(None, "optional" if judged_optional else "required", 5,
+                           conflict=True)
     row, key = chosen
     chain_overrides = tuple(chain_overrides)
     _reject_colliding_scopes(chain_overrides)

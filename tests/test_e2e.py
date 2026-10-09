@@ -129,7 +129,7 @@ class TestFixtureQuarter(Base):
         st = {r["counterparty"]: r["status"] for r in rows}
         self.assertEqual(st, {"Adobe": "MATCHED", "Zapier": "MISSING", "Client BV": "MATCHED",
                               "Own savings": "NO-DOCUMENT", "Payroll": "OPTIONAL-MISSING",
-                              "Mystery": "MISSING"})
+                              "Mystery": "UNCLASSIFIED"})
 
 class TestEndsE2E(Base):
     def test_returning_payment_in_the_same_pass_takes_its_document_as_a_machine_pick(self):
