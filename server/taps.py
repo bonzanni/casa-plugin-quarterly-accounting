@@ -142,16 +142,19 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
 
 
 def _answer(conn, receipt, next_rid, in_place=False) -> dict:
-    """#1302: the receipt (a non-blank sentence), then the card Casa posts after it.
-    `in_place` (Casa #1339, v0.344.48): a tap that only changes the card's own view — a
-    page turn, the switch, the invoice links — asks Casa to edit the tapped card into the
-    next one; a landed edit sends no receipt, anything else is the receipt and the card."""
+    """#1302: the receipt (a non-blank sentence), then the card Casa posts after it, if
+    any (#80: after a walk's last card the receipt is the whole answer). `in_place` (Casa
+    #1339, v0.344.48): a tap that only changes the card's own view — a page turn, the
+    switch, the invoice links — asks Casa to edit the tapped card into the next one; a
+    landed edit sends no receipt, anything else is the receipt and the card."""
     import cards
-    if not receipt.strip() or next_rid is None:
-        raise RuntimeError("#1302: every card answer is a receipt and a next card")
-    out = {"receipt": views.fit_message(receipt), "next": cards.deposit_of(conn, next_rid)}
-    if in_place:
-        out["in_place"] = True
+    if not receipt.strip():
+        raise RuntimeError("#1302: every card answer is a receipt")
+    out = {"receipt": views.fit_message(receipt)}
+    if next_rid is not None:
+        out["next"] = cards.deposit_of(conn, next_rid)
+        if in_place:
+            out["in_place"] = True
     return out
 
 
@@ -187,7 +190,8 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
     if action == "review":
         # PLAY 0.11.2: the counts line's own numbers, never a count of cards
         return _answer(conn, f"Reviewing {cards.walk_words(scope, ', then ')}.",
-                       cards.next_after(conn, rid, -1))
+                       cards.next_after(conn, rid, -1)
+                       or cards.compose_open(conn, scope["quarter"]))
     if action == "confirm-all":
         return _confirm_all(conn, r, scope, grant)
     if action == "links":
@@ -199,16 +203,17 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
         if nxt is not None:
             at = json.loads(_row_scope(conn, nxt))["page"]
             return _answer(conn, f"Page {at} of {len(pages)}.", nxt, in_place=True)
+        # r1 Terra S1: page 1 may still hold payments; fresh() re-posts it, else the next item
         return _answer(conn, "Nothing is left on the later pages: answered meanwhile.",
-                       cards.next_after(conn, review_of, pos))
+                       fresh())
     if action in ("all-quarters", "this-quarter"):
         # §B: a switch writes nothing; the same card comes back switched (Casa #1302: the
         # receipt is required, so it is the shortest plain phrase)
         on = action == "all-quarters"
         nxt = cards.switched(conn, rid, on)
         if nxt is None:
-            return _answer(conn, "Nothing is left on this card: answered meanwhile.",
-                           cards.next_after(conn, review_of, pos))
+            # r2 Astra S1: as for an emptied later page, the vendor's page 1 may still be owed
+            return _answer(conn, "Nothing is left on this card: answered meanwhile.", fresh())
         return _answer(conn, "All quarters on." if on else "This quarter only.", nxt,
                        in_place=True)
     if action == "leave-vendor":

@@ -1232,9 +1232,10 @@ def card(conn, review_of, pos, page=1):
     return _vendor_page(conn, review_of, pos, len(order), q, scheduled, o, page)
 
 
-def next_after(conn, review_of, pos) -> str:
+def next_after(conn, review_of, pos):
     """§1: every answer posts its successor — the next item of the stored Review order
-    still unanswered, else the open-items card ("all answered" when nothing is open)."""
+    still unanswered, else None: after the walk's last card the receipt alone answers
+    (#80: no quarter card the operator did not ask for)."""
     scope = json.loads(_row(conn, review_of)["scope_json"])
     order = scope.get("order") or []
     for k in range(pos + 1, len(order)):
@@ -1254,7 +1255,7 @@ def next_after(conn, review_of, pos) -> str:
             rid = card(conn, review_of, k)
             if rid is not None:
                 return rid
-    return compose_open(conn, scope["quarter"])
+    return None
 
 
 # ---- buttons and the deposit -------------------------------------------------------------

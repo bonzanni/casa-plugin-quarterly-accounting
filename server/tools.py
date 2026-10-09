@@ -623,10 +623,16 @@ def t_review(args):
 
 @register("show_view",
           "Post a view to the operator, with its buttons (Casa posts it, labelled; never "
-          "retell it). view: status, missing, check, rest, older, all, item (with pid), "
-          "quarter, open (where a quarter stands: one card with its state and buttons; at "
-          "most a quarter; for a quarter before the books it answers `say` and posts "
-          "nothing: say that line); page/after/prev from a previous "
+          "retell it). view: open (where a quarter stands: one card with its state and "
+          "buttons; at most a quarter; for a quarter before the books it answers `say` and "
+          "posts nothing: say that line); status (one quarter's full sheet: missing "
+          "documents, unclear categories, guesses); missing (one quarter's payments missing "
+          "a document); check (suggested matches waiting for a yes or no, in the quarter and "
+          "every earlier one); "
+          "rest (one quarter's nice-to-have documents not found); older (earlier quarters' "
+          "payments still open); all (the status sheet with every item); quarter (one "
+          "quarter's figures, missing payments and packages sent); item (one payment, with "
+          "pid); page/after/prev from a previous "
           "`next`, unchanged. render_id: post that stored rendering again (the job's "
           "`view` unit). After Casa's receipt (casa_delivery.status delivered), call "
           "mark_rendering_delivered(render_id).",

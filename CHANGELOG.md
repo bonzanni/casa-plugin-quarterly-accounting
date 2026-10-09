@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.11.12
+
+Same store schema (16) and Casa floor (v0.344.67).
+
+- **A payment's card says its invoice once (#79).** A matched payment's card read "Invoice … is
+  filed with it." and then "Matched to invoice … (15 Sep)."; a suggested one read "Paired
+  with …, not confirmed." and then "Suggested: …". Now only the second line stays.
+- **"To check" no longer opens with "Not checked yet." (#79).** That line was one quarter's
+  bank coverage; the list spans every quarter, so it is gone from there.
+- **The last answer of a walk of cards is just its receipt (#80).** Before, the quarter's
+  status card followed it unasked. Ask "how's Q3?" to see it.
+- **Finance has a one-line description of each view (#80),** so two wordings of one question
+  ("anything to check?", "what's to check?") should get the same view.
+
 ## 0.11.11
 
 Same store schema (16) and Casa floor (v0.344.67).

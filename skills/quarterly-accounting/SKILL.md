@@ -35,9 +35,17 @@ quarter. Never ask the operator to confirm the period: when the quarter lies bef
 books' start, the ask itself moves the start, and its `line` says so.
 
 Other questions about the books (a list of what is missing, one payment, "more", "all of
-them"): `show_view(view=…, quarter=…, page=…, after=…)`, the view the question asks for
-(`status`, `missing`, `check`, `rest`, `older`, `all`, `quarter`, `item` with `pid`). For
-"more" or "all of them", call `propose_reading` (below), then call `show_view` with the
+them"): `show_view(view=…, quarter=…, page=…, after=…)`, the view the question asks for:
+- `status`: one quarter's full sheet: missing documents, unclear categories, my guesses;
+- `missing`: one quarter's payments still missing a document;
+- `check`: suggested matches waiting for a yes or no, in the quarter and every earlier one;
+- `rest`: one quarter's nice-to-have documents not found;
+- `older`: earlier quarters' payments still open;
+- `all`: the `status` sheet with every item;
+- `quarter`: one quarter's figures, its missing payments and the packages sent;
+- `item` with `pid`: one payment.
+
+For "more" or "all of them", call `propose_reading` (below), then call `show_view` with the
 arguments the reading returns, unchanged: you cannot know them yourself. After its
 receipt, `mark_rendering_delivered(render_id)`. A view carries the operator's buttons; you
 never press them and never call a button's tool.
