@@ -198,7 +198,8 @@ class AllVendors(_Case):
         self.assertEqual(b.deposits[0]["slot"], "results")
         self.assertEqual(views.displayed(b.deposits[0]["value"]),
                          "Renamed 2 vendors to the name on their invoice. 1 keeps the bank "
-                         "name: the invoice name belongs to another vendor (Ryanair Mtw0). "
+                         "name: the invoice name belongs to another vendor (Ryanair Mtw0 → Ryanair "
+                         "DAC). Ask to merge them if they are the same vendor. "
                          "Kept the names you gave: ElevenLabs. No invoice yet: LINKEDIN, "
                          "OPENAI *CHATGPT.")
         self.assertEqual(out["renamed"], 2)
@@ -249,7 +250,7 @@ class AllVendors(_Case):
         names = sorted(r[0] for r in self.conn.execute("SELECT name FROM counterparties"))
         self.assertEqual(names, ["Amazon Web Services EMEA SARL", "Zapier Inc"])
         self.assertIsNone(self.entry("Zapier Inc")["named_at"])
-        self.assertIn("(Zapier Inc)", b.deposits[0]["value"])
+        self.assertIn("(Zapier Inc → Zapier)", b.deposits[0]["value"])
 
 
 class Skill(_Case):
@@ -263,7 +264,7 @@ class Skill(_Case):
                        "give; left out for the name on its invoice>)`",
                        "`rename_vendors_to_invoice_names()`, once",
                        "add nothing, your whole reply is `<silent/>`",
-                       "Never rename unasked."):
+                       "Never rename or merge unasked."):
             self.assertIn(phrase, s, phrase)
         self.assertNotIn("upsert_counterparty", s)
 

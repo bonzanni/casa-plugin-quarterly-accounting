@@ -17,7 +17,8 @@ sys.modules.setdefault("qa_server", qa_server)
 EXPECTED = {
     "ingest_document", "update_document_metadata", "mark_irrelevant", "list_unmatched_documents",
     "get_counterparty", "upsert_counterparty", "list_vendors", "rename_vendor",
-    "rename_vendors_to_invoice_names", "get_package", "get_document", "set_expectation",
+    "rename_vendors_to_invoice_names", "merge_vendors", "get_package", "get_document",
+    "set_expectation",
     "record_match", "propose_match", "relabel_match",
     "import_ledger_export",
     "record_probe", "check_setup", "reset_store",
@@ -108,7 +109,7 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 44)     # #89: + rename_vendor, rename_vendors_to_invoice_names; #84: + list_vendors; #56: + get_document; S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
+        self.assertEqual(len(EXPECTED), 45)     # #90: + merge_vendors; #89: + rename_vendor, rename_vendors_to_invoice_names; #84: + list_vendors; #56: + get_document; S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
                                                 # Task 7: + 2; T8: + ask_state; T9: - job_report (§9);
                                                 # T10: + post_results (§5); T11: + post_package (§6.1);
                                                 # simple loop T4: + decide, record_missing (§2.2);
@@ -121,7 +122,7 @@ class TestSurface(TempEnv):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 44)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 45)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])

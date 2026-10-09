@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.23
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **Merge two vendors that are one (#90).** Tell Finance "merge Ryanair Mtw0 into Ryanair DAC"
+  (or "Anthropic and Claude.ai Subscription are the same vendor"). The first vendor's bank
+  texts, documents and rules join the second, its payments show the second's name, and Finance
+  posts "Ryanair Mtw0 is now part of Ryanair DAC." with the vendor's card. When your words fit
+  several vendors, Finance names them instead of guessing. A card posted before the merge
+  answers once with the card again, under the merged name.
+- **"Use the invoice names for all my vendors" says who has each kept name (#90):** "Ryanair
+  Mtw0 → Ryanair DAC", and that you can ask to merge them.
+
 ## 0.11.22
 
 Same store schema (17) and Casa floor (v0.344.67).

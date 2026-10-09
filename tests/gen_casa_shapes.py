@@ -72,12 +72,13 @@ class _Store(LoopCase):
 SLOTS = {"show_view": "view", "propose_reading": "reading", "propose_account": "accounts",
          "post_results": "results", "post_package": "package", "get_package": "package",
          "get_document": "document", "rename_vendor": "view",
-         "rename_vendors_to_invoice_names": "results"}
+         "rename_vendors_to_invoice_names": "results", "merge_vendors": "view"}
 KINDS = {"show_view": "operator_proposal", "propose_reading": "operator_proposal",
          "propose_account": "operator_proposal", "post_results": "operator_message",
          "post_package": "operator_file", "get_package": "operator_file",
          "get_document": "operator_file", "rename_vendor": "operator_proposal",
-         "rename_vendors_to_invoice_names": "operator_message"}
+         "rename_vendors_to_invoice_names": "operator_message",
+         "merge_vendors": "operator_proposal"}
 PROPOSALS = {t for t, k in KINDS.items() if k == "operator_proposal"}
 
 
@@ -151,7 +152,7 @@ class Shapes:
             self.records.append(rec)
             return body
         prop = json.loads(body["value"])
-        if tool in ("show_view", "rename_vendor"):
+        if tool in ("show_view", "rename_vendor", "merge_vendors"):
             # binding r7: the checker builds Casa's real quote of this post (label, render,
             # clip) and the plugin must bind it back to this rendering, on the store copy
             rec["bind"] = {"render_id": out["render_id"], "store": self.shape}
@@ -164,8 +165,8 @@ class Shapes:
                 rec["page_binds"] = [{"render_id": rid, "display_expect": views.displayed(t),
                                       "bold_expect": views.bold_spans(t)}
                                      for rid, t in zip(page_ids, prop["pages"], strict=True)]
-            elif tool == "rename_vendor":
-                # #89: the rename's line, a page of its own before the card
+            elif tool in ("rename_vendor", "merge_vendors"):
+                # #89: the rename's line (#90: the merge's), a page of its own before the card
                 rid = st.conn.execute("SELECT render_id FROM renders WHERE text=? ORDER BY"
                                       " rowid DESC LIMIT 1", (prop["pages"][0],)).fetchone()[0]
                 rec["page_binds"] = [{"render_id": rid,
@@ -1011,6 +1012,19 @@ def gen_rename_all(sh, st, b):
         raise AssertionError(f"rename_all:summary: posted {body['value'][:200]}")
 
 
+def gen_merge_vendors(sh, st, b):
+    """#90: one merge — the plain line before the merged vendor's card — of two hostile
+    payees, the second the one that stays."""
+    import views
+    _renamable(st)
+    sh.call(st, b, "merge_vendors:line", "merge_vendors", {"vendor": hostile(2),
+                                                           "into": hostile(0)})
+    prop = json.loads(b.deposits[-1]["value"])
+    if len(prop.get("pages") or []) != 1 or "is now part of" not in views.unesc(
+            prop["pages"][0]):
+        raise AssertionError(f"merge_vendors:line: posted {prop.get('pages')}")
+
+
 SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_single,
           gen_show_view_setup_stop, gen_legacy_rendering, gen_propose_reading,
           gen_propose_account, gen_post_results, gen_post_package,
@@ -1019,7 +1033,7 @@ SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_si
           gen_end_message_with_completion, gen_open_items,
           gen_all_answered, gen_ready_notice, gen_review_cards, gen_vendor_pages,
           gen_vendor_pages_scheduled, gen_get_package, gen_get_document, gen_replace_cards,
-          gen_rename_vendor, gen_rename_all]
+          gen_rename_vendor, gen_rename_all, gen_merge_vendors]
 
 
 def generate(stores=None) -> Shapes:

@@ -4,7 +4,7 @@ A Casa plugin that prepares a B.V.'s quarterly accounting. It matches every tran
 business bank account (from bank-feed) to the document it needs, keeps `acct::` tags and
 accounting notes current in the bank ledger, answers from its own store when asked, and builds
 a quarter's zip (SnelStart-ready `invoices/`, `ledger.csv`, `ledger.xlsx`, `notes.md`) on
-request. The server registers 44 tools. Design: `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.md`.
+request. The server registers 45 tools. Design: `docs/superpowers/specs/2026-08-10-quarterly-accounting-design.md`.
 
 The checking runs as one Casa job on the finance specialist, `quarterly-accounting:work`
 ("Accounting check", skill `skills/quarterly-job/SKILL.md`): one pass per run that reads the
@@ -94,7 +94,7 @@ already written into bank-feed's ledger, nor Home Assistant backups.
   below-floor case) and gmail's sent log. Refresh with `scripts/vendor-bankfeed.sh <tag>`.
 - `git config core.hooksPath .githooks` — tool-list agreement and the identifier scan.
 - `scripts/check_tool_agreement.py` — the server's registry, `casa.provides_tools` and
-  `casa.resultContract.tools` must name exactly the same 44 tools.
+  `casa.resultContract.tools` must name exactly the same 45 tools.
 - `scripts/scan_identifiers.py .` — fails the build on an IBAN-shaped token anywhere outside
   `tests/upstream/`. No IBAN, company name, vendor list or operator identity belongs in this
   tree; when in doubt, run the script.
