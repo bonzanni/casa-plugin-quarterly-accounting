@@ -40,6 +40,15 @@ class RenameLine(_Q3):
         out = kb.upsert_counterparty(self.conn, "LINKEDIN", new_name="LinkedIn")
         self.assertEqual(out["line"], "LINKEDIN is now called LinkedIn.")
 
+    def test_the_line_keeps_the_stored_name_whole(self):
+        # r1 (Terra S2): a trailing period of the name itself is kept
+        self.pay("RAW", 100, "2026-08-03")
+        out = kb.upsert_counterparty(self.conn, "RAW", new_name="Acme B.V..")
+        self.assertEqual(out["name"], "Acme B.V..")
+        self.assertEqual(out["line"], "RAW is now called Acme B.V..")
+        out = kb.upsert_counterparty(self.conn, "Acme B.V..", new_name="Acme")
+        self.assertEqual(out["line"], "Acme B.V.. is now called Acme.")
+
     def test_an_upsert_without_a_rename_has_no_line(self):
         out = kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
         self.assertNotIn("line", out)

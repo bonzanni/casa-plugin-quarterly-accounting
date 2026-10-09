@@ -159,7 +159,8 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
                          (new_name.strip(), current["cp_id"]))
         # #87: the sentence the desk says for one rename, in the operator's words
         line = f"{(current['name'] if current is not None else name).strip()} is now called " \
-               f"{new_name.strip()}".rstrip(".") + "."
+               f"{new_name.strip()}"
+        line += "" if line.endswith(".") else "."
         name = new_name
     if source not in (None, "email", "portal"):
         raise db.Refusal("source is 'email' or 'portal'")
