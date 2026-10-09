@@ -203,8 +203,9 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
         if nxt is not None:
             at = json.loads(_row_scope(conn, nxt))["page"]
             return _answer(conn, f"Page {at} of {len(pages)}.", nxt, in_place=True)
+        # r1 Terra S1: page 1 may still hold payments; fresh() re-posts it, else the next item
         return _answer(conn, "Nothing is left on the later pages: answered meanwhile.",
-                       cards.next_after(conn, review_of, pos))
+                       fresh())
     if action in ("all-quarters", "this-quarter"):
         # §B: a switch writes nothing; the same card comes back switched (Casa #1302: the
         # receipt is required, so it is the shortest plain phrase)

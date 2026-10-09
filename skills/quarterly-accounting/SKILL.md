@@ -38,7 +38,7 @@ Other questions about the books (a list of what is missing, one payment, "more",
 them"): `show_view(view=…, quarter=…, page=…, after=…)`, the view the question asks for:
 - `status`: one quarter's full sheet: missing documents, unclear categories, my guesses;
 - `missing`: one quarter's payments still missing a document;
-- `check`: every quarter's suggested matches waiting for a yes or no;
+- `check`: suggested matches waiting for a yes or no, in the quarter and every earlier one;
 - `rest`: one quarter's nice-to-have documents not found;
 - `older`: earlier quarters' payments still open;
 - `all`: the `status` sheet with every item;

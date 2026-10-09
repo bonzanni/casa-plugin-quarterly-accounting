@@ -55,5 +55,6 @@ class ViewsDescribed(LoopCase):
         for view in ("status", "missing", "check", "rest", "older", "all", "quarter", "item"):
             self.assertIn(f"- `{view}`", skill)
             self.assertIn(f"{view} (", desc)
-        self.assertIn("every quarter's suggested matches waiting for a yes or no", skill)
-        self.assertIn("every quarter's suggested matches waiting for a yes or no", desc)
+        line = "suggested matches waiting for a yes or no, in the quarter and every earlier one"
+        self.assertIn(line, skill)
+        self.assertIn(line, desc)

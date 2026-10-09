@@ -717,7 +717,7 @@ def _compose(conn, view, q, items, members, lead):
     if parts["head"]:
         parts["head"].append("")
     parts["head"].append(titles[view])
-    # #79: "To check" spans every quarter; one quarter's bank coverage says nothing of it
+    # #79: "To check" spans earlier quarters too; one quarter's bank coverage says nothing of it
     cov = None if view == "check" else coverage(conn, members)
     if view in ("status", "all", "quarter") and members:
         cov += f" · {_plural(len(cur), 'transaction')}, {len(missing)} missing a document."

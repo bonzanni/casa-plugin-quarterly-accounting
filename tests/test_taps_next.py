@@ -385,6 +385,9 @@ class TapsMore(_Tapping):
         # payments were all matched meanwhile has nothing left to list (Task 7 carry)
         out = self.tap(page1, "Next page")
         self.assertEqual(out["receipt"], "Nothing is left on the later pages: answered meanwhile.")
+        # r1 Terra S1: page 1 still holds 25 missing payments, so the vendor's card follows
+        self.assertIn("Adobe", out["next"]["text"])
+        self.assertEqual(len(self.scope_of(out["next"])["pages"][0]), 25)
         # the vendor's card as it is now states the matched ones in `also`, and Never there
         # still binds all 30 (the matched ones by membership)
         card = self.tap(self.end(), "Review")["next"]
