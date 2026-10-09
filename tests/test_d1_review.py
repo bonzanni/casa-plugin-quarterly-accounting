@@ -184,10 +184,11 @@ class LateHandover(StoreCase):
         import cards, job
         jid = "dadadada-1"
         self.drv.gmail.invoice("Zapier", 1000, "EUR", "2026-07-05", "ORIGINAL")
-        first = self.until(jid, "view")                       # the end message is composed
+        # #93: "all accounted for" has nothing to tap — the end message is a plain post
+        first = self.until(jid, "post")                       # the end message is composed
         composed = self.conn.execute("SELECT end_render_id FROM runs WHERE job_id=?",
                                      (jid,)).fetchone()[0]
-        self.assertEqual(first["render_id"], composed)
+        self.assertEqual(first["render_ids"], [composed])
         path = self.publish("competitor.pdf", b"%PDF-1.4 competitor", producer="telegram")
         doc = self.drv._tool("ingest_document", dict(
             source_path=path, kind="invoice", source="manual-telegram",
@@ -200,8 +201,8 @@ class LateHandover(StoreCase):
         self.assertEqual((said["state"], said["live_run"], said["line"]),
                          ("queued", False, asks.BUSY_NO_RESULT))
         u = self.drv.next()
-        self.assertEqual(u["unit"], "view")                    # not the handover's vendor
-        self.assertEqual(u["render_id"], composed)
+        self.assertEqual(u["unit"], "post")                    # not the handover's vendor
+        self.assertEqual(u["render_ids"], [composed])
         self.drv.do(u, self.drv.token)
         units = [x["unit"] for x in self.drv._loop(jid)]
         self.assertEqual(units, ["complete"])
@@ -238,7 +239,7 @@ class LateHandover(StoreCase):
         self.assertIsNotNone(r["delivered_at"])
         self.assertIn("1 handed-over document to check — Review shows it.", r["text"])
         self.assertEqual([b[0] for b in cards.buttons(self.conn, r)],
-                         ["Review", "Get package"])
+                         ["Review", "Close"])
         self.assertEqual(self.conn.execute("SELECT state FROM work_requests WHERE"
                                            " request_id=?", (ask["request_id"],)).fetchone()[0],
                          "reported")                             # the continuation's result

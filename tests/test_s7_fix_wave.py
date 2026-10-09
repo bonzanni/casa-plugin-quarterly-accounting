@@ -47,10 +47,12 @@ class TypedMore(_Q3):
 
     def test_a_whole_list_posted_leaves_nothing_more(self):
         """#66: show_view posts every page; "all of them" on its card has nothing left."""
+        import views
         self.big_sheet()
         out = self.show(view="check")
         self.assertIsNone(out["next"])
-        r, prop = self.propose("all of them", quoted=self.render_text(out["render_id"]))
+        r, prop = self.propose("all of them",
+                               quoted=views.displayed(self.render_text(out["render_id"])))
         self.assertIsNone(prop)
         self.assertEqual(r["instructions"], [])
 
@@ -339,7 +341,7 @@ class R3QuoteBindsAPostedPage(_Q3):
         page2 = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
                                              " render_id=?", (second["render_id"],)
                                              ).fetchone()[0])["list_pages"][1]
-        self.assertEqual(views.bound_rendering(self.conn, prop["pages"][1])["render_id"], page2)
+        self.assertEqual(views.bound_rendering(self.conn, views.displayed(prop["pages"][1]))["render_id"], page2)
         self.assertEqual(views.bound_rendering(self.conn, None)["render_id"],
                          first["render_id"])                   # the unquoted fallback
 

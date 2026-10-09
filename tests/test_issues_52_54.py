@@ -26,13 +26,13 @@ class ProposalLineCountsPurchases(LoopCase):
                      document_date="2026-09-01", amount_minor=2200, currency="USD")
         line = self.proposal_line()
         self.assertNotIn("fit", line)
-        self.assertIn("↔ invoice CUWVSRB8\\-0007 · USD 22.00", line)
+        self.assertIn("↔ invoice · USD 22.00", line)
 
     def test_the_twin_compares_by_the_purchase_normalisation(self):
         p = self.pay("Adobe", 10000, "2026-09-01")
         twin = self.doc(kind="receipt", issuer=" adobe ", document_number="inv-7 ")
         self.propose(p, alternatives=[twin], document_number="INV-7")
-        self.assertIn("↔ invoice INV\\-7 · EUR 100.00", self.proposal_line())
+        self.assertIn("↔ invoice · EUR 100.00", self.proposal_line())
 
     def test_two_purchases_still_say_how_many_fit(self):
         p = self.pay("AWS", 4120, "2026-08-02")
@@ -59,7 +59,7 @@ class ProposalLineCountsPurchases(LoopCase):
         self.machine_entry(p, self.doc(kind="receipt", document_number="N-1"))
         line = self.proposal_line()
         self.assertNotIn("fit", line)
-        self.assertIn("↔ invoice N\\-1 · EUR 100.00", line)
+        self.assertIn("↔ invoice · EUR 100.00", line)
 
 
 class NoHardWrap(StoreCase):

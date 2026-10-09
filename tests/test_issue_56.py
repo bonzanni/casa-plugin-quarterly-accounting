@@ -55,7 +55,7 @@ class SeeButton(Case):
                                          "arguments": {"doc_id": d, "key": key}}}])
         # every other button is deposited exactly as before (no keep_card)
         self.assertTrue(all("keep_card" not in b for b in dep["buttons"] if b is not see[0]))
-        self.assertIn("See PDF: the document, sent here; this card stays", dep["text"])
+        self.assertNotIn("See PDF: the document, sent here; this card stays", dep["text"])
 
     def test_an_image_document_is_see_document(self):
         import cards
@@ -68,7 +68,7 @@ class SeeButton(Case):
         rid, _ = self.confirm_card(ext="html")
         r = self.conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
         self.assertEqual([b[0] for b in cards.buttons(self.conn, r)],
-                         ["Confirm", "Wrong", "Leave for now"])
+                         ["Confirm", "Wrong", "Leave for now", "Close"])
 
     def test_a_card_offering_several_documents_has_no_see_button(self):
         import cards
@@ -95,7 +95,7 @@ class SeeButton(Case):
                               (db.canonical(scope), rid))
         r = self.conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
         self.assertEqual([b[0] for b in cards.buttons(self.conn, r)],
-                         ["Confirm", "Wrong", "Leave for now"])
+                         ["Confirm", "Wrong", "Leave for now", "Close"])
 
 
 class GetDocument(Case):

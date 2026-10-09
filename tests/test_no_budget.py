@@ -123,7 +123,8 @@ class OneDeliveryAfterACut(StoreCase):
         from tests.fakebroker import FakeBroker
         self.bind()
         drv = JobDriver(self, payments=3)
-        for i in range(3):
+        # #93: one stays missing, so the end message has something to tap (a card, `view`)
+        for i in range(2):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i], f"ZAP-{i + 1}")
         real, cut = drv._view, []
 
@@ -156,10 +157,12 @@ class OneDeliveryAfterACut(StoreCase):
         self.bind()
         with FakeBroker() as b:
             b.honour_keys = True
-            posting.show_view(self.conn, view="status")
+            # #93: a payment missing, so the status view has something to act on (a card)
+            self.seed_payments([{"counterparty": "Adobe"}])
+            posting.show_view(self.conn, view="status", quarter="2026-Q3")
             binding.reset_store(self.conn)
-            self.bind()
-            posting.show_view(self.conn, view="status")
+            self.seed_payments([{"counterparty": "Adobe"}])
+            posting.show_view(self.conn, view="status", quarter="2026-Q3")
         self.assertEqual(len(b.deposits), 2)
         self.assertEqual(len(b.sent), 2, [d.get("key") for d in b.deposits])
         self.assertNotEqual(b.deposits[0]["key"], b.deposits[1]["key"])

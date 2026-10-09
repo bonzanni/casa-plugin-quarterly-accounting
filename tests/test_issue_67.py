@@ -55,7 +55,7 @@ class OneUnreadInvoice(Case):
         doc = self.drv.file_unread("INV-7", "Zapier", 2000, document_date="2026-08-04")
         self.give(doc)
         units = self.go()
-        self.assertEqual(kinds(units), ["reading", "payment", "view", "complete"])
+        self.assertEqual(kinds(units), ["reading", "payment", "post", "complete"])
         self.assertEqual(units[0]["docs"] if units[0]["unit"] == "reading" else
                          [u for u in units if u["unit"] == "reading"][0]["docs"], [doc])
         self.no_sweep(units)
@@ -65,10 +65,10 @@ class OneUnreadInvoice(Case):
         self.assertEqual((row[0], row[1]), (2000, "EUR"))
         self.assertIsNotNone(row[2])
         text, labels = self.card()
-        self.assertIn("Zapier INV\\-7 · 4 Aug · EUR 20.00: matched automatically to the 5 Aug "
+        self.assertIn("Zapier · 4 Aug · EUR 20.00: matched automatically to the 5 Aug "
                       "EUR 20.00 payment (Zapier).", text)
-        self.assertEqual(labels.count("Get package"), 1)        # its payment's quarter, Q3
-        self.assertIn("Get package: the Q3 zip", text)
+        self.assertEqual(labels.count("Get package"), 0)        # its payment's quarter, Q3
+        self.assertNotIn("Get package", text)          # #94
 
     def test_an_automatic_match_is_undone_from_its_payments_card(self):
         """Operator ruling 2026-10-09: an automatic match can be undone the usual way."""
@@ -109,8 +109,8 @@ class QuarterAndCopies(Case):
         self.give(doc)
         self.go()
         text, labels = self.card()
-        self.assertEqual(labels.count("Get package"), 1)
-        self.assertIn("Get package: the Q3 zip", text)
+        self.assertEqual(labels.count("Get package"), 0)
+        self.assertNotIn("Get package", text)          # #94
         self.assertNotIn("Q4", text)
 
     def test_a_copy_of_a_held_invoice_is_reported_and_not_worked_again(self):
@@ -120,10 +120,10 @@ class QuarterAndCopies(Case):
         c = self.drv.file_unread("OA-7", "Zapier", 2000, document_date="2026-08-04")
         self.give(c)
         units = self.go("bbbbbbbb-3")
-        self.assertEqual(kinds(units), ["reading", "view", "complete"])
+        self.assertEqual(kinds(units), ["reading", "post", "complete"])
         self.assertEqual(self.work("bbbbbbbb-3"), [])
         text, _ = self.card("bbbbbbbb-3")
-        self.assertIn(f"OA\\-7 · 4 Aug · EUR 20.00: already filed as \\#{a}.", text)
+        self.assertIn(f"Zapier · 4 Aug · EUR 20.00: already filed as \\#{a}.", text)
 
 
 class NothingFits(Case):
@@ -135,10 +135,10 @@ class NothingFits(Case):
         doc = self.drv.file_unread("INV-9", "Zapier", 9999, document_date="2026-09-20")
         self.give(doc)
         units = self.go()
-        self.assertEqual(kinds(units), ["reading", "view", "complete"])
+        self.assertEqual(kinds(units), ["reading", "post", "complete"])
         self.assertEqual(len(self.drv.gmail.searches), before)
         text, labels = self.card()
-        self.assertIn("Zapier INV\\-9 · 20 Sep · EUR 99.99: no payment of EUR 99.99 in the books "
+        self.assertIn("Zapier · 20 Sep · EUR 99.99: no payment of EUR 99.99 in the books "
                       "yet", text)
         self.assertNotIn("Get package", labels)
         self.assertNotIn("Q4", text)
@@ -148,7 +148,7 @@ class NothingFits(Case):
         self.drv._reading = lambda u, token: None       # the model never records a reading
         self.give(doc)
         units = self.go()
-        self.assertEqual(kinds(units), ["reading", "reading", "view", "complete"])
+        self.assertEqual(kinds(units), ["reading", "reading", "post", "complete"])
         text, labels = self.card()
         self.assertIn("INV\\-10: could not be read, so it was not matched — send it again "
                       "to retry.", text)
@@ -165,7 +165,7 @@ class SeveralInvoices(Case):
         self.assertNotIn(c, (a, b))                     # other bytes, the same invoice
         self.give(a, b, c)
         units = self.go()
-        self.assertEqual(kinds(units), ["reading", "payment", "payment", "view", "complete"])
+        self.assertEqual(kinds(units), ["reading", "payment", "payment", "post", "complete"])
         self.assertEqual(sorted([u for u in units if u["unit"] == "reading"][0]["docs"]),
                          sorted([a, b, c]))
         self.no_sweep(units)
@@ -173,7 +173,7 @@ class SeveralInvoices(Case):
                                        (self.pids[2], "handover", "match")])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM runs").fetchone()[0], 2)
         text, _labels = self.card()
-        self.assertIn(f"Zapier OA\\-1 · 4 Jul · EUR 10.00: already filed as \\#{a}.", text)
+        self.assertIn(f"Zapier · 4 Jul · EUR 10.00: already filed as \\#{a}.", text)
         self.assertEqual(text.count(": matched automatically to the"), 2)
 
     def test_a_reissue_with_another_recipient_is_no_copy(self):
@@ -211,7 +211,7 @@ class Reissue(Case):
                                            " new_doc_id=? AND state='open'", (b,)).fetchone()[0],
                          1)
         text, _ = self.card("bbbbbbbb-3")
-        self.assertIn("OR\\-1 · 5 Aug · EUR 20.00: its payment already has a document — Review "
+        self.assertIn("Zapier · 5 Aug · EUR 20.00: its payment already has a document — Review "
                       "asks which to keep.", text)
 
 
@@ -227,7 +227,7 @@ class DeskFiling(Case):
                                  "document_date": "2026-08-04", "document_number": "CAP-1"}
         self.give(doc)
         units = self.go()
-        self.assertEqual(kinds(units), ["reading", "payment", "view", "complete"])
+        self.assertEqual(kinds(units), ["reading", "payment", "post", "complete"])
         self.assertEqual(self.work(), [(self.pids[1], "handover", "match")])
 
 

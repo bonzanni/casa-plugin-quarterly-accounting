@@ -20,9 +20,6 @@ class Reading(_Tapping):
     def labels(self, dep):
         return [b["label"] for b in dep["buttons"]]
 
-    def legend(self, dep):
-        return untag(dep["text"]).split("\n")[-1]
-
     # 1 ------------------------------------------------------------------------------------
     def test_the_legend_and_the_review_receipt_print_no_other_missing_count(self):
         p = self.pay("Zapier", 1958, "2026-09-01")
@@ -32,9 +29,7 @@ class Reading(_Tapping):
         end = self.end()
         lines = untag(end["text"]).split("\n")
         self.assertEqual(lines[1], "1 to confirm · 2 missing")
-        self.assertTrue(self.legend(end).startswith(
-            "Review: go through the 1 to confirm and the missing invoices, one at a time"),
-            self.legend(end))
+        self.assertNotIn("Review: go through", end["text"])         # #99: no legend
         out = self.tap(end, "Review")
         self.assertEqual(out["receipt"], "Reviewing the 1 to confirm, then the missing invoices.")
 
@@ -43,7 +38,6 @@ class Reading(_Tapping):
         a = self.pay("Twilio", 2000, "2026-08-14")
         card = self.tap(self.end(), "Review")["next"]
         self.assertIn("Leave for now", self.labels(card))
-        self.assertIn("Leave for now: decide later", self.legend(card))
         rev = self.rev(a)
         out = self.tap(card, "Leave for now")
         self.assertEqual(out["receipt"], "Left for now: Twilio.")
@@ -75,12 +69,13 @@ class Reading(_Tapping):
         self.assertEqual(body, ["EUR 20.00 · 14 Aug", "EUR 21.00 · 15 Aug"])
 
     # 4 ------------------------------------------------------------------------------------
-    def test_a_receipt_reads_as_a_receipt_in_the_confirm_legend(self):
+    def test_a_review_card_carries_no_legend(self):
         p = self.pay("Elevenlabs.io", 1899, "2026-09-01")
         self.propose(p, kind="receipt", document_number="2635-8754-8667",
                      amount_minor=1899)
         card = self.tap(self.end(), "Review")["next"]
-        self.assertIn("Confirm: this receipt is right", self.legend(card))
+        self.assertNotIn("Confirm: this", card["text"])           # #99: the buttons say it
+        self.assertIn("Confirm", self.labels(card))
 
     def test_two_purchases_are_two_documents_not_two_invoices(self):
         p = self.pay("Hanabi", 2271, "2026-07-16")
@@ -105,7 +100,7 @@ class Reading(_Tapping):
         views.mark_rendering_delivered(self.conn, rid)
         text = self.conn.execute("SELECT text FROM renders WHERE render_id=?", (rid,)).fetchone()[0]
         res = apply_now(self.conn, "the Notion one is wrong",
-                        "\U0001f4ca Alex\n" + views.unesc(text))
+                        "\U0001f4ca Alex\n" + views.displayed(text))
         self.assertIn("Reject the suggested document for Notion · EUR 9.00 · 2 Sep.",
                       res["proposal"])
 
@@ -114,7 +109,6 @@ class Reading(_Tapping):
         self.pay("Twilio", 2100, "2026-10-14")
         on = self.tap(self.tap(self.end(), "Review")["next"], "Apply to all quarters")["next"]
         self.assertIn("Only this quarter", self.labels(on))
-        self.assertIn("Only this quarter: switch back", self.legend(on))
 
     def test_pending_says_at_the_bank(self):
         import cards, collections
@@ -122,14 +116,13 @@ class Reading(_Tapping):
         self.assertEqual(cards._counts_line(c), "1 matched · 1 waiting on the bank")
 
     # 5 ------------------------------------------------------------------------------------
-    def test_the_pick_legend_is_plain(self):
+    def test_a_pick_card_carries_no_legend(self):
         p = self.pay("AWS", 149, "2026-07-02")
         alt = self.doc(issuer="AWS", document_number="EUINNL26-664958", amount_minor=149)
         self.propose(p, alternatives=[alt], issuer="AWS", document_number="EUINNL26-429716",
                      amount_minor=149)
         card = self.tap(self.end(), "Review")["next"]
-        self.assertTrue(self.legend(card).startswith("A document button: use that document · "),
-                        self.legend(card))
+        self.assertNotIn("A document button", card["text"])      # #99: no legend
 
 
 class R7Fixes(Reading):
@@ -145,11 +138,18 @@ class R7Fixes(Reading):
         out = self.tap(card, "Next page")
         self.assertIn("page 3 of 3", out["next"]["text"])
 
-    def test_confirm_all_says_documents(self):
+    def test_the_question_stands_above_the_list_confirm_all_answers(self):
+        # #99: the question on its own line, its list right under it; no legend
         p = self.pay("Elevenlabs.io", 1899, "2026-09-01")
         self.propose(p, kind="receipt", document_number="REC-1", amount_minor=1899)
-        self.assertIn("Confirm all: accept the suggested documents listed above",
-                      self.end()["text"])
+        end = self.end()
+        lines = end["text"].split("\n")
+        i = lines.index("**Confirm these matches?**")
+        self.assertEqual(lines[i - 1], "")
+        self.assertTrue(lines[i + 1].startswith("1. Elevenlabs.io"))
+        self.assertNotIn("REC", end["text"])                     # #99: no raw number
+        self.assertNotIn("Confirm all:", end["text"])
+        self.assertIn("Confirm all", self.labels(end))
 
 
 class R8Fixes(Reading):

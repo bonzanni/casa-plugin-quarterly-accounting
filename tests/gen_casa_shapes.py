@@ -115,6 +115,14 @@ class Shapes:
         n0 = len(broker.deposits)
         self.tick()
         out = qa_server.TOOLS[tool]["fn"](dict(args))
+        if isinstance(out, dict) and out.get(SLOTS[tool]) is None and out.get("post"):
+            # #93: nothing on it to act on — the desk posts it plain, as the note says
+            body = None
+            for i, group in enumerate(out["post"]):
+                body = self.call(st, broker, f"{case}:plain{i}", "post_results",
+                                 {"render_ids": group}, display=display,
+                                 bind=len(group) == 1)
+            return body
         if not (isinstance(out, dict) and isinstance(out.get(SLOTS[tool]), str)):
             raise AssertionError(f"{case}: {tool}({args}) posted nothing: {out}")
         new = broker.deposits[n0:]
@@ -136,7 +144,8 @@ class Shapes:
             rec["bind"] = {"render_id": args["render_ids"][0], "store": self.shape}
         if tool not in PROPOSALS:
             if display is True:          # an operator_message's text is its value
-                rec["display_expect"] = views.unesc(body["value"])
+                rec["display_expect"] = views.displayed(body["value"])
+                rec["bold_expect"] = views.bold_spans(body["value"])
             else:
                 rec["display_skip"] = display
             self.records.append(rec)
@@ -152,16 +161,19 @@ class Shapes:
                 page_ids = json.loads(st.conn.execute(
                     "SELECT scope_json FROM renders WHERE render_id=?",
                     (out["render_id"],)).fetchone()[0])["list_pages"]
-                rec["page_binds"] = [{"render_id": rid, "display_expect": views.unesc(t)}
+                rec["page_binds"] = [{"render_id": rid, "display_expect": views.displayed(t),
+                                      "bold_expect": views.bold_spans(t)}
                                      for rid, t in zip(page_ids, prop["pages"], strict=True)]
             elif tool == "rename_vendor":
                 # #89: the rename's line, a page of its own before the card
                 rid = st.conn.execute("SELECT render_id FROM renders WHERE text=? ORDER BY"
                                       " rowid DESC LIMIT 1", (prop["pages"][0],)).fetchone()[0]
                 rec["page_binds"] = [{"render_id": rid,
-                                      "display_expect": views.unesc(prop["pages"][0])}]
+                                      "display_expect": views.displayed(prop["pages"][0]),
+                                      "bold_expect": views.bold_spans(prop["pages"][0])}]
         if display is True:
-            rec["display_expect"] = views.unesc(prop["text"])
+            rec["display_expect"] = views.displayed(prop["text"])
+            rec["bold_expect"] = views.bold_spans(prop["text"])
         else:
             rec["display_skip"] = display
         self.records.append(rec)
@@ -342,7 +354,8 @@ def _item_states(sh, st, b, tag, pids):
     check = sh.call(st, b, f"{tag}:check-walk", "show_view", {"view": "check",
                                                                "quarter": QUARTER})
     one = next(x for x in check if x["label"] == "One by one")
-    item = sh.call(st, b, f"{tag}:item:proposed", "show_view", one["call"]["arguments"])
+    # #93 r2: [One by one] is a tap whose answer carries the payment's card
+    item = sh.tap(st, f"{tag}:item:proposed", one, keep=True)["next"]["buttons"]
     if labels(item)[:3] != ["Right", "Wrong", "No invoice needed"]:
         raise AssertionError(f"{tag}: a proposed item offers {labels(item)}")
     paired = sh.call(st, b, f"{tag}:item:paired", "show_view",
@@ -356,7 +369,7 @@ def _item_states(sh, st, b, tag, pids):
     sh.tap(st, f"{tag}:item:none", none[0], keep=True)
     exempt = sh.call(st, b, f"{tag}:item:exempt", "show_view",
                      {"view": "item", "pid": pids["missing"][0]})
-    if any("key" in x.get("call", {}).get("arguments", {}) for x in exempt):
+    if isinstance(exempt, list) and any("key" in x.get("call", {}).get("arguments", {}) for x in exempt):
         raise AssertionError(f"{tag}: an exempt item offers a verdict")
 
 
@@ -411,7 +424,7 @@ def gen_legacy_rendering(sh, st, b):
                             " text, membership_json) VALUES (?,'status','{}','x',?,'[]')",
                             (rid, text))
         sh.call(st, b, case, "show_view", {"render_id": rid}, display=display)
-        posted = next(r for r in reversed(sh.records) if r["case"] == case)
+        posted = next(r for r in reversed(sh.records) if r["case"].startswith(case))
         if display is True and posted["display_expect"] != views.deposit_safe(text):
             raise AssertionError(f"{case}: a legacy text is displayed as itself, cleaned")
 
@@ -627,7 +640,7 @@ def _post(sh, st, b, case, rid, must=None):
     phrase its text has to hold — the shape is the one asked for."""
     import views
     text = st.conn.execute("SELECT text FROM renders WHERE render_id=?", (rid,)).fetchone()[0]
-    if must is not None and must not in views.unesc(text):
+    if must is not None and must not in views.displayed(text):
         raise AssertionError(f"{case}: {must!r} is not in {text[:200]!r}")
     return sh.call(st, b, case, "show_view", {"render_id": rid})
 
@@ -675,12 +688,13 @@ def gen_end_message_operator(sh, st, b):
     _missing(st, [hostile(22)], day=Q2_DAY)
     end = _c(st, cards.compose_end, st.job_id, scheduled=False)
     labels = [x["label"] for x in _post(sh, st, b, "end:operator", end, "Q3 checked")]
-    if labels != ["Review", "Confirm all", "Invoice links", "Get package"]:
+    # #93 #94: Close beside the actions; a job's end card offers no package
+    if labels != ["Review", "Confirm all", "Invoice links", "Close"]:
         raise AssertionError(f"end:operator: the buttons are {labels}")
     _proposals(st, 27, start=3)
     end = _c(st, cards.compose_end, st.job_id, scheduled=False)
     labels = [x["label"] for x in _post(sh, st, b, "end:operator-full", end, "more to confirm")]
-    if labels != ["Review", "Invoice links", "Get package"]:
+    if labels != ["Review", "Invoice links", "Close"]:
         raise AssertionError(f"end:operator-full: the buttons are {labels}")
 
 
@@ -700,7 +714,8 @@ def gen_end_message_scheduled(sh, st, b):
 
 
 def gen_end_message_nothing_to_ask(sh, st, b):
-    """Every payment accounted for: "all accounted for", [Get package] alone."""
+    """Every payment accounted for: "all accounted for", nothing to tap — a plain message
+    (#93, #94)."""
     import cards
     loop_store(st)
     for i in range(3):
@@ -709,9 +724,9 @@ def gen_end_message_nothing_to_ask(sh, st, b):
                                      amount_minor=700 + i, document_date=Q3_DAY,
                                      document_number=docnum(i)), st.token)
     end = _c(st, cards.compose_end, st.job_id, scheduled=False)
-    labels = [x["label"] for x in _post(sh, st, b, "end:nothing", end, "all accounted for")]
-    if labels != ["Get package"]:
-        raise AssertionError(f"end:nothing: the buttons are {labels}")
+    body = _post(sh, st, b, "end:nothing", end, "all accounted for")
+    if not isinstance(body, dict) or body.get("slot") != "results":
+        raise AssertionError(f"end:nothing: not a plain message: {body}")
 
 
 def gen_end_message_handover(sh, st, b):
@@ -734,8 +749,8 @@ def gen_end_message_handover(sh, st, b):
 
 
 def gen_end_message_handover_close(sh, st, b):
-    """#72: a handover card with nothing to tap (a copy already filed, a document fitting no
-    payment) posts with Casa's Close button (v0.344.64, #1375) — a buttonless card is refused."""
+    """#93: a handover card with nothing to tap (a copy already filed, a document fitting no
+    payment) is a plain message — never a card with Close alone."""
     import cards
     loop_store(st)
     first = st.doc(counterparty=hostile(0), issuer=hostile(0), amount_minor=10000,
@@ -744,9 +759,9 @@ def gen_end_message_handover_close(sh, st, b):
                   document_date=Q3_DAY, document_number=docnum(0), recipient="Voorbeeld BV")
     lone = st.doc(counterparty=hostile(2), amount_minor=1, document_number=docnum(2))
     end = _c(st, cards.compose_end, st.job_id, scheduled=False, handover_docs=[copy, lone])
-    buttons = _post(sh, st, b, "end:handover-close", end, f": already filed as #{first}")
-    if buttons != [{"label": "Close", "close": True}]:
-        raise AssertionError(f"end:handover-close: buttons {buttons}")
+    body = _post(sh, st, b, "end:handover-close", end, f": already filed as #{first}")
+    if not isinstance(body, dict) or body.get("slot") != "results":
+        raise AssertionError(f"end:handover-close: not a plain message: {body}")
 
 
 def gen_end_message_with_completion(sh, st, b):
@@ -771,8 +786,14 @@ def gen_open_items(sh, st, b):
     _proposals(st, 2, alternatives=2)
     _missing(st, [hostile(20), hostile(21)])
     out = sh.call(st, b, "open-items", "show_view", {"view": "open", "quarter": QUARTER})
-    if [x["label"] for x in out] != ["Review", "Confirm all", "Invoice links", "Get package"]:
+    if [x["label"] for x in out] != ["Review", "Confirm all", "Invoice links", "Close"]:
         raise AssertionError(f"open-items: the buttons are {[x['label'] for x in out]}")
+    # #94: the desk judged the operator wants the package
+    out = sh.call(st, b, "open-items:package", "show_view", {"view": "open", "quarter": QUARTER,
+                                                              "package": True})
+    if [x["label"] for x in out] != ["Review", "Confirm all", "Invoice links", "Get package",
+                                     "Close"]:
+        raise AssertionError(f"open-items:package: the buttons are {[x['label'] for x in out]}")
 
 
 def gen_all_answered(sh, st, b):
@@ -782,8 +803,10 @@ def gen_all_answered(sh, st, b):
     left = _missing(st, [hostile(20)])
     st.granted(lambda c, grant: work.leave_missing_in_tx(c, left, grant=grant))
     sh.call(st, b, "all-answered", "show_view", {"view": "open", "quarter": QUARTER})
+    # #93: nothing left to tap — the card goes as a plain message
     if "all accounted for" not in next(r for r in sh.records
-                                  if r["case"] == "all-answered")["display_expect"]:
+                                       if r["case"].startswith("all-answered")
+                                       )["display_expect"]:
         raise AssertionError("all-answered: the card does not say so")
 
 
@@ -823,7 +846,8 @@ def gen_review_cards(sh, st, b):
                             ("review:single", single, 0)):
         buttons = _post(sh, st, b, case, _c(st, cards.card, end, order.index(pid)),
                         "· to confirm")
-        picks = [x for x in buttons if x["call"]["arguments"].get("action") == "pick"]
+        picks = [x for x in buttons
+                 if x.get("call", {}).get("arguments", {}).get("action") == "pick"]
         if len(picks) != want:
             raise AssertionError(f"{case}: {len(picks)} named candidates, not {want}")
 
@@ -860,13 +884,13 @@ def gen_replace_cards(sh, st, b):
         rows.append(pid)
     end = _c(st, cards.compose_end, st.job_id, scheduled=False)
     labels = [x["label"] for x in _post(sh, st, b, "end:replace", end, "to check")]
-    if labels != ["Review", "Get package"]:
+    if labels != ["Review", "Close"]:
         raise AssertionError(f"end:replace: the buttons are {labels}")
     for k, case in ((0, "replace:job"), (1, "replace:operator")):
         buttons = _post(sh, st, b, case, _c(st, cards.card, end, k), "already has an invoice")
-        if [x["label"] for x in buttons] != ["Keep current", "Use new"]:
+        if [x["label"] for x in buttons] != ["Keep current", "Use new", "Close"]:
             raise AssertionError(f"{case}: the buttons are {buttons}")
-        for x in buttons:
+        for x in buttons[:-1]:
             sh.tap(st, f"{case}:{x['label']}", x)
 
 

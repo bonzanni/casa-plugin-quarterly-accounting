@@ -1,8 +1,8 @@
 """S7 §7.6/§12/§6.1: every deposit this plugin makes, judged by Casa's REAL deposit
 (ReferenceStore.deposit: proposal_ok, _message_ok, _file_caption_ok, the S7a filename
 predicate), Casa's real message plan (render_paged ≤ MAX_MESSAGE_PAGES) and Casa's real
-renderer (tg_richtext.render: the displayed text equals the unescaped composition; no
-entity). Runs under Casa's interpreter; never imported by the stdlib suite.
+renderer (tg_richtext.render: the displayed text equals the unescaped composition; its
+only entities are the house style's bold spans, #99). Runs under Casa's interpreter; never imported by the stdlib suite.
 
 The file's first line is the generator's header; every deposit case it names must be judged
 and accepted, the accepted deposits per kind must equal its counts, every kind in
@@ -77,6 +77,18 @@ def _quiet_job(manifest) -> list:
         if "quietWhenScheduled" not in str(exc):
             bad.append((0, f"a non-boolean quietWhenScheduled refused as {exc}", ""))
     return bad
+
+
+def _bold(shown, entities):
+    """#99: the displayed text of each entity, which must all be BOLD — the house style's
+    title and question lines, never a field's markers."""
+    u = shown.encode("utf-16-le")
+    out = []
+    for e in entities or []:
+        if "BOLD" not in str(e.type).upper():
+            return None
+        out.append(u[2 * e.offset:2 * (e.offset + e.length)].decode("utf-16-le"))
+    return out
 
 
 def _display(rec):
@@ -187,7 +199,7 @@ def main(path) -> int:
         else:
             checked += 1
             shown, entities = render(text)
-            if shown != expect or entities:
+            if shown != expect or _bold(shown, entities) != rec.get("bold_expect", []):
                 bad.append((n, "display differs or an entity was produced", rec["case"]))
         if "bind" in rec and (mode == "check" or dkind == rb.OPERATOR_FILE):
             # binding r7 (#44: the package note and the file too): Casa's real quote of the
@@ -217,7 +229,8 @@ def main(path) -> int:
         for pb, page_text in zip(promised, sent or []):
             shown, entities = render(page_text)
             checked += 1
-            if shown != pb["display_expect"] or entities:
+            if shown != pb["display_expect"] or _bold(shown, entities) != pb.get(
+                    "bold_expect", []):
                 bad.append((n, "a page's display differs or an entity was produced",
                             rec["case"]))
             raw = render(rb.compose_operator_message(page_text, label))[0]

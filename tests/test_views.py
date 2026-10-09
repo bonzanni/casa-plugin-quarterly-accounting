@@ -118,7 +118,7 @@ class TestSheet(Base):
                              expected_revision=self.rev(g), row_snapshot=self.snapshot(g),
                              token=self.token, labels=("guessed",), runners_up=["8712 (10 Sep)"])
         text = self.render()["text"]
-        self.assertLess(text.index("MISSING"), text.index("I GUESSED THESE"))
+        self.assertLess(text.index("**Missing**"), text.index("**I guessed these**"))  # #99
         self.assertIn("Adobe · EUR 100.00 · 14 Sep", text)
         self.assertIn("https://adobe.example/invoices", text)
         self.assertIn("Picked invoice 8841 (17 Sep); 8712 \\(10 Sep\\) also fits.", text)
@@ -156,7 +156,7 @@ class TestSheet(Base):
         self.add(counterparty="Unsearched", searched=False)
         self.add(tags=(), counterparty="Unclassified", searched=False)
         text = self.render()["text"]
-        self.assertIn("MISSING\nSearched · ", text)
+        self.assertIn("**Missing**\nSearched · ", text)
         self.assertNotIn("Unsearched", text)         # never looked for: not `missing`
         self.assertIn("3 transactions, 1 missing a document.", flat(text))
         self.assertIn("2 new payments not checked yet", text)   # an unclassified one is unsearched
@@ -256,7 +256,7 @@ class TestSheet(Base):
             saved = dict(self.conn.execute("SELECT * FROM binding").fetchone())
             self.conn.execute("DELETE FROM binding")
         stop = self.render()
-        self.assertTrue(stop["text"].startswith("Not set up yet."))
+        self.assertTrue(stop["text"].lstrip("*").startswith("Not set up yet."))
         views.mark_rendering_delivered(self.conn, stop["render_id"])
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO binding(%s) VALUES (%s)" % (
@@ -374,7 +374,8 @@ class TestSheet(Base):
         self.add(counterparty="Dropped", searched=False)
         self.granted(work.stop_chasing_in_tx, "2026-Q3")
         text = self.render()["text"]
-        self.assertIn("Dropped · EUR 100.00 · 14 Sep\nNo longer chased.", text)
+        # #99: one tight line per payment, its detail after it
+        self.assertIn("Dropped · EUR 100.00 · 14 Sep — No longer chased.", text)
         self.assertIn("2 transactions, 2 missing a document.", flat(text))
         self.assertNotIn("the next pass looks", text)
         self.assertNotIn("Not searched yet", text)
@@ -392,7 +393,7 @@ class TestSheet(Base):
                               (survivor, loser))
             lineage.settle(self.conn, survivor)
         text = self.render()["text"]
-        self.assertIn("MISSING\nKept · ", text)
+        self.assertIn("**Missing**\nKept · ", text)
         self.assertNotIn("the next pass looks", text)
 
     def test_an_interrupted_pass_says_not_checked_once(self):
@@ -461,7 +462,7 @@ class TestSheet(Base):
         self.assertIn("1 transaction, 1 missing a document.", flat(text))
         self.assertIn("+1 older still missing (Q2)", text)
         item = self.render("item", pid=pid)["text"]
-        self.assertTrue(item.startswith("NowCo · "), item)
+        self.assertTrue(item.startswith("**NowCo · "), item)       # #99: its title
 
     def test_a_cut_page_keeps_its_continuation_phrase(self):
         kb.upsert_counterparty(self.conn, "Big", source="portal",

@@ -17,6 +17,7 @@ from unittest import mock
 
 from tests._base import StoreCase
 from tests.fakebroker import FakeBroker
+import views
 
 NOW = dt.datetime(2026, 9, 15, 12, tzinfo=dt.timezone.utc)
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -59,7 +60,9 @@ class _Q3(StoreCase):
     def propose(self, text, quoted=None):
         import posting
         with FakeBroker() as b:
-            out = posting.propose_reading(self.conn, text, quoted)
+            # #99: the operator quotes what they saw (bold markers are formatting)
+            out = posting.propose_reading(self.conn, text, views.displayed(quoted)
+                                          if isinstance(quoted, str) else quoted)
         return out, (b.proposal() if b.deposits else None)
 
     def readings(self):
@@ -74,7 +77,7 @@ class _Q3(StoreCase):
 
     def text_of(self, render_id):
         import views
-        return views.unesc(self.render_text(render_id))
+        return views.displayed(self.render_text(render_id))
 
     def repair(self, pid, number, issuer=None, token=None):
         """The job re-judges `pid`: a new document (same amount and date, `number`) replaces
@@ -199,7 +202,7 @@ class MergedSurvivor(StoreCase):
         import posting
         with FakeBroker():
             out = posting.propose_reading(self.conn, "the Zapier one is good",
-                                          views.unesc(r1["text"]))
+                                          views.displayed(r1["text"]))
         self.assertIsNone(out["reading"])
         self.assertEqual(out["reshow"], [survivor])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE author='operator'"
@@ -222,10 +225,10 @@ class PostedOnlyQuote(_Q3):
         self.tick()                    # #53: composed a second after the fixture's sheet
         with FakeBroker() as b:
             call("show_view", view="status", quarter="2026-Q3")
-            sheet = tap(b.proposal(), "Show matches to confirm (3)")
-            prop = b.proposal()
-        r = self.conn.execute("SELECT * FROM renders WHERE render_id=?",
-                              (sheet["render_id"],)).fetchone()
+            # #93 r2: the button is a tap; its answer carries the list as the next card
+            prop = tap(b.proposal(), "Show matches to confirm (3)")["next"]
+        rid = prop["buttons"][0]["call"]["arguments"]["render_id"]
+        r = self.conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
         self.assertIsNone(r["delivered_at"])
         ref = next(k for k, v in json.loads(r["scope_json"])["refs"].items() if a[1] in v)
         out, rprop = self.propose(f"ref {ref} is wrong", quoted=prop["text"])
@@ -281,7 +284,8 @@ class MonotoneStamp(_Q3):
         row = self.conn.execute("SELECT posted_seq FROM renders WHERE render_id=?",
                                 (rid,)).fetchone()
         self.assertIsNotNone(row["posted_seq"])
-        self.assertEqual(views.bound_rendering(self.conn, landed)["render_id"], rid)
+        self.assertEqual(views.bound_rendering(self.conn, views.displayed(landed))["render_id"],
+                         rid)
 
 
 # ---------------------------------------------------------------------------------------
@@ -370,7 +374,9 @@ class ContinuedPages(StoreCase):
     def propose(self, text, quoted=None):
         import posting
         with FakeBroker() as b:
-            out = posting.propose_reading(self.conn, text, quoted)
+            # #99: the operator quotes what they saw (bold markers are formatting)
+            out = posting.propose_reading(self.conn, text, views.displayed(quoted)
+                                          if isinstance(quoted, str) else quoted)
         return out, (b.proposal() if b.deposits else None)
 
     def unpairs(self):
@@ -391,7 +397,7 @@ class ContinuedPages(StoreCase):
         import views
         p2 = views.build_review(self.conn, **prop["next"])
         call("mark_rendering_delivered", render_id=p2["render_id"])
-        return p2, {"text": views.unesc(p2["text"])}
+        return p2, {"text": views.displayed(p2["text"])}
 
     def test_show_view_posts_both_pages_and_the_cards_wrong_sets_aside_both(self):
         """#66: the item's candidates go out as two pages before one card; a reply to the
@@ -407,7 +413,7 @@ class ContinuedPages(StoreCase):
         self.assertEqual(len(mrevs), 2)
         self.assertEqual([x["label"] for x in prop["buttons"]], ["No invoice needed", "Close"])
         call("mark_rendering_delivered", render_id=out["render_id"])
-        o, rprop = self.propose("the Adobe one is wrong", quoted=views.unesc(prop["text"]))
+        o, rprop = self.propose("the Adobe one is wrong", quoted=views.displayed(prop["text"]))
         self.assertIsNotNone(o["reading"])
         tap(rprop, "Apply")
         self.assertEqual(self.unpairs(), 2)
@@ -481,7 +487,7 @@ class ContinuedPages(StoreCase):
             (p2["render_id"], self.pid)).fetchone()[0])
         self.assertEqual(len(mrevs), 1)
         views.mark_rendering_delivered(self.conn, p2["render_id"])
-        out, _ = self.propose("the Adobe one is wrong", quoted=views.unesc(p2["text"]))
+        out, _ = self.propose("the Adobe one is wrong", quoted=views.displayed(p2["text"]))
         self.assertIsNone(out["reading"])
         self.assertEqual(self.unpairs(), 0)
 
@@ -609,12 +615,14 @@ class _Long(StoreCase):
     def propose(self, text, quoted=None):
         import posting
         with FakeBroker() as b:
-            out = posting.propose_reading(self.conn, text, quoted)
+            # #99: the operator quotes what they saw (bold markers are formatting)
+            out = posting.propose_reading(self.conn, text, views.displayed(quoted)
+                                          if isinstance(quoted, str) else quoted)
         return out, (b.proposal() if b.deposits else None)
 
     def quote(self, render_id):
         import views
-        return (LABEL + views.unesc(self.render_text(render_id)))[:2000]
+        return (LABEL + views.displayed(self.render_text(render_id)))[:2000]
 
 
 class RawTruncation(_Long):
@@ -676,8 +684,8 @@ class LegacyAmbiguity(_Long):
         with FakeBroker() as br:
             fresh = call("show_view", **rec[0]["show_view"])
             ftext = br.proposal()["text"]
-        self.assertRegex(views.unesc(ftext).split("\n")[0], TAG_RE)
-        self.assertEqual(views.bound_rendering(self.conn, LABEL + ftext)["render_id"],
+        self.assertRegex(views.displayed(ftext).split("\n")[0], TAG_RE)
+        self.assertEqual(views.bound_rendering(self.conn, LABEL + views.displayed(ftext))["render_id"],
                          fresh["render_id"])
         self.assertTrue(db)
 
@@ -690,7 +698,7 @@ class LegacyAmbiguity(_Long):
 
     def text_of(self, rid):
         import views
-        return views.unesc(self.render_text(rid))
+        return views.displayed(self.render_text(rid))
 
     make_legacy_both = _Q3.make_legacy
 
@@ -782,7 +790,7 @@ class IdenticalSheets(_Q3):
         with FakeBroker() as br:
             fresh = call("show_view", **rec)
             text = br.proposal()["text"]
-        self.assertEqual(views.bound_rendering(self.conn, text)["render_id"],
+        self.assertEqual(views.bound_rendering(self.conn, views.displayed(text))["render_id"],
                          fresh["render_id"])
 
 
@@ -903,7 +911,9 @@ class BroadProvenance(StoreCase):
     def propose(self, text, quoted=None):
         import posting
         with FakeBroker() as b:
-            out = posting.propose_reading(self.conn, text, quoted)
+            # #99: the operator quotes what they saw (bold markers are formatting)
+            out = posting.propose_reading(self.conn, text, views.displayed(quoted)
+                                          if isinstance(quoted, str) else quoted)
         return out, (b.proposal() if b.deposits else None)
 
     def test_class_rule_lists_its_effect_and_applies_once(self):
@@ -982,7 +992,7 @@ class Tags(_Q3):
                 self.assertRegex(first, TAG_RE)                 # #53: the composition time
                 for word in views.FORBIDDEN:
                     self.assertNotIn(word, first)
-                self.assertEqual(views.esc(views.unesc(first)), first)
+                self.assertEqual(views.esc(views.displayed(first)), first.replace("**", ""))  # #99: a bold title
                 self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
 
     def test_the_fit_never_cuts_the_tag(self):
@@ -1109,7 +1119,7 @@ class LegacyFields(_Q3):
             self.assertIn(views.LACKS, out["say"])
             call("show_view", **rec[0])                       # the recovery, then its quote
             out = call("propose_reading", text="all good",
-                       quoted=views.unesc(b.proposal()["text"]))
+                       quoted=views.displayed(b.proposal()["text"]))
             self.assertIsNotNone(out["reading"])
             tap(b.proposal(), "Apply")
         self.assertEqual(m.execute("SELECT count(*) FROM readings").fetchone()[0], 1)
@@ -1186,7 +1196,7 @@ class LabelOnlyOnTheQuote(_Q3):
         f = self.sheet_fixture(payee="\U0001f4ca Analytics")
         with FakeBroker() as b:
             s = call("show_view", view="item", pid=f["pid"])
-            quote = LABEL + views.unesc(b.proposal()["text"])
+            quote = LABEL + views.displayed(b.proposal()["text"])
             call("mark_rendering_delivered", render_id=s["render_id"])
             self.assertEqual(views.bound_rendering(self.conn, quote)["render_id"],
                              s["render_id"])
@@ -1229,7 +1239,7 @@ class ClippedQuote(_Long):
         with FakeBroker() as b:
             r = call("show_view", view="all", quarter="2026-Q3", page=1)
             call("mark_rendering_delivered", render_id=r["render_id"])
-            raw = LABEL + views.unesc(b.proposal()["text"])
+            raw = LABEL + views.displayed(b.proposal()["text"])
             quote = casa_clip(raw)
             self.assertGreater(len(raw), CASA_QUOTE_CHARS)
             self.assertTrue(quote.endswith(CASA_CLIP))
@@ -1254,7 +1264,7 @@ class ClippedQuote(_Long):
                               " delivered_at, text, membership_json, delivered_seq) VALUES"
                               " ('r9000', 'status', '{}', 'x', 'x', ?, '[]', ?)",
                               (text, db.next_seq(self.conn)))
-        quote = casa_clip(LABEL + views.unesc(views.deposit_safe(text)))
+        quote = casa_clip(LABEL + views.displayed(views.deposit_safe(text)))
         self.assertEqual(views.bound_rendering(self.conn, quote)["render_id"], "r9000")
 
     def test_only_casa_s_own_clip_is_undone(self):

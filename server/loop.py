@@ -771,8 +771,10 @@ def _post_unit(conn, job_id, run):
     if rid:
         if not _owed_post(conn, rid, job_id):
             return None
-        text = conn.execute("SELECT text FROM renders WHERE render_id=?", (rid,)).fetchone()[0]
-        if views.fits_proposal(text):
+        r = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
+        import posting
+        # #93: a message with nothing to act on is posted plain, never as a card
+        if views.fits_proposal(r["text"]) and posting.has_actions(conn, r):
             return {"unit": "view", "render_id": rid}
         return {"unit": "post", "render_ids": [rid]}
     a = alerts.pending_in_tx(conn)

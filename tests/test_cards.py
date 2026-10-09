@@ -39,7 +39,7 @@ class Cards(LoopCase):
         self.assertIn("(other currency)", text)
         # #57: [Invoice links] while the quarter has a missing invoice
         self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Invoice links",
-                                            "Get package"])
+                                            "Close"])         # #94: no package on an end card
         self.assertEqual([("p" in o) for o in scope["order"]], [True, True, False])
 
     def test_confirm_all_is_left_out_at_25_proposals(self):
@@ -49,7 +49,7 @@ class Cards(LoopCase):
             self.propose(p, amount_minor=1000 + i, issuer="V%02d" % i)
         rid = self.c(cards.compose_end, self.job_id, scheduled=False)
         self.assertNotIn("Confirm all", " ".join(self.labels(rid)))
-        self.assertEqual(self.labels(rid)[-1], "Get package")
+        self.assertEqual(self.labels(rid)[-1], "Close")
 
     def test_nothing_to_ask(self):
         import cards
@@ -57,7 +57,7 @@ class Cards(LoopCase):
         self.machine_match(p, self.doc(), self.token)
         rid = self.c(cards.compose_end, self.job_id, scheduled=False)
         self.assertIn("all accounted for", self.rendering(rid)[0]["text"])
-        self.assertEqual(self.labels(rid), ["Get package"])
+        self.assertEqual(self.labels(rid), [])          # #93 #94: nothing to tap: posted plain
 
     def test_a_vendor_with_more_payments_than_a_card_is_paged(self):
         import cards, views
@@ -86,7 +86,7 @@ class Cards(LoopCase):
         r, scope = self.rendering(rid)
         self.assertIn("1 earlier item still open", r["text"])
         self.assertEqual(scope["order"], [{"v": "Adobe", "pids": [new]}])
-        self.assertTrue(r["text"].startswith("Q3 · new: 1 missing"))
+        self.assertTrue(r["text"].lstrip("*").startswith("Q3 · new: 1 missing"))
         page = self.c(cards.card, rid, 0)
         self.assertNotIn("Never for Adobe", self.labels(page))                 # rev 17
         p, pscope = self.rendering(page)
@@ -155,7 +155,7 @@ class Cards(LoopCase):
                               " ('2026-Q3', 'an-earlier-completion', 1)")  # completed before
         rid = self.c(cards.compose_ready, ["2026-Q3"])
         self.assertIn("Q3 complete · updated · package ready", self.rendering(rid)[0]["text"])
-        self.assertEqual(self.labels(rid), ["Get package"])
+        self.assertEqual(self.labels(rid), [])          # #94: a job's notice offers no package
         # 0.11.2: the status card says "all accounted for" for a quarter with payments,
         # every one answered (a quarter with none says nothing_to_check's sentence)
         p = self.pay("Adobe", 100)
@@ -176,13 +176,16 @@ class Cards(LoopCase):
             q = self.pay(vendor + "%02d" % i, 5000 + i)
             self.propose(q, amount_minor=5000 + i, document_number="N" * 58 + "%02d" % i)
             pids.append(q)
+        from unittest import mock
+        import views                       # #99: no legend reserve — a smaller card instead
+        self.enterContext(mock.patch.object(views, "BODY_LIMIT", views.BODY_LIMIT - 1200))
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         r, scope = self.rendering(end)
         self.assert_binds_exactly_what_it_shows(end)
         shown = len(scope["bound_lines"])
         self.assertLess(shown, 24)                   # fewer than Confirm all's bound
         self.assertIn(f"… and {30 - shown} more to confirm — Review shows them.", r["text"])
-        self.assertEqual(self.labels(end), ["Review", "Get package"])
+        self.assertEqual(self.labels(end), ["Review", "Close"])
         self.assertEqual([o["p"] for o in scope["order"]], pids)       # every proposal
         self.assertEqual(sorted(scope["proposed"]),
                          sorted(int(p) for p in scope["bound_lines"]))
@@ -193,13 +196,16 @@ class Cards(LoopCase):
         for i in range(30):
             q = self.pay(vendor + "%02d" % i, 5000 + i)
             self.propose(q, amount_minor=5000 + i, document_number="N" * 58 + "%02d" % i)
+        from unittest import mock
+        import views                       # #99: no legend reserve — a smaller card instead
+        self.enterContext(mock.patch.object(views, "BODY_LIMIT", views.BODY_LIMIT - 1200))
         rid = self.c(cards.compose_open, "2026-Q3")
         r, scope = self.rendering(rid)
-        self.assertTrue(r["text"].startswith("Q3 · 30 payments · "), r["text"])
+        self.assertTrue(r["text"].lstrip("*").startswith("Q3 · 30 payments** · "), r["text"])
         self.assertEqual(r["text"].split("\n")[1], "30 to confirm")
         self.assert_binds_exactly_what_it_shows(rid)
         self.assertLess(len(scope["bound_lines"]), 24)
-        self.assertEqual(self.labels(rid), ["Review", "Get package"])
+        self.assertEqual(self.labels(rid), ["Review", "Close"])
 
     def test_an_oversized_vendor_page_is_sized_from_its_real_lines(self):
         """Round 7 (Astra S1): a punctuated 60-character vendor name, 24 "left missing"
@@ -233,9 +239,10 @@ class Cards(LoopCase):
         self.assertEqual(self.labels(rids[-1])[1], views.clip("Never for " + vendor, 32))
         self.assertEqual(self.labels(rids[-1]), ["No invoice needed for these",
                                                  views.clip("Never for " + vendor, 32),
-                                                 "Leave missing", "Leave for now"])
+                                                 "Leave missing", "Leave for now",
+                                                 "Close"])
         self.assertEqual(self.labels(first), ["No invoice needed for these", "Leave missing",
-                                              "Next page", "Leave for now"])
+                                              "Next page", "Leave for now", "Close"])
 
     WIDE = "*_" * 30          # 60 characters, every one escaped: the widest field there is
 
@@ -249,7 +256,7 @@ class Cards(LoopCase):
         # card; a smaller body limit keeps the real-lines measure under test
         from unittest import mock
         import views
-        self.enterContext(mock.patch.object(views, "BODY_LIMIT", 1400))
+        self.enterContext(mock.patch.object(views, "BODY_LIMIT", 1000))     # #99: no legend
         self.granted(lambda c, grant: work.leave_missing_in_tx(c, pids, grant=grant))
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         self.assertEqual(self.rendering(end)[1]["order"], [])    # all answered: no item
@@ -274,7 +281,7 @@ class Cards(LoopCase):
         # grown lines; a smaller body limit keeps the growth past the fit under test
         from unittest import mock
         import views
-        self.enterContext(mock.patch.object(views, "BODY_LIMIT", 1400))
+        self.enterContext(mock.patch.object(views, "BODY_LIMIT", 1000))     # #99: no legend
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         first = self.c(cards.card, end, 0)
         pages = self.rendering(first)[1]["pages"]
@@ -376,8 +383,8 @@ class Cards(LoopCase):
 
     def test_the_measure_counts_the_worst_case_tag(self):
         import cards, views
-        # 0.11.2: the measure also reserves the legend line (LEGEND_MAX and its newline)
-        line = "a" * (views.BODY_LIMIT - len(cards.TAG_WORST) - cards.LEGEND_MAX - 1)
+        # #99: no legend line to reserve any more (the buttons say it)
+        line = "a" * (views.BODY_LIMIT - len(cards.TAG_WORST) - 4)        # 4: the bold title
         self.assertTrue(cards._fits([line]))
         self.assertFalse(cards._fits([line + "a"]))
         self.assertTrue(views.fits_proposal(line + "a"))     # fits without the tag
@@ -394,10 +401,10 @@ class Cards(LoopCase):
         end = self.c(cards.compose_end, self.job_id, scheduled=False, extra=extra)
         r, scope = self.rendering(end)
         self.assertLess(len(scope["bound_lines"]), 22)
-        self.assertEqual(self.labels(end), ["Review", "Get package"])
+        self.assertEqual(self.labels(end), ["Review", "Close"])
         self.assertEqual(scope["confirm_all"], 0)
-        # the failure lines stay (0.11.2: before the legend line)
-        self.assertEqual(r["text"].split("\n")[-5:-1], extra)
+        # the failure lines stay, last (#99: no legend after them)
+        self.assertEqual(r["text"].split("\n")[-4:], extra)
         self.assert_binds_exactly_what_it_shows(end)
 
     def legacy_set(self, n):
@@ -415,7 +422,7 @@ class Cards(LoopCase):
         p, mids = self.legacy_set(6)
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         self.assertIn("6 documents fit", self.rendering(end)[0]["text"])
-        self.assertEqual(self.labels(end), ["Review", "Get package"])   # no chosen one
+        self.assertEqual(self.labels(end), ["Review", "Close"])   # no chosen one
         rid = self.c(cards.card, end, 0)
         r, scope = self.rendering(rid)
         self.assert_binds_exactly_what_it_shows(rid)
@@ -445,15 +452,15 @@ class Cards(LoopCase):
                               alternatives=[alt])
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         self.assertIn("2 documents fit; chose INV\\-88 (2 Aug)", self.rendering(end)[0]["text"])
-        self.assertEqual(self.labels(end), ["Review", "Confirm all", "Get package"])
+        self.assertEqual(self.labels(end), ["Review", "Confirm all", "Close"])
         rid = self.c(cards.card, end, 0)
         r, scope = self.rendering(rid)
         self.assertEqual(scope["alternatives"], [alt])
         self.assertEqual(self.labels(rid), ["INV-88 (2 Aug)", "INV-91 (4 Aug)", "Wrong",
-                                            "Leave for now"])
+                                            "Leave for now", "Close"])
         dep = self.c(cards.deposit_of, rid)
         picks = [b["call"]["arguments"] for b in dep["buttons"]
-                 if b["call"]["arguments"].get("action") == "pick"]
+                 if b.get("call", {}).get("arguments", {}).get("action") == "pick"]
         self.assertEqual([a["doc_id"] for a in picks], [chosen, alt])
         stored = dict(self.conn.execute("SELECT key, doc_id FROM render_keys WHERE"
                                         " render_id=? AND action='pick'", (rid,)).fetchall())
@@ -467,7 +474,7 @@ class Cards(LoopCase):
         rid = self.c(cards.card, end, 0)
         r, scope = self.rendering(rid)
         # #56: the proposed PDF rides beside [Confirm] (test_issue_56)
-        self.assertEqual(self.labels(rid), ["Confirm", "See PDF", "Wrong", "Leave for now"])
+        self.assertEqual(self.labels(rid), ["Confirm", "See PDF", "Wrong", "Leave for now", "Close"])
         self.assertEqual(scope["alternatives"], [])
         self.assertEqual(scope["review_of"], end)
         self.assertEqual(scope["pos"], 0)
@@ -509,9 +516,9 @@ class Cards(LoopCase):
         self.assertEqual(dict(st["counts"]["2026-Q2"]), {"missing": 1})
         rid = self.c(cards.compose_end, self.job_id, scheduled=False)
         lines = self.rendering(rid)[0]["text"].split("\n")
-        self.assertTrue(lines[0].startswith("Q3 checked · 3 payments"))
+        self.assertTrue(lines[0].startswith("**Q3 checked · 3 payments"))     # #99: a title
         self.assertEqual(lines[1], "1 matched · 1 missing · 1 waiting on the bank")
-        self.assertEqual(lines[2], "Q2 still open: 1 missing")
+        self.assertEqual(lines[2:4], ["", "Q2 still open: 1 missing"])     # #99: a new group
         # 0.11.2: the end card walks only its quarter's items; Q2 is the one line above
         self.assertEqual(self.rendering(rid)[1]["order"], [{"v": "Open", "pids": [old - 1]}])
 
@@ -528,16 +535,21 @@ class Cards(LoopCase):
                      handover_docs=[filed, prop, lone])
         r, scope = self.rendering(rid)
         lines = r["text"].split("\n")
-        # #67: one line per handed document, named as read, with what became of it
+        # #99: a title saying what happened, then one line per handed document, named as
+        # read (no raw number), with what became of it (#67)
+        self.assertTrue(lines[0].startswith("**3 documents you sent**"), lines[0])
         self.assertIn(": matched automatically to the 2 Sep EUR 100.00 payment (Adobe).",
-                      lines[0])
-        self.assertTrue(any(": proposed for AWS · 2 Sep · EUR 41.20 — confirm?" in ln
-                            for ln in lines), lines)
+                      lines[1])
+        # #96: a proposed one is said once — its line in the question's list
+        self.assertFalse(any("— confirm?" in ln for ln in lines), lines)
         self.assertTrue(any(ln.endswith(": not matched yet.") for ln in lines), lines)
-        self.assertIn("To confirm:", lines)
+        i = lines.index("**Confirm these matches?**")
+        self.assertTrue(lines[i + 1].startswith("1. AWS · 2 Sep · EUR 41.20 ↔ invoice · "),
+                        lines[i + 1])
+        self.assertNotIn("INV-88", r["text"])
         self.assertNotIn("Twilio", r["text"])
         self.assertEqual(scope["order"], [{"p": q}])
-        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
+        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Close"])
 
     def test_owed_notices_join_an_end_message_or_become_the_message(self):
         import cards, loop
@@ -547,8 +559,8 @@ class Cards(LoopCase):
         r, scope = self.rendering(rid)
         self.assertEqual(r["kind"], "end")
         self.assertIn('Q2 complete · package ready — say "send the Q2 package"', r["text"])
-        # 0.11.2: the notice is the last line before the legend
-        self.assertTrue(r["text"].split("\n")[-2].endswith("bank-feed needs attention"))
+        # 0.11.2: the notice is the last line (#99: no legend after it)
+        self.assertTrue(r["text"].split("\n")[-1].endswith("bank-feed needs attention"))
         self.assertEqual(scope["ready_quarters"], ["2026-Q2"])
         self.assertEqual(scope["ready_sigs"], {"2026-Q2": loop.completion_sig(self.conn,
                                                                               "2026-Q2")})
@@ -633,11 +645,11 @@ class Cards(LoopCase):
             posting.show_view(self.conn, view="open")
         first, second = b.proposal(0), b.proposal(1)
         self.assertEqual([x["label"] for x in first["buttons"]],
-                         ["Review", "Invoice links", "Get package"])       # #57
+                         ["Review", "Invoice links", "Close"])       # #57
         self.assertEqual(first["revision"], "walk:" + end)
         self.assertEqual(untag(second["text"]).split("\n")[:2], ["Q3 · 1 payment", "1 missing"])
-        self.assertEqual(second["buttons"][-1]["call"],
-                         {"tool": "get_package", "arguments": {"quarter": "2026-Q3"}})
+        # #94: no package unless the desk judged the operator wants it
+        self.assertNotIn("get_package", json.dumps(second["buttons"]))
         self.assertIsNotNone(self.conn.execute("SELECT posted_seq FROM renders WHERE"
                                                " render_id=?", (end,)).fetchone()[0])
         with self.assertRaises(db.Refusal):

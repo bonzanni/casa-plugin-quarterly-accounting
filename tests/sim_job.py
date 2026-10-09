@@ -1034,6 +1034,11 @@ class JobDriver:
     def _post(self, u, token):
         """post_results(render_ids); on Casa's receipt, mark_rendering_delivered each."""
         out = self._tool("post_results", {"render_ids": u["render_ids"]})
+        if self._broker_now is not None and out.get("render_ids"):
+            # #93: a message with nothing to tap goes plain — kept like a view's deposit
+            for rid in out["render_ids"]:
+                self.posted[rid] = {"text": self._broker_now.deposits[-1]["value"],
+                                    "buttons": []}
         if self.deliver and out.get("render_ids"):
             self._tool("mark_rendering_delivered", {"render_ids": out["render_ids"]})
         return None

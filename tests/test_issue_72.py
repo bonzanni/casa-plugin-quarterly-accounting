@@ -47,7 +47,7 @@ class Monthly(StoreCase):
         # nearest the invoice's own date first (cheap steering)
         u = [u for u in units if u["unit"] == "payment"][0]
         self.assertEqual(u["handed_fits"][str(doc)][0]["pid"], sep)
-        self.assertIn("Get package: the Q3 zip", text)
+        self.assertNotIn("Get package", text)           # #94: no package on an end card
 
     def test_decide_refuses_a_dated_document_outside_the_payments_window(self):
         import decide
@@ -200,13 +200,21 @@ class Cards(LoopCase):
         with db.tx(self.conn):
             return fn(self.conn, *a, **k)
 
-    def test_a_card_with_nothing_to_tap_carries_casas_close_button(self):
-        import cards
+    def test_a_card_with_nothing_to_tap_is_posted_as_a_plain_message(self):
+        # #93: Close never alone — the job posts it plain (a `post` unit, no keyboard)
+        import cards, loop
         lone = self.doc(amount_minor=1)
         rid = self.c(cards.compose_end, self.job_id, scheduled=False, handover_docs=[lone])
-        dep = self.c(cards.deposit_of, rid)
-        self.assertEqual(dep["buttons"], [{"label": "Close", "close": True}])
-        self.assertNotIn("Close:", dep["text"])
+        r = self.conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
+        import posting
+        self.assertFalse(posting.has_actions(self.conn, r))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE runs SET end_render_id=? WHERE job_id=?",
+                              (rid, self.job_id))
+            run = self.conn.execute("SELECT * FROM runs WHERE job_id=?",
+                                    (self.job_id,)).fetchone()
+            self.assertEqual(loop._post_unit(self.conn, self.job_id, run),
+                             {"unit": "post", "render_ids": [rid]})
 
     def test_a_pending_payment_of_that_amount_is_named_not_denied(self):
         import cards

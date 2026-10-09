@@ -688,9 +688,14 @@ def t_review(args):
           "quarter's figures, missing payments and packages sent); item (one payment, with "
           "pid); page/after/prev from a previous "
           "`next`, unchanged. render_id: post that stored rendering again (the job's "
-          "`view` unit). After Casa's receipt (casa_delivery.status delivered), call "
-          "mark_rendering_delivered(render_id).",
+          "`view` unit). package (open only): true when the operator's words make it "
+          "reasonably clear they want the quarter's package (e.g. \"is Q3 ready for the "
+          "accountant?\"): the card then offers [Get package]; otherwise leave it out. After "
+          "Casa's receipt (casa_delivery.status delivered), call "
+          "mark_rendering_delivered(render_id). `post` instead of a view: the view has "
+          "nothing to act on — post it as its note says.",
           obj({"view": S, "quarter": Q, "pid": I, "page": I, "render_id": S, "prev": S,
+               "package": {"type": "boolean"},
                "after": {"type": "array", "description": "the cursor from a `next`, unchanged"}}))
 @capability("view")
 def t_show_view(args):
@@ -701,6 +706,7 @@ def t_show_view(args):
     return posting.show_view(conn(), view=args.get("view"), quarter=_quarter(args),
                              pid=_int(args, "pid"), page=_int(args, "page"), after=after,
                              render_id=args.get("render_id"),
+                             package=_bool(args, "package", False),
                              prev=args.get("prev"))
 
 

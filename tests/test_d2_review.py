@@ -155,13 +155,13 @@ class HandoverJoiningACheck(StoreCase):
             "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
             {"matched": 1, "open": 1})        # operator ruling 2026-10-09: sure → matched
         lines = end["text"].split("\n")
-        self.assertTrue(lines[0].startswith("Q3 checked · 2 payments"), lines)
+        self.assertTrue(lines[0].startswith("**Q3 checked · 2 payments"), lines)
         self.assertIn("1 matched · 1 missing", lines)
-        (receipt,) = [ln for ln in lines if "ZAP\\-HAND" in ln]
+        (receipt,) = [ln for ln in lines if "matched automatically to the 5 Jul" in ln]
         self.assertTrue(receipt.endswith(": matched automatically to the 5 Jul EUR 10.00 "
                                          "payment (Zapier)."), receipt)
         self.assertEqual([b["label"] for b in end["buttons"]],
-                         ["Review", "Invoice links", "Get package"])        # #57
+                         ["Review", "Invoice links", "Close"])        # #57
         # the Review order is the check's: the missing payment's vendor
         rid = self.conn.execute("SELECT end_render_id FROM runs WHERE job_id='d2d2d2d2-b1'"
                                 ).fetchone()[0]
@@ -183,7 +183,7 @@ class HandoverJoiningACheck(StoreCase):
             "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
             {"matched": 2})                 # operator ruling 2026-10-09: sure → matched
         self.assertIn("Q3 complete · 2 of 2 accounted for · package ready", end["text"])
-        self.assertIn("ZAP\\-HAND · 5 Jul · EUR 10.00: matched automatically to the 5 Jul "
+        self.assertIn("Zapier · 5 Jul · EUR 10.00: matched automatically to the 5 Jul "
                       "EUR 10.00 payment (Zapier).", end["text"])
 
     def test_a_standalone_continuation_keeps_the_handover_only_message(self):
@@ -199,10 +199,12 @@ class HandoverJoiningACheck(StoreCase):
                                             doc_ids=[doc["doc_id"]]))
         self.drv.run_job("d2d2d2d2-b4")
         end = self.drv.posted_end("d2d2d2d2-b4")
-        self.assertIn("Zapier ZAP\\-HAND · 5 Jul · EUR 10.00: matched automatically to the "
-                      "5 Jul EUR 10.00 payment (Zapier).", end["text"].split("\n")[0])
+        lines = end["text"].split("\n")         # #99: the title, then the document's line
+        self.assertTrue(lines[0].startswith("**1 document you sent**"), lines[0])
+        self.assertIn("Zapier · 5 Jul · EUR 10.00: matched automatically to the "
+                      "5 Jul EUR 10.00 payment (Zapier).", lines[1])
         self.assertNotIn("checked", end["text"])
-        self.assertEqual([b["label"] for b in end["buttons"]], ["Get package"])
+        self.assertEqual(end["buttons"], [])     # #93 #94: nothing to tap — a plain message
 
 
 class OwnMailInvoiceIsACandidate(StoreCase):

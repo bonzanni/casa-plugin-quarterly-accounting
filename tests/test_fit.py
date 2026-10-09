@@ -522,7 +522,7 @@ class TestSeenNameProperty(Base):
             before = {p: paired(p) for p in pids}
             # binding R1/R3: a reply quoting the sheet resolves on it; unquoted words bind
             # whatever came last, and refuse when it does not show the payee
-            quoted = views.unesc(r["text"]) if rng.random() < 0.5 else None
+            quoted = views.displayed(r["text"]) if rng.random() < 0.5 else None
             out = apply_now(self.conn, "the %s one is wrong" % " ".join(words), quoted=quoted)
             changed = [p for p in pids if before[p] != paired(p)]
             self.assertLessEqual(set(changed), {target}, (words, out["receipt"]))

@@ -24,8 +24,9 @@ class Posts(StoreCase):
         asks.request_work(self.conn, "check", "operator")
         units = self.drive(A, deliver=True, bank_tools=False)   # the pass stops
         kinds = [u["unit"] for u in units]
-        self.assertEqual(kinds, ["probes", "view", "complete"])  # its one message, then complete
-        text = self.render_text(units[1]["render_id"])
+        # its one message (#93: nothing to tap: plain), then complete
+        self.assertEqual(kinds, ["probes", "post", "complete"])
+        text = self.render_text(units[1]["render_ids"][0])
         self.assertIn("Accounting check stopped: bank\\-feed's tools are not available to"
                       " the finance specialist.", " ".join(text.split()))   # escaped field
 

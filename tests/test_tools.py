@@ -147,12 +147,12 @@ class TestSurface(TempEnv):
         import tools  # noqa: F401
         out = qa_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                 "params": {"name": "get_counterparty", "arguments": {}}})
-        self.assertTrue(out["result"]["content"][0]["text"].startswith("refused:"))
+        self.assertTrue(out["result"]["content"][0]["text"].lstrip("*").startswith("refused:"))
 
     def test_a_refusal_is_not_an_error(self):
         import tools  # noqa: F401
         res = _tool("record_match", pid="1", doc_id=1, author="auto", expected_revision=0)
-        self.assertTrue(res["content"][0]["text"].startswith("refused: pid must be an integer"))
+        self.assertTrue(res["content"][0]["text"].lstrip("*").startswith("refused: pid must be an integer"))
         self.assertNotIn("isError", res)
 
 
@@ -403,7 +403,7 @@ class TestArgumentTypes(ToolCase):
         # last_built; #22: + dates_unread; S2: the job's tools take the old step flags' place;
         # S7 Task 4: - set_exemption's exempt; simple loop Task 11: - the unread-dates
         # listing's flag, - the sweep's not-found flag
-        self.assertEqual(len(bools), 12, bools)
+        self.assertEqual(len(bools), 13, bools)       # #94: + show_view's package
         for n, k in bools:
             res = _tool(n, **{k: "false"})
             text = res["content"][0]["text"]
@@ -414,7 +414,8 @@ class TestArgumentTypes(ToolCase):
                           "snapshot_id": 1, "step": "sweep", "action": "finish"}
                 res = _tool(n, **{r: filler[r] for r in req if r != k}, **{k: "false"})
                 text = res["content"][0]["text"]
-            self.assertEqual(text, f"refused: {k} must be true or false", (n, k))
+            # a capability tool (show_view) refuses with its null slot beside the words
+            self.assertIn(f"{k} must be true or false", text, (n, k))
 
     def test_the_string_false_marks_nothing_irrelevant(self):
         doc = self.doc()

@@ -84,7 +84,10 @@ def rename_vendor(conn, vendor, new_name=None) -> dict:
             lead = _line(v["name"], target)
         rid = posting._compose_list(conn, "item", None, max(v["pids"]), None, None, None)
         r = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
-        _lead_rendering(conn, r, lead)
+        line = _lead_rendering(conn, r, lead)
+        if not posting.has_actions(conn, r):
+            # #93: a card with nothing to act on goes, after its line, as plain messages
+            return {"view": None, **posting.plain_post(conn, r, line)}
         value, _ = posting._view_value(conn, r, lead=lead)
         key = posting.delivery_key(conn, "rename", [rid])
     ref = casa_broker.deposit("view", value, key=key)

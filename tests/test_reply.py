@@ -1083,7 +1083,7 @@ class TestIdentity(Base):
         # quoting the sheet, the alias it printed still asks between both payments
         sheet = self.conn.execute("SELECT text FROM renders WHERE kind='status' ORDER BY"
                                   " rowid DESC LIMIT 1").fetchone()[0]
-        out = apply_now(self.conn, "the A\u2022B one is wrong", quoted=views.unesc(sheet))
+        out = apply_now(self.conn, "the A\u2022B one is wrong", quoted=views.displayed(sheet))
         self.assertEqual(out["applied"], [])
         self.assertIn("Which one?", out["receipt"])
         self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))

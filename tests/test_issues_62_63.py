@@ -50,15 +50,12 @@ class DomainNames(StoreCase):
         self.assertIn("twilio.com", reply._dotted_names(self.conn, reply._open_items(self.conn)))
 
 
-class CreditNoteLegend(StoreCase):
-    def test_the_exempt_legend_entry_starts_with_its_buttons_words(self):
+class CreditNoteButton(StoreCase):
+    def test_a_credit_note_vendor_card_says_document_on_its_button(self):
+        # #99: no legend; the button's own words say it
         import cards
         for noun, label in (("invoice", "No invoice needed for these"),
                             ("credit note", "No document needed for these")):
             scope = {"quarter": "2026-Q2", "vendor": "AMAZON", "page": 1, "pages": [[1]],
                      "noun": noun, "missing": True}
-            legend = cards.legend("vendor-page", scope)
-            labels = [b[0] for b in cards._buttons("r0", "vendor-page", scope)]
-            self.assertIn(label, labels)
-            first = legend.split(" · ")[0]
-            self.assertTrue(label.startswith(first.split(":")[0]), (first, label))
+            self.assertIn(label, [b[0] for b in cards._buttons("r0", "vendor-page", scope)])

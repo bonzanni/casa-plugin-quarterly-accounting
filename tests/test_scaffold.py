@@ -60,7 +60,7 @@ class TestScaffold(TempEnv):
         b = qa_server.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
                               "params": {"name": "_t_boom", "arguments": {}}})
         self.assertTrue(b["result"]["isError"])
-        self.assertTrue(b["result"]["content"][0]["text"].startswith("error: KeyError"))
+        self.assertTrue(b["result"]["content"][0]["text"].lstrip("*").startswith("error: KeyError"))
 
     def test_casa_handoff_is_vendored_verbatim(self):
         up = ROOT / "tests/upstream/component-v0.21.0/plugins/bank-feed/server/casa_handoff.py"

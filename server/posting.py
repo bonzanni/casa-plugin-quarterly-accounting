@@ -57,18 +57,17 @@ def _keyed(conn, render_id, specs) -> list:
     return out
 
 
-# the approved script: a card that carries buttons ends with one line saying what they do
-READING_LEGEND = "Apply: make this change · Cancel: change nothing"
-ACCOUNT_LEGEND = "Account n: that one is the business account"
 
 def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
-              render_id=None, prev=None) -> dict:
+              render_id=None, prev=None, package=False) -> dict:
     """§7.1: render exactly as build_review does (or, with render_id, re-post that stored
     rendering — the job's `view` unit, §5) and deposit it as a proposal: text = the page,
     buttons = §7.2, revision = view:<view>:<quarter>. `prev` is the predecessor page the
     More button (or a typed "more") names (binding V1). Simple loop §1: a cards rendering
     (cards.KINDS) re-posts with its own keyboard (cards.buttons) and the revision of its
-    walk; view="open" composes and posts a fresh open-items card (§1 Recovery)."""
+    walk; view="open" composes and posts a fresh open-items card (§1 Recovery), with
+    [Get package] when `package` (#94). #93: a rendering with nothing to act on is not
+    deposited — `post` names it for post_results."""
     import cards
     with db.tx(conn):
         if render_id is not None:
@@ -89,18 +88,52 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
                 # null slot is Casa's no-deposit statement (#1015 addendum, INV-PLUG-028),
                 # so the result reaches the desk unchanged
                 return {"view": None, "say": cards.before_books(conn, quarter)}
-            rid = cards.compose_open(conn, quarter or cards.main_quarter(conn))
+            # #94: [Get package] only when the desk judged the operator wants the package
+            rid = cards.compose_open(conn, quarter or cards.main_quarter(conn),
+                                     package=package)
             r = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
         else:
             r = conn.execute("SELECT * FROM renders WHERE render_id=?",
                              (_compose_list(conn, view or "status", quarter, pid, page,
                                             after, prev),)).fetchone()
+        if not has_actions(conn, r):
+            return {"view": None, **plain_post(conn, r)}
         value, scope = _view_value(conn, r)
         # g1 (Astra S1), Casa #1312: re-posting the same rendering after a cut that lost its
         # mark_rendering_delivered sends nothing — Casa answers the original receipt
         key = delivery_key(conn, "view", [r["render_id"]])
     ref = casa_broker.deposit("view", value, key=key)
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
+
+
+POST_NOTE = ("Nothing on it to act on, so it goes as a plain message: post_results(render_ids="
+             "<each list in `post`>), and after each receipt mark_rendering_delivered on its "
+             "render ids. Never retell it; then your whole reply is <silent/>.")
+
+
+def has_actions(conn, r) -> bool:
+    """#93: a posted rendering `r` carries a button to act on (Close goes only beside one)."""
+    import cards
+    return bool(cards.buttons(conn, r) if r["kind"] in cards.KINDS
+                else views.buttons_for(conn, r))
+
+
+def plain_post(conn, r, lead_rid=None) -> dict:
+    """#93: a rendering with nothing to act on is not a card: the desk posts it, with its
+    pages (and a rename's line, `lead_rid`) first, as plain messages through post_results —
+    `post` holds one render id per call, in order. The null slot is
+    Casa's no-deposit statement (#1015 addendum)."""
+    scope = json.loads(r["scope_json"])
+    ids = ([lead_rid] if lead_rid else []) + list(scope.get("list_pages") or []) \
+        + [r["render_id"]]
+    # r1 (Astra S2): one rendering per post — Casa pages a joined message at its own
+    # boundaries, and a quote of its second message would match no stored rendering
+    groups = [[rid] for rid in ids]
+    for rid in ids:
+        # "a deposit attempted" (as a view's stamp): a reply quoting the plain post binds it
+        conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
+                     (db.next_seq(conn), rid))
+    return {"post": groups, "render_id": r["render_id"], "note": POST_NOTE}
 
 
 def _view_value(conn, r, lead=None):
@@ -417,11 +450,10 @@ def propose_reading(conn, text, quoted=None) -> dict:
             say = "\n".join(out["receipt"])
             return {"reading": None,
                     "say": views.fit_message(say, views.FIT_CLOSING) if say else "", **base}
-        body = ["I read this as:"] + [f"· {x}" for x in out["propose"]]
+        body = [views.title("I read this as:")] + [f"· {x}" for x in out["propose"]]
         if out["unresolved"]:
             body += ["", "Not included:"] + [f"· {x}" for x in out["unresolved"]]
         body += [x for x in out["receipt"] if x.startswith("Not rebuilding yet")]
-        body.append(READING_LEGEND)
         text_ = "\n".join(body)
         if not views.fits_proposal(text_):
             raise db.Refusal(READING_TOO_LONG)
@@ -476,7 +508,7 @@ def propose_account(conn, after=0) -> dict:
         if not page:
             raise db.Refusal("there are no more accounts")
         key, now = keys.mint(), db.now()
-        lines, buttons = [ACCOUNT_Q], []
+        lines, buttons = [views.title(ACCOUNT_Q)], []
         for n, a in enumerate(page, 1):
             label = a.get("label") or ""
             if not isinstance(label, str):
@@ -489,7 +521,6 @@ def propose_account(conn, after=0) -> dict:
         more = len(company) > (after + 1) * ACCOUNTS_PER_PAGE
         if more:
             buttons.append(("More", "propose_account", {"after": after + 1}))
-        lines.append(ACCOUNT_LEGEND + (" · More: the next accounts" if more else ""))
         text = "\n".join(lines)
         assert views.fits_proposal(text)   # 6 lines of ≤ 2×60+20 units: far within budget
         value = _proposal(text, buttons, "accounts")

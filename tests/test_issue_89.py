@@ -49,9 +49,9 @@ class OneVendor(_Case):
         dep = b.deposits[0]
         self.assertEqual(dep["slot"], "view")
         value = json.loads(dep["value"])
-        self.assertEqual([views.unesc(p) for p in value["pages"]],
+        self.assertEqual([views.displayed(p) for p in value["pages"]],
                          [f"{INFO} is now called {INFO_ISSUER}"])
-        self.assertIn(INFO_ISSUER, views.unesc(value["text"]))
+        self.assertIn(INFO_ISSUER, views.displayed(value["text"]))
         self.assertTrue(value["buttons"])
         card = self.conn.execute("SELECT scope_json FROM renders WHERE render_id=?",
                                  (out["render_id"],)).fetchone()[0]
@@ -196,7 +196,7 @@ class AllVendors(_Case):
             out = call("rename_vendors_to_invoice_names", {})
         self.assertEqual(len(b.deposits), 1)
         self.assertEqual(b.deposits[0]["slot"], "results")
-        self.assertEqual(views.unesc(b.deposits[0]["value"]),
+        self.assertEqual(views.displayed(b.deposits[0]["value"]),
                          "Renamed 2 vendors to the name on their invoice. 1 keeps the bank "
                          "name: the invoice name belongs to another vendor (Ryanair Mtw0). "
                          "Kept the names you gave: ElevenLabs. No invoice yet: LINKEDIN, "

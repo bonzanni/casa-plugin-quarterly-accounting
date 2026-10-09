@@ -34,7 +34,7 @@ class Readings(StoreCase):
         fx = self.sheet_fixture()
         out, prop = self.propose(f"the {fx['payee']} one is wrong")
         self.assertRegex(out["reading"], r"^casa-cap-")
-        self.assertTrue(prop["text"].startswith("I read this as:"))
+        self.assertTrue(prop["text"].lstrip("*").startswith("I read this as:"))
         self.assertIn("Remove the match for", prop["text"])
         self.assertEqual([b["label"] for b in prop["buttons"]], ["Apply", "Cancel"])
         self.assertEqual(prop["revision"], "reading")
@@ -109,7 +109,7 @@ class Readings(StoreCase):
         with self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, 2, tzinfo=dt.timezone.utc)):
             newer = views.build_review(self.conn, view="check")
         views.mark_rendering_delivered(self.conn, newer["render_id"])
-        quoted = "📊 Finance\n" + views.unesc(older["text"])[:300]
+        quoted = "📊 Finance\n" + views.displayed(older["text"])[:300]
         out, prop = self.propose("all good", quoted=quoted)
         self.assertIsNotNone(prop, out)
         self.assertEqual(prop["text"].count("Confirm "), 1)
@@ -140,7 +140,7 @@ class Readings(StoreCase):
         self.assertEqual(out["instructions"], [{"show_view": {"view": "status"}}])
         r = self.conn.execute("SELECT * FROM renders WHERE render_id=?",
                               (fx["render_id"],)).fetchone()
-        long = "📊 Finance\n" + views.unesc(r["text"]) + "\n" + "x " * 300
+        long = "📊 Finance\n" + views.displayed(r["text"]) + "\n" + "x " * 300
         self.assertEqual(views.bound_rendering(self.conn, long)["render_id"], fx["render_id"])
 
     def test_a_quote_of_a_joined_post_binds_to_its_first_rendering(self):

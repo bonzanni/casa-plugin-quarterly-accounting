@@ -28,6 +28,12 @@ _ON_KIND = {"end": ("review", "confirm-all", "links"),
             "vendor-page": ("exempt-these", "leave-missing", "never", "next-page",
                             "all-quarters", "this-quarter", "leave-vendor"),
             "replace": ("keep-current", "use-new")}
+# #93: the buttons that show another view, decided when tapped (_show)
+SHOW_ACTIONS = {"show-missing": "missing", "show-check": "check", "show-item": "item"}
+SHOW_RECEIPT = {"missing": "Missing invoices:", "check": "Matches to confirm:",
+                "item": "The payment:"}
+SHOW_SAY = {"missing": "show the missing invoices", "check": "show what to check",
+            "item": "show that payment"}
 CARD_CHANGED = "That changed since it was shown — nothing applied. Here it is as it is now."
 LIST_CHANGED = "That list changed since it was shown — nothing applied. Here it is as it is now."
 
@@ -109,10 +115,12 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
     binds (render, action, pid, doc_id); a key, rendering or action that does not hold is
     a refusal — {"receipt"} only, no card."""
     import cards
-    if action not in ACTIONS + CARD_ACTIONS:
+    if action not in ACTIONS + CARD_ACTIONS + tuple(SHOW_ACTIONS):
         raise db.Refusal(keys.NO_LONGER)
     with db.tx(conn):
         keys.spend_render(conn, key, render_id, action, pid, doc_id)
+        if action in SHOW_ACTIONS:
+            return _show(conn, render_id, SHOW_ACTIONS[action], pid)
         grant = authority.OperatorGrant("verdict", key)
         r = conn.execute("SELECT * FROM renders WHERE render_id=?", (render_id,)).fetchone()
         if r is not None and r["kind"] in cards.KINDS:
@@ -141,6 +149,32 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
     return {"receipt": views.fit_message(lines), "applied": applied}
 
 
+def _show(conn, render_id, view, pid=None) -> dict:
+    """#93 (d1, r1, r2 Astra S2): a button that shows another view (the missing or the
+    check list, one payment), decided when tapped. A view with something to act on is the
+    next card (its pages before it); one with nothing to act on is the tap's answer, plain,
+    as stored (it binds what it shows); a list longer than a message says how to see it."""
+    import posting
+    r = conn.execute("SELECT * FROM renders WHERE render_id=?", (render_id,)).fetchone()
+    q = json.loads(r["scope_json"]).get("quarter") if r is not None else None
+    if view != "item" and not q:
+        raise db.Refusal(keys.NO_LONGER)
+    rid = posting._compose_list(conn, view, None if view == "item" else q,
+                                pid if view == "item" else None, None, None, None)
+    lst = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
+    pages = json.loads(lst["scope_json"]).get("list_pages") or []
+    if posting.has_actions(conn, lst):
+        value, _ = posting._view_value(conn, lst)
+        return {"receipt": SHOW_RECEIPT[view], "next": json.loads(value)}
+    if pages:
+        # a list longer than one message cannot be one answer (r1 Astra S2: a clipped one
+        # bound what it never showed); the desk posts it whole, page by page
+        return {"receipt": f"Too long for one message: say \"{SHOW_SAY[view]}\" to see it "
+                           "all."}
+    conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?", (db.next_seq(conn), rid))
+    return {"receipt": lst["text"]}
+
+
 def _answer(conn, receipt, next_rid, in_place=False) -> dict:
     """#1302: the receipt (a non-blank sentence), then the card Casa posts after it, if
     any (#80: after a walk's last card the receipt is the whole answer). `in_place` (Casa
@@ -150,6 +184,17 @@ def _answer(conn, receipt, next_rid, in_place=False) -> dict:
     import cards
     if not receipt.strip():
         raise RuntimeError("#1302: every card answer is a receipt")
+    import posting
+    if next_rid is not None:
+        r = conn.execute("SELECT * FROM renders WHERE render_id=?", (next_rid,)).fetchone()
+        if not posting.has_actions(conn, r):
+            # #93: a card with nothing to tap is no card: its text follows the receipt, as
+            # one plain message (stamped posted, so a reply quoting it binds)
+            # d1 (Astra S2): the rendering holds the whole message as sent, so a quote of
+            # it binds
+            receipt, next_rid = views.fit_message(f"{receipt}\n\n{r['text']}"), None
+            conn.execute("UPDATE renders SET text=?, posted_seq=? WHERE render_id=?",
+                         (receipt, db.next_seq(conn), r["render_id"]))
     out = {"receipt": views.fit_message(receipt)}
     if next_rid is not None:
         out["next"] = cards.deposit_of(conn, next_rid)
@@ -191,13 +236,15 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
         # PLAY 0.11.2: the counts line's own numbers, never a count of cards
         return _answer(conn, f"Reviewing {cards.walk_words(scope, ', then ')}.",
                        cards.next_after(conn, rid, -1)
-                       or cards.compose_open(conn, scope["quarter"]))
+                       or cards.compose_open(conn, scope["quarter"],
+                                             package=bool(scope.get("package"))))
     if action == "confirm-all":
         return _confirm_all(conn, r, scope, grant)
     if action == "links":
         # issue #57: the quarter's card again, with where to download each missing invoice
         return _answer(conn, "Invoice links: on the card below.",
-                       cards.compose_open(conn, scope["quarter"], links=True), in_place=True)
+                       cards.compose_open(conn, scope["quarter"], links=True,
+                                          package=bool(scope.get("package"))), in_place=True)
     if action == "next-page":
         nxt = later_page()
         if nxt is not None:
@@ -377,7 +424,8 @@ def _confirm_all(conn, r, scope, grant) -> dict:
     head = [f"Confirmed {done} of {len(listed)}."]
     if skipped:
         head.append(f"{_plural(skipped, 'proposal')} already answered — left as answered.")
-    return _answer(conn, "\n".join(head + lines), cards.compose_open(conn, scope["quarter"]))
+    return _answer(conn, "\n".join(head + lines),
+                   cards.compose_open(conn, scope["quarter"], package=bool(scope.get("package"))))
 
 
 CHANGED = ("Something changed since I read your message — nothing was applied. Say it again.")

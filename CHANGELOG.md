@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.11.17
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **Cards share one light house style (#99).** Every card and list opens with a bold title
+  that says what it is or what happened ("3 documents you sent", "Q3 checked · 6 payments").
+  A question stands on its own line right above the list it asks about ("Confirm these
+  matches?"). Items are one tight line each, with blank lines only between groups. The line
+  explaining the buttons is gone: the buttons say it. Documents are named by issuer, date
+  and amount, not by provider ids, and a section with nothing useful in it is left out.
+- **Close sits beside a card's buttons, never alone (#93).** A card you can act on also
+  offers Close, so you can dismiss it without acting. A card with nothing to act on, such as
+  a list of missing invoices with nothing to confirm, now comes as a plain message with no
+  buttons.
+- **Get package only when you ask for the package (#94).** A check's end card and its
+  completion notice no longer offer it. A quarter's status card offers it when your words
+  make clear you want the package, for instance "is Q3 ready for the accountant?".
+  "Send the Q3 package" works as before.
+- **Each proposed match is stated once (#96).** A document you sent that needs your yes or
+  no appears only in the numbered list that Review and Confirm all refer to.
+
 ## 0.11.16
 
 Same store schema (17) and Casa floor (v0.344.67).
