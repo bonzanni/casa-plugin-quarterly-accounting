@@ -208,7 +208,7 @@ def _missing_of(conn, vendor) -> list:
     document, booked, all quarters (left-missing included). What a vendor card's
     [No invoice needed for these] and [Leave missing] act on — never Never's set."""
     return sorted(pid for pid, p, row in loop.in_scope(conn)
-                  if kb.norm(loop.vendor_of(conn, row)) == kb.norm(vendor)
+                  if kb.same_vendor(conn, loop.vendor_of(conn, row), vendor)
                   and p["status"] == "open" and p["exp_kind"] != "none"
                   and row["status"] == "BOOK")
 

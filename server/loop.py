@@ -310,13 +310,13 @@ def candidates(conn, pid, row, vendor) -> list:
         if d["amount_minor"] is None or not d["currency"]:
             # Q2 run 1: a document of unknown amount is a candidate of its own vendor only
             # — to propose (the floor never matches it)
-            if not d["vendor"] or kb.norm(d["vendor"]) != kb.norm(vendor):
+            if not d["vendor"] or not kb.same_vendor(conn, d["vendor"], vendor):
                 continue
         elif d["currency"] == row["currency"]:
             if d["amount_minor"] != row["amount_minor"]:
                 continue
         else:
-            if d["vendor"] is not None and kb.norm(d["vendor"]) != kb.norm(vendor):
+            if d["vendor"] is not None and not kb.same_vendor(conn, d["vendor"], vendor):
                 continue
             if fx.screen(fxp, row["amount_minor"], row["currency"], d["amount_minor"],
                          d["currency"]) is not None:
@@ -374,7 +374,7 @@ def exact_fit(conn, pid, row, vendor, cands):
     fits = [c["doc_id"] for c in cands
             if c["held"] is None and c["currency"] == row["currency"]
             and c["amount_minor"] == row["amount_minor"] and c["vendor"]
-            and kb.norm(c["vendor"]) == kb.norm(vendor)
+            and kb.same_vendor(conn, c["vendor"], vendor)
             and c["date"] and day and _gap(c["date"], day) <= NEAR_DAYS]
     return fits[0] if len(fits) == 1 else None
 

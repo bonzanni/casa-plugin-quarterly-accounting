@@ -35,7 +35,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server"))
 import binding  # noqa: E402
 import db  # noqa: E402
 
-REQUIRED_SCHEMA = 16
+REQUIRED_SCHEMA = 17
 _KEPT_BINDING = ("account_id", "account_label", "watermark", "bound_at", "package_name",
                  "package_name_announced", "watermark_announced")
 _KB_TABLES = ("counterparties", "chain_overrides")

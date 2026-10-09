@@ -257,17 +257,35 @@ def t_get_cp(args):
           "shows them; source is 'email' or 'portal'; document_link is the researched deep link "
           "to the vendor's invoice list. hint_sender and hint_subject are the vendor's learned "
           "search hint: the sender address and subject pattern of the search that found its "
-          "invoice. During a pass, pass the pass_token.",
-          obj({"name": S, "patterns": A, "source": S, "document_link": S, "link_note": S,
-               "search_hint": S, "notes": S, "window_days": I, "hint_sender": S,
-               "hint_subject": S, "pass_token": TOKEN}, ("name",)))
+          "invoice. new_name renames the vendor `name` (its current name or a bank text, as "
+          "list_vendors gives it): the same entry keeps its patterns, hints and rulings, and "
+          "its old name stays one of its bank texts. During a pass, pass the pass_token.",
+          obj({"name": S, "new_name": S, "patterns": A, "source": S, "document_link": S,
+               "link_note": S, "search_hint": S, "notes": S, "window_days": I,
+               "hint_sender": S, "hint_subject": S, "pass_token": TOKEN}, ("name",)))
 def t_upsert_cp(args):
     _need(args, "name")
     return kb.upsert_counterparty(conn(), args["name"], token=_int(args, "pass_token"),
                                   **_pick(args, ("patterns", "source", "document_link",
                                                  "link_note", "search_hint", "notes",
                                                  "window_days", "hint_sender",
-                                                 "hint_subject")))
+                                                 "hint_subject", "new_name")))
+
+
+@register("list_vendors",
+          "Read-only: every vendor of the payments, one entry each: name (its current name — "
+          "pass it as upsert_counterparty's name to rename it), shown (the name its cards "
+          "show), bank_texts, named (the name is one someone gave), invoice_issuer (the issuer "
+          "printed on the latest invoice matched to one of its payments; null when none is "
+          "matched), payments, latest_pid. `next`: pass it back as `after` for more.",
+          obj({"after": {"type": "array", "description": "the cursor from the previous "
+                                                         "`next`, passed back unchanged"}}))
+def t_vendors(args):
+    after = args.get("after")
+    if after is not None and (not isinstance(after, list) or len(after) != 1
+                              or not isinstance(after[0], str)):
+        raise db.Refusal("after is the cursor a previous page's `next` returned, unchanged")
+    return work.list_vendors(conn(), after=after[0] if after else None)
 
 
 @register("set_expectation",

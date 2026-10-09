@@ -21,7 +21,7 @@ import time
 
 DB_NAME = "accounting.sqlite"
 CUSTODY_LOCK = ".custody.lock"
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 BUSY_TIMEOUT_MS = 2000
 LOCK_BOUND_S = 30.0
 
@@ -288,7 +288,8 @@ CREATE TABLE IF NOT EXISTS counterparties (
   source TEXT CHECK (source IN ('email', 'portal')),
   document_link TEXT, link_note TEXT, search_hint TEXT, notes TEXT,
   window_days INTEGER NOT NULL DEFAULT 10, updated_at TEXT NOT NULL,
-  hint_sender TEXT, hint_subject TEXT);   -- the learned search hint (D6)
+  hint_sender TEXT, hint_subject TEXT,    -- the learned search hint (D6)
+  named_at TEXT);                         -- #84: the operator named it (new_name)
 CREATE TABLE IF NOT EXISTS chain_overrides (
   scope TEXT PRIMARY KEY, kind TEXT NOT NULL, tier TEXT,
   rows_json TEXT NOT NULL, key_json TEXT NOT NULL,   -- expectation.normalize_scope, fixed at set time
@@ -615,6 +616,9 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE run_items_v15 RENAME TO run_items"],
     # 15 -> 16 (#67): the handed documents of a run — their reading hand-outs and fits
     15: [RUN_DOCS_DDL],
+    # 16 -> 17 (#84): a vendor the operator renamed; its name wins over an invoice's issuer
+    # (the column is added by the data step _add_named_at, only where it is missing)
+    16: [],
     12: ["ALTER TABLE claims ADD COLUMN said_seq INTEGER",
          "ALTER TABLE claims ADD COLUMN report_seq INTEGER",
          "ALTER TABLE documents ADD COLUMN amount_conflict INTEGER NOT NULL DEFAULT 0"],
@@ -739,8 +743,16 @@ def _backfill_render_states(conn) -> None:
                          " VALUES (?,?,?)", (r[0], r[1], cards.item_state(d)))
 
 
+def _add_named_at(conn) -> None:
+    """16 -> 17 (#84): counterparties.named_at, unless the store already has it (a store
+    built from this DDL and labelled older, as the migration tests do)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(counterparties)")}
+    if "named_at" not in cols:
+        conn.execute("ALTER TABLE counterparties ADD COLUMN named_at TEXT")
+
+
 SCHEMA_DATA_STEPS = {9: _close_delegation_pass, 10: _settle_staged_email_on_upgrade,
-                     11: _backfill_render_states}
+                     11: _backfill_render_states, 16: _add_named_at}
 
 
 def migrate(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S) -> None:

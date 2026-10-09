@@ -1,6 +1,6 @@
 {
   "name": "quarterly-accounting",
-  "version": "0.11.12",
+  "version": "0.11.13",
   "description": "Quarterly accounting preparation: matches every business-account transaction to the document it needs, mirrors the decisions into bank-feed as acct:: tags and notes, answers from its own store, and builds a quarter's zip on request.",
   "author": {
     "name": "Nicola Bonzanni"
@@ -82,6 +82,9 @@
           "result": "safe"
         },
         "list_unmatched_documents": {
+          "result": "safe"
+        },
+        "list_vendors": {
           "result": "safe"
         },
         "mark_irrelevant": {
@@ -209,6 +212,7 @@
       "mcp__plugin_quarterly-accounting_quarterly-accounting__job_status",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_quarter_state",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__list_unmatched_documents",
+      "mcp__plugin_quarterly-accounting_quarterly-accounting__list_vendors",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__mark_irrelevant",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__mark_rendering_delivered",
       "mcp__plugin_quarterly-accounting_quarterly-accounting__post_package",
