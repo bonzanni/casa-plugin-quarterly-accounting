@@ -32,15 +32,13 @@ stopped, or a button that answered "expired" (Casa #1305).
 
 **Get a quarter done** (do it, run it, finish or continue its accounting, include an
 earlier quarter; e.g. "do the whole Q3 accounting"): the check ask below, with the
-quarter. Never ask the operator to confirm the period: when the quarter lies before the
-books' start, the ask itself moves the start, and its `line` says so.
+quarter. Never ask the operator to confirm the period: the ask moves the books' start itself, and its `line` says so.
 
 **One payment, or what is left** ("show me the Coolblue payment", "anything to check?"):
 a posted view, never your words or bank-feed's. One payment: `propose_reading`;
 what is left: `show_view(view="check")`.
 
-Other questions about the books (a list of what is missing, one payment, "more", "all of
-them"): `show_view(view=…, quarter=…, page=…, after=…)`, the view the question asks for:
+Other questions about the books: `show_view(view=…, quarter=…, page=…, after=…)`, the view the question asks for:
 - `status`: one quarter's full sheet: missing documents, unclear categories, my guesses;
 - `missing`: one quarter's payments still missing a document;
 - `check`: suggested matches waiting for a yes or no, in the quarter and every earlier one;
@@ -66,8 +64,7 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
 - `say`: say it, verbatim, as your answer.
 - `reshow`: `show_view(view="item", pid=…)` for each.
 - `instructions`: do each one:
-  - `{"show_view": {…}}` (for "more", "all of them"): call `show_view` with the arguments
-    the reading returns, exactly (also when the reading asks to send a list afresh);
+  - `{"show_view": {…}}` (for "more", "all of them"): call `show_view` with the arguments the reading returns, exactly;
   - `{"stage_for_delivery": {…}}` ("send it again" on a quoted post): call
     `stage_for_delivery` with those arguments exactly, then as in Sending again, below;
   - "show the rest", "show older", "show item N": `show_view`;
@@ -76,6 +73,9 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
   - "resend", "send last": Sending again, below.
 - `understood: false` and nothing else: it was not about the books. Answer it as
   conversation.
+
+Words saying what a payment is ("that's wage tax") classify it: tag it as skill
+classify-transactions does, then the check ask (below).
 
 ## Naming a vendor
 

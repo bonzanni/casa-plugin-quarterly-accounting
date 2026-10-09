@@ -34,7 +34,7 @@ CONFIRM_ALL_MAX = 24          # §1: with 25 or more proposals it is left out
 CANDIDATE_BUTTONS = 4         # §1: up to four named candidates
 PAGE_LINES = 25               # a vendor page's payments, then fitted to BODY_LIMIT
 LABEL_MAX = 32                # casa:result_broker.py, a button label
-BUCKETS = ("matched", "proposed", "missing", "not_needed", "pending")
+BUCKETS = ("matched", "proposed", "missing", "not_needed", "pending", "unclassified")
 TAG_WORST = " · 30 Sep 00:00:00"    # views.tag_now: its longest form
 
 
@@ -135,6 +135,7 @@ def checked_line(conn, q) -> str:
         return nothing_to_check(conn, q)
     line = (f"{dates.quarter_label(q)} checked: {c['matched']} matched, {c['proposed']} to "
             f"confirm, {c['missing']} missing")
+    line += f", {c['unclassified']} not classified yet" if c["unclassified"] else ""
     return line + (f", {c['pending']} pending" if c["pending"] else "")
 
 
@@ -143,12 +144,20 @@ def _line_key(d):
     return (kb.norm(d["vendor"]), d["date"] or "", d["pid"])
 
 
+def unclassified(d) -> bool:
+    """#98: an open payment the classifier has not classified yet (expectation row 4: no
+    tag, or parked) — not a missing invoice: what it is, is not known yet."""
+    return d["status"] == "open" and d["expectation"]["row"] == 4
+
+
 def _bucket(d) -> str:
     """§6.1's partition: pending first, then status. An open payment absent from the latest
     bank read (not fresh: decide refuses it until a later import observes it) is counted
     pending, never missing (Task 6/7 carry): each payment in exactly one bucket (§6.1)."""
     if d["pending"] or (d["status"] == "open" and not d["fresh"]):
         return "pending"
+    if unclassified(d):
+        return "unclassified"
     return {"matched": "matched", "proposed": "proposed",
             "open": "missing"}.get(d["status"], "not_needed")
 
@@ -173,7 +182,8 @@ def state(conn) -> dict:
         v = names.setdefault(kb.norm(d["vendor"]), d["vendor"])
         missing.setdefault(v, []).append(d)
     return {"proposals": by_bucket["proposed"], "missing": missing,
-            "pending": by_bucket["pending"], "counts": counts, "by_bucket": by_bucket}
+            "pending": by_bucket["pending"], "unclassified": by_bucket["unclassified"],
+            "counts": counts, "by_bucket": by_bucket}
 
 
 def _answered(d) -> bool:
@@ -210,6 +220,7 @@ def _missing_of(conn, vendor) -> list:
     return sorted(pid for pid, p, row in loop.in_scope(conn)
                   if kb.same_vendor(conn, loop.vendor_of(conn, row), vendor)
                   and p["status"] == "open" and p["exp_kind"] != "none"
+                  and p["exp_row"] != 4                  # #98: unclassified, not missing
                   and row["status"] == "BOOK")
 
 
@@ -524,7 +535,8 @@ def _walk_missing(conn, vendors, quarter, scheduled) -> int:
 def _counts_line(c) -> str:
     return _nonzero((c["matched"], "matched"), (c["not_needed"], "need no invoice"),
                     (c["proposed"], "to confirm"), (c["missing"], "missing"),
-                    (c["pending"], "waiting on the bank"))
+                    (c["pending"], "waiting on the bank"),
+                    (c["unclassified"], "not classified yet"))         # #98
 
 
 def _ready_scope(conn, quarters) -> dict:
@@ -700,22 +712,27 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     receipts = _receipts(conn, handover_docs, job_id)[0] if handover_docs else []
     reported = {d["pid"]: item_state(d) for d in st["proposals"]}
     reported.update({d["pid"]: "missing" for ds in st["missing"].values() for d in ds})
+    reported.update({d["pid"]: "unclassified" for d in st["unclassified"]})        # #98
     extra_scope = {"job_id": job_id, **sent, **offer,
                    **(_ready_scope(conn, ready) if ready else {})}
     if scheduled:
         new_props = [d for d in st["proposals"]
                      if not seen_state(conn, d["pid"], item_state(d))]
         new_miss = [d for d in open_missing if not seen_state(conn, d["pid"], "missing")]
+        new_uncl = [d for d in st["unclassified"]
+                    if not seen_state(conn, d["pid"], "unclassified")]           # #98
         qs = replace.open_ones(conn)
         new_qs = [x for x in qs if x["job_id"] == job_id]    # asked by this run: new
-        if not new_props and not new_miss and not new_qs:
+        if not new_props and not new_miss and not new_qs and not new_uncl:
             if ready:
                 return compose_ready(conn, ready, extra, alerts=alerts, receipts=receipts)
             if not receipts:
                 return None
-        earlier = len(st["proposals"]) + len(open_missing) - len(new_props) - len(new_miss)
+        earlier = len(st["proposals"]) + len(open_missing) + len(st["unclassified"]) \
+            - len(new_props) - len(new_miss) - len(new_uncl)
         head = [f"{_qn(q)} · new: " + _nonzero((len(new_props), "to confirm"),
-                                                (len(new_miss), "missing"))]
+                                                (len(new_miss), "missing"),
+                                                (len(new_uncl), "not classified yet"))]
         if earlier:
             head.append(f"{_s(earlier, 'earlier item')} still open")
         head += _fit_receipts(receipts, head, _confirm_room(new_props) + tail)
@@ -732,7 +749,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     # still owes them their own card)
     reported = {p: v for p, v in reported.items()
                 if work.describe(conn, p)["quarter"] == q}
-    if not st["proposals"] and not open_missing:
+    if not st["proposals"] and not open_missing and not c["unclassified"]:
         if ready and not all_qs:
             return compose_ready(conn, ready, extra, alerts=alerts, receipts=receipts)
         if not c["pending"]:
@@ -751,7 +768,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     earlier = _other_quarters(st, open_missing, q)
     if not n:
         head = [stopped or views.esc(nothing_to_check(conn, q))]
-    elif not props and not mine and not qs and not c["pending"]:
+    elif not props and not mine and not qs and not c["pending"] and not c["unclassified"]:
         head = [stopped or f"{_qn(q)} checked · {_s(n, 'payment')} · all accounted for."]
     else:
         head = [stopped or f"{_qn(q)} checked · {_s(n, 'payment')}", _counts_line(c)]
@@ -818,13 +835,15 @@ def compose_open(conn, quarter, *, scheduled=False, links=False, package=False) 
     props = [d for d in st["proposals"] if d["quarter"] == quarter]
     mine = [d for d in open_missing if d["quarter"] == quarter]
     reported = {d["pid"]: item_state(d) for d in props + mine}
+    reported.update({d["pid"]: "unclassified" for d in st["unclassified"]
+                     if d["quarter"] == quarter})                              # #98
     qs = [x for x in replace.open_ones(conn)
           if work.describe(conn, x["pid"])["quarter"] == quarter]
     c = st["counts"].get(quarter, collections.Counter())
     n = sum(c.values())
     if not n:
         head = [views.esc(nothing_to_check(conn, quarter))]
-    elif not props and not mine and not qs and not c["pending"]:
+    elif not props and not mine and not qs and not c["pending"] and not c["unclassified"]:
         head = [f"{_qn(quarter)} · {_s(n, 'payment')} · all accounted for"]
     else:
         head = [f"{_qn(quarter)} · {_s(n, 'payment')}", _counts_line(c)]

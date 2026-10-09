@@ -136,6 +136,8 @@ def _step(st: FoldState, e: Entry, occupied) -> None:
         st.exemption = e.seq
     elif e.kind == "lift":
         st.exemption = None
+    elif e.kind == "judge":
+        pass                    # #97: a job's judgement of the expectation, no pairing
     elif e.kind == "retire":
         c = st.cands.get(e.match_id)
         if c is None or c.activation != e.retire_activation:

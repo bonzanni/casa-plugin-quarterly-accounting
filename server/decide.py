@@ -5,6 +5,8 @@ An earlier entry's write is in the same transaction, so the document it took is 
 the later ones by construction. "No invoice needed" is never the job's (r9)."""
 from __future__ import annotations
 
+import json
+
 import db
 import lineage
 import matches
@@ -12,9 +14,10 @@ import passes
 
 ENTRIES_MAX = 30
 OUTCOMES = ("match", "propose", "missing",      # no `not-needed`: the operator's (§2.2, r9)
-            "keep", "replace")                 # a handover onto a paired payment (rev 18.4)
+            "keep", "replace",                 # a handover onto a paired payment (rev 18.4)
+            "optional")                        # #97: nice-to-have, by the job's judgement
 REASON_MAX = 200
-NOT_NEEDED = ("outcome is match, propose or missing: \"no invoice needed\" is the "
+NOT_NEEDED = ("outcome is match, propose, missing or optional: \"no invoice needed\" is the "
               "operator's tap, a KB rule or an expectation of none, never the job's")
 DATE_READ = ("pass document_date: the date printed on the document you opened (its issue "
              "date), YYYY-MM-DD")
@@ -99,6 +102,38 @@ def _labels(e) -> tuple:
     return tuple(labels)
 
 
+def _revoke_judgement(conn, pid) -> None:
+    """#97 (d2, Astra S1): a later decision of the job (match, propose, missing) supersedes
+    its nice-to-have judgement: a revoking `judge` entry (no basis), so restored facts never
+    bring the old judgement back."""
+    r = conn.execute("SELECT fp FROM log WHERE pid=? AND kind='judge' ORDER BY seq DESC"
+                     " LIMIT 1", (pid,)).fetchone()
+    if r is not None and r["fp"] is not None:
+        lineage.append(conn, pid, "judge", "auto", detail="superseded by a later decision")
+        lineage.settle(conn, pid)
+
+
+def optional_in_tx(conn, pid, expected_revision, reason) -> dict:
+    """#97 (operator ruling, a ruled exception — not a licence): the job judged this
+    payment's document nice-to-have (money back from a tax authority), with its reason.
+    Recorded as a `judge` log entry bound to the facts it judged (lineage.judgement_basis):
+    it applies while the payment keeps them; new facts bring the default back and the
+    payment onto the work list. Never on a payment holding a pairing or exempted."""
+    if not reason:
+        raise db.Refusal("optional needs a reason: what makes this document nice-to-have")
+    proj, row, _exp = matches.decidable(conn, pid, expected_revision)
+    st = lineage.fold_of(conn, pid)
+    if st.exemption is not None:
+        raise db.Refusal("the operator exempted this payment: nothing to judge")
+    if any(c.state in ("matched", "proposed", "conflicted") for c in st.cands.values()):
+        raise db.Refusal("this payment holds a pairing: decide it as match or propose")
+    tags = json.loads(proj["class_tags_json"]) if proj["class_tags_json"] else []
+    lineage.append(conn, pid, "judge", "auto", fp=lineage.judgement_basis(row, tags),
+                   detail=reason)
+    lineage.settle(conn, pid)
+    return {"applied": True, "wrote": True}
+
+
 def missing_in_tx(conn, pid, expected_revision, reason) -> dict:
     """A `missing` decision, inside the caller's transaction: the floor's own preconditions
     (matches.decidable: as handed out, managed, fresh, a document expected, booked), no
@@ -131,6 +166,12 @@ def _entry(conn, token, e, seen) -> dict:
         record_outcome(conn, token, pid, outcome)
         seen.add(pid)
         return {"pid": pid, **out, "status": lineage.projection(conn, pid)["status"]}
+    if outcome == "optional":
+        reason = str(e.get("reason") or "").strip()[:REASON_MAX]
+        out = optional_in_tx(conn, pid, rev, reason)
+        record_outcome(conn, token, pid, "settled", reason)
+        seen.add(pid)
+        return {"pid": pid, **out, "status": lineage.projection(conn, pid)["status"]}
     if outcome == "missing":
         reason = str(e.get("reason") or "")[:REASON_MAX]
         _check_listed(conn, token, pid)
@@ -147,6 +188,7 @@ def _entry(conn, token, e, seen) -> dict:
             # an exempt payment (machine_in_tx's one non-raising refusal): its residue line
             # is kept, as record_match keeps it; the entry is reported refused, no outcome
             return {"pid": pid, "applied": False, "wrote": False, "refused": out["refused"]}
+    _revoke_judgement(conn, pid)
     record_outcome(conn, token, pid, outcome, reason)
     seen.add(pid)                  # only a decided entry: a refused one may come again
     return {"pid": pid, "applied": True, "wrote": bool(out.get("wrote")),
