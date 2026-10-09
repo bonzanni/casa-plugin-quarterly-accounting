@@ -4,6 +4,7 @@ one plain line in the desk skill and the show_view description (the model picks 
 import pathlib
 
 from tests._base import LoopCase
+from tests.test_taps_next import _Tapping
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -58,3 +59,25 @@ class ViewsDescribed(LoopCase):
         line = "suggested matches waiting for a yes or no, in the quarter and every earlier one"
         self.assertIn(line, skill)
         self.assertIn(line, desc)
+
+
+class OwedCardFollows(_Tapping):
+    def test_a_switch_on_an_answered_page_re_posts_page_one(self):
+        """r2 Astra S1: page 2 answered meanwhile, then its quarter switch: the vendor's
+        page 1 still holds payments, so it follows the receipt (not the walk's end)."""
+        import matches
+        for i in range(30):                         # the walk's quarter (the run's: Q4)
+            self.pay("Adobe", 100 + i, "2026-10-%02d" % (i % 8 + 1))
+        self.pay("Adobe", 999, "2026-08-05")        # another quarter: the switch is offered
+        page1 = self.tap(self.end(), "Review")["next"]
+        page2 = self.tap(page1, "Next page")["next"]
+        for p in self.scope_of(page2)["pages"][1]:
+            amount = self.conn.execute("SELECT amount_minor FROM bank_rows b JOIN projections p"
+                                       " ON p.dest_row_id=b.row_id WHERE p.pid=?",
+                                       (p,)).fetchone()[0]
+            matches.record_match(self.conn, pid=p, author="auto",
+                                 doc_id=self.doc(document_date="2026-10-01", amount_minor=amount),
+                                 expected_revision=self.rev(p), token=self.token)
+        out = self.tap(page2, "Apply to all quarters")
+        self.assertEqual(out["receipt"], "Nothing is left on this card: answered meanwhile.")
+        self.assertIn("Adobe", out["next"]["text"])

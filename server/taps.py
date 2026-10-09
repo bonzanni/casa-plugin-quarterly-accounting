@@ -212,8 +212,8 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
         on = action == "all-quarters"
         nxt = cards.switched(conn, rid, on)
         if nxt is None:
-            return _answer(conn, "Nothing is left on this card: answered meanwhile.",
-                           cards.next_after(conn, review_of, pos))
+            # r2 Astra S1: as for an emptied later page, the vendor's page 1 may still be owed
+            return _answer(conn, "Nothing is left on this card: answered meanwhile.", fresh())
         return _answer(conn, "All quarters on." if on else "This quarter only.", nxt,
                        in_place=True)
     if action == "leave-vendor":
