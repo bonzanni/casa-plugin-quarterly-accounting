@@ -71,13 +71,14 @@ class T16DelegatedStart(unittest.TestCase):
     def test_the_desk_asks_name_the_delegated_start(self):
         asks = DESK[DESK.index("## Asks"):DESK.index("## A file the operator sent")]
         flat = " ".join(asks.split())
-        self.assertIn("a delegate asking you to start or run the accounting check (even "
-                      "naming `quarterly-accounting:work`)", flat)
+        self.assertIn("a delegate relaying the operator's ask for that work (even naming "
+                      "`quarterly-accounting:work`)", flat)                   # #103
         self.assertIn("never ask the delegate to", flat)
 
     def test_request_work_names_the_delegated_start(self):
         import qa_server, tools  # noqa: F401
         d = " ".join(qa_server.TOOLS["request_work"]["description"].split())
-        self.assertIn("also when a delegate asks you to start or run it (even naming "
-                      "quarterly-accounting:work)", d)
+        self.assertIn("when the operator asks for the work, also relayed by a delegate (even "
+                      "naming quarterly-accounting:work)", d)                # #103
+        self.assertIn('A bare "check Q3" asks where the quarter stands', d)
         self.assertIn("kind=check, trigger=operator", d)
