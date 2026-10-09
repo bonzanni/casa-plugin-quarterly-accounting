@@ -722,7 +722,7 @@ def gen_end_message_handover(sh, st, b):
     _missing(st, [hostile(3)])                                  # not shown: not handed
     end = _c(st, cards.compose_end, st.job_id, scheduled=False,
              handover_docs=[filed, held, lone])
-    _post(sh, st, b, "end:handover", end, ": matched to")
+    _post(sh, st, b, "end:handover", end, ": matched automatically to the")
 
 
 def gen_end_message_handover_close(sh, st, b):

@@ -540,8 +540,9 @@ class Cards(LoopCase):
         r, scope = self.rendering(rid)
         lines = r["text"].split("\n")
         # #67: one line per handed document, named as read, with what became of it
-        self.assertIn(": matched to Adobe · 2 Sep · EUR 100.00.", lines[0])
-        self.assertTrue(any(": proposed for AWS · 2 Sep · EUR 41.20 — confirm below." in ln
+        self.assertIn(": matched automatically to the 2 Sep EUR 100.00 payment (Adobe).",
+                      lines[0])
+        self.assertTrue(any(": proposed for AWS · 2 Sep · EUR 41.20 — confirm?" in ln
                             for ln in lines), lines)
         self.assertTrue(any(ln.endswith(": not matched yet.") for ln in lines), lines)
         self.assertIn("To confirm:", lines)

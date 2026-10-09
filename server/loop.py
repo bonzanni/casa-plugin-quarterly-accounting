@@ -431,7 +431,11 @@ def _handed_fits(conn, job_id, docs) -> dict:
                              "amount_minor": row["amount_minor"], "currency": row["currency"],
                              "holds_it": any(h == pid for h, _how, _d in
                                              matches.purchase_holders(conn, doc))})
-        out[str(doc)] = sorted(fits, key=lambda f: (f["date"] or "", f["pid"]))
+        day = conn.execute("SELECT document_date FROM documents WHERE doc_id=?",
+                           (doc,)).fetchone()[0]
+        # operator 2026-10-09: cheap steering — nearest the document's own date first
+        out[str(doc)] = sorted(fits, key=lambda f: (
+            _gap(f["date"], day) if f["date"] and day else 10 ** 6, f["date"] or "", f["pid"]))
     return out
 
 

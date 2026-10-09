@@ -39,10 +39,14 @@ class Monthly(StoreCase):
         u = [u for u in units if u["unit"] == "payment"][0]
         self.assertEqual(sorted(f["pid"] for f in u["handed_fits"][str(doc)]), offered)
         sep = self.drv.pid_of(self.nos[-1])
+        # operator ruling 2026-10-09: the model is sure — matched, and the card says so
         self.assertEqual(self.conn.execute("SELECT pid FROM match_state WHERE doc_id=? AND"
-                                           " state='proposed'", (doc,)).fetchall()[0][0], sep)
+                                           " state='matched'", (doc,)).fetchall()[0][0], sep)
         text = untag(self.drv.posted_end("bbbbbbbb-2")["text"])
-        self.assertIn(": proposed for LINKEDIN · 15 Sep · EUR 57.84 — confirm below.", text)
+        self.assertIn(": matched automatically to the 15 Sep EUR 57.84 payment (LINKEDIN).", text)
+        # nearest the invoice's own date first (cheap steering)
+        u = [u for u in units if u["unit"] == "payment"][0]
+        self.assertEqual(u["handed_fits"][str(doc)][0]["pid"], sep)
         self.assertIn("Get package: the Q3 zip", text)
 
     def test_decide_refuses_a_dated_document_outside_the_payments_window(self):
