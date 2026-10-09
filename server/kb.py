@@ -62,11 +62,19 @@ def display_name(conn, bank_counterparty) -> str:
 
 
 def given_name(cp, bank_texts=()) -> bool:
-    """The entry's name is one someone gave, not a bank text it stands for. #84: compared
-    with its case kept — "LinkedIn" for the bank's "LINKEDIN" is a name the operator gave,
-    which a case-blind comparison took for the bank's own text."""
-    return cp is not None and _spaced(cp["name"]) not in {
-        _spaced(t) for t in (*bank_texts, *json.loads(cp["patterns_json"])) if t}
+    """The entry's name is one someone gave, not a bank text it stands for: no text it
+    stands for reads the same, case aside — unless one of its patterns is that text in
+    other capitals (#84: "LinkedIn" renamed from the bank's "LINKEDIN" keeps "LINKEDIN" as a
+    pattern, so the case is the operator's; an entry nobody renamed reads as before, r1)."""
+    if cp is None:
+        return False
+    pats = [p for p in json.loads(cp["patterns_json"]) if p]
+    texts = [t for t in bank_texts if t] + pats
+    name = _spaced(cp["name"])
+    if name in {_spaced(t) for t in texts}:
+        return False
+    return norm(name) not in {norm(t) for t in texts} or any(norm(p) == norm(name)
+                                                              for p in pats)
 
 
 def readable_name(conn, bank_counterparty, cp=None, pid=None) -> str:
@@ -145,9 +153,11 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
             raise db.Refusal("new_name is the name to show for this vendor")
         current = _entry(conn, name) or counterparty_for(conn, name)
         patterns = [*patterns, current["name"] if current is not None else name]
+        # r1 (Astra + Terra S1): checked before the entry is looked up by its new name, also
+        # when there is no entry yet — a rename never lands on another vendor's entry
+        _refuse_shared_bank_text(conn, current, [new_name.strip(), *patterns, *(
+            json.loads(current["patterns_json"]) if current is not None else [])])
         if current is not None:
-            _refuse_shared_bank_text(conn, current, [new_name.strip(), *patterns,
-                                                     *json.loads(current["patterns_json"])])
             conn.execute("UPDATE counterparties SET name=? WHERE cp_id=?",
                          (new_name.strip(), current["cp_id"]))
         name = new_name
@@ -167,7 +177,7 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
     if new_name is not None:
         # d1 (Astra S2): a pattern equal to the new name (a name given earlier, renamed back
         # to) would make the name read as a bank text; the name itself still resolves it
-        merged = [p for p in merged if norm(p) != norm(name)]
+        merged = [p for p in merged if _spaced(p) != _spaced(name)]
     # Every bank text resolves to at most one entry (fix wave B, Astra S1; round
     # B2, Terra S1): ALL of this upsert's names and patterns — the ones it adds and
     # the ones the entry already holds — are checked against every OTHER entry's,

@@ -551,13 +551,14 @@ def list_vendors(conn, after=None) -> dict:
             " ORDER BY m.match_id DESC LIMIT 1" % ",".join("?" * len(g["pids"])),
             g["pids"]).fetchone()
         texts = sorted(g["texts"].values())
-        out.append(budget.bounded({
+        # r1 (Astra S2): name and invoice_issuer are values to pass back and copy: whole
+        out.append({
             "name": g["name"],
-            "shown": kb.readable_name(conn, texts[0] if texts else None, cp),
-            "bank_texts": texts[:5],
-            "named": kb.given_name(cp, texts),
             "invoice_issuer": issuer[0].strip() if issuer else None,
-            "payments": len(g["pids"]), "latest_pid": latest}, 120))
+            **budget.bounded({"shown": kb.readable_name(conn, texts[0] if texts else None, cp),
+                              "bank_texts": texts[:5]}, 120),
+            "named": kb.given_name(cp, texts),
+            "payments": len(g["pids"]), "latest_pid": latest})
     shown, rest = budget.page(out, len(out) or 1, ident=lambda v: f"vendor {v['name']}")
     return {"vendors": shown, "total": len(out), "remaining": rest,
             "next": [shown[-1]["name"]] if rest and shown else None,

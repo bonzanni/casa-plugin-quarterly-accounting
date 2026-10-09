@@ -124,6 +124,28 @@ class Rename(_Q3):
         self.assertTrue(out["applied"], out)
         self.assertEqual(lineage.projection(self.conn, p)["status"], "exempt")
 
+    def test_a_rename_with_no_entry_onto_another_vendors_name_is_refused(self):
+        # r1 (Astra + Terra S1): with no entry for the bank text, the new name found the
+        # other vendor's entry and merged the two (its ruling then covered both)
+        kb.upsert_counterparty(self.conn, "Vendor A", patterns=["BANK A"])
+        self.pay("BANK B", 2200, "2026-08-03")
+        with self.assertRaises(db.Refusal):
+            kb.upsert_counterparty(self.conn, "BANK B", new_name="vendor a")
+        rows = self.conn.execute("SELECT name, patterns_json FROM counterparties").fetchall()
+        self.assertEqual([(r[0], json.loads(r[1])) for r in rows], [("Vendor A", ["BANK A"])])
+
+    def test_an_entry_nobody_renamed_reads_as_before_in_other_capitals(self):
+        # r1 (Astra + Terra S2): the bank's "Linkedin" for an entry named "LINKEDIN" is the
+        # bank's text, not a given name: the matched invoice's issuer names it
+        self.kb("LINKEDIN")
+        done = self.pay("LINKEDIN", 5784, "2026-07-15")
+        self.matched_to(done, "LinkedIn Ireland Unlimited Company", amount_minor=5784,
+                        document_date="2026-07-15")
+        q = self.pay("Linkedin", 5784, "2026-08-15")
+        with db.tx(self.conn):
+            self.assertEqual(work.describe(self.conn, q)["readable"],
+                             "LinkedIn Ireland Unlimited Company")
+
 
 class ListVendors(_Q3):
     def test_every_vendor_once_with_its_invoice_issuer(self):
@@ -160,6 +182,18 @@ class ListVendors(_Q3):
                 after = out["next"][0]
         self.assertEqual(len(seen), 60)
         self.assertEqual(len(set(seen)), 60)
+
+    def test_a_long_name_is_listed_whole_and_renames(self):
+        # r1 (Astra S2): a clipped name passed back made a second entry
+        long = "A vendor whose bank text runs on " + "and on " * 15 + "until it ends"
+        self.pay(long, 1300, "2026-08-03")
+        self.kb(long)
+        with db.tx(self.conn):
+            v = work.list_vendors(self.conn)["vendors"][0]
+        self.assertEqual(v["name"], long)
+        kb.upsert_counterparty(self.conn, v["name"], new_name="Short")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0],
+                         1)
 
     def test_the_tool_renames_and_lists(self):
         import qa_server
