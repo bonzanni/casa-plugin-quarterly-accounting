@@ -144,8 +144,8 @@ class Skills(StoreCase):
 
     def test_the_desk_says_how_words_classify_a_payment(self):
         self.assertIn("Words saying what a payment is (\"that's wage tax\") classify it: tag "
-                      "it as skill classify-transactions does, then the check ask (below).",
-                      flat(DESK))
+                      "it as skill classify-transactions does, then offer a check; the ask "
+                      "(below) when they want one.", flat(DESK))                # #106
         self.assertLessEqual(len(DESK), 10_000)
 
 
@@ -197,6 +197,6 @@ class UnclassifiedEverywhere(_Loop):
                                  (end,)).fetchone()[0]
         self.assertIn("Q2 still open: 1 not classified yet", text)
         q2 = views.build_review(self.conn, "quarter", quarter="2026-Q2")["text"]
-        self.assertIn("1 not yet classified", q2)
+        self.assertIn("**Not classified yet**\nBelastingdienst", q2)       # #106: named
         status = views.build_review(self.conn, "status", quarter="2026-Q3")["text"]
         self.assertIn("+1 older not classified yet (Q2)", status)

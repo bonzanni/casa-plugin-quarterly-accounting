@@ -721,6 +721,13 @@ def _first_review(conn) -> bool:
 CHECK_Q = "Are these the right documents?"      # #102: the check view's question
 
 
+def _uncl_line(ds) -> str:
+    """#106: how to settle the payments the "Not classified yet" section lists (r1 Astra +
+    Terra: the payments themselves are blocks, so a reply about one binds it)."""
+    what = "it is" if len(ds) == 1 else "they are"
+    return f"Not classified yet — tell me what {what} (\"that's wage tax\")."
+
+
 def view_title(view, q) -> str:
     return {"status": f"Accounting · {dates.quarter_label(q)}",
             "all": f"Accounting · {dates.quarter_label(q)}",
@@ -802,6 +809,8 @@ def _compose(conn, view, q, items, members, lead):
         # #102: on the missing view the title already says it; no second heading
         secs.append(_Section(title("Missing") if view != "missing" else "",
                              _item_blocks(missing, _missing_detail, q, inline=True)))
+        # #106 r1: the payments not classified yet, each a bindable line, under their title
+        secs.append(_Section(title("Not classified yet"), _item_blocks(uncl, lambda d: [], q)))
     if view in ("status", "all"):
         secs.append(_Section(title("What is this?"), _item_blocks(
             conflicts, lambda d: ["The categories on it disagree — which is it?"], q)))
@@ -827,11 +836,11 @@ def _compose(conn, view, q, items, members, lead):
     def tail(printed_guessed):
         out = list(packages)
         if view == "quarter" and uncl:              # #98 r1 (Astra): its own count here too
-            out += ["", f"{len(uncl)} not yet classified — the categories aren't in yet."]
+            out += ["", _uncl_line(uncl)]
         if view in ("status", "all", "missing"):
             counts = []
             if uncl:
-                counts.append(f"{len(uncl)} not yet classified — the categories aren't in yet.")
+                counts.append(_uncl_line(uncl))
             # one line, one source: an interrupted pass's lead already says how
             # many it did not reach, from the run record
             # older ones are counted on their own quarter's line below

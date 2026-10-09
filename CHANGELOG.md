@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.22
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **Clearer wording after 0.11.18 (#106).**
+  - The "not classified yet" line names the payment and asks what it is ("that's wage tax").
+  - The bank ledger's note for a nice-to-have payment says "nice to have", as the cards do.
+  - Finance no longer adds a message describing a list it has just posted.
+  - "That's wage tax" classifies the payment and offers a check instead of starting one.
+  - A suggested match shows the document's number when it is a short one.
+
 ## 0.11.21
 
 Same store schema (17) and Casa floor (v0.344.67).

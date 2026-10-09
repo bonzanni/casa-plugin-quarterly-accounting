@@ -35,6 +35,7 @@ CANDIDATE_BUTTONS = 4         # §1: up to four named candidates
 PAGE_LINES = 25               # a vendor page's payments, then fitted to BODY_LIMIT
 LABEL_MAX = 32                # casa:result_broker.py, a button label
 BUCKETS = ("matched", "proposed", "missing", "not_needed", "pending", "unclassified")
+NUMBER_SHOWN = 16       # #106: a document number at most this long is shown on its line
 TAG_WORST = " · 30 Sep 00:00:00"    # views.tag_now: its longest form
 
 
@@ -366,6 +367,9 @@ def _proposal_line(conn, i, d) -> str:
         if other and c.get("issuer"):
             # #102: the amounts differ, so the line names whose document it is
             doc = f"{views.field(c['issuer'])} {word}"
+        if c.get("number") and len(c["number"]) <= NUMBER_SHOWN:
+            # #106: a short document number helps find it; a provider's long id does not
+            doc += f" {views.field(c['number'])}"
         doc += f" · {_money(c['amount_minor'], c['currency'])}"
         if other:
             doc += " (other currency)"

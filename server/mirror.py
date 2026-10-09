@@ -27,6 +27,7 @@ ROWS_PER_CALL = 100            # bank-feed MAX_ROWS_PER_CALL (tools_annotate.py:
 NOTE_MAX = 1000                # bank-feed NOTE_MAX (tools_annotate.py:57)
 ORDER = ("untag_transaction", "tag_transaction", "add_note")
 NEEDS_NONE = f"Accounting: no invoice needed{SUFFIX}"
+NICE_TO_HAVE = f"Accounting: nice to have{SUFFIX}"
 
 
 def _doc_words(conn, match_id) -> str:
@@ -74,7 +75,9 @@ def note_text(conn, pid):
         text = f"Accounting: not classified yet{SUFFIX}"
     elif status == "open":
         text = f"Accounting: invoice missing{SUFFIX}"
-    else:                                 # exempt, no-document, optional
+    elif status == "optional":
+        text = NICE_TO_HAVE               # #106: the cards' word
+    else:                                 # exempt, no-document
         text = NEEDS_NONE
     return text[:NOTE_MAX]
 

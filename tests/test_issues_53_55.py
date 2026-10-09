@@ -97,7 +97,7 @@ class StatusCard(_Cards):
         lines = self.text(rid).split("\n")
         self.assertEqual(lines[0], "Q3 · 2 payments · 8 Oct 21:04:37")
         self.assertEqual(lines[1], "1 to confirm · 1 missing")
-        self.assertIn("1. Zapier · 1 Sep · EUR 19.58 ↔ invoice · EUR 19.58", lines)
+        self.assertIn("1. Zapier · 1 Sep · EUR 19.58 ↔ invoice ZAP\\-114 · EUR 19.58", lines)
         self.assertNotIn("Notion", self.text(rid).split("Q4 so far")[0])
         self.assertIn("Q4 so far: 1 to confirm", lines)
         self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Invoice links",

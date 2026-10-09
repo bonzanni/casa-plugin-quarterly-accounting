@@ -182,8 +182,12 @@ class Quarter(StoreCase):
         calls = _mirror_calls(self.units)
         needs_none = [c for c in calls if c["tool"] == "add_note"
                       and c["args"]["note"].startswith("Accounting: no invoice needed")]
-        self.assertEqual(len(needs_none), 1)               # rows 6 and 8 in ONE call
-        self.assertEqual(len(needs_none[0]["args"]["row_ids"]), 2)
+        # #106: rows 6 and 8 are nice to have — the cards' word — in ONE call
+        self.assertEqual(needs_none, [])
+        nice = [c for c in calls if c["tool"] == "add_note"
+                and c["args"]["note"].startswith("Accounting: nice to have")]
+        self.assertEqual(len(nice), 1)
+        self.assertEqual(len(nice[0]["args"]["row_ids"]), 2)
 
     def test_a_decide_with_one_refused_entry_applies_the_other(self):
         import qa_server, tools  # noqa: F401
