@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.11.20
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **The rest of the cards follow the house style (#102).** The "To check" list asks its
+  question once ("Are these the right documents?") instead of "Not sure — say if it's wrong."
+  under every item. The missing list has one title, not a second "Missing" heading.
+  [Show matches to confirm] says how many are this quarter's and how many earlier, so the
+  number matches the card it is on. Tapping a "Show …" button turns the card into that list
+  instead of first sending a lone line. After "All good" the confirmation has a title and one
+  line per payment, named as the card named it. A match in another currency names whose
+  document it is. "Is Q3 ready for my accountant?" now opens with "Q3 is ready for your
+  accountant." or "Not ready yet."
+
 ## 0.11.19
 
 Same store schema (17) and Casa floor (v0.344.67).

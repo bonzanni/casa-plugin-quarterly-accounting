@@ -112,8 +112,10 @@ class Views(StoreCase):
         self.seed_payments(rows)
         text = views.build_review(self.conn, "missing", quarter="2026-Q3")["text"]
         lines = text.split("\n")
-        at = lines.index("**Missing**")
-        self.assertEqual(len([ln for ln in lines[at + 1:at + 5] if ln.startswith("Vendor")]), 4)
+        # #102: the missing view's title is its only heading
+        self.assertNotIn("**Missing**", lines)
+        at = next(i for i, ln in enumerate(lines) if ln.startswith("Vendor"))
+        self.assertEqual(len([ln for ln in lines[at:at + 4] if ln.startswith("Vendor")]), 4)
 
     def test_the_open_card_offers_the_package_only_when_the_desk_asks(self):
         import posting
@@ -196,7 +198,10 @@ class ShowMissing(StoreCase):
                               document_date="2026-09-14")
         out = self.tap(self.status())
         self.assertIn("next", out)
-        self.assertIn("Show matches to confirm", json.dumps(out["next"]))
+        # #102: it replaces the tapped card; its receipt never reads like the card
+        self.assertIs(out.get("in_place"), True)
+        self.assertEqual(out["receipt"], "Showing the missing invoices.")
+        self.assertIn("to confirm", json.dumps(out["next"]))
 
     def test_a_list_that_lost_its_action_since_the_button_was_shown_is_plain(self):
         import matches
@@ -277,3 +282,63 @@ class PackageAfterAWalk(LoopCase):
 
     def test_any_other_walk_ends_on_its_receipt(self):
         self.assertNotIn("next", self.walk_end(False))
+
+
+class Views102(LoopCase):
+    """#102: the views #99 did not cover."""
+
+    def c(self, fn, *a, **kw):
+        with db.tx(self.conn):
+            return fn(self.conn, *a, **kw)
+
+    def test_the_check_view_asks_once_and_no_item_repeats_it(self):
+        for i in range(3):
+            p = self.pay("V%d" % i, 1000 + i)
+            self.propose(p, amount_minor=1000 + i)
+        text = views.build_review(self.conn, "check", quarter="2026-Q3")["text"]
+        self.assertEqual(text.count("**" + views.CHECK_Q + "**"), 1)
+        self.assertNotIn("Not sure", text)
+
+    def test_the_check_label_counts_this_quarter_and_the_earlier_ones(self):
+        q3 = self.pay("Now", 1000, "2026-08-01")
+        self.propose(q3, amount_minor=1000, document_date="2026-08-01")
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE binding SET watermark='2026-04-01'")
+        q2 = self.pay("Then", 2000, "2026-05-01")
+        self.propose(q2, amount_minor=2000, document_date="2026-05-01")
+        self.assertEqual(views.check_label(self.conn, "2026-Q3", 2),
+                         "Show 1 to confirm (+1 earlier)")
+
+    def test_labels_stay_within_casas_32_characters(self):
+        import unittest.mock as m
+        with m.patch.object(views, "membership", lambda *a: []):
+            self.assertEqual(views.check_label(self.conn, "2026-Q3", 200),
+                             "Show 200 earlier to confirm")
+        fake = [{"quarter": "2026-Q3"}] * 150
+        with m.patch.object(views, "membership", lambda *a: range(150)), \
+                m.patch.object(views.work, "describe", lambda c, p: fake[0]), \
+                m.patch.object(views, "_needs_check", lambda d: True):
+            label = views.check_label(self.conn, "2026-Q3", 300)
+        self.assertEqual(label, "Show 300 to confirm")         # the split would be 34
+        self.assertLessEqual(len(label), 32)
+
+    def test_all_good_receipt_has_a_title_and_the_cards_names(self):
+        import posting, qa_server, tools  # noqa: F401
+        for i in range(2):
+            p = self.pay("Elevenlabs.io", 1000 + i)
+            self.propose(p, amount_minor=1000 + i, issuer="Eleven Labs Inc.")
+        with FakeBroker() as b:
+            posting.show_view(self.conn, view="check", quarter="2026-Q3")
+        call = next(x["call"] for x in b.proposal()["buttons"] if x["label"] == "All good")
+        out = qa_server.TOOLS["verdict"]["fn"](dict(call["arguments"]))
+        lines = out["receipt"].split("\n")
+        self.assertEqual(lines[0], "**Confirmed 2 matches**")
+        self.assertTrue(all(ln.startswith("Elevenlabs.io · ") for ln in lines[1:3]), lines)
+
+    def test_is_it_ready_gets_a_sentence(self):
+        import cards
+        self.pay("Adobe", 100)
+        rid = self.c(cards.compose_open, "2026-Q3", package=True)
+        text = self.conn.execute("SELECT text FROM renders WHERE render_id=?",
+                                 (rid,)).fetchone()[0]
+        self.assertEqual(text.split("\n")[1], "Not ready yet.")

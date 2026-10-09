@@ -408,8 +408,7 @@ def evidence(d: dict, cands=None) -> list:
         if "recipient?" in labels:
             out.append(f"{name[0].upper() + name[1:]} names "
                        f"{field(doc.get('recipient')) or 'someone else'}, not the business.")
-        if d["status"] == "proposed" and len(out) == 1:
-            out.append("Not sure — say if it's wrong.")
+        # #102: no "Not sure — say if it's wrong." on every item: the view's question says it
         if (doc.get("currency") and d.get("currency") and doc["currency"] != d["currency"]
                 and doc.get("amount_minor") is not None):
             # issue #30: a document in another currency (a USD invoice for a EUR card
@@ -716,6 +715,9 @@ def _first_review(conn) -> bool:
         " AND coalesce(json_extract(scope_json, '$.stop'), 0) = 0").fetchone()[0] == 0
 
 
+CHECK_Q = "Are these the right documents?"      # #102: the check view's question
+
+
 def view_title(view, q) -> str:
     return {"status": f"Accounting · {dates.quarter_label(q)}",
             "all": f"Accounting · {dates.quarter_label(q)}",
@@ -770,6 +772,9 @@ def _compose(conn, view, q, items, members, lead):
         cov = "First review · " + cov[0].lower() + cov[1:]
     if cov is not None:
         parts["head"].append(cov)
+    if view == "check" and guessed:
+        # #102: the question once, above the items it asks about
+        parts["head"].append(title(CHECK_Q))
     if b is not None and not b["watermark_announced"] and view in ("status", "all", "missing"):
         start_q = dates.quarter_of(b["watermark"])
         n = dates.parse_quarter(start_q)[1]
@@ -791,8 +796,9 @@ def _compose(conn, view, q, items, members, lead):
                                   for pkg_id, fname, status in delivery.offerable(conn, q)]))
     if view in ("status", "all", "missing", "quarter"):
         # #99: one tight line per payment, its detail after it
-        secs.append(_Section(title("Missing"), _item_blocks(missing, _missing_detail, q,
-                                                            inline=True)))
+        # #102: on the missing view the title already says it; no second heading
+        secs.append(_Section(title("Missing") if view != "missing" else "",
+                             _item_blocks(missing, _missing_detail, q, inline=True)))
     if view in ("status", "all"):
         secs.append(_Section(title("What is this?"), _item_blocks(
             conflicts, lambda d: ["The categories on it disagree — which is it?"], q)))
@@ -1309,6 +1315,20 @@ def show_counts(conn, q) -> tuple:
             sum(1 for d in items if _needs_check(d)))
 
 
+def check_label(conn, q, check) -> str:
+    """#102: [Show matches to confirm] opens the check view, which spans every quarter (#77);
+    a quarter's card counts its own. The label says both when they differ and it fits
+    Casa's 32 characters (d1 Terra), else the count of what it opens."""
+    items = [work.describe(conn, p) for p in membership(conn, "status", q)]
+    mine = sum(1 for d in items if _needs_check(d) and d["quarter"] == q)
+    if mine == check:
+        return f"Show matches to confirm ({check})"
+    if not mine:
+        return f"Show {check} earlier to confirm"
+    split = f"Show {mine} to confirm (+{check - mine} earlier)"
+    return split if len(split) <= 32 else f"Show {check} to confirm"
+
+
 CLOSE = ("Close", None, None, None)          # Casa v0.344.64: clears the keyboard, runs nothing
 
 
@@ -1348,7 +1368,7 @@ def buttons_for(conn, r) -> list:
                         {"render_id": rid, "action": "show-missing"},
                         ("show-missing", None, None)))
         if check and kind != "check":
-            out.append((f"Show matches to confirm ({check})", "verdict",
+            out.append((check_label(conn, q, check), "verdict",
                         {"render_id": rid, "action": "show-check"},
                         ("show-check", None, None)))
     # #93: Close beside the actions, never alone — a view with nothing to act on is posted

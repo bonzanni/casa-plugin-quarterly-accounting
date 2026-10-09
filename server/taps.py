@@ -30,8 +30,8 @@ _ON_KIND = {"end": ("review", "confirm-all", "links"),
             "replace": ("keep-current", "use-new")}
 # #93: the buttons that show another view, decided when tapped (_show)
 SHOW_ACTIONS = {"show-missing": "missing", "show-check": "check", "show-item": "item"}
-SHOW_RECEIPT = {"missing": "Missing invoices:", "check": "Matches to confirm:",
-                "item": "The payment:"}
+SHOW_RECEIPT = {"missing": "Showing the missing invoices.",
+                "check": "Showing the matches to confirm.", "item": "Showing the payment."}
 SHOW_SAY = {"missing": "show the missing invoices", "check": "show what to check",
             "item": "show that payment"}
 CARD_CHANGED = "That changed since it was shown — nothing applied. Here it is as it is now."
@@ -137,16 +137,43 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
         changed = _changed(conn, render_id, affected)
         if changed:
             raise db.Refusal(_stale(len(changed)))
-        lines, applied, quarters = [], [], set()
+        lines, applied, quarters, ds = [], [], set(), []
         for p in affected:
             d = work.describe(conn, p)
+            ds.append(d)
             res, line = _apply_one(conn, grant, render_id, action, d)
             applied.append({"pid": p, **res})
             lines.append(line)
             if d["quarter"]:
                 quarters.add(d["quarter"])
-        lines += reply.package_lines(conn, quarters)
+        tail = reply.package_lines(conn, quarters)
+        if action == "all-good":
+            return {"receipt": _all_good_receipt(scope, ds, lines, tail),
+                    "applied": applied}
+        lines += tail
     return {"receipt": views.fit_message(lines), "applied": applied}
+
+
+def _all_good_receipt(scope, ds, lines, tail) -> str:
+    """#102: a title, then one tight line per payment named as the card showed it (its
+    scope `names`: the receipt never renames a vendor the card named otherwise), as many as
+    fit whole, then how many more (d1 Terra)."""
+    names = scope.get("names") or {}
+    rows = []
+    for d, line in zip(ds, lines):
+        if not line.startswith("Confirmed "):
+            rows.append(line)                    # a refusal line, as it came
+            continue
+        name = names.get(str(d["pid"]))
+        rows.append(f"{views.field(name)} · {views.headline(d, payee=False)}" if name
+                    else line[len("Confirmed "):].rstrip("."))
+    n = len(rows)
+    head = [views.title(f"Confirmed {n} {'match' if n == 1 else 'matches'}")]
+    for k in range(n, -1, -1):
+        out = head + rows[:k] + ([f"… and {n - k} more confirmed."] if k < n else []) + tail
+        if views.utf16_len("\n".join(out)) <= views.BODY_LIMIT:
+            return "\n".join(out)
+    return head[0]
 
 
 def _show(conn, render_id, view, pid=None) -> dict:
@@ -165,7 +192,11 @@ def _show(conn, render_id, view, pid=None) -> dict:
     pages = json.loads(lst["scope_json"]).get("list_pages") or []
     if posting.has_actions(conn, lst):
         value, _ = posting._view_value(conn, lst)
-        return {"receipt": SHOW_RECEIPT[view], "next": json.loads(value)}
+        # #102: the shown view replaces the tapped card (Casa #1339: a landed edit sends no
+        # receipt; a card with pages is never an edit — Casa posts receipt, pages, card).
+        # The receipt never reads like the card's opening (d1 Astra): a quote of it binds
+        # nothing it did not show
+        return {"receipt": SHOW_RECEIPT[view], "next": json.loads(value), "in_place": True}
     if pages:
         # a list longer than one message cannot be one answer (r1 Astra S2: a clipped one
         # bound what it never showed); the desk posts it whole, page by page
