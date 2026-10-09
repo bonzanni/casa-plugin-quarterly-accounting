@@ -144,6 +144,14 @@ class Shapes:
             # binding r7: the checker builds Casa's real quote of this post (label, render,
             # clip) and the plugin must bind it back to this rendering, on the store copy
             rec["bind"] = {"render_id": out["render_id"], "store": self.shape}
+            if prop.get("pages"):
+                # #66: each plain page before the card is a rendering of its own — the
+                # checker displays and quotes every page and binds it back to its page
+                page_ids = json.loads(st.conn.execute(
+                    "SELECT scope_json FROM renders WHERE render_id=?",
+                    (out["render_id"],)).fetchone()[0])["list_pages"]
+                rec["page_binds"] = [{"render_id": rid, "display_expect": views.unesc(t)}
+                                     for rid, t in zip(page_ids, prop["pages"], strict=True)]
         if display is True:
             rec["display_expect"] = views.unesc(prop["text"])
         else:
@@ -302,24 +310,27 @@ VIEWS_SIMPLE = ("status", "missing", "check", "rest", "older", "quarter")
 
 
 def _views(sh, st, b, tag):
-    """Every list view of the store, `all` pages 1 and 2 (page 2 by p1's More button's
-    stored call), and the item walk from the check sheet's One by one button."""
+    """Every list view of the store, and `all` (#66: a full store's posts its pages before
+    one action card, no More)."""
     for view in VIEWS_SIMPLE:
         sh.call(st, b, f"{tag}:{view}", "show_view", {"view": view, "quarter": QUARTER})
-    p1 = sh.call(st, b, f"{tag}:all:1", "show_view", {"view": "all", "quarter": QUARTER})
-    more = [x for x in p1 if x["label"] == "More"]
-    if tag.startswith("full"):
-        if not more:
-            raise AssertionError(f"{tag}: a full store's all page 1 offers no More")
-        sh.call(st, b, f"{tag}:all:2", "show_view", more[0]["call"]["arguments"])
+    p1 = sh.call(st, b, f"{tag}:all", "show_view", {"view": "all", "quarter": QUARTER})
+    if any(x["label"] == "More" for x in p1):
+        raise AssertionError(f"{tag}: a list offers More")
+    rec = next(r for r in sh.records if r["case"] == f"{tag}:all")
+    if tag.startswith("full") and not rec.get("page_binds"):
+        raise AssertionError(f"{tag}: a full store's all view posted no pages")
 
 
 def _item_states(sh, st, b, tag, pids):
     """`item` in each item_state, reached as the operator reaches it: proposed (One by one
     from the check sheet, so it offers Next on a full sheet), paired (a clean pairing),
     none (a missing payment), exempt (after the none page's No invoice needed tap)."""
-    def labels(buttons):
-        return [x["label"] for x in buttons]
+    def labels(buttons):                       # #66: every view card ends with Close
+        out = [x["label"] for x in buttons]
+        if out[-1:] != ["Close"]:
+            raise AssertionError(f"{tag}: a view card without Close: {out}")
+        return out[:-1]
     check = sh.call(st, b, f"{tag}:check-walk", "show_view", {"view": "check",
                                                                "quarter": QUARTER})
     one = next(x for x in check if x["label"] == "One by one")
@@ -337,7 +348,7 @@ def _item_states(sh, st, b, tag, pids):
     sh.tap(st, f"{tag}:item:none", none[0], keep=True)
     exempt = sh.call(st, b, f"{tag}:item:exempt", "show_view",
                      {"view": "item", "pid": pids["missing"][0]})
-    if any("key" in x["call"]["arguments"] for x in exempt):
+    if any("key" in x.get("call", {}).get("arguments", {}) for x in exempt):
         raise AssertionError(f"{tag}: an exempt item offers a verdict")
 
 
@@ -974,11 +985,14 @@ def header(records) -> dict:
     kinds: dict = {}
     for r in deposits:
         kinds[kind_of(r)] = kinds.get(kind_of(r), 0) + 1
+    pages = sum(len(r.get("page_binds") or []) for r in deposits)
     return {"case": "header", "kinds": kinds, "cases": [r["case"] for r in deposits],
-            "display_checked": sum(1 for r in deposits if "display_expect" in r),
-            # a quote is built for a bound post whose display is promised, and every file
+            "display_checked": sum(1 for r in deposits if "display_expect" in r) + pages,
+            # a quote is built for a bound post whose display is promised, and every file;
+            # #66: and for each plain page before a card
             "binds": sum(1 for r in deposits if "bind" in r
-                         and ("display_expect" in r or KINDS[r["tool"]] == "operator_file"))}
+                         and ("display_expect" in r or KINDS[r["tool"]] == "operator_file"))
+            + pages}
 
 
 def main(argv) -> int:

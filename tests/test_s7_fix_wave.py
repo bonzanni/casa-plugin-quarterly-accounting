@@ -45,24 +45,35 @@ class TypedMore(_Q3):
     big_sheet = _P.big_sheet
     del _P
 
-    def test_all_of_them_returns_the_capped_views_next(self):
+    def test_a_whole_list_posted_leaves_nothing_more(self):
+        """#66: show_view posts every page; "all of them" on its card has nothing left."""
         self.big_sheet()
         out = self.show(view="check")
-        self.assertIsNotNone(out["next"])
+        self.assertIsNone(out["next"])
         r, prop = self.propose("all of them", quoted=self.render_text(out["render_id"]))
         self.assertIsNone(prop)
-        self.assertEqual(r["instructions"], [{"show_view": out["next"]}])
-        self.assertIsNone(arguments_ok(r["instructions"][0]["show_view"]))
+        self.assertEqual(r["instructions"], [])
 
-    def test_more_returns_the_page_cursor(self):
-        self.big_sheet()
+    def test_more_past_six_pages_returns_the_cards_cursor(self):
+        """#66: a list longer than one post (Casa's six pages) ends its card with "say
+        more"; "more" continues from where the sixth page stopped."""
+        import views
+        self.patch(views, "BODY_LIMIT", 600)
+        pids = self.big_sheet()
         first = self.show(view="check")
-        page1 = self.show(**first["next"])
-        self.assertIn("after", page1["next"])
+        self.assertIn("after", first["next"])
+        self.assertIn('say "more"', self.render_text(first["render_id"]))
         r, _ = self.propose("more")
         (ins,) = r["instructions"]
-        self.assertEqual(ins, {"show_view": page1["next"]})
+        self.assertEqual(ins, {"show_view": first["next"]})
+        self.assertIsNone(arguments_ok(ins["show_view"]))
         self.assertTrue(all(type(x) is int for x in ins["show_view"]["after"]))
+        second = self.show(**first["next"])
+        a = set(views.render_items(self.conn, first["render_id"]))
+        b = set(views.render_items(self.conn, second["render_id"]))
+        self.assertFalse(a & b)
+        self.assertTrue(b)
+        self.assertLessEqual(a | b, set(pids))
 
     def test_more_with_nothing_more_says_so(self):
         self.sheet_fixture()
@@ -272,8 +283,10 @@ class R3LegacyMore(_Q3):
 
     def test_more_on_a_legacy_page(self):
         import db
+        import views
         self.big_sheet()
-        page1 = self.show(view="check", page=1)
+        page1 = views.build_review(self.conn, view="check", page=1)     # a page as v0.9 sent it
+        views.mark_rendering_delivered(self.conn, page1["render_id"])
         self.assertIsNotNone(page1["next"])
         scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
                                              " render_id=?", (page1["render_id"],)).fetchone()[0])
@@ -313,20 +326,20 @@ class R3QuoteBindsAPostedPage(_Q3):
     del _P
 
     def test_quoting_page_two_binds_page_two(self):
+        """#66: a list posted by a tap (no mark follows) — its pages are stamped posted with
+        its card, so a quote of page two binds page two."""
         import tools, qa_server, views  # noqa: F401
         self.big_sheet()
         call = lambda name, **a: qa_server.TOOLS[name]["fn"](a)
         with FakeBroker() as b:
-            first = call("show_view", view="check", page=1)
+            first = call("show_view", view="missing")
             call("mark_rendering_delivered", render_id=first["render_id"])
-            more = next(x["call"] for x in b.proposal()["buttons"] if x["label"] == "More")
-            second = call(more["tool"], **more["arguments"])        # the tap: no mark follows
-            shown = b.proposal()["text"]
-            typed = call("propose_reading", text="more", quoted=shown)
-        self.assertEqual(views.bound_rendering(self.conn, shown)["render_id"],
-                         second["render_id"])
-        self.assertEqual(typed["instructions"],
-                         [{"show_view": second["next"]}] if second["next"] else [])
+            second = call("show_view", view="check")              # the tap: no mark follows
+            prop = b.proposal()
+        page2 = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                             " render_id=?", (second["render_id"],)
+                                             ).fetchone()[0])["list_pages"][1]
+        self.assertEqual(views.bound_rendering(self.conn, prop["pages"][1])["render_id"], page2)
         self.assertEqual(views.bound_rendering(self.conn, None)["render_id"],
                          first["render_id"])                   # the unquoted fallback
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.11.9
+
+A long list arrives in full. Same store schema (16); **Casa v0.344.67 or newer is required**
+(plain pages before a card, #1377; the Close button, #1375). On a Casa older than v0.344.64
+a list's card is refused; on v0.344.64–66 a long list shows only its action card.
+
+- **A long list is sent whole, with its actions on a card of their own (#66).** A list that
+  does not fit one message (the payments still missing an invoice, the matches to confirm,
+  one payment's possible documents) now comes as plain messages in a row, up to six, with
+  no [More] button to tap. A separate card follows them, saying how many items are listed
+  above. Its buttons act on the whole list: [All good] confirms every match on every page,
+  and if any of them changed since it was shown, nothing is applied. A list that fits one
+  message is still one card with its buttons. A list longer than six messages ends its card
+  with 'say "more"' for the rest.
+- **The next-step buttons say what they show.** "What's missing" and "Anything to check?"
+  are now [Show missing invoices (N)] and [Show matches to confirm (N)], with the number of
+  items each list holds. Each appears only when its list is not empty.
+- **[Close] on every list card.** It removes the card's buttons when you are done with it,
+  and changes nothing else.
+
 ## 0.11.8
 
 Requires **Casa v0.344.64 or newer** (#1375, Casa's Close button). Same store schema (16).

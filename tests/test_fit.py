@@ -134,7 +134,7 @@ class TestViewsProperty(Base):
                 clipped += views.CLIP_MARK in r["text"]
                 nxt = r["next"]
                 if nxt is not None:
-                    self.assertTrue('say "more"' in r["text"] or 'say "all of them"' in r["text"],
+                    self.assertTrue(views.MORE_LINE in r["text"] or 'say "all of them"' in r["text"],
                                     (view, r["text"][-120:]))
                 flat = _flat(r["text"])
                 for pid in views.render_items(self.conn, r["render_id"]):
@@ -425,7 +425,7 @@ class TestIdentityProperty(Base):
                 self.check(r, bound, "item", pid)
                 if r["next"] is None:
                     break
-                self.assertIn('say "more"', r["text"])
+                self.assertIn(views.MORE_LINE, r["text"])
                 page, after = r["next"]["page"], r["next"]["after"]
         for pid in pids:
             self.assertIn(pid, bound)                                # every item bindable

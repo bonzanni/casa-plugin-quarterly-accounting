@@ -207,6 +207,23 @@ def main(path) -> int:
                 pathlib.Path(path).name + ".stores") / f"{rec['bind']['store']}.sqlite"),
                            clip(raw, DESK_QUOTE_CHARS), rec["bind"]["render_id"], raw))
             quoted_kinds.add(dkind)
+        # #66 (Casa v0.344.67): a card's plain pages, posted before it — each must be the
+        # page the plugin recorded, display as promised, and its quote (Casa labels every
+        # page) bind back to its own page rendering
+        sent = json.loads(b["value"]).get("pages") if dkind == rb.OPERATOR_PROPOSAL else None
+        promised = rec.get("page_binds") or []
+        if len(promised) != len(sent or []):
+            bad.append((n, "the pages sent are not the pages recorded", rec["case"]))
+        for pb, page_text in zip(promised, sent or []):
+            shown, entities = render(page_text)
+            checked += 1
+            if shown != pb["display_expect"] or entities:
+                bad.append((n, "a page's display differs or an entity was produced",
+                            rec["case"]))
+            raw = render(rb.compose_operator_message(page_text, label))[0]
+            quotes.append((n, rec["case"] + ":page", str(pathlib.Path(path).parent / (
+                pathlib.Path(path).name + ".stores") / f"{rec['bind']['store']}.sqlite"),
+                           clip(raw, DESK_QUOTE_CHARS), pb["render_id"], raw))
     # binding r7: every displayed view post's quote binds back to its own rendering, by the
     # plugin's own views.bound_rendering in a process of its own (scripts/bind_quotes.py)
     bound = 0

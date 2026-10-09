@@ -5,8 +5,8 @@ import json
 from tests._base import StoreCase
 from tests.fakebroker import FakeBroker, arguments_ok
 
-LABELS = {"All good", "One by one", "More", "Right", "Wrong", "No invoice needed", "Next",
-          "What's missing", "Anything to check?", "Apply", "Cancel"} | {
+LABELS = {"All good", "One by one", "Right", "Wrong", "No invoice needed", "Next",
+          "Close", "Apply", "Cancel", "More"} | {
           f"Account {i}" for i in range(1, 6)}
 
 
@@ -40,7 +40,8 @@ class ShowView(_Q3):
         self.assertEqual(prop["revision"], "view:check:2026-Q3")
         for b in prop["buttons"]:
             self.assertIn(b["label"], LABELS)
-            self.assertIsNone(arguments_ok(b["call"]["arguments"]))
+            if "call" in b:
+                self.assertIsNone(arguments_ok(b["call"]["arguments"]))
 
     def test_the_key_never_reaches_the_tools_result(self):
         import tools, qa_server  # noqa: F401
@@ -51,10 +52,10 @@ class ShowView(_Q3):
         self.assertNotIn(key, json.dumps(out))
         self.assertRegex(out["view"], r"^casa-cap-")
 
-    def test_an_informational_page_offers_whats_missing_and_anything_to_check(self):
+    def test_an_informational_page_with_nothing_open_offers_close_only(self):
+        """#66: a "Show …" button appears only when its list is not empty."""
         out, prop, _ = self.post(view="status")
-        self.assertEqual([b["label"] for b in prop["buttons"]],
-                         ["What's missing", "Anything to check?"])
+        self.assertEqual([b["label"] for b in prop["buttons"]], ["Close"])
 
     def test_re_posting_a_stored_rendering_reuses_its_text_and_mints_fresh_keys(self):
         self.sheet_fixture()
@@ -83,8 +84,7 @@ class ShowView(_Q3):
         items; show_view still stores and posts it."""
         out, prop, _ = self.post(view="status")          # StoreCase: nothing bound
         self.assertRegex(out["view"], r"^casa-cap-")
-        self.assertEqual([b["label"] for b in prop["buttons"]],
-                         ["What's missing", "Anything to check?"])
+        self.assertEqual([b["label"] for b in prop["buttons"]], ["Close"])
 
     def test_a_legacy_rendering_with_a_control_character_is_deposited_clean(self):
         import db
@@ -124,25 +124,20 @@ class PagedSheet(_Q3):
             pids.append(pid)
         return pids
 
-    def test_the_more_cursor_is_ints_and_page_two_continues_page_one(self):
-        import posting, views
+    def test_show_view_posts_every_page_and_no_payment_twice(self):
+        """#66: no More — the pages go out together before one action card; each page
+        binds its own payments, none on two pages and none skipped."""
+        import json, posting, views
         pids = self.big_sheet()
-        args, seen, cursors = {"view": "check"}, [], []
-        for _ in range(20):
-            with FakeBroker() as b:
-                out = posting.show_view(self.conn, **args)
-            more = [x for x in b.proposal()["buttons"] if x["label"] == "More"]
-            if args.get("page"):
-                seen.append(views.render_items(self.conn, out["render_id"]))
-            if not more:
-                break
-            args = more[0]["call"]["arguments"]
-            self.assertIsNone(arguments_ok(args))
-            if "after" in args:
-                self.assertTrue(all(type(x) is int for x in args["after"]), args)
-                cursors.append(args["after"])
+        with FakeBroker() as b:
+            out = posting.show_view(self.conn, view="check")
+        prop = b.proposal()
+        self.assertNotIn("More", [x["label"] for x in prop["buttons"]])
+        pages = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
+                                             " render_id=?", (out["render_id"],)).fetchone()[0])
+        seen = [views.render_items(self.conn, rid) for rid in pages["list_pages"]]
         self.assertGreaterEqual(len(seen), 2)         # the sheet really paged
-        self.assertTrue(cursors)
+        self.assertEqual(len(seen), len(prop["pages"]))
         flat = [p for page in seen for p in page]
         self.assertEqual(len(flat), len(set(flat)))   # no payment on two pages
         self.assertEqual(set(flat), set(pids))        # and none skipped between them
@@ -200,7 +195,7 @@ class Verdict(_Q3):
             posting.show_view(self.conn, **walk)
         item = b.proposal()
         self.assertEqual([x["label"] for x in item["buttons"]],
-                         ["Right", "Wrong", "No invoice needed"])       # §4: no walk Next
+                         ["Right", "Wrong", "No invoice needed", "Close"])  # §4: no walk Next
         out = self.tap(item, "Wrong")
         self.assertIn("Removed the match for", out["receipt"])
 
@@ -225,7 +220,7 @@ class Verdict(_Q3):
         prop, scope = item()
         self.assertEqual(scope["item_state"], "paired")
         self.assertEqual(scope["proposed"], [])
-        self.assertEqual([x["label"] for x in prop["buttons"]], ["Wrong", "No invoice needed"])
+        self.assertEqual([x["label"] for x in prop["buttons"]], ["Wrong", "No invoice needed", "Close"])
         self.assertNotIn("among several that fit", prop["text"])
         self.assertNotIn("also fits", prop["text"])
         with FakeBroker() as b:
@@ -283,7 +278,7 @@ class Verdict(_Q3):
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM log WHERE author='operator' AND kind='exempt'").fetchone()[0], 1)
         _, again = self.item(fx["pid"])
-        self.assertEqual([x["label"] for x in again["buttons"]], ["What's missing"])
+        self.assertEqual([x["label"] for x in again["buttons"]], ["Close"])
 
     def candidates_only(self):
         """A payment with two displayed candidates and no current pairing."""
@@ -318,7 +313,7 @@ class Verdict(_Q3):
         scope = _json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
                                               " render_id=?", (out["render_id"],)).fetchone()[0])
         self.assertEqual(scope["item_state"], "none")
-        self.assertEqual([x["label"] for x in prop["buttons"]], ["No invoice needed"])
+        self.assertEqual([x["label"] for x in prop["buttons"]], ["No invoice needed", "Close"])
 
     def test_wrong_with_no_current_pairing_sets_every_shown_candidate_aside(self):
         """T5-b: taps._apply_one `wrong` over candidates (reject_all_in_tx)."""

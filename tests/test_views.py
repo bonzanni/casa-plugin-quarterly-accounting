@@ -318,9 +318,9 @@ class TestSheet(Base):
                 seen |= set(got)
                 self.assertEqual(r["printed"], len(got))
                 if r["next"] is None:
-                    self.assertNotIn('say "more"', r["text"])
+                    self.assertNotIn(views.MORE_LINE, r["text"])
                     break
-                self.assertIn('say "more"', r["text"])
+                self.assertIn(views.MORE_LINE, r["text"])
                 page, after = r["next"]["page"], r["next"]["after"]
             self.assertGreater(n, 1, view)
             self.assertEqual(len(seen), 200, view)
@@ -477,7 +477,7 @@ class TestSheet(Base):
         r = views.build_review(self.conn, view="missing", quarter="2026-Q3", page=1)
         self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
         self.assertIsNotNone(r["next"])
-        self.assertTrue(r["text"].endswith('say "more".'), r["text"][-80:])
+        self.assertTrue(r["text"].endswith(views.MORE_LINE), r["text"][-80:])
         r2 = views.build_review(self.conn, view="missing", quarter="2026-Q3", **{
             k: r["next"][k] for k in ("page", "after")})
         self.assertIn("Small199", r2["text"])

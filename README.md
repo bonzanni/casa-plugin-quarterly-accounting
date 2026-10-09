@@ -22,7 +22,12 @@ emailed. `job_status` answers, read-only, whether the job may end; `set_aside` c
 item no other write closes (an attachment that is no invoice, a row bank-feed still has).
 
 ## Requirements
-- **Casa v0.344.39 or newer** (the release carrying #1301, #1302 and #1303, #1308 and #1312). #1301
+- **Casa v0.344.67 or newer** (0.11.9, #66): #1377 (v0.344.67) posts a long list's plain
+  pages before its action card, and #1375 (v0.344.64) the card's [Close] button. On a Casa
+  older than v0.344.64 a list's card is refused; on v0.344.64–66 a long list arrives as its
+  action card alone.
+  Earlier floors, all included in v0.344.67:
+- Casa v0.344.39 or newer (the release carrying #1301, #1302 and #1303, #1308 and #1312). #1301
   lets the job run silently when the scheduler starts it (`quietWhenScheduled`), #1302 lets a
   tap's receipt post the next card, #1303 lets a [Get package] button deliver the file, and
   #1308 (v0.344.38): a tap's pinned turn is the operator's tap, not a delegation (stored-call

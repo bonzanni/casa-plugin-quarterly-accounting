@@ -222,7 +222,7 @@ class PostedOnlyQuote(_Q3):
         self.tick()                    # #53: composed a second after the fixture's sheet
         with FakeBroker() as b:
             call("show_view", view="status", quarter="2026-Q3")
-            sheet = tap(b.proposal(), "Anything to check?")
+            sheet = tap(b.proposal(), "Show matches to confirm (3)")
             prop = b.proposal()
         r = self.conn.execute("SELECT * FROM renders WHERE render_id=?",
                               (sheet["render_id"],)).fetchone()
@@ -377,23 +377,64 @@ class ContinuedPages(StoreCase):
         return self.conn.execute("SELECT count(*) FROM log WHERE author='operator' AND"
                                  " kind='unpair'").fetchone()[0]
 
+    # #66: show_view posts every page at once (pages before one card); the continued-page
+    # binding (V1) still serves a page composed from its predecessor's `next` — a typed
+    # "more" — so these pin it at the composing seam, each page delivered as shown
     def page1(self):
-        with FakeBroker() as b:
-            p1 = call("show_view", view="item", pid=self.pid)
-            prop = b.proposal()
+        import views
+        p1 = views.build_review(self.conn, view="item", pid=self.pid)
         call("mark_rendering_delivered", render_id=p1["render_id"])
         self.assertTrue(p1["next"], p1)
-        return p1, prop
+        return p1, {"next": p1["next"]}
 
     def more(self, prop):
+        import views
+        p2 = views.build_review(self.conn, **prop["next"])
+        call("mark_rendering_delivered", render_id=p2["render_id"])
+        return p2, {"text": views.unesc(p2["text"])}
+
+    def test_show_view_posts_both_pages_and_the_cards_wrong_sets_aside_both(self):
+        """#66: the item's candidates go out as two pages before one card; a reply to the
+        card ("the Adobe one is wrong") covers the candidates of both pages."""
+        import views
         with FakeBroker() as b:
-            p2 = tap(prop, "More")
-            return p2, b.proposal()
+            out = call("show_view", view="item", pid=self.pid)
+            prop = b.proposal()
+        self.assertEqual(len(prop["pages"]), 2)
+        mrevs = json.loads(self.conn.execute(
+            "SELECT match_revisions_json FROM render_items WHERE render_id=? AND pid=?",
+            (out["render_id"], self.pid)).fetchone()[0])
+        self.assertEqual(len(mrevs), 2)
+        self.assertEqual([x["label"] for x in prop["buttons"]], ["No invoice needed", "Close"])
+        call("mark_rendering_delivered", render_id=out["render_id"])
+        o, rprop = self.propose("the Adobe one is wrong", quoted=views.unesc(prop["text"]))
+        self.assertIsNotNone(o["reading"])
+        tap(rprop, "Apply")
+        self.assertEqual(self.unpairs(), 2)
+
+    def test_an_item_past_six_pages_binds_every_candidate_on_its_last_card(self):
+        """#66 r1 (Astra S2): six pages, a card saying "more", then the rest — the second
+        card's verdicts cover every candidate shown, as the last More page did."""
+        import views
+        for i in range(2, 8):
+            did = self.doc(counterparty="Adobe", issuer="Adobe", document_number="CANDIDATE%02d"
+                           % i + "X" * 40, document_date="2026-09-14", amount_minor=5445)
+            self.machine_entry(self.pid, did)
+        with FakeBroker() as b:
+            first = call("show_view", view="item", pid=self.pid)
+            self.assertEqual(len(b.proposal()["pages"]), 6)
+            second = call("show_view", **first["next"])
+            self.assertEqual(len(b.proposal()["pages"]), 2)
+        self.assertIsNone(second["next"])
+        mrevs = json.loads(self.conn.execute(
+            "SELECT match_revisions_json FROM render_items WHERE render_id=? AND pid=?",
+            (second["render_id"], self.pid)).fetchone()[0])
+        self.assertEqual(len(mrevs), 8)
+        self.assertTrue(views)
 
     def test_control_page_two_sets_aside_both(self):
         p1, prop = self.page1()
-        more = next(x["call"] for x in prop["buttons"] if x["label"] == "More")
-        self.assertEqual(more["arguments"].get("prev"), p1["render_id"])
+        self.assertEqual(prop["next"].get("prev"), p1["render_id"])
         p2, prop2 = self.more(prop)
         mrevs = json.loads(self.conn.execute(
             "SELECT match_revisions_json FROM render_items WHERE render_id=? AND pid=?",
@@ -421,7 +462,7 @@ class ContinuedPages(StoreCase):
         refused = self.conn.execute("SELECT * FROM renders ORDER BY rowid DESC LIMIT 1"
                                     ).fetchone()
         self.assertIsNotNone(refused["posted_seq"])
-        p2, prop2 = self.more(prop)              # the ORIGINAL page's More
+        p2, prop2 = self.more(prop)              # the ORIGINAL page's `next`
         out, _ = self.propose("the Adobe one is wrong", quoted=prop2["text"])
         self.assertIsNone(out["reading"])
         self.assertEqual(self.readings_count(), 0)

@@ -31,11 +31,13 @@ def button_json(label, tool, args) -> dict:
     return out
 
 
-def _proposal(text, buttons, revision) -> str:
-    return json.dumps({"text": views.deposit_safe(text), "revision": revision,
-                       "buttons": [button_json(label, tool, args)
-                                   for label, tool, args in buttons]},
-                      ensure_ascii=False)
+def _proposal(text, buttons, revision, pages=None) -> str:
+    """`pages` (#66, Casa v0.344.67): plain messages Casa posts, in order, before the card."""
+    value = {"text": views.deposit_safe(text), "revision": revision,
+             "buttons": [button_json(label, tool, args) for label, tool, args in buttons]}
+    if pages:
+        value["pages"] = [views.deposit_safe(p) for p in pages]
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _keyed(conn, render_id, specs) -> list:
@@ -90,10 +92,9 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
             rid = cards.compose_open(conn, quarter or cards.main_quarter(conn))
             r = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
         else:
-            out = views.review_in_tx(conn, view or "status", quarter, pid, page, after,
-                                     prev=prev)
             r = conn.execute("SELECT * FROM renders WHERE render_id=?",
-                             (out["render_id"],)).fetchone()
+                             (_compose_list(conn, view or "status", quarter, pid, page,
+                                            after, prev),)).fetchone()
         scope = json.loads(r["scope_json"])
         if r["kind"] in cards.KINDS:
             # keys minted and posted_seq stamped by deposit_of, as for a tap's `next`
@@ -101,7 +102,13 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
         else:
             buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r))
             revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
-            value = _proposal(r["text"], buttons, revision)
+            pages = [conn.execute("SELECT text FROM renders WHERE render_id=?",
+                                  (p,)).fetchone()[0] for p in scope.get("list_pages") or []]
+            value = _proposal(r["text"], buttons, revision, pages)
+            for p in scope.get("list_pages") or []:
+                # a page is posted with its card: a quote of it binds it (db.seen_render)
+                conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
+                             (db.next_seq(conn), p))
             # r3 #3: stamped posted before the deposit (which stays last) — a view posted by
             # a tap's stored call is never marked delivered, and a quote of it binds it. The
             # stamp means "a deposit was attempted at seq n": monotone, never restored on a
@@ -115,6 +122,31 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
         key = delivery_key(conn, "view", [r["render_id"]])
     ref = casa_broker.deposit("view", value, key=key)
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
+
+
+def _compose_list(conn, view, quarter, pid, page, after, prev) -> str:
+    """#66: the whole list, page after page (each its own rendering, binding what it prints,
+    as a More page did), up to views.MAX_PAGES. One page is the card itself; more become
+    plain pages before one action card (views.list_card) that acts on all of them. Returns
+    the render id to post."""
+    page, ids = page or 1, []
+    while True:
+        out = views.review_in_tx(conn, view, quarter, pid, page, after, prev=prev)
+        ids.append(out["render_id"])
+        nxt = out["next"]
+        if nxt is None or len(ids) == views.MAX_PAGES:
+            break
+        page, after, prev = nxt["page"], nxt.get("after"), nxt.get("prev")
+    if len(ids) == 1 and nxt is None:
+        return ids[0]
+    for rid in ids:
+        # every page is posted: none of them leads anywhere a typed "more" should go
+        sc = json.loads(conn.execute("SELECT scope_json FROM renders WHERE render_id=?",
+                                     (rid,)).fetchone()[0])
+        sc["next"] = None
+        conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
+                     (db.canonical(sc), rid))
+    return views.list_card(conn, ids, nxt)
 
 
 DELIVERY_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")    # Casa #1312's `key`
