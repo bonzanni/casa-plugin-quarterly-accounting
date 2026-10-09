@@ -147,7 +147,7 @@ class R7Fixes(Reading):
         i = lines.index("**Confirm these matches?**")
         self.assertEqual(lines[i - 1], "")
         self.assertTrue(lines[i + 1].startswith("1. Elevenlabs.io"))
-        self.assertNotIn("REC", end["text"])                     # #99: no raw number
+        self.assertIn("receipt REC\\-1 · EUR 18.99", end["text"])   # #106: a short number
         self.assertNotIn("Confirm all:", end["text"])
         self.assertIn("Confirm all", self.labels(end))
 

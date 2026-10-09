@@ -544,7 +544,7 @@ class Cards(LoopCase):
         self.assertFalse(any("— confirm?" in ln for ln in lines), lines)
         self.assertTrue(any(ln.endswith(": not matched yet.") for ln in lines), lines)
         i = lines.index("**Confirm these matches?**")
-        self.assertTrue(lines[i + 1].startswith("1. AWS · 2 Sep · EUR 41.20 ↔ invoice · "),
+        self.assertTrue(lines[i + 1].startswith("1. AWS · 2 Sep · EUR 41.20 ↔ invoice INV\\-88 · "),
                         lines[i + 1])
         self.assertNotIn("INV-88", r["text"])
         self.assertNotIn("Twilio", r["text"])

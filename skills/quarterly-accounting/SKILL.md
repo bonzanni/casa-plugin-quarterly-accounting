@@ -77,7 +77,7 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
   conversation.
 
 Words saying what a payment is ("that's wage tax") classify it: tag it as skill
-classify-transactions does, then the check ask (below).
+classify-transactions does, then offer a check; the ask (below) when they want one.
 
 ## Naming a vendor
 
@@ -141,7 +141,7 @@ A file on your desk (a reply with a document, a delegation naming a shared path)
 
 ## Setup
 
-`check_setup()` says what the check can reach. The check never asks which account is the
+ The check never asks which account is the
 business account: before a first check, or when a check stopped for it, call
 `check_setup()`, and when it asks which company account is the business account, call
 `propose_account()`: the operator taps the account. Never bind one yourself. You never

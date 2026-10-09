@@ -103,7 +103,10 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
         # mark_rendering_delivered sends nothing — Casa answers the original receipt
         key = delivery_key(conn, "view", [r["render_id"]])
     ref = casa_broker.deposit("view", value, key=key)
-    return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
+    # #106: the posted view is the whole answer — no narration of the post
+    return {"view": ref, "render_id": r["render_id"], "next": scope.get("next"),
+            "note": "Casa posts this view itself; never describe it. After its receipt, "
+                    "mark_rendering_delivered(render_id); your whole reply is <silent/>."}
 
 
 POST_NOTE = ("Nothing on it to act on, so it goes as a plain message: post_results(render_ids="
