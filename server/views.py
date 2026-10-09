@@ -1334,15 +1334,12 @@ def buttons_for(conn, r) -> list:
     q = scope.get("quarter")
     if kind != "item" and q:
         missing, check = show_counts(conn, q)
-        if missing and kind != "missing" and not check:
-            # d1 (Astra S2): a missing list with nothing to act on goes as the tap's plain
-            # answer (a stored show_view call could not post it plain)
+        if missing and kind != "missing":
+            # d1, r1 (Astra S2): a tap decides when tapped whether the list is a card or,
+            # with nothing to act on, a plain answer (a stored show_view could not post plain)
             out.append((f"Show missing invoices ({missing})", "verdict",
                         {"render_id": rid, "action": "show-missing"},
                         ("show-missing", None, None)))
-        elif missing and kind != "missing":
-            out.append((f"Show missing invoices ({missing})", "show_view",
-                        {"view": "missing", "quarter": q}, None))
         if check and kind != "check":
             out.append((f"Show matches to confirm ({check})", "show_view",
                         {"view": "check", "quarter": q}, None))
@@ -1396,18 +1393,17 @@ def list_card(conn, page_ids, nxt) -> str:
     q, n, k = s0.get("quarter"), len(items), len(page_ids)
     if kind == "item":
         d = work.describe(conn, s0.get("pid"))
-        lines = [headline(d), f"Every possible document for it is listed above, in {k} messages."]
+        lines = [title(headline(d)),
+                 f"Every possible document for it is listed above, in {k} messages."]
     else:
         what = {"missing": _plural(n, "payment") + " without an invoice",
                 "check": _plural(len(proposed), "match", "matches") + " to confirm"}.get(
                     kind, _plural(n, "payment"))
-        lines = [view_title(kind, q), f"{what[0].upper()}{what[1:]} — listed above, in {k} messages."]
+        lines = [title(view_title(kind, q)),
+                 f"{what[0].upper()}{what[1:]} — listed above, in {k} messages."]
     if nxt is not None:
         lines.append(SAY_MORE)
-    if kind in SHEET_VIEWS and proposed:
-        lines.append(f"All good: confirm all {len(proposed)} of them · One by one: go through"
-                     " them")
-    lines[0] += tag_now()
+    lines[0] += tag_now()          # #99: no legend — the buttons say it
     conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
                  " membership_json) VALUES (?,?,?,?,?,?)",
                  (rid, kind, db.canonical(scope), db.now(), _text(lines),

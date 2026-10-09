@@ -121,21 +121,14 @@ def has_actions(conn, r) -> bool:
 def plain_post(conn, r, lead_rid=None) -> dict:
     """#93: a rendering with nothing to act on is not a card: the desk posts it, with its
     pages (and a rename's line, `lead_rid`) first, as plain messages through post_results —
-    `post` holds the render ids in groups one post_results call takes. The null slot is
+    `post` holds one render id per call, in order. The null slot is
     Casa's no-deposit statement (#1015 addendum)."""
-    import job
     scope = json.loads(r["scope_json"])
     ids = ([lead_rid] if lead_rid else []) + list(scope.get("list_pages") or []) \
         + [r["render_id"]]
-    groups, size = [], 0
-    for rid in ids:
-        n = len(conn.execute("SELECT text FROM renders WHERE render_id=?",
-                             (rid,)).fetchone()[0]) + 2
-        if not groups or len(groups[-1]) >= job.POST_MAX or size + n > job.POST_CHARS:
-            groups.append([])
-            size = 0
-        groups[-1].append(rid)
-        size += n
+    # r1 (Astra S2): one rendering per post — Casa pages a joined message at its own
+    # boundaries, and a quote of its second message would match no stored rendering
+    groups = [[rid] for rid in ids]
     for rid in ids:
         # "a deposit attempted" (as a view's stamp): a reply quoting the plain post binds it
         conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",

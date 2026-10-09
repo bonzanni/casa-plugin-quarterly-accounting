@@ -47,10 +47,12 @@ class TypedMore(_Q3):
 
     def test_a_whole_list_posted_leaves_nothing_more(self):
         """#66: show_view posts every page; "all of them" on its card has nothing left."""
+        import views
         self.big_sheet()
         out = self.show(view="check")
         self.assertIsNone(out["next"])
-        r, prop = self.propose("all of them", quoted=self.render_text(out["render_id"]))
+        r, prop = self.propose("all of them",
+                               quoted=views.displayed(self.render_text(out["render_id"])))
         self.assertIsNone(prop)
         self.assertEqual(r["instructions"], [])
 

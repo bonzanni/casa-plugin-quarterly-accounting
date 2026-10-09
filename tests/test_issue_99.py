@@ -5,6 +5,8 @@ for the buttons, short names, no empty section. Close goes beside real actions a
 alone (a card with nothing to act on goes plain); Get package only where the desk judged
 the operator wants the package; a proposed pair is stated once."""
 
+import json
+
 from tests._base import LoopCase, StoreCase, apply_now
 from tests.fakebroker import FakeBroker
 import db
@@ -147,3 +149,68 @@ class Skill(StoreCase):
                        "package"):
             self.assertIn(phrase, s, phrase)
         self.assertLessEqual(len(SKILL), 10_000)
+
+
+class ShowMissing(StoreCase):
+    """r1 (Astra S2 ×3): [Show missing invoices] decides when tapped — a card when the list
+    has something to act on, else the list's first page as the plain answer, binding only
+    what it shows."""
+
+    def status(self):
+        import posting
+        with FakeBroker() as b:
+            posting.show_view(self.conn, view="status", quarter="2026-Q3")
+        return b.proposal()
+
+    def tap(self, prop):
+        import qa_server, tools  # noqa: F401
+        call = next(x["call"] for x in prop["buttons"]
+                    if x["label"].startswith("Show missing invoices"))
+        self.assertEqual(call["arguments"]["action"], "show-missing")
+        return qa_server.TOOLS["verdict"]["fn"](dict(call["arguments"]))
+
+    def test_a_long_list_says_how_to_see_it_and_binds_nothing(self):
+        self.seed_payments([{"counterparty": f"Vendor {i:02d} Holdings International",
+                             "amount_minor": 1000 + i} for i in range(120)])
+        out = self.tap(self.status())
+        self.assertNotIn("next", out)
+        self.assertIn('say "show the missing invoices"', out["receipt"])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE kind='missing'"
+                                           " AND posted_seq IS NOT NULL").fetchone()[0], 0)
+
+    def test_a_short_list_is_the_answer_and_a_quote_of_it_binds_it(self):
+        self.seed_payments([{"counterparty": "Adobe"}, {"counterparty": "Zapier"}])
+        out = self.tap(self.status())
+        self.assertNotIn("next", out)
+        r = views.bound_rendering(self.conn, views.displayed(out["receipt"]))
+        self.assertEqual(r["kind"], "missing")
+        self.assertEqual(len(views.render_items(self.conn, r["render_id"])), 2)
+
+    def test_a_list_with_something_to_confirm_is_the_next_card(self):
+        import matches
+        self.seed_payments([{"counterparty": "Adobe"}, {"counterparty": "Zapier",
+                                                        "amount_minor": 999}])
+        p = self.conn.execute("SELECT pid FROM projections ORDER BY pid DESC").fetchone()[0]
+        matches.propose_match(self.conn, pid=p, doc_id=self.doc(amount_minor=999),
+                              expected_revision=self.rev(p), token=self.pass_(),
+                              document_date="2026-09-14")
+        out = self.tap(self.status())
+        self.assertIn("next", out)
+        self.assertIn("Show matches to confirm", json.dumps(out["next"]))
+
+    def test_a_list_that_lost_its_action_since_the_button_was_shown_is_plain(self):
+        import matches
+        self.seed_payments([{"counterparty": "Adobe"}, {"counterparty": "Zapier",
+                                                        "amount_minor": 999}])
+        p = self.conn.execute("SELECT pid FROM projections ORDER BY pid DESC").fetchone()[0]
+        token = self.pass_()
+        mid = matches.propose_match(self.conn, pid=p, doc_id=self.doc(amount_minor=999),
+                                    expected_revision=self.rev(p), token=token,
+                                    document_date="2026-09-14")["match_id"]
+        prop = self.status()
+        self.granted(lambda c, grant: matches.confirm_in_tx(
+            c, grant=grant, match_id=mid, expected_revision=self.rev(match_id=mid),
+            render_id=prop["buttons"][0]["call"]["arguments"]["render_id"], bind="rendered"))
+        out = self.tap(prop)
+        self.assertNotIn("next", out)
+        self.assertIn("Adobe", out["receipt"])

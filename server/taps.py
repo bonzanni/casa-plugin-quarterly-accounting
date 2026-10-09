@@ -7,6 +7,7 @@ import json
 
 import authority
 import binding
+import dates
 import db
 import keys
 import lineage
@@ -144,9 +145,10 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
 
 
 def _show_missing(conn, render_id) -> dict:
-    """#93 (d1, Astra S2): [Show missing invoices] on a view whose missing list has nothing
-    to act on: the list itself is the tap's answer, one plain message, stored as posted
-    (its pages joined) so a reply quoting it binds."""
+    """#93 (d1, r1 Astra S2): [Show missing invoices], decided when tapped. A missing list
+    with something to act on is the next card (its pages before it); one with nothing to act
+    on is the tap's answer, plain, as stored (it binds what it shows); one longer than a
+    message says how to see it all."""
     import posting
     r = conn.execute("SELECT * FROM renders WHERE render_id=?", (render_id,)).fetchone()
     q = json.loads(r["scope_json"]).get("quarter") if r is not None else None
@@ -154,15 +156,18 @@ def _show_missing(conn, render_id) -> dict:
         raise db.Refusal(keys.NO_LONGER)
     rid = posting._compose_list(conn, "missing", q, None, None, None, None)
     lst = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
-    pages = [conn.execute("SELECT text FROM renders WHERE render_id=?", (p,)).fetchone()[0]
-             for p in json.loads(lst["scope_json"]).get("list_pages") or []]
-    text = views.fit_message("\n\n".join(pages + [lst["text"]]))
-    for p in json.loads(lst["scope_json"]).get("list_pages") or []:
-        conn.execute("INSERT OR IGNORE INTO render_items(render_id, pid, projection_revision,"
-                     " match_revisions_json) SELECT ?, pid, projection_revision,"
-                     " match_revisions_json FROM render_items WHERE render_id=?", (rid, p))
-    conn.execute("UPDATE renders SET text=?, posted_seq=? WHERE render_id=?",
-                 (text, db.next_seq(conn), rid))
+    pages = json.loads(lst["scope_json"]).get("list_pages") or []
+    if posting.has_actions(conn, lst):
+        value, _ = posting._view_value(conn, lst)
+        return {"receipt": f"Missing invoices, {dates.quarter_label(q)}:",
+                "next": json.loads(value)}
+    if pages:
+        # a list longer than one message cannot be one answer (r1 Astra S2: a clipped one
+        # bound what it never showed); the desk posts it whole, page by page
+        return {"receipt": "Too many missing invoices for one message: say \"show the "
+                           "missing invoices\" to see them all."}
+    text = lst["text"]
+    conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?", (db.next_seq(conn), rid))
     return {"receipt": text}
 
 
