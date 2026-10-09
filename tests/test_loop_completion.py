@@ -91,9 +91,10 @@ class Completion(StoreCase):
             units = drv.run_job("cccccccc-2", started_by="operator")
         posts = [u for u in units if u["unit"] in ("view", "post")]
         self.assertEqual(len(posts), 1)
+        rid = posts[0].get("render_id") or posts[0]["render_ids"][0]   # #93: plain, no tap
         r = self.conn.execute("SELECT text, scope_json FROM renders WHERE render_id=?",
-                              (posts[0]["render_id"],)).fetchone()
-        self.assertTrue(r[0].startswith("Q3 complete · "), r[0])
+                              (rid,)).fetchone()
+        self.assertTrue(r[0].lstrip("*").startswith("Q3 complete · "), r[0])
         self.assertEqual(json.loads(r[1])["ready_quarters"], ["2026-Q3"])
         self.assertEqual(self.conn.execute("SELECT times FROM quarter_notices WHERE"
                                            " quarter='2026-Q3'").fetchone()[0], 1)

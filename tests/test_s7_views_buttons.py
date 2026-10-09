@@ -52,10 +52,21 @@ class ShowView(_Q3):
         self.assertNotIn(key, json.dumps(out))
         self.assertRegex(out["view"], r"^casa-cap-")
 
-    def test_an_informational_page_with_nothing_open_offers_close_only(self):
-        """#66: a "Show …" button appears only when its list is not empty."""
-        out, prop, _ = self.post(view="status")
-        self.assertEqual([b["label"] for b in prop["buttons"]], ["Close"])
+    def plain(self, **kw):
+        """#93: a view with nothing to act on: no deposit, `post` for post_results."""
+        import posting
+        with FakeBroker() as b:
+            out = posting.show_view(self.conn, **kw)
+            self.assertEqual(b.deposits, [])
+            self.assertIsNone(out["view"])
+            body = posting.post_results(self.conn, out["post"][0])
+        return out, b.deposits[0]["value"], body
+
+    def test_an_informational_page_with_nothing_open_is_a_plain_message(self):
+        """#66: a "Show …" button appears only when its list is not empty; #93: with none,
+        no Close alone — the page is posted plain."""
+        out, text, _ = self.plain(view="status")
+        self.assertEqual(out["post"], [[out["render_id"]]])
 
     def test_re_posting_a_stored_rendering_reuses_its_text_and_mints_fresh_keys(self):
         self.sheet_fixture()
@@ -82,9 +93,8 @@ class ShowView(_Q3):
     def test_a_setup_stop_view_posts_with_informational_buttons(self):
         """Plan round 4, Terra S2: an unbound store's status view (the setup lead) has no
         items; show_view still stores and posts it."""
-        out, prop, _ = self.post(view="status")          # StoreCase: nothing bound
-        self.assertRegex(out["view"], r"^casa-cap-")
-        self.assertEqual([b["label"] for b in prop["buttons"]], ["Close"])
+        out, text, body = self.plain(view="status")      # StoreCase: nothing bound
+        self.assertRegex(body["results"], r"^casa-cap-")
 
     def test_a_legacy_rendering_with_a_control_character_is_deposited_clean(self):
         import db
@@ -92,8 +102,8 @@ class ShowView(_Q3):
             self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
                               " text, membership_json) VALUES ('r901','status','{}','x',?,'[]')",
                               ("ACME\x01 owes",))
-        _, prop, _ = self.post(render_id="r901")
-        self.assertEqual(prop["text"], "ACME  owes")
+        _, text, _ = self.plain(render_id="r901")
+        self.assertEqual(text, "ACME  owes")
 
 
 class PagedSheet(_Q3):
@@ -224,8 +234,9 @@ class Verdict(_Q3):
         self.assertNotIn("among several that fit", prop["text"])
         self.assertNotIn("also fits", prop["text"])
         with FakeBroker() as b:
-            posting.show_view(self.conn, view="check")
-        self.assertNotIn("All good", [x["label"] for x in b.proposal()["buttons"]])
+            out = posting.show_view(self.conn, view="check")
+        # #93: nothing left to confirm — no card, no All good
+        self.assertEqual((out["view"], b.deposits), (None, []))
 
     def test_a_verdict_on_a_pid_the_rendering_did_not_list_refuses(self):
         # final fix wave T5-a: the key matches (render_id, action, pid), so the key check
@@ -277,8 +288,10 @@ class Verdict(_Q3):
         self.assertIn("needs no document; removed its match.", out["receipt"])
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM log WHERE author='operator' AND kind='exempt'").fetchone()[0], 1)
-        _, again = self.item(fx["pid"])
-        self.assertEqual([x["label"] for x in again["buttons"]], ["Close"])
+        import posting
+        with FakeBroker() as b:                             # #93: nothing left to tap: plain
+            out = posting.show_view(self.conn, view="item", pid=fx["pid"])
+        self.assertEqual((out["view"], b.deposits), (None, []))
 
     def candidates_only(self):
         """A payment with two displayed candidates and no current pairing."""

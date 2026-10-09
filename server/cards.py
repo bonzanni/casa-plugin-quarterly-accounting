@@ -349,7 +349,7 @@ def _proposal_line(conn, i, d) -> str:
     else:
         c = offered[0]["doc"]
         word = views.KIND_WORD.get(c["kind"], "document")
-        doc = f"{word} {views.field(c['number'])}" if c.get("number") else word
+        doc = word          # #99: short names, never a raw document number
         doc += f" · {_money(c['amount_minor'], c['currency'])}"
         if c.get("currency") and d["currency"] and c["currency"] != d["currency"]:
             doc += " (other currency)"
@@ -368,7 +368,7 @@ def _fits(lines) -> bool:
     measured on the real lines, never on an estimate)."""
     if not lines:
         return True
-    text = "\n".join([lines[0] + TAG_WORST] + list(lines[1:]) + ["x" * LEGEND_MAX])
+    text = "\n".join([views.title(lines[0]) + TAG_WORST] + list(lines[1:]))
     return views.utf16_len(text) <= views.BODY_LIMIT and views.fits_proposal(text)
 
 
@@ -408,8 +408,8 @@ def _store(conn, kind, lines, scope, bound, states, docs=None) -> str:
     rid = f"r{db.next_seq(conn)}"
     pre = {"names": {}, "refs": {}, "proposed": [], "offers": [], "next": None,
            "walk": None, "pid": None, "pos": -1, "scheduled": False, **scope}
-    key = legend(kind, pre)
-    lines = list(lines) + ([key] if key else [])
+    # #99: line 1 is the card's title; the buttons say what they do (no legend)
+    lines = [views.title(lines[0]), *lines[1:]] if lines else []
     out, whole = views.fit_lines(lines, tag=views.tag_now())
     late = [pid for pid, i in bound.items() if i >= whole] + [
         (pid, m) for pid, ms in (docs or {}).items() for m, i in ms.items() if i >= whole]
@@ -473,14 +473,19 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
     order, then `vendors`."""
     with views.named(proposals, quarter):
         plines = [_proposal_line(conn, i, d) for i, d in enumerate(proposals, 1)]
-        before = list(head) + _questions_line(questions) + (["To confirm:"] if proposals
-                                                            else [])
+        # #99: the title and facts, then the question on its own line above the list its
+        # buttons refer to, then the rest — one blank line between the groups
+        before = views.groups(head, _questions_line(questions),
+                              [""] if proposals else [])
+        if proposals:
+            before[-1] = views.title(CONFIRM_Q)
+        after = views.groups([""], tail)[1:] if tail else []
 
         def closing(left):
             return f"… and {left} more to confirm — Review shows them."
-        k = _fit_count(before, plines, closing, tail)
+        k = _fit_count(before, plines, closing, after)
         lines = before + plines[:k] + ([closing(len(plines) - k)] if k < len(plines) else []) \
-            + list(tail)
+            + after
         listed = proposals[:k]
         bound = {d["pid"]: len(before) + j for j, d in enumerate(listed)}
         docs = {d["pid"]: ({d["current"]["match_id"]: bound[d["pid"]]}
@@ -496,6 +501,9 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
                  + [{"p": d["pid"]} for d in proposals] + list(vendors),
                  **_grammar(listed), **(extra_scope or {})}
         return _store(conn, kind, lines, scope, bound, states, docs=docs)
+
+
+CONFIRM_Q = "Confirm these matches?"       # #99: the question the Review / Confirm all refer to
 
 
 def _nonzero(*parts) -> str:
@@ -528,7 +536,8 @@ def _ready_scope(conn, quarters) -> dict:
 def _doc_name(d) -> str:
     """#67: a handed document as read — issuer, number, date, amount (what is known); the
     file's own name when nothing was read. Displayed (escaped)."""
-    who = " ".join(x for x in (d["issuer"] or d["counterparty"], d["document_number"]) if x)
+    # #99: a short name — the number only when nothing else names it
+    who = d["issuer"] or d["counterparty"] or d["document_number"]
     parts = [views.field(who or d["original_name"] or f"document {d['doc_id']}")]
     if d["document_date"]:
         parts.append(_day(d["document_date"]))
@@ -547,17 +556,12 @@ def _pending_of(conn, doc):
     return min(rows, key=lambda r: dates.effective_date(r) or "") if rows else None
 
 
-def _payment_words(d) -> str:
-    return (f"{views.field(views.shown(d))} · {_day(d['date'])} · "
-            f"{_money(d['amount_minor'], d['currency'])}")
-
-
 def _receipts(conn, docs, job_id=None) -> tuple:
     """§2.5, what the handed documents changed (#67: one line per document, naming it as
     read, with what the run computed for it — never a result it did not compute): matched
-    to a payment, proposed for one (to confirm), a copy of an earlier document, not read,
-    or the payments it was checked against. Returns (those lines, the proposed payments
-    holding one of them)."""
+    to a payment, a copy of an earlier document, not read,
+    or the payments it was checked against; a proposed one is only its "To confirm" line
+    (#96). Returns (those lines, the proposed payments holding one of them)."""
     import documents
     head, props = [], []
     for doc in dict.fromkeys(docs):
@@ -593,7 +597,8 @@ def _receipts(conn, docs, job_id=None) -> tuple:
             continue
         d = work.describe(conn, held[0]) if held else None
         if d is not None and d["status"] == "proposed":
-            head.append(f"{name}: proposed for {_payment_words(d)} — confirm?")
+            # #96: said once — its line in the numbered "To confirm" list, which Review and
+            # Confirm all refer to, names the document and the payment
             if all(x["pid"] != d["pid"] for x in props):
                 d["vendor"] = d["counterparty"]
                 props.append(d)
@@ -639,9 +644,10 @@ def _fit_receipts(lines, before, after) -> list:
 
 
 def _confirm_room(props) -> list:
-    """The lines a message's proposals need at the least: their heading and closing line."""
-    return (["To confirm:", f"… and {len(props)} more to confirm — Review shows them."]
-            if props else [])
+    """The lines a message's proposals need at the least: a blank line, the question and the
+    closing line."""
+    return (["", views.title(CONFIRM_Q), f"… and {len(props)} more to confirm — Review shows "
+             "them."] if props else [])
 
 
 def _handover(conn, job_id, docs, quarter, tail, ready, sent=None, scheduled=False) -> str:
@@ -649,12 +655,13 @@ def _handover(conn, job_id, docs, quarter, tail, ready, sent=None, scheduled=Fal
     whose only request is the handover): one line per handed document — what the
     continuation changed — and the proposals among them to confirm."""
     head, props = _receipts(conn, docs, job_id)
-    head = _fit_receipts(head, [], _confirm_room(props) + list(tail))
-    backed = handover_quarter(conn, job_id, docs)[1]
+    n = len(dict.fromkeys(docs))
+    top = [f"{_s(n, 'document')} you sent"]          # #99: the card's title
+    head = top + _fit_receipts(head, top, _confirm_room(props) + list(tail))
     return _summary(conn, "end", quarter, head, props, [], tail,
                     {d["pid"]: item_state(d) for d in props}, scheduled=False,
-                    # #67: [Get package] only for the quarter a handed document backs
-                    extra_scope={"job_id": job_id, "package": backed, **(sent or {}),
+                    # #94: a job's end card never offers the package
+                    extra_scope={"job_id": job_id, **(sent or {}),
                                  **(_ready_scope(conn, ready) if ready else {})},
                     # e5 (Astra S2): a scheduled run offers only its own run's questions
                     questions=[q for q in replace.open_ones(conn)
@@ -712,13 +719,11 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         if earlier:
             head.append(f"{_s(earlier, 'earlier item')} still open")
         head += _fit_receipts(receipts, head, _confirm_room(new_props) + tail)
-        extra_scope["package"] = bool(sum(st["counts"].get(q, collections.Counter()).values()))
         return _summary(conn, "end", q, head, new_props, _vendor_items(new_miss), tail,
                         reported, scheduled=True, extra_scope=extra_scope,
                         questions=new_qs)       # e1 (Astra S2): only this run's new ones
     c = st["counts"].get(q, collections.Counter())
     n = sum(c.values())
-    extra_scope["package"] = bool(n)     # r2 (Astra S2): every branch, the early ones too
     all_qs = replace.open_ones(conn)
     # r3 (Astra S2): the card's questions are its quarter's, on every branch
     qs = [x for x in all_qs if work.describe(conn, x["pid"])["quarter"] == q]
@@ -788,20 +793,24 @@ def _links_lines(conn, mine, before, after, quarter) -> list:
     for d in ds:
         where = ([views.field(d["link"], views.LINK_MAX)] if d["link"] else []) \
             + ([views.field(d["link_note"])] if d.get("link_note") else [])
-        lines.append(f"{views.field(views.shown(d))}: " + (" — ".join(where) or
-                                                          "no link known"))
+        if where:            # #99: a vendor with no known link adds nothing
+            lines.append(f"{views.field(views.shown(d))}: " + " — ".join(where))
+    if not lines:
+        return ["", "No download links known for these vendors."]
 
     def more(left):
         return f"… and {_s(left, 'more vendor')}"
     k = _fit_count(list(before) + [LINKS_HEAD], lines, more, after)
-    return [LINKS_HEAD] + lines[:k] + ([more(len(lines) - k)] if k < len(lines) else [])
+    return ["", views.title(LINKS_HEAD)] + lines[:k] \
+        + ([more(len(lines) - k)] if k < len(lines) else [])
 
 
-def compose_open(conn, quarter, *, scheduled=False, links=False) -> str:
+def compose_open(conn, quarter, *, scheduled=False, links=False, package=False) -> str:
     """The quarter status card (#55, the approved script 1a/1b; the open-items card of §1
     r11): where `quarter` stands — its payments and non-zero counts, ITS proposals and
     missing invoices (Review walks only those), one line per other quarter with open items,
-    and [Get package] only when the quarter has a payment in the books. `b` counts the
+    and [Get package] only with `package` (#94: the desk asked for it, the operator's intent to
+    get the package being clear) and a payment in the books. `b` counts the
     unanswered missing payments only ([Leave missing] is an answer). `links` (issue #57,
     the [Invoice links] tap): the same card with where to download each missing invoice."""
     st = state(conn)
@@ -824,13 +833,13 @@ def compose_open(conn, quarter, *, scheduled=False, links=False) -> str:
         tail += _links_lines(conn, mine, head + _confirm_room(props), tail, quarter)
     return _summary(conn, "open-items", quarter, head, props, _vendor_items(mine),
                     tail, reported, scheduled=scheduled, questions=qs,
-                    extra_scope={"package": bool(n), "links_offer": bool(mine),
+                    extra_scope={"package": bool(package and n), "links_offer": bool(mine),
                                  "links": links})
 
 
 def compose_ready(conn, quarters: list, extra=(), alerts=(), receipts=()) -> str:
-    """The "package ready" notice (§1, D19): the latest owed quarter heads it with [Get
-    package]; `receipts` (d2: the "Filed." lines of a handover the completing check took);
+    """The "package ready" notice (§1, D19): the latest owed quarter heads it (no button:
+    #94); `receipts` (d2: the "Filed." lines of a handover the completing check took);
     each earlier quarter is a line; then `extra`. Delivery records each completion
     (`ready_sigs`, views.mark_rendering_delivered)."""
     qs = sorted(set(quarters))
@@ -844,6 +853,8 @@ def compose_ready(conn, quarters: list, extra=(), alerts=(), receipts=()) -> str
         head = f"{_qn(latest)} complete · {k} of {k} accounted for · package ready"
     after = [_ready_line(q, latest) for q in qs[:-1]] + list(extra)
     lines = [head] + _fit_receipts(list(receipts), [head], after) + after
+    # d1 (Astra, Terra): a job's completion notice is no package request (#94): no button,
+    # so it goes as a plain message; "send the Qn package" in words gets it
     return _store(conn, "ready", lines, {"quarter": latest, "order": [],
                                          **({"alerts": sorted(alerts)} if alerts else {}),
                                          **_ready_scope(conn, qs)}, {}, {})
@@ -1262,14 +1273,16 @@ def next_after(conn, review_of, pos):
 
 def buttons(conn, r) -> list:
     """The stored calls of a cards rendering, in order, as (label, tool, args, key_spec);
-    key_spec is (action, pid, doc_id) (D16: every tap is a keyed `verdict`), and [Get
-    package] — the one unkeyed call (#1303) — is always last."""
-    return _buttons(r["render_id"], r["kind"], json.loads(r["scope_json"]))
+    key_spec is (action, pid, doc_id) (D16: every tap is a keyed `verdict`); [Get package]
+    — the one unkeyed call (#1303) — is the last action, then Close."""
+    out = _buttons(r["render_id"], r["kind"], json.loads(r["scope_json"]))
+    # #93: Close beside the actions (room allowing: Casa takes six), so a card can be
+    # dismissed without acting; never alone — a card with nothing to tap is posted plain
+    return out + [views.CLOSE] if out and len(out) < 6 else out
 
 
 def _buttons(rid, kind, scope) -> list:
-    """buttons() from a rendering's id, kind and scope: _store reads the labels before the
-    row exists, for the legend line (the approved script)."""
+    """buttons() from a rendering's id, kind and scope, Close aside."""
 
     def v(label, action, pid=None, doc_id=None):
         args = {"render_id": rid, "action": action}
@@ -1279,7 +1292,7 @@ def _buttons(rid, kind, scope) -> list:
             args["doc_id"] = doc_id
         return (label, "verdict", args, (action, pid, doc_id))
     get = [("Get package", "get_package", {"quarter": scope["quarter"]}, None)] \
-        if scope.get("package", True) else []
+        if scope.get("package") else []
     if kind in ("end", "open-items"):
         out = []
         if scope.get("order"):
@@ -1288,11 +1301,9 @@ def _buttons(rid, kind, scope) -> list:
             out.append(v("Confirm all", "confirm-all"))
         if scope.get("links_offer") and not scope.get("links"):
             out.append(v("Invoice links", "links"))
-        # #72: Casa posts a card only with a button — a card with nothing to tap (a copy
-        # already filed, a document not read) carries Close (Casa v0.344.64, #1375)
-        return out + get or [("Close", None, None, None)]
+        return out + get
     if kind == "ready":
-        return get
+        return []
     if kind == "replace":
         pid, doc = scope["pid"], scope["new_doc_id"]
         return [v("Keep current", "keep-current", pid, doc), v("Use new", "use-new", pid, doc)]
@@ -1340,62 +1351,6 @@ def exempt_label(scope) -> str:
             else "No document needed for these")
 
 
-LEGEND = {"review": "Review: go through {walk}, one at a time",
-          "confirm-all": "Confirm all: accept the suggested documents listed above",
-          "links": "Invoice links: where to download each missing invoice",
-          "pick": "{label}: use this document",
-          "confirm": "Confirm: this {kind} is right",
-          "wrong": "Wrong: not this one, keep looking",
-          "leave": "Leave for now: decide later",
-          "exempt-these": "{exempt}: these need none",
-          "exempt-these-all": "{exempt}: these and the {others} in other quarters need none",
-          "never": "{label}: {vendor} never sends one, in any quarter",
-          "leave-missing": "Leave missing: stop looking, keep them missing",
-          "leave-missing-all": "Leave missing: these and the {others} in other quarters",
-          "all-quarters": "Apply to all quarters: your next answer here also covers the "
-                          "{others} in other quarters",
-          "this-quarter": "Only this quarter: switch back",
-          "leave-vendor": "Leave for now: decide later",
-          "next-page": "Next page: the rest of this vendor",
-          "keep-current": "Keep current: keep the filed invoice",
-          "use-new": "Use new: use the new one"}
-
-
-def legend(kind, scope) -> str:
-    """The approved script: a card that carries buttons ends with ONE short plain line
-    saying what each button shown does — the buttons actually shown, in order, from the
-    same function that makes them. Picks share one entry."""
-    parts, picked = [], False
-    for label, tool, args, _ in _buttons("r0", kind, scope):
-        if tool is None:
-            continue                     # #72: Close says what it does
-        if tool == "get_package":
-            parts.append(f"Get package: the {_qn(scope['quarter'])} zip for your accountant")
-            continue
-        if tool == "get_document":
-            parts.append(f"{label}: the document, sent here; this card stays")
-            continue
-        action = args["action"]
-        if action == "pick":
-            # PLAY 0.11.2: one plain entry for every pick button
-            if not picked:
-                parts.append("A document button: use that document")
-            picked = True
-            continue
-        if action in ("exempt-these", "leave-missing") and scope.get("all_quarters"):
-            action += "-all"
-        noun = scope.get("noun", "invoice")
-        # #60: a label carries a vendor's name ([Never for X]); the legend is card text,
-        # so it is escaped as every dynamic field is (a button label is plain)
-        parts.append(LEGEND[action].format(label=views.esc(label), walk=walk_words(scope),
-                                           kind=scope.get("doc_word") or "document",
-                                           others=len(scope.get("others_missing") or []),
-                                           # #63: the button's own words
-                                           exempt=exempt_label(scope).removesuffix(" for these"),
-                                           vendor=views.field(vendor_name(scope))))
-    return " · ".join(parts)
-
-
 def walk_words(scope, sep=" and ") -> str:
     """BRAIN/operator 2026-10-08: a count on a button must be a number the card shows, so
     [Review] carries none; PLAY 0.11.2: one thing, one number — the legend and the Review
@@ -1410,9 +1365,6 @@ def walk_words(scope, sep=" and ") -> str:
     if not parts:
         return "each open item"
     return sep.join(parts) if len(parts) <= 2 else ", ".join(parts[:-1]) + sep + parts[-1]
-
-
-LEGEND_MAX = 400          # the longest legend line: the vendor page's, its name clipped
 
 
 def deposit_of(conn, rid) -> dict:

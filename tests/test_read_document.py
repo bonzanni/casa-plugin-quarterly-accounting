@@ -154,7 +154,7 @@ class TestReadDocumentOverMcp(StoreCase):
 
     def test_a_missing_doc_id_is_a_refusal_not_a_crash(self):
         out = self._call()["result"]
-        self.assertTrue(out["content"][0]["text"].startswith("refused:"))
+        self.assertTrue(out["content"][0]["text"].lstrip("*").startswith("refused:"))
         self.assertNotIn("isError", out)
 
     def test_a_custody_failure_is_reported_as_an_error(self):

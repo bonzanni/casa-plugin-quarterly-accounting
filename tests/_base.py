@@ -552,10 +552,13 @@ S7_EMPTY_SCOPE = ('{"names": {}, "next": null, "offers": [], "pid": null, "propo
 
 def untag(text: str) -> str:
     """A rendering's text without its first-line tag (" · <d Mon> <HH:MM:SS>", the composition
-    time) — for pins of composed text that predate the tag."""
+    time) and without the house style's bold markers (#99) — for pins of composed text that
+    predate both."""
     import re
+    import views
     first, sep, rest = text.partition("\n")
-    return re.sub(r" \u00b7 \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d$", "", first) + sep + rest
+    return views._BOLD.sub("", re.sub(r" \u00b7 \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d$", "",
+                                      first) + sep + rest)
 
 
 def apply_now(conn, text, quoted=None) -> dict:
@@ -569,8 +572,11 @@ def apply_now(conn, text, quoted=None) -> dict:
     import qa_server
     import tools  # noqa: F401 — registers the tools
     from tests.fakebroker import FakeBroker
+    import views
     with FakeBroker() as b:
-        out = posting.propose_reading(conn, text, quoted)
+        # #99: the operator quotes what they saw (the bold markers are formatting)
+        out = posting.propose_reading(conn, text, views.displayed(quoted)
+                                      if isinstance(quoted, str) else quoted)
     res = dict(out, proposal=None, applied=[])
     if out["reading"] is None:
         res["receipt"] = out["say"]

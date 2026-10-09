@@ -25,7 +25,8 @@ class _Cards(LoopCase):
         return self.conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
 
     def text(self, rid):
-        return self.row_of(rid)["text"]
+        import views
+        return views._BOLD.sub("", self.row_of(rid)["text"])     # #99: pins predate the bold
 
     def labels(self, rid):
         import cards
@@ -69,16 +70,16 @@ class SameSecond(StoreCase):
             views.mark_rendering_delivered(self.conn, r["render_id"])
         self.assertEqual(a["text"], b["text"])
         with self.assertRaises(views.QuoteRefusal):
-            views.bound_rendering(self.conn, b["text"])
+            views.bound_rendering(self.conn, views.displayed(b["text"]))
         with self.patch_clock(AT + dt.timedelta(days=1)):     # d1 Terra S2: a day later
             d = views.build_review(self.conn, "status", quarter="2026-Q3")
         views.mark_rendering_delivered(self.conn, d["render_id"])
-        self.assertEqual(views.bound_rendering(self.conn, d["text"])["render_id"],
+        self.assertEqual(views.bound_rendering(self.conn, views.displayed(d["text"]))["render_id"],
                          d["render_id"])
         with self.patch_clock(AT + dt.timedelta(seconds=1)):
             c = views.build_review(self.conn, "status", quarter="2026-Q3")
         views.mark_rendering_delivered(self.conn, c["render_id"])
-        self.assertEqual(views.bound_rendering(self.conn, c["text"])["render_id"],
+        self.assertEqual(views.bound_rendering(self.conn, views.displayed(c["text"]))["render_id"],
                          c["render_id"])
 
 
@@ -96,16 +97,12 @@ class StatusCard(_Cards):
         lines = self.text(rid).split("\n")
         self.assertEqual(lines[0], "Q3 · 2 payments · 8 Oct 21:04:37")
         self.assertEqual(lines[1], "1 to confirm · 1 missing")
-        self.assertIn("1. Zapier · 1 Sep · EUR 19.58 ↔ invoice ZAP\\-114 · EUR 19.58", lines)
+        self.assertIn("1. Zapier · 1 Sep · EUR 19.58 ↔ invoice · EUR 19.58", lines)
         self.assertNotIn("Notion", self.text(rid).split("Q4 so far")[0])
         self.assertIn("Q4 so far: 1 to confirm", lines)
         self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Invoice links",
-                                            "Get package"])                  # #57
-        self.assertEqual(lines[-1], "Review: go through the 1 to confirm and the missing invoices, "
-                                    "one at a time · Confirm all: "
-                                    "accept the suggested documents listed above · Invoice links: "
-                                    "where to download each missing invoice · Get package: the Q3 "
-                                    "zip for your accountant")
+                                            "Close"])                        # #57, #94
+        self.assertEqual(lines[-1], "Q4 so far: 1 to confirm")             # #99: no legend
         scope = json.loads(self.row_of(rid)["scope_json"])
         self.assertEqual([o.get("p") for o in scope["order"] if "p" in o], [q3])
 
@@ -181,10 +178,10 @@ class OnePurchaseOnTheReviewCard(_Cards):
         text = self.text(rid)
         self.assertEqual(text.count("CUWVSRB8"), 2, text)     # the candidate line + evidence
         self.assertNotIn("receipt", text.split("\n")[2])
-        self.assertEqual(self.labels(rid), ["Confirm", "See PDF", "Wrong", "Leave for now"])  # #56
+        self.assertEqual(self.labels(rid), ["Confirm", "See PDF", "Wrong", "Leave for now", "Close"])  # #56
         scope = json.loads(self.row_of(rid)["scope_json"])
         self.assertEqual(scope["alternatives"], [])
-        self.assertTrue(text.split("\n")[-1].startswith("Confirm: "), text)
+        self.assertFalse(text.split("\n")[-1].startswith("Confirm: "), text)   # #99: no legend
         self.assertNotEqual(inv, rec)
 
 
@@ -197,7 +194,7 @@ class PlainWords(_Cards):
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         views.mark_rendering_delivered(self.conn, end)
         res = apply_now(self.conn, "the Zapier one is wrong",
-                        "\U0001f4ca Alex\n" + views.unesc(self.text(end)))
+                        "\U0001f4ca Alex\n" + views.displayed(self.text(end)))
         self.assertIn("Reject the suggested document for Zapier · EUR 19.58 · 1 Sep.", res["proposal"])
         self.assertEqual(res["receipt"],
                          "Rejected the suggested document for Zapier · EUR 19.58 · 1 Sep.")
@@ -237,7 +234,7 @@ class EndCardIsTheQuartersCard(_Cards):
         self.assertTrue(lines[0].startswith("Q3 checked · 1 payment · "), lines)
         self.assertNotIn("Notion", self.text(rid).split("Q4 so far")[0])
         self.assertIn("Q4 so far: 1 to confirm", lines)
-        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Get package"])
+        self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Close"])
 
 
 class CompletionText(_Cards):
@@ -301,9 +298,8 @@ class WalkLegend(_Cards):
         self.propose(p, issuer="Zapier", document_number="ZAP-114", amount_minor=1958)
         rid = self.c(cards.compose_open, "2026-Q3")
         self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Invoice links",
-                                            "Get package"])                  # #57
-        self.assertTrue(self.text(rid).split("\n")[-1].startswith(
-            "Review: go through the 1 to confirm and the missing invoices, one at a time · "))
+                                            "Close"])                        # #57, #94
+        self.assertNotIn("Review: go through", self.text(rid))            # #99: no legend
 
     def test_a_proposal_reads_as_suggested_not_matched(self):
         import cards
@@ -324,9 +320,8 @@ class LegendMatchesTheWalk(_Cards):
         self.pay("Adobe", 2000, "2026-08-14")
         self.pay("Adobe", 2100, "2026-10-14")
         rid = self.c(cards.compose_open, "2026-Q3")
-        legend = self.text(rid).split("\n")[-1]
-        self.assertTrue(legend.startswith("Review: go through the missing invoices, one at a time"),
-                        legend)
+        self.assertNotIn("Review: go through", self.text(rid))            # #99: no legend
+        self.assertIn("Review", self.labels(rid))
 
 
 class EmptyQuarterEndCard(_Cards):

@@ -155,7 +155,9 @@ class Queues(StoreCase):
                 with drv._broker():
                     drv.do(rest[-1], drv.token)
         kinds = [u["unit"] for u in rest]
-        self.assertLess(kinds.index("payment"), kinds.index("view"))
+        # #93: the end message is a card ("view") or, with nothing to tap, a plain "post"
+        self.assertLess(kinds.index("payment"),
+                        next(i for i, k in enumerate(kinds) if k in ("view", "post")))
         self.assertEqual(self.conn.execute("SELECT status FROM projections").fetchone()[0],
                          "matched")                       # operator ruling 2026-10-09: sure
 

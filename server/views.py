@@ -156,6 +156,44 @@ def unesc(text: str) -> str:
     return _UNESC.sub(r"\1", text)
 
 
+# ---- #99: the house style, one place. A card or a view: a bold title line saying what it is
+# or what happened; a question on its own line; one tight line per item, blank lines only
+# between groups; bold labels; short names; no legend for the buttons; no empty section.
+
+def title(text: str) -> str:
+    """#99: a title or a question line (bold)."""
+    return f"**{text}**" if text else text
+
+
+def groups(*blocks) -> list:
+    """#99: the lines of each non-empty block, one blank line between blocks."""
+    out = []
+    for b in blocks:
+        b = list(b or [])
+        if b:
+            out += ([""] if out else []) + b
+    return out
+
+
+_BOLD = re.compile(r"(?<!\\)\*\*")
+
+
+def displayed(text: str) -> str:
+    """#99 d1 (Astra S2): what the operator sees of a stored text — the house style's bold
+    markers (unescaped `**`) are formatting, not characters, then unesc. A quote is compared
+    with this."""
+    return unesc(_BOLD.sub("", text))
+
+
+_BOLD_SPAN = re.compile(r"(?<!\\)\*\*(.+?)(?<!\\)\*\*")
+
+
+def bold_spans(text: str) -> list:
+    """#99: the house style's bold spans of a stored text, as displayed — the only
+    formatting a post carries (Casa's shapes gate: every entity is one of these)."""
+    return [unesc(m.group(1)) for m in _BOLD_SPAN.finditer(text)]
+
+
 def deposit_safe(body: str) -> str:
     """The last step on every body a posting tool deposits (S7 §7.6): any Cc character
     other than newline and tab becomes a space — renderings stored before S7 included."""
@@ -656,11 +694,15 @@ def _residue_blocks(conn) -> tuple:
     return blocks, silent
 
 
-def _item_blocks(ds, detail, q, shows_pairings=False, guessed=False) -> list:
+def _item_blocks(ds, detail, q, shows_pairings=False, guessed=False, inline=False) -> list:
     """`pairings` are the match ids whose proposition the text displays. Only
     those are bound for a later correction (round p1, Astra S1: a missing view
-    that bound candidates it never showed let "Adobe is wrong" reject them)."""
-    return [_Block([headline(d, q), *detail(d)], pid=d["pid"], ident=headline(d, q),
+    that bound candidates it never showed let "Adobe is wrong" reject them). `inline`
+    (#99): the detail follows the headline on its one line."""
+    def lines(d):
+        return [" — ".join([headline(d, q), *detail(d)])] if inline \
+            else [headline(d, q), *detail(d)]
+    return [_Block(lines(d), pid=d["pid"], ident=headline(d, q),
                    pairings=pairings(d) if shows_pairings else {},
                    amount=abs(d["amount_minor"] or 0), order=(d["date"] or "", d["pid"]),
                    name=d["counterparty"], guessed=guessed)
@@ -716,7 +758,7 @@ def _compose(conn, view, q, items, members, lead):
         parts["head"] += _status_notes(conn)
     if parts["head"]:
         parts["head"].append("")
-    parts["head"].append(titles[view])
+    parts["head"].append(title(titles[view]))
     # #79: "To check" spans earlier quarters too; one quarter's bank coverage says nothing of it
     cov = None if view == "check" else coverage(conn, members)
     if view in ("status", "all", "quarter") and members:
@@ -746,11 +788,13 @@ def _compose(conn, view, q, items, members, lead):
                                          order=("", pkg_id), offer=pkg_id)
                                   for pkg_id, fname, status in delivery.offerable(conn, q)]))
     if view in ("status", "all", "missing", "quarter"):
-        secs.append(_Section("MISSING", _item_blocks(missing, _missing_detail, q), gap=True))
+        # #99: one tight line per payment, its detail after it
+        secs.append(_Section(title("Missing"), _item_blocks(missing, _missing_detail, q,
+                                                            inline=True)))
     if view in ("status", "all"):
-        secs.append(_Section("WHAT IS THIS?", _item_blocks(
+        secs.append(_Section(title("What is this?"), _item_blocks(
             conflicts, lambda d: ["The categories on it disagree — which is it?"], q)))
-        secs.append(_Section("I GUESSED THESE", _item_blocks(guessed, evidence, q, True, True)))
+        secs.append(_Section(title("I guessed these"), _item_blocks(guessed, evidence, q, True, True)))
     if view == "check":
         secs.append(_Section("", _item_blocks(guessed, evidence, q, True, True),
                              empty="Nothing to check."))
@@ -1012,7 +1056,7 @@ def _item_block(d, cands, more) -> _Block:
     # #79: the evidence's "Matched to …" / "Suggested: …" already names the document
     said = ([] if d["status"] in ("matched", "proposed") and _names_pick(d)
             else [_item_sentence(d)])
-    lines = [headline(d), *said, *evidence(d, cands=cands)]
+    lines = [title(headline(d)), *said, *evidence(d, cands=cands)]     # #99: its title
     if _open_required(d):
         lines += _missing_detail(d)
     if more:
@@ -1265,7 +1309,8 @@ CLOSE = ("Close", None, None, None)          # Casa v0.344.64: clears the keyboa
 
 def buttons_for(conn, r) -> list:
     """S7 §7.2: the stored calls of a posted rendering `r` (a renders row), in order, at
-    most six, as (label, tool, args, key_spec); the last is always Close (#66). A writing
+    most six, as (label, tool, args, key_spec); the last is Close (#66), beside at least
+    one action (#93: none at all when there is nothing to act on). A writing
     button carries key_spec=(action, pid, None); the caller mints and stores its key. No
     More (#66): show_view posts a whole list at once. "Show …" opens the missing or the
     check list, with its count, only when it is not empty and is not this view."""
@@ -1289,13 +1334,21 @@ def buttons_for(conn, r) -> list:
     q = scope.get("quarter")
     if kind != "item" and q:
         missing, check = show_counts(conn, q)
-        if missing and kind != "missing":
+        if missing and kind != "missing" and not check:
+            # d1 (Astra S2): a missing list with nothing to act on goes as the tap's plain
+            # answer (a stored show_view call could not post it plain)
+            out.append((f"Show missing invoices ({missing})", "verdict",
+                        {"render_id": rid, "action": "show-missing"},
+                        ("show-missing", None, None)))
+        elif missing and kind != "missing":
             out.append((f"Show missing invoices ({missing})", "show_view",
                         {"view": "missing", "quarter": q}, None))
         if check and kind != "check":
             out.append((f"Show matches to confirm ({check})", "show_view",
                         {"view": "check", "quarter": q}, None))
-    return out[:5] + [CLOSE]
+    # #93: Close beside the actions, never alone — a view with nothing to act on is posted
+    # as a plain message (posting.plain_post)
+    return out[:5] + [CLOSE] if out else []
 
 
 MAX_PAGES = 6             # Casa v0.344.67: a card brings at most six plain pages before it
@@ -1508,7 +1561,7 @@ def bound_rendering(conn, quoted):
                           db.UNQUOTABLE_KINDS):
         # the body as posted: deposit_safe is the last step of every deposit (§7.6), so a
         # pre-S7 body's control characters are spaces in what the operator saw
-        t = _bnorm(unesc(deposit_safe(r["text"] or "")))[:QUOTE_CAP]
+        t = _bnorm(displayed(deposit_safe(r["text"] or "")))[:QUOTE_CAP]
         n = min(len(t), len(q))
         if db.seen_render(r) and n and t[:n] == q[:n]:
             found.append(r)

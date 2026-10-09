@@ -142,7 +142,8 @@ class ReplaceFlow(StoreCase):
             end = cards.compose_end(self.conn, self.job_id, scheduled=False,
                                     handover_docs=[d], standalone=True)
         text = self.render_text(end)
-        self.assertIn("B2", text)                        # #67: the document's own line
+        # #67: the document's own line (#99: named by issuer, date, amount — no number)
+        self.assertIn("Adobe · 2 Sep · EUR 100.00: not matched yet.", text)
         self.assertNotIn("to check", text)
 
     def test_a_handover_onto_a_changed_paired_payment_goes_through_the_card(self):

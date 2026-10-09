@@ -108,8 +108,7 @@ class LinkAndNoun(_Q3):
         lines = untag(dep["text"]).split("\n")
         self.assertEqual(lines[0], "Card 1 of 1 · missing credit notes · Belastingdienst")
         self.assertIn("No document needed for these", self.labels(dep))
-        # #63: the legend names the button that is there
-        self.assertIn("No document needed: these need none", lines[-1])
+        self.assertNotIn("these need none", dep["text"])           # #99: no legend
         out = self.tap(dep, "No document needed for these")
         self.assertTrue(out["receipt"].startswith("No credit note needed (Belastingdienst): "),
                         out["receipt"])
@@ -119,7 +118,7 @@ class LinkAndNoun(_Q3):
         dep = self.card()
         self.assertIn("missing invoices", dep["text"])
         self.assertIn("No invoice needed for these", self.labels(dep))
-        self.assertIn("No invoice needed: these need none", dep["text"])
+        self.assertNotIn("these need none", dep["text"])           # #99: no legend
 
     def test_the_other_quarters_line_says_why_it_is_there(self):
         self.pay("Twilio", 2000, "2026-08-14")
@@ -138,17 +137,17 @@ class InvoiceLinks(_Q3):
         self.pay("Openai *chatgpt Subscr", 2000, "2026-08-14")
         self.pay("Runpod", 3000, "2026-08-20")
         end = self.end()
-        self.assertEqual(self.labels(end), ["Review", "Invoice links", "Get package"])
-        self.assertIn("Invoice links: where to download each missing invoice", end["text"])
+        self.assertEqual(self.labels(end), ["Review", "Invoice links", "Close"])
+        self.assertNotIn("Invoice links:", end["text"])             # #99: no legend
         out = self.tap(end, "Invoice links")
         self.assertIs(out["in_place"], True)
         self.assertTrue(out["receipt"])
         lines = untag(out["next"]["text"]).replace("\\", "").split("\n")
         at = lines.index("Where to download the missing invoices:")
-        self.assertEqual(lines[at + 1:at + 3],
-                         ["OpenAI: https://platform.openai.com/settings/billing",
-                          "Runpod: no link known"])
-        self.assertEqual(self.labels(out["next"]), ["Review", "Get package"])
+        # #99: a vendor with no known link adds nothing; the section is its own group
+        self.assertEqual(lines[at - 1], "")
+        self.assertEqual(lines[at + 1:], ["OpenAI: https://platform.openai.com/settings/billing"])
+        self.assertEqual(self.labels(out["next"]), ["Review", "Close"])
         # the card's other buttons still work
         self.assertIn("Card 1 of 2", self.tap(out["next"], "Review")["next"]["text"])
 
@@ -163,7 +162,8 @@ class InvoiceLinks(_Q3):
         end = self.end()
         self.granted(work.leave_missing_in_tx, [p])
         out = self.tap(end, "Invoice links")
-        self.assertIn("Nothing is missing in Q3 any more.", untag(out["next"]["text"]))
+        # #93: nothing left to tap: the card follows the receipt as one plain message
+        self.assertIn("Nothing is missing in Q3 any more.", out["receipt"])
 
     def test_many_vendors_fit_and_the_rest_is_counted(self):
         for i in range(60):

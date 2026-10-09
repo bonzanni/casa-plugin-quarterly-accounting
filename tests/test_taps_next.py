@@ -60,7 +60,7 @@ class Taps(_Tapping):
         card = self.tap(self.end(), "Review")["next"]
         labels = [b["label"] for b in card["buttons"]]
         self.assertEqual(labels[:2], ["INV-88 (2 Aug)", "INV-91 (4 Aug)"])
-        self.assertEqual(labels[2:], ["Wrong", "Leave for now"])
+        self.assertEqual(labels[2:], ["Wrong", "Leave for now", "Close"])
         self.tap(card, "INV-91 (4 Aug)")
         rows = dict(self.conn.execute("SELECT doc_id, state FROM match_state WHERE pid=?",
                                       (p,)).fetchall())
@@ -315,13 +315,16 @@ class TapsMore(_Tapping):
         end = self.end()
         self.tap(self.tap(end, "Review")["next"], "Confirm")      # a, through Review
         out = self.tap(end, "Confirm all")
-        self.assertEqual(out["receipt"],
-                         "Confirmed 1 of 2.\n1 proposal already answered — left as answered.")
+        # #93: the open card after it has nothing to tap: one plain message
+        self.assertTrue(out["receipt"].startswith(
+            "Confirmed 1 of 2.\n1 proposal already answered — left as answered.\n\n"
+            "**Q3 · 2 payments · all accounted for**"), out["receipt"])
+        self.assertNotIn("next", out)
         for p in (a, b):
             self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE pid=? AND"
                                                " author='operator' AND kind='pair'",
                                                (p,)).fetchone()[0], 1)
-        self.assertIn("· all accounted for", out["next"]["text"])
+        self.assertIn("· all accounted for", out["receipt"])
 
     def _two_pages(self):
         pids = [self.pay("Adobe", 100 + i, "2026-08-%02d" % (i % 28 + 1)) for i in range(30)]
@@ -410,7 +413,9 @@ class TapsMore(_Tapping):
                              doc_id=self.doc(amount_minor=100),
                              expected_revision=self.rev(a), token=self.token)
         out = self.tap(end, "Review")
-        self.assertIn("· all accounted for", out["next"]["text"])
+        # #93: the card after it has nothing to tap — it follows the receipt, plain
+        self.assertNotIn("next", out)
+        self.assertIn("· all accounted for", out["receipt"])
 
     def test_leave_missing_on_a_changed_page_commits_nothing(self):
         a = self.pay("Adobe", 100)

@@ -40,7 +40,7 @@ class Desk(StoreCase):
         card = json.loads(broker.deposits[0]["value"])
         # 0.11.2: the quarter status card ("Q3 · 1 payment" + the non-zero counts)
         self.assertTrue(untag(card["text"]).startswith("Q3 · 1 payment\n1 missing"), card["text"])
-        self.assertEqual(card["buttons"][-1]["label"], "Get package")
+        self.assertEqual(card["buttons"][-1]["label"], "Close")   # #94: no package unasked
 
     def test_typed_confirm_all_on_the_end_message_commits_on_apply(self):
         import cards, matches
@@ -217,19 +217,20 @@ class NamedQuarter(StoreCase):
         qa_server.TOOLS["request_work"]["fn"](args)
         self.drv.run_job(job_id)
 
-    def open_card(self):
+    def open_card(self, **kw):
         import qa_server, tools  # noqa: F401
         with FakeBroker() as broker:
-            out = qa_server.TOOLS["show_view"]["fn"]({"view": "open"})
+            out = qa_server.TOOLS["show_view"]["fn"]({"view": "open", **kw})
         return out, json.loads(broker.deposits[0]["value"])
 
     def test_whats_open_and_a_bare_send_the_package_follow_the_checked_quarter(self):
         import qa_server, tools  # noqa: F401
         with self.patch_clock(_dt("2026-10-06")):
             self.check("eeeeeeee-1", quarter="Q2")
-            out, card = self.open_card()
-            self.assertTrue(card["text"].startswith("Q2 · "), card["text"])
-            get = card["buttons"][-1]
+            # #94: the desk judged the operator wants the package
+            out, card = self.open_card(package=True)
+            self.assertTrue(card["text"].lstrip("*").startswith("Q2 · "), card["text"])
+            get = card["buttons"][-2]
             self.assertEqual((get["label"], get["call"]["tool"],
                               get["call"]["arguments"]["quarter"]),
                              ("Get package", "get_package", "2026-Q2"))
@@ -247,7 +248,7 @@ class NamedQuarter(StoreCase):
             # a later check that names no quarter gives D11's latest in-scope quarter back
             self.check("eeeeeeee-2")
             _, card = self.open_card()
-            self.assertTrue(card["text"].startswith("Q3 · "), card["text"])
+            self.assertTrue(card["text"].lstrip("*").startswith("Q3 · "), card["text"])
             with FakeBroker():
                 bare = qa_server.TOOLS["get_package"]["fn"]({})
             self.assertIn("-2026-Q3-", bare["filename"])

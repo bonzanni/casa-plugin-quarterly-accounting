@@ -7,6 +7,7 @@ import json
 
 from tests._base import StoreCase
 from tests.fakebroker import FakeBroker, arguments_ok
+import views
 
 
 class _Q3(StoreCase):
@@ -23,6 +24,15 @@ class _Q3(StoreCase):
             out = posting.show_view(self.conn, **kw)
         self.assertEqual(len(b.deposits), 1)
         return out, b.proposal()
+
+    def plain(self, **kw):
+        """#93: a view with nothing to act on: no deposit; `post` names its renderings
+        (its pages first), in groups post_results takes."""
+        import posting
+        with FakeBroker() as b:
+            out = posting.show_view(self.conn, **kw)
+        self.assertEqual((out["view"], b.deposits), (None, []))
+        return out
 
     def guesses(self, n=40):
         import db, matches
@@ -121,9 +131,9 @@ class LongList(_Q3):
         scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
                                              " render_id=?", (out["render_id"],)).fetchone()[0])
         for rid, text in zip(scope["list_pages"], prop["pages"]):
-            self.assertEqual(views.bound_rendering(self.conn, "📊 Finance\n" + text)
+            self.assertEqual(views.bound_rendering(self.conn, "📊 Finance\n" + views.displayed(text))
                              ["render_id"], rid)
-        self.assertEqual(views.bound_rendering(self.conn, "📊 Finance\n" + prop["text"])
+        self.assertEqual(views.bound_rendering(self.conn, "📊 Finance\n" + views.displayed(prop["text"]))
                          ["render_id"], out["render_id"])
 
     def test_more_quoting_a_posted_page_posts_nothing_again(self):
@@ -132,7 +142,7 @@ class LongList(_Q3):
         self.guesses()
         out, prop = self.post(view="check", quarter="2026-Q3")
         with FakeBroker() as b:
-            r = posting.propose_reading(self.conn, "more", "📊 Finance\n" + prop["pages"][0])
+            r = posting.propose_reading(self.conn, "more", "📊 Finance\n" + views.displayed(prop["pages"][0]))
         self.assertEqual(r.get("instructions") or [], [])
         self.assertEqual(b.deposits, [])
 
@@ -146,10 +156,16 @@ class LongList(_Q3):
     def test_a_long_missing_list_offers_the_check_list_with_its_count(self):
         self.seed_payments([{"counterparty": f"Vendor {i:02d} Holdings International",
                              "amount_minor": 1000 + i} for i in range(120)])
-        out, prop = self.post(view="missing", quarter="2026-Q3")
-        self.assertGreaterEqual(len(prop.get("pages") or []), 2)
-        self.assertEqual(self.labels(prop), ["Close"])      # nothing to confirm
-        self.assertIn("120", prop["text"])
+        out = self.plain(view="missing", quarter="2026-Q3")    # nothing to confirm
+        ids = [r for g in out["post"] for r in g]
+        self.assertGreaterEqual(len(ids), 3)                # its pages, then the list's end
+        self.assertEqual(ids[-1], out["render_id"])
+        import posting
+        with FakeBroker() as b:
+            for g in out["post"]:
+                posting.post_results(self.conn, g)
+        self.assertEqual(len(b.deposits), len(out["post"]))
+        self.assertIn("120", b.deposits[-1]["value"])
 
 
 class OtherCards(_Q3):
@@ -187,9 +203,16 @@ class ShortList(_Q3):
         self.seed_payments([{"counterparty": "Adobe"}, {"counterparty": "Zapier"}])
         out, prop = self.post(view="status", quarter="2026-Q3")
         self.assertEqual(self.labels(prop), ["Show missing invoices (2)", "Close"])
-        out, prop = self.post(view="missing", quarter="2026-Q3")
-        self.assertEqual(self.labels(prop), ["Close"])
+        # #93 (d1, Astra S2): the missing list has nothing to act on — the button is a tap
+        # whose answer is the list itself, plain
+        call = prop["buttons"][0]["call"]
+        self.assertEqual((call["tool"], call["arguments"]["action"]), ("verdict", "show-missing"))
+        import qa_server, tools  # noqa: F401
+        ans = qa_server.TOOLS["verdict"]["fn"](dict(call["arguments"]))
+        self.assertNotIn("next", ans)
+        self.assertIn("Adobe", ans["receipt"])
+        self.assertIn("Zapier", ans["receipt"])
+        self.plain(view="missing", quarter="2026-Q3")
 
-    def test_an_empty_store_offers_close_only(self):
-        out, prop = self.post(view="status")
-        self.assertEqual(self.labels(prop), ["Close"])
+    def test_an_empty_store_is_a_plain_message(self):
+        self.plain(view="status")

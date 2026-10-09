@@ -339,7 +339,7 @@ class R3QuoteBindsAPostedPage(_Q3):
         page2 = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
                                              " render_id=?", (second["render_id"],)
                                              ).fetchone()[0])["list_pages"][1]
-        self.assertEqual(views.bound_rendering(self.conn, prop["pages"][1])["render_id"], page2)
+        self.assertEqual(views.bound_rendering(self.conn, views.displayed(prop["pages"][1]))["render_id"], page2)
         self.assertEqual(views.bound_rendering(self.conn, None)["render_id"],
                          first["render_id"])                   # the unquoted fallback
 

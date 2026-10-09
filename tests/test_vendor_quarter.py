@@ -36,10 +36,8 @@ class VendorCardQuarter(_Tapping):
         self.assertIn("Also missing in other quarters: 1 (Q4)", lines)
         self.assertEqual(self.labels(dep), ["No invoice needed for these", "Never for Twilio",
                                             "Leave missing", "Apply to all quarters",
-                                            "Leave for now"])
-        self.assertTrue(lines[-1].endswith("Apply to all quarters: your next answer here also "
-                                           "covers the 1 in other quarters · Leave for now: "
-                                           "decide later"), lines[-1])
+                                            "Leave for now", "Close"])
+        self.assertNotIn("Apply to all quarters:", dep["text"])        # #99: no legend
         self.assertEqual(self.scope_of(dep)["others_missing"], [q4])
         self.assertNotIn(q4, self.scope_of(dep)["missing"])
         del q3
@@ -128,7 +126,7 @@ class VendorCardQuarter(_Tapping):
         end = self.end()
         # PLAY 0.11.2: the counts line carries the number; the legend names no count
         self.assertEqual(untag(end["text"]).split("\n")[1], "2 missing")
-        self.assertIn("Review: go through the missing invoices, one at a time", end["text"])
+        self.assertNotIn("Review: go through", end["text"])             # #99: no legend
 
 
 class OfferedDropsSetAside(_Tapping):
@@ -152,7 +150,6 @@ class R5Fixes(VendorCardQuarter):
         pids = [self.pay(name, 100000 + i, "2026-08-14") for i in range(48)]
         self.pay(name, 500000, "2026-10-14")
         import cards, views
-        self.patch(cards, "LEGEND_MAX", 0)                    # isolate the count line's room
         for limit in range(1500, 1700, 9):                    # some page ends up tight
             self.patch(views, "BODY_LIMIT", limit)
             dep, seen = self.card(), set()
@@ -179,4 +176,4 @@ class R5Fixes(VendorCardQuarter):
         self.granted(work.leave_missing_in_tx, [a])
         end = self.end()
         self.assertEqual(untag(end["text"]).split("\n")[1], "2 missing")
-        self.assertIn("Review: go through the missing invoices, one at a time", end["text"])
+        self.assertNotIn("Review: go through", end["text"])             # #99: no legend

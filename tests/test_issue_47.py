@@ -57,7 +57,7 @@ class EmptyCheck(StoreCase):
         # r1 (Astra S2): pinned on the card the operator got — the quarter's plain sentence,
         # the later quarter's payment summarised, no package for an empty quarter
         card = drv.posted_end("47474747-05")
-        text = views.unesc(card["text"])
+        text = views.displayed(card["text"])
         self.assertTrue(text.startswith("Nothing to check for Q3 2026 yet: the bank has no "
                                         "payment in it (the books start 1 Jul 2026). Ask me to "
                                         "do Q2 to include it."), text)
@@ -93,7 +93,7 @@ class EmptyCheck(StoreCase):
         units, end = self.run_it("agent", "47474747-02", quarter="2026-Q2")
         self.assertEqual(units[-1]["text"], job.CARD_POSTED)
         # r1 (Astra S2): pinned on the card the operator got
-        self.assertTrue(views.unesc(end).startswith(
+        self.assertTrue(views.displayed(end).startswith(
             "Nothing to check for Q2 2026 yet: the bank has no payment in it (the books start "
             "1 Apr 2026). Ask me to do Q1 to include it."), end)
         self.assertNotIn("checked ·", end)
@@ -101,9 +101,9 @@ class EmptyCheck(StoreCase):
 
     def test_the_operators_empty_check_posts_the_same_plain_sentence(self):
         units, end = self.run_it("operator", "47474747-03", quarter="2026-Q2")
-        self.assertIn("view", [u["unit"] for u in units])
+        self.assertIn("post", [u["unit"] for u in units])     # #93: nothing to tap: plain
         self.assertIn("Nothing to check for Q2 2026 yet: the bank has no payment in it (the "
-                      "books start 1 Apr 2026). Ask me to do Q1 to include it.", views.unesc(end))
+                      "books start 1 Apr 2026). Ask me to do Q1 to include it.", views.displayed(end))
         self.assertNotIn("all accounted for", end)
         self.assertNotIn("checked ·", end)
 
@@ -121,5 +121,6 @@ class EmptyCheck(StoreCase):
         self.assertEqual(units[-1]["text"], job.CARD_POSTED)
         # r1 (Astra S2): the counts are pinned on the card the operator got, not recomputed
         lines = drv.posted_end("47474747-04")["text"].split("\n")
-        self.assertTrue(lines[0].startswith("Q3 checked · 3 payments · "), lines)
+        self.assertTrue(views.displayed(lines[0]).startswith("Q3 checked · 3 payments · "),
+                        lines)
         self.assertEqual(lines[1], "2 matched · 1 missing")

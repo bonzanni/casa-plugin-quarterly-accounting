@@ -161,7 +161,7 @@ class Carries(StoreCase):
             self.assertEqual([d["pid"] for d in st["pending"]], [pid])
             rid = cards.compose_end(self.conn, self.job_id, scheduled=False)
         # 0.11.2: the counts line prints non-zero parts only
-        self.assertIn("\n1 waiting on the bank\n", self.render_text(rid))   # PLAY 0.11.2 wording
+        self.assertTrue(self.render_text(rid).endswith("\n1 waiting on the bank"))  # 0.11.2
         self.assertNotIn("missing", self.render_text(rid))
 
     def test_a_handover_taken_mid_run_reopens_its_payment_once(self):
@@ -232,11 +232,11 @@ class Carries(StoreCase):
             asks.request_work(self.conn, "check", "operator", quarter="2026-Q2")
             drv.run_job("dddddddd-7")
             rid, text = self.end_text("dddddddd-7")
-            self.assertTrue(text.startswith("Q2 checked · 1 payment"), text)
+            self.assertTrue(text.lstrip("*").startswith("Q2 checked · 1 payment"), text)
             r = self.conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
-            with db.tx(self.conn):
-                (get,) = [b for b in cards.buttons(self.conn, r) if b[0] == "Get package"]
-            self.assertEqual(get[1:3], ("get_package", {"quarter": "2026-Q2"}))
+            with db.tx(self.conn):            # #94: a job's end card offers no package
+                self.assertEqual([b for b in cards.buttons(self.conn, r)
+                                  if b[0] == "Get package"], [])
             q2 = [d["pid"] for d in cards.state(self.conn)["by_bucket"]["missing"]
                   if d["quarter"] == "2026-Q2"]
             self.granted(lambda c, grant: __import__("work").leave_missing_in_tx(
@@ -244,7 +244,8 @@ class Carries(StoreCase):
             asks.request_work(self.conn, "check", "operator", quarter="2026-Q2")
             units = drv.run_job("dddddddd-8")
             rid, text = self.end_text("dddddddd-8")
-        self.assertEqual([u.get("render_id") for u in units if u["unit"] in ("view", "post")],
+        self.assertEqual([u.get("render_id") or u["render_ids"][0] for u in units
+                          if u["unit"] in ("view", "post")],
                          [rid])                    # one message: the notice is a line of it
         self.assertIn("Q2 complete · package ready", text)
         self.assertEqual(json.loads(self.conn.execute(
@@ -368,7 +369,8 @@ class ReviewRound1(StoreCase):
         drv.run_job("ffffffff-8", started_by="scheduled")             # same streak: silent
         last = self.msg(drv.run_job("ffffffff-9"))                    # the alert was sent
         for text in (first, again, last):
-            self.assertTrue(text.startswith("Accounting check stopped: bank\\-feed's tools"),
+            self.assertTrue(text.lstrip("*").startswith(
+                "Accounting check stopped: bank\\-feed's tools"),
                             text)
             self.assertNotIn("checked", text)
             self.assertEqual(text.count("Accounting check stopped"), 1, text)

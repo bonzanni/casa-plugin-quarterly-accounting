@@ -243,7 +243,7 @@ class TestDesk(TempEnv):
         # 0.11.2 (#55): one check ask, with the quarter when one is meant
         for phrase in ('`request_work(kind="check", trigger="operator", quarter=<the quarter, '
                        'when one is meant>)`',
-                       "Its end card and its [Get package] are that quarter's.",
+                       "Its end card is that quarter's.",
                        '"Send the package", "Give me Q3", "rebuild it", "the package for Q2": '
                        "`get_package(quarter=…)`, also for the reading's \"rebuild Qn\"; a "
                        "bare \"send the package\" names no quarter: `get_package()` sends "

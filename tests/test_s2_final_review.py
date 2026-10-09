@@ -64,7 +64,7 @@ class RestoreMidPass(StoreCase):
                                            ).fetchone()[0], remembered)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0], 0)
         units = self.drv._loop(A)                         # the pass stops; its message, then
-        self.assertEqual([x["unit"] for x in units], ["view", "complete"])
+        self.assertEqual([x["unit"] for x in units], ["post", "complete"])   # #93: plain
         self.assertIsNone(job.live_job_pass(self.conn))
         r = self.conn.execute("SELECT state, outcome FROM work_requests").fetchone()
         self.assertEqual((r["state"], r["outcome"]), ("reported", "stopped"))

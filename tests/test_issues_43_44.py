@@ -3,6 +3,7 @@ quarterly-job skill says, through the real tools; #44 — "send it again" on the
 note and on the file; the desk's "show me the X payment" and partial vendor names."""
 from tests._base import StoreCase
 from tests.fakebroker import FakeBroker
+import views
 
 A = "aaaaaaaa-1"
 
@@ -50,7 +51,7 @@ class SendItAgainOnThePackage(StoreCase):
     def test_a_quote_of_the_file_after_uncertain_sends_it_again(self):
         pkg = self.sent_package(first_outcome="uncertain")
         import views
-        cap = views.unesc(self.conn.execute("SELECT text FROM renders WHERE"
+        cap = views.displayed(self.conn.execute("SELECT text FROM renders WHERE"
                                             " kind='package-file'").fetchone()[0])
         n = self.deliveries()
         st = self.resend("Can you send it again?", LABEL + "\n" + cap)
@@ -118,7 +119,9 @@ class DeskNames(StoreCase):
     def propose(self, text, quoted=None):
         import posting
         with FakeBroker() as b:
-            out = posting.propose_reading(self.conn, text, quoted)
+            # #99: the operator quotes what they saw (bold markers are formatting)
+            out = posting.propose_reading(self.conn, text, views.displayed(quoted)
+                                          if isinstance(quoted, str) else quoted)
         return out, (b.proposal() if b.deposits else None)
 
     def tap(self, prop, label):
