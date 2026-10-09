@@ -1189,7 +1189,7 @@ class TestIdentity(Base):
             views.mark_rendering_delivered(self.conn, it["render_id"])
             if it["next"] is None:
                 break
-            self.assertTrue(it["text"].endswith('say "more".'))
+            self.assertTrue(it["text"].endswith(views.MORE_LINE))
             # binding V1: More's call names this page as `prev`, so the next page adds its
             # candidates — the last page binds all 60
             kw, page = dict(it["next"]), it["next"]["page"]

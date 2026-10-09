@@ -667,6 +667,16 @@ def _first_review(conn) -> bool:
         " AND coalesce(json_extract(scope_json, '$.stop'), 0) = 0").fetchone()[0] == 0
 
 
+def view_title(view, q) -> str:
+    return {"status": f"Accounting · {dates.quarter_label(q)}",
+            "all": f"Accounting · {dates.quarter_label(q)}",
+            "missing": f"Missing · {dates.quarter_label(q)}",
+            "check": f"To check · {dates.quarter_label(q)}",
+            "rest": f"Nice to have · {dates.quarter_label(q)}",
+            "older": "Older, still open",
+            "quarter": f"Accounting · {dates.quarter_label(q)}"}[view]
+
+
 def _compose(conn, view, q, items, members, lead):
     """The parts of a view, before any capping or paging: a head printed on
     every page, the announcement printed once, the sections, and a tail built
@@ -692,13 +702,7 @@ def _compose(conn, view, q, items, members, lead):
         parts["tail"] = lambda printed_guessed: []
         return parts                    # composed page by page in _item_page
 
-    titles = {"status": f"Accounting · {dates.quarter_label(q)}",
-              "all": f"Accounting · {dates.quarter_label(q)}",
-              "missing": f"Missing · {dates.quarter_label(q)}",
-              "check": f"To check · {dates.quarter_label(q)}",
-              "rest": f"Nice to have · {dates.quarter_label(q)}",
-              "older": "Older, still open",
-              "quarter": f"Accounting · {dates.quarter_label(q)}"}
+    titles = {v: view_title(v, q) for v in VIEWS if v != "item"}
     # the same quarter figure the coverage line prints; older ones have their own line
     parts["head"] = _degraded_block(gmail_down, interrupted, missing, unsearched, absent)
     if view in ("status", "all"):
@@ -846,7 +850,10 @@ def _capped(parts, cap):
     return _emit(parts, picks, announce=True, cap=cap)
 
 
-MORE_LINE = 'There is more — say "more".'
+# #66: show_view posts every page of a list at once (Casa `pages`), so a page that continues
+# says so; the typed "more" is the action card's own line (list_card)
+MORE_LINE = "Continued in the next message."
+SAY_MORE = 'There are more after these — say "more" to see them.'
 
 
 def _day_ordinal(day) -> int:
@@ -1233,18 +1240,31 @@ def fits_proposal(text: str) -> bool:
     return utf16_len(body) <= BODY_LIMIT and len(body) <= 4000
 
 
+def show_counts(conn, q) -> tuple:
+    """#66: the sizes of the two lists the next-step buttons show — the quarter's missing
+    payments (the `missing` view) and the proposed matches to confirm (the `check` view)."""
+    items = [work.describe(conn, p) for p in membership(conn, "status", q)]
+    return (sum(1 for d in items if d["quarter"] == q and _is_missing(d)),
+            sum(1 for d in items if _needs_check(d)))
+
+
+CLOSE = ("Close", None, None, None)          # Casa v0.344.64: clears the keyboard, runs nothing
+
+
 def buttons_for(conn, r) -> list:
     """S7 §7.2: the stored calls of a posted rendering `r` (a renders row), in order, at
-    most six, at least one, as (label, tool, args, key_spec). A writing button carries
-    key_spec=(action, pid, None); the caller mints and stores its key."""
+    most six, as (label, tool, args, key_spec); the last is always Close (#66). A writing
+    button carries key_spec=(action, pid, None); the caller mints and stores its key. No
+    More (#66): show_view posts a whole list at once. "Show …" opens the missing or the
+    check list, with its count, only when it is not empty and is not this view."""
     scope = json.loads(r["scope_json"])
     rid, kind = r["render_id"], r["kind"]
-    proposed, nxt = scope.get("proposed") or [], scope.get("next")
-    more = [("More", "show_view", dict(nxt), None)] if nxt else []
+    proposed = scope.get("proposed") or []
+    out = []
     if kind in SHEET_VIEWS and proposed:
         out = [("All good", "verdict", {"render_id": rid, "action": "all-good"},
                 ("all-good", None, None)),
-               ("One by one", "show_view", {"view": "item", "pid": proposed[0]}, None)] + more
+               ("One by one", "show_view", {"view": "item", "pid": proposed[0]}, None)]
     elif kind == "item":
         pid = scope.get("pid")
         verdicts = {"proposed": ("right", "wrong", "no-invoice"),
@@ -1254,11 +1274,84 @@ def buttons_for(conn, r) -> list:
         out = [(words[a], "verdict", {"render_id": rid, "action": a, "pid": pid},
                 (a, pid, None))
                for a in verdicts]
-        out += more        # simple loop §4: the walk's [Next] is deleted (single-use keyboards)
+    q = scope.get("quarter")
+    if kind != "item" and q:
+        missing, check = show_counts(conn, q)
+        if missing and kind != "missing":
+            out.append((f"Show missing invoices ({missing})", "show_view",
+                        {"view": "missing", "quarter": q}, None))
+        if check and kind != "check":
+            out.append((f"Show matches to confirm ({check})", "show_view",
+                        {"view": "check", "quarter": q}, None))
+    return out[:5] + [CLOSE]
+
+
+MAX_PAGES = 6             # Casa v0.344.67: a card brings at most six plain pages before it
+
+
+def list_card(conn, page_ids, nxt) -> str:
+    """#66: the action card of a list posted as pages (Casa `pages`): a rendering of the
+    pages' own kind whose render_items are the UNION of the pages' rows — every item each
+    page bound, at the revisions that page recorded — so its "All good" (or an item's
+    verdict) covers the whole list and refuses, all or nothing, if any of it changed. Its
+    text says what is above; `nxt` (more pages than one post carries) is its "more"."""
+    rows = [conn.execute("SELECT * FROM renders WHERE render_id=?", (p,)).fetchone()
+            for p in page_ids]
+    scopes = [json.loads(r["scope_json"]) for r in rows]
+    kind, s0 = rows[0]["kind"], scopes[0]
+    items: dict = {}
+    for p in page_ids:
+        for it in conn.execute("SELECT * FROM render_items WHERE render_id=?", (p,)):
+            prev = items.get(it["pid"])
+            mrevs = json.loads(it["match_revisions_json"])
+            items[it["pid"]] = (it["projection_revision"],
+                                {**(prev[1] if prev else {}), **mrevs})
+    rid = f"r{db.next_seq(conn)}"
+    if nxt is not None:
+        # r1 (Astra S2): the rest continues from THIS card, whose rows hold every page's
+        # candidates — so an item's next page merges them all (binding V1), as the last
+        # More page did
+        nxt = {**nxt, "prev": rid}
+    proposed, names, refs, offers = [], {}, {}, []
+    for sc in scopes:
+        proposed += [p for p in sc.get("proposed") or [] if p not in proposed]
+        names.update(sc.get("names") or {})
+        for k, ps in (sc.get("refs") or {}).items():
+            refs[k] = sorted(set(refs.get(k, [])) | set(ps))
+        offers += [o for o in sc.get("offers") or [] if o not in offers]
+    scope = {"quarter": s0.get("quarter"), "pid": s0.get("pid"), "list_pages": list(page_ids),
+             "proposed": proposed, "names": names, "refs": refs, "offers": offers,
+             "walk": None, "next": nxt}
+    if kind == "item":
+        states = {sc.get("item_state") for sc in scopes}
+        for st in ("proposed", "paired", "exempt", "none"):
+            if st in states:
+                scope["item_state"] = st
+                break
+    q, n, k = s0.get("quarter"), len(items), len(page_ids)
+    if kind == "item":
+        d = work.describe(conn, s0.get("pid"))
+        lines = [headline(d), f"Every possible document for it is listed above, in {k} messages."]
     else:
-        out = more or [("What's missing", "show_view", {"view": "missing"}, None),
-                       ("Anything to check?", "show_view", {"view": "check"}, None)]
-    return (out or [("What's missing", "show_view", {"view": "missing"}, None)])[:6]
+        what = {"missing": _plural(n, "payment") + " without an invoice",
+                "check": _plural(len(proposed), "match", "matches") + " to confirm"}.get(
+                    kind, _plural(n, "payment"))
+        lines = [view_title(kind, q), f"{what[0].upper()}{what[1:]} — listed above, in {k} messages."]
+    if nxt is not None:
+        lines.append(SAY_MORE)
+    if kind in SHEET_VIEWS and proposed:
+        lines.append(f"All good: confirm all {len(proposed)} of them · One by one: go through"
+                     " them")
+    lines[0] += tag_now()
+    conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
+                 " membership_json) VALUES (?,?,?,?,?,?)",
+                 (rid, kind, db.canonical(scope), db.now(), _text(lines),
+                  rows[0]["membership_json"]))
+    for pid, (prev_rev, mrevs) in items.items():
+        conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
+                     " match_revisions_json) VALUES (?,?,?,?)",
+                     (rid, pid, prev_rev, db.canonical(mrevs)))
+    return rid
 
 
 def _norm(s: str) -> str:
@@ -1421,41 +1514,52 @@ def render_items(conn, render_id) -> list:
 
 
 def mark_rendering_delivered(conn, render_id: str) -> dict:
+    """#66: an action card's pages (scope `pages`) went out before it, in one post: they are
+    delivered first, so the card is the last rendering delivered."""
     with db.tx(conn):
         r = conn.execute("SELECT * FROM renders WHERE render_id=?", (render_id,)).fetchone()
         if r is None:
             raise db.Refusal(f"there is no rendering {render_id}")
-        if r["delivered_at"] is not None:
-            return {"render_id": render_id, "already": True}
-        now = db.now()
-        # the delivery ORDER is the store sequence, not the one-second timestamp (db.last_delivered)
-        conn.execute("UPDATE renders SET delivered_at=?, delivered_seq=? WHERE render_id=?",
-                     (now, db.next_seq(conn), render_id))
-        scope = json.loads(r["scope_json"])
-        # every delivered rendering's items become `shown` (S7 §9 retires renders.binding,
-        # the stamp job_report's hand-out wrote: it is ignored, whatever it holds)
-        # (binding §2 #13: a continued page's candidates are merged when it is composed,
-        # from its explicit predecessor only — never here; nothing outside views reads
-        # `shown`)
-        for it in conn.execute("SELECT * FROM render_items WHERE render_id=?",
-                               (render_id,)).fetchall():
-            conn.execute("INSERT OR REPLACE INTO shown(pid, render_id, projection_revision,"
-                         " match_revisions_json, delivered_at) VALUES (?,?,?,?,?)",
-                         (it["pid"], render_id, it["projection_revision"],
-                          it["match_revisions_json"], now))
-        for rid_ in scope.get("residue", []) + scope.get("residue_silent", []):
-            conn.execute("UPDATE residue SET shown_render=? WHERE id=?", (render_id, rid_))
-        if scope.get("announce_watermark"):
-            conn.execute("UPDATE binding SET watermark_announced=1 WHERE id=1")
-        for a in scope.get("alerts", []):
-            conn.execute("UPDATE alerts SET sent_at=?, render_id=? WHERE alert_id=?",
-                         (now, render_id, a))
-        # simple loop §1 (D19, shape d): a "package ready" notice — or an end message that
-        # carries one — counts as given only once delivered, for the completion composed
-        for q, sig in (scope.get("ready_sigs") or {}).items():
-            conn.execute("INSERT OR IGNORE INTO quarter_notices(quarter) VALUES (?)", (q,))
-            conn.execute("UPDATE quarter_notices SET sig=?, times=times+1, render_id=? WHERE"
-                         " quarter=?", (sig, render_id, q))
-        if scope.get("announce_package_name"):
-            conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
-        return {"render_id": render_id, "delivered_at": now}
+        for page in json.loads(r["scope_json"]).get("list_pages") or []:
+            _mark_delivered(conn, page)
+        return _mark_delivered(conn, render_id)
+
+
+def _mark_delivered(conn, render_id: str) -> dict:
+    r = conn.execute("SELECT * FROM renders WHERE render_id=?", (render_id,)).fetchone()
+    if r is None:
+        raise db.Refusal(f"there is no rendering {render_id}")
+    if r["delivered_at"] is not None:
+        return {"render_id": render_id, "already": True}
+    now = db.now()
+    # the delivery ORDER is the store sequence, not the one-second timestamp (db.last_delivered)
+    conn.execute("UPDATE renders SET delivered_at=?, delivered_seq=? WHERE render_id=?",
+                 (now, db.next_seq(conn), render_id))
+    scope = json.loads(r["scope_json"])
+    # every delivered rendering's items become `shown` (S7 §9 retires renders.binding,
+    # the stamp job_report's hand-out wrote: it is ignored, whatever it holds)
+    # (binding §2 #13: a continued page's candidates are merged when it is composed,
+    # from its explicit predecessor only — never here; nothing outside views reads
+    # `shown`)
+    for it in conn.execute("SELECT * FROM render_items WHERE render_id=?",
+                           (render_id,)).fetchall():
+        conn.execute("INSERT OR REPLACE INTO shown(pid, render_id, projection_revision,"
+                     " match_revisions_json, delivered_at) VALUES (?,?,?,?,?)",
+                     (it["pid"], render_id, it["projection_revision"],
+                      it["match_revisions_json"], now))
+    for rid_ in scope.get("residue", []) + scope.get("residue_silent", []):
+        conn.execute("UPDATE residue SET shown_render=? WHERE id=?", (render_id, rid_))
+    if scope.get("announce_watermark"):
+        conn.execute("UPDATE binding SET watermark_announced=1 WHERE id=1")
+    for a in scope.get("alerts", []):
+        conn.execute("UPDATE alerts SET sent_at=?, render_id=? WHERE alert_id=?",
+                     (now, render_id, a))
+    # simple loop §1 (D19, shape d): a "package ready" notice — or an end message that
+    # carries one — counts as given only once delivered, for the completion composed
+    for q, sig in (scope.get("ready_sigs") or {}).items():
+        conn.execute("INSERT OR IGNORE INTO quarter_notices(quarter) VALUES (?)", (q,))
+        conn.execute("UPDATE quarter_notices SET sig=?, times=times+1, render_id=? WHERE"
+                     " quarter=?", (sig, render_id, q))
+    if scope.get("announce_package_name"):
+        conn.execute("UPDATE binding SET package_name_announced=1 WHERE id=1")
+    return {"render_id": render_id, "delivered_at": now}
