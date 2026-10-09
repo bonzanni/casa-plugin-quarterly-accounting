@@ -140,7 +140,9 @@ class ConflictIsSticky(StoreCase):
         self.assertEqual(self.match(doc)["applied"], 1)
         self.file("b.pdf", 2000)
         head, props = cards._receipts(self.conn, [doc])
-        self.assertEqual((head, [p["pid"] for p in props]), ([], [self.pid]))
+        self.assertEqual([p["pid"] for p in props], [self.pid])
+        (line,) = head                       # #67: the document's own line says "proposed"
+        self.assertTrue(line.endswith(": proposed for Zapier — confirm below."), line)
 
 
 class SchemaTwelveStoresUpgrade(StoreCase):

@@ -57,10 +57,6 @@ def starter_trigger(started_by) -> str:
     return STARTED_BY.get(started_by.strip(), "cron")
 
 
-def _queued_any(conn) -> bool:
-    return conn.execute("SELECT 1 FROM work_requests WHERE state='queued'").fetchone() is not None
-
-
 def _completed(conn, job_id) -> bool:
     r = conn.execute("SELECT completed_at FROM runs WHERE job_id=?", (job_id,)).fetchone()
     return r is not None and r[0] is not None
@@ -119,7 +115,17 @@ def claim(conn, job_id, started_by=None) -> int:
             live = loop.run_pass(conn, conn.execute("SELECT * FROM runs WHERE job_id=?",
                                                     (job_id,)).fetchone())
             if live is not None:
-                if first and not _queued_any(conn):
+                # #67 (d1): a handover alone makes a narrow run (loop.handover_only) only
+                # when the operator started it on a store already imported; a run Casa
+                # explicitly says is scheduled (or an agent's), or a store never imported,
+                # records its check too — fixed here, never re-judged mid-run. A missing
+                # starter line adds nothing (Terra d1)
+                said = started_by.strip() if isinstance(started_by, str) else None
+                queued = {r[0] for r in conn.execute("SELECT DISTINCT kind FROM work_requests"
+                                                     " WHERE state='queued'")}
+                if first and (not queued or (queued == {"handover"} and (
+                        STARTED_BY.get(said) == "cron"
+                        or conn.execute("SELECT 1 FROM snapshots").fetchone() is None))):
                     conn.execute("INSERT INTO work_requests(kind, trigger, doc_ids_json,"
                                  " created_seq, created_at, state) VALUES ('check', ?, '[]',"
                                  " ?, ?, 'queued')", (starter_trigger(started_by),
@@ -190,6 +196,7 @@ TOPIC_MAX = 200     # one topic line: Casa keeps a summary's or completion's fir
 
 
 CARD_POSTED = "The result card is posted in the chat; there is nothing to add."
+HANDOVER_DONE = "The handed-over documents are filed; ask me where the quarter stands to see them."
 
 def run_end(conn, job_id) -> tuple:
     """THE closing words of job run `job_id` (PLAY T7 F2): (the completion's text, its
@@ -215,6 +222,9 @@ def run_end(conn, job_id) -> tuple:
         if shown is not None:
             # 0.11.2 (one answer per ask; Casa #1332): the end card says it all
             return CARD_POSTED, loop.WORDS["complete"]
+        if loop.handover_only(conn, job_id):
+            # #67: a run that took only handovers checked no quarter — never "Qn checked"
+            return HANDOVER_DONE, loop.WORDS["complete"]
         line = views.clip(cards.checked_line(conn, cards.main_quarter(conn, job_id)),
                           TOPIC_MAX)
         return line, loop.WORDS["complete"]

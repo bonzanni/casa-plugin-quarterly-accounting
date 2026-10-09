@@ -372,7 +372,7 @@ class TestJob(TempEnv):
                      "vendor-and-dates search", "record_mirror", "record_not_found",
                      "certain", "reset_store", "set_aside(", "refs=["):
             self.assertIn(rule, text)
-        self.assertLessEqual(len(text), 10_600)    # queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90)
+        self.assertLessEqual(len(text), 10_800)    # queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90); 0.11.7: the reading unit, handed documents proposed (#67, +200)
 
     def test_the_units_come_in_the_loops_order(self):
         """Simple loop §2: probes, snapshot, filing, vendor, mirror, the run's one post."""

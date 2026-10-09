@@ -61,10 +61,39 @@ def main_quarter(conn, job_id=None) -> str:
         r = conn.execute("SELECT quarter FROM runs WHERE job_id=?", (job_id,)).fetchone()
         if r is not None and r[0]:
             return r[0]
+        if r is not None and loop.handover_only(conn, job_id):
+            return handover_quarter(conn, job_id)[0]       # #67: never the newest payment
     elif named_quarter(conn):
         return named_quarter(conn)
     days = [dates.effective_date(row) for _, _, row in loop.in_scope(conn)]
     return dates.quarter_of(max(days) if days else dates.today())
+
+
+def _backed(conn, doc_id) -> list:
+    """The payments a handed document backs now: a pairing or proposal holding it, or the
+    open question asking to swap it in (rev 18.4 §R18.3)."""
+    out = [p for p, _how in matches.holders(conn, doc_id)]
+    out += [r[0] for r in conn.execute("SELECT pid FROM replace_questions WHERE new_doc_id=?"
+                                       " AND state='open'", (doc_id,))]
+    return list(dict.fromkeys(out))
+
+
+def handover_quarter(conn, job_id, docs=None) -> tuple:
+    """#67: the quarter of a run that took only handovers, and whether it came from the
+    handed documents themselves — (the earliest quarter of a payment a handed document
+    backs, True); else (the quarter in play: the newest run that named one, False); else
+    (D11's newest-payment quarter, False), a label only: the card then offers no package."""
+    qs = sorted({work.describe(conn, p)["quarter"]
+                 for d in (loop.run_handover_docs(conn, job_id) if docs is None else docs)
+                 for p in _backed(conn, d)})
+    if qs:
+        return qs[0], True
+    r = conn.execute("SELECT quarter FROM runs WHERE quarter IS NOT NULL ORDER BY rowid DESC"
+                     " LIMIT 1").fetchone()
+    if r is not None:
+        return r[0], False
+    days = [dates.effective_date(row) for _, _, row in loop.in_scope(conn)]
+    return dates.quarter_of(max(days) if days else dates.today()), False
 
 
 def nothing_to_check(conn, q) -> str:
@@ -496,11 +525,38 @@ def _ready_scope(conn, quarters) -> dict:
             "ready_sigs": {q: loop.completion_sig(conn, q) for q in qs}}
 
 
-def _receipts(conn, docs) -> tuple:
-    """§2.5, what the handed documents changed: ("Filed." lines — one per document paired
-    or fitting no payment yet —, the proposed payments holding one of them)."""
+def _doc_name(d) -> str:
+    """#67: a handed document as read — issuer, number, date, amount (what is known); the
+    file's own name when nothing was read. Displayed (escaped)."""
+    who = " ".join(x for x in (d["issuer"] or d["counterparty"], d["document_number"]) if x)
+    parts = [views.field(who or d["original_name"] or f"document {d['doc_id']}")]
+    if d["document_date"]:
+        parts.append(_day(d["document_date"]))
+    if d["amount_minor"] is not None and d["currency"] and not d["amount_conflict"]:
+        parts.append(_money(d["amount_minor"], d["currency"]))
+    return " · ".join(parts)
+
+
+def _payment_words(d) -> str:
+    return (f"{views.field(views.shown(d))} · {_day(d['date'])} · "
+            f"{_money(d['amount_minor'], d['currency'])}")
+
+
+def _receipts(conn, docs, job_id=None) -> tuple:
+    """§2.5, what the handed documents changed (#67: one line per document, naming it as
+    read, with what the run computed for it — never a result it did not compute): matched
+    to a payment, proposed for one (to confirm), a copy of an earlier document, not read,
+    or the payments it was checked against. Returns (those lines, the proposed payments
+    holding one of them)."""
+    import documents
     head, props = [], []
     for doc in dict.fromkeys(docs):
+        row = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc,)).fetchone()
+        name = _doc_name(row)
+        dup = documents.duplicate_of(conn, doc)
+        if dup is not None:
+            head.append(f"{name}: already filed as {views.esc(f'#{dup}')}.")
+            continue
         hs = matches.holders(conn, doc)
         # f2 (Astra S2): "Paired" only while the payment reduces to matched — a machine match
         # whose document's readings then disagree is a proposal (reducer `amount-unknown`)
@@ -509,21 +565,42 @@ def _receipts(conn, docs) -> tuple:
         paired = [p for p, how in hs if how == "matched" and status[p] == "matched"]
         held = [p for p, how in hs if p not in paired]
         if paired:
-            d = work.describe(conn, paired[0])
-            head.append(f"Filed. Matched to {views.field(views.shown(d))} · "
-                        f"{_day(d['date'])} · {_money(d['amount_minor'], d['currency'])}")
+            head.append(f"{name}: matched to {_payment_words(work.describe(conn, paired[0]))}.")
             continue
         if conn.execute("SELECT 1 FROM replace_questions WHERE new_doc_id=? AND state='open'",
                         (doc,)).fetchone():
-            continue          # rev 18.4 §R18.3: its question is the "to check" line + card
-                              # (e2: retired questions are closed first — compose_end)
+            # rev 18.4 §R18.3: its question is the "to check" line + card (e2: retired
+            # questions are closed first — compose_end)
+            head.append(f"{name}: its payment already has a document — Review asks which "
+                        "to keep.")
+            continue
         d = work.describe(conn, held[0]) if held else None
         if d is not None and d["status"] == "proposed":
+            head.append(f"{name}: proposed for {views.field(views.shown(d))} — confirm "
+                        "below.")
             if all(x["pid"] != d["pid"] for x in props):
                 d["vendor"] = d["counterparty"]
                 props.append(d)
             continue
-        head.append("Filed. No payment fits it yet — it's matched when one does.")
+        if row["read_at"] is None:
+            head.append(f"{name}: could not be read, so it was not matched — send it again "
+                        "to retry.")
+            continue
+        if documents.amount_unknown(row):
+            head.append(f"{name}: its amount could not be read, so it was not matched.")
+            continue
+        r = conn.execute("SELECT fits FROM run_docs WHERE job_id=? AND doc_id=?",
+                         (job_id, doc)).fetchone() if job_id is not None else None
+        n = r[0] if r is not None else None
+        money = _money(row["amount_minor"], row["currency"])
+        if n:
+            head.append(f"{name}: checked against {_s(n, 'payment')} it could fit — not "
+                        "matched.")
+        elif n == 0:
+            head.append(f"{name}: no payment of {money} in the books yet — it's matched when "
+                        "one comes in.")
+        else:
+            head.append(f"{name}: not matched yet.")
     props.sort(key=_line_key)
     return head, props
 
@@ -547,11 +624,13 @@ def _handover(conn, job_id, docs, quarter, tail, ready, sent=None, scheduled=Fal
     """§1 "A missing invoice the operator has" (§2.5), a standalone continuation (d2: a run
     whose only request is the handover): one line per handed document — what the
     continuation changed — and the proposals among them to confirm."""
-    head, props = _receipts(conn, docs)
+    head, props = _receipts(conn, docs, job_id)
     head = _fit_receipts(head, [], _confirm_room(props) + list(tail))
+    backed = handover_quarter(conn, job_id, docs)[1]
     return _summary(conn, "end", quarter, head, props, [], tail,
                     {d["pid"]: item_state(d) for d in props}, scheduled=False,
-                    extra_scope={"job_id": job_id, **(sent or {}),
+                    # #67: [Get package] only for the quarter a handed document backs
+                    extra_scope={"job_id": job_id, "package": backed, **(sent or {}),
                                  **(_ready_scope(conn, ready) if ready else {})},
                     # e5 (Astra S2): a scheduled run offers only its own run's questions
                     questions=[q for q in replace.open_ones(conn)
@@ -587,7 +666,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         extra = [stopped] + list(extra)
     if handover_docs and standalone:
         return _handover(conn, job_id, handover_docs, q, tail, ready, sent, scheduled=scheduled)
-    receipts = _receipts(conn, handover_docs)[0] if handover_docs else []
+    receipts = _receipts(conn, handover_docs, job_id)[0] if handover_docs else []
     reported = {d["pid"]: item_state(d) for d in st["proposals"]}
     reported.update({d["pid"]: "missing" for ds in st["missing"].values() for d in ds})
     extra_scope = {"job_id": job_id, **sent, **offer,

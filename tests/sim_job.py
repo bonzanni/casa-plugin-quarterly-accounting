@@ -274,6 +274,7 @@ class JobDriver:
         self.bank_log = []              # every bank-feed call: (tool, canonical args)
         self.near_days = 10             # the skill's "certain": a match dated this near
         self.propose_days = 20          # a look-alike this near is proposed; farther: not it
+        self.printed = {}               # #67: doc_id -> what the reading unit reads on it
         self.add_payments([self.DATES[i % len(self.DATES)] for i in range(payments)])
 
     # --- the bank, as the operator's bank has it ------------------------------------
@@ -413,6 +414,23 @@ class JobDriver:
         import asks
         doc = self.file_document(**reading)
         asks.request_work(self.conn, "handover", "operator", doc_ids=[doc])
+        return doc
+
+    def file_unread(self, number, vendor, amount_minor, currency="EUR",
+                    document_date="2026-07-09", kind="invoice") -> int:
+        """#67 (prod 2026-10-08): the desk files a document with only its number — no
+        issuer, amount, currency or date (read_at stays NULL). What is printed on it is kept
+        in `printed`, for the job's `reading` unit. Its doc_id."""
+        import documents
+        self._docs = getattr(self, "_docs", 0) + 1          # each file its own bytes
+        path = self.test.publish(f"{number}.pdf", f"%PDF-1.4 desk {self._docs} {number}\n"
+                                 .encode())
+        doc = documents.ingest_document(
+            self.conn, source_path=path, kind=kind, source="manual-telegram",
+            extraction_author="desk", document_number=number)["doc_id"]
+        self.printed[doc] = {"issuer": vendor, "amount_minor": amount_minor,
+                             "currency": currency, "document_date": document_date,
+                             "document_number": number}
         return doc
 
     def posted_end(self, job_id) -> dict:
@@ -937,7 +955,9 @@ class JobDriver:
                      if other else keep)
         elif exact():
             c = exact()[0]
-            entry = {**base, "outcome": "match", "doc_id": c["doc_id"],
+            # #67: the operator's handed document is proposed — the operator confirms it
+            entry = {**base, "outcome": "propose" if c["doc_id"] in u.get("handed_over", ())
+                     else "match", "doc_id": c["doc_id"],
                      "document_date": c["date"] or u["date"]}
         elif [c for c in unheld() if gap(c) <= self.propose_days]:
             cs = sorted((c for c in unheld() if gap(c) <= self.propose_days),
@@ -954,6 +974,8 @@ class JobDriver:
                 return None    # the skill: a refusal → job_next (a search that aged it out)
             redo = keep if held is not None else {
                 **base, "outcome": "missing", "reason": "no fitting invoice found"}
+            if "answer replace" in (r.get("refused") or ""):
+                redo = {**base, "outcome": "keep"}     # the refusal's words: keep it
             assert entry["outcome"] != "missing", out   # the sim decides what the floor takes
             out = self._tool("decide", {"pass_token": token, "entries": [redo]})
             assert out["refused"] == 0, out
@@ -962,6 +984,17 @@ class JobDriver:
             self._tool("upsert_counterparty", {"name": vendor, "hint_sender": senders[0],
                                                "hint_subject": f"{vendor} invoice",
                                                "pass_token": token})
+        return None
+
+    def _reading(self, u, token):
+        """#67: each handed document read — read_document, Read, then
+        update_document_metadata with what is printed (`printed`; nothing readable: an
+        empty reading, which still records it)."""
+        for doc in u["docs"]:
+            self._tool("read_document", {"doc_id": doc})
+            if self._read(self.SESSION + f"doc-{doc}.pdf"):
+                self._tool("update_document_metadata", {"doc_id": doc, "pass_token": token,
+                                                        **self.printed.get(doc, {})})
         return None
 
     def _report(self, u, token):

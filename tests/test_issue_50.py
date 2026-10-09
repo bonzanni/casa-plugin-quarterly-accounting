@@ -198,7 +198,7 @@ class Schema15(StoreCase):
             self.conn.execute("UPDATE meta SET value='14' WHERE key='schema_version'")
         D.migrate(self.conn)
         self.assertEqual(self.conn.execute("SELECT value FROM meta WHERE key="
-                                           "'schema_version'").fetchone()[0], "15")
+                                           "'schema_version'").fetchone()[0], str(db.SCHEMA_VERSION))
         self.assertEqual([tuple(r) for r in self.conn.execute(
             "SELECT job_id, unit, kind, key, state, attempts, hand_seq, seq FROM run_items")],
             [("j", "payment:1", "ref", "m:a", "queued", 1, 7, 8)])

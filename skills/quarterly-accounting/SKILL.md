@@ -98,11 +98,14 @@ is filed by you, without being asked:
 2. `ingest_document(source_path=<the shared path>, kind=<your reading: invoice, receipt,
    credit-note, sales-invoice, statement, payslip, other>, source="manual-telegram",
    extraction_author="desk", counterparty=…, document_date=…, amount_minor=…,
-   currency=…)` — your provisional reading, from the file itself.
+   currency=…)` — only what you already know (the operator's words, a caption). Never
+   `Read` the shared path: the check reads each document itself, whatever you filed.
    An invoice sent together with its own receipt: file both, each as what it is (`invoice`,
    `receipt`); the job uses the invoice.
-3. `request_work(kind="handover", trigger="operator", doc_ids=[<every doc_id filed>])`,
-   then `start_job` as above. The job posts what it finds.
+3. ONE `request_work(kind="handover", trigger="operator", doc_ids=[<every doc_id filed>])`
+   for all the files of the turn, then `start_job` as above. The job reads each document
+   (whatever you could not), matches it only against the payments it could fit, and posts
+   one line per document.
 
 ## Sending again
 

@@ -539,8 +539,10 @@ class Cards(LoopCase):
                      handover_docs=[filed, prop, lone])
         r, scope = self.rendering(rid)
         lines = r["text"].split("\n")
-        self.assertTrue(lines[0].startswith("Filed. Matched to Adobe · 2 Sep · EUR 100.00"))
-        self.assertIn("Filed. No payment fits it yet — it's matched when one does.", lines)
+        # #67: one line per handed document, named as read, with what became of it
+        self.assertIn(": matched to Adobe · 2 Sep · EUR 100.00.", lines[0])
+        self.assertTrue(any(ln.endswith(": proposed for AWS — confirm below.") for ln in lines))
+        self.assertTrue(any(ln.endswith(": not matched yet.") for ln in lines), lines)
         self.assertIn("To confirm:", lines)
         self.assertNotIn("Twilio", r["text"])
         self.assertEqual(scope["order"], [{"p": q}])

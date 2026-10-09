@@ -108,6 +108,24 @@ def collisions(conn, doc_id: int) -> list:
         + _SAME_PURCHASE + " ORDER BY doc_id", (doc_id, d["sha256"], *key))]
 
 
+def duplicate_of(conn, doc_id: int):
+    """#67: the earlier document `doc_id` is a copy of — the lowest-id document filed before
+    it of the same purchase (issuer and number, as `collisions` compares them), not
+    irrelevant, whose reading is the same in every field a judgment reads (`fingerprint`:
+    kind, amount, currency, date, issuer, counterparty, number, recipient) — or None. A
+    reissue (same number, a field read differently, e.g. a corrected recipient) is no copy:
+    it is worked, and onto a paired payment the operator is asked to replace (BRAIN
+    2026-10-09). A mechanical fact of the two readings, never of their wording."""
+    d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
+    if d is None or d["read_at"] is None:
+        return None
+    for other in collisions(conn, doc_id):
+        o = conn.execute("SELECT * FROM documents WHERE doc_id=?", (other,)).fetchone()
+        if other < doc_id and fingerprint(o) == fingerprint(d):
+            return other
+    return None
+
+
 def purchase(conn, doc_id: int) -> list:
     """Issue #48: the documents of `doc_id`'s purchase, itself first — every document with
     the same issuer and the same document number, compared as `collisions` compares them

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.11.7
+
+Store schema 16 (a run's handed-over documents; migrated on start). Same Casa floor (v0.344.39).
+
+- **A handed-over invoice is read and matched to the payments it could fit (#67).** When you
+  send invoices to the assistant, the check reads each one first (also when it was filed
+  without a reading), then works only the payments those invoices could fit, and proposes
+  each match for you to confirm. It no longer syncs the bank, searches your mail or works
+  every open payment for a hand-off; ask for a check when you want that. Send several
+  invoices at once and they are handled in one go ("Filed 3 documents. Checking them…").
+- **The result names each invoice.** One line per invoice, with its issuer, number, date and
+  amount as read, and what happened to it: matched to which payment, proposed for one, already
+  filed as #N (the same invoice, read the same in every field), could not be read, or no payment
+  of that amount in the books yet. [Get package] appears only for the quarter of a payment an
+  invoice now backs, never for an unrelated quarter.
+- A reissued invoice (same number, something read differently, such as the recipient) is not
+  treated as a copy: on a payment that already has the earlier one, you are asked whether to
+  keep the current one or use the new one.
+
 ## 0.11.6
 
 Same store schema and Casa floor (v0.344.39; [See PDF] keeps its card on v0.344.58 or newer).
