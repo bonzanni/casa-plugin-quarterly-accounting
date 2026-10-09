@@ -245,11 +245,15 @@ def t_read_document(args):
 # --- knowledge base ----------------------------------------------------------
 @register("get_counterparty",
           "The KB entry whose name or bank text equals `text` (exact, case-insensitive): "
-          "expectation override, source (email/portal), researched document link, search hint.",
+          "expectation override, source (email/portal), researched document link, search hint. "
+          "To find a vendor by part of its name, or its invoice's issuer: list_vendors.",
           obj({"text": S}, ("text",)))
 def t_get_cp(args):
     _need(args, "text")
-    return kb.get_counterparty(conn(), args["text"]) or {"found": False}
+    # #86: a miss names where every vendor is, with its invoice's issuer
+    return kb.get_counterparty(conn(), args["text"]) or {
+        "found": False, "note": "No vendor has exactly this name or bank text; list_vendors "
+                                "lists every vendor with the issuer on its invoice."}
 
 
 @register("upsert_counterparty",
@@ -259,7 +263,8 @@ def t_get_cp(args):
           "search hint: the sender address and subject pattern of the search that found its "
           "invoice. new_name renames the vendor `name` (its current name or a bank text, as "
           "list_vendors gives it): the same entry keeps its patterns, hints and rulings, and "
-          "its old name stays one of its bank texts. During a pass, pass the pass_token.",
+          "its old name stays one of its bank texts; `line` says the rename in plain words. "
+          "During a pass, pass the pass_token.",
           obj({"name": S, "new_name": S, "patterns": A, "source": S, "document_link": S,
                "link_note": S, "search_hint": S, "notes": S, "window_days": I,
                "hint_sender": S, "hint_subject": S, "pass_token": TOKEN}, ("name",)))
