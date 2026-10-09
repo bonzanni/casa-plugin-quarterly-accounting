@@ -31,17 +31,17 @@ def _texts(v) -> set:
 
 
 def resolve(conn, words) -> dict:
-    """The one vendor the operator's words name: the same text as its name or one of its bank
-    texts (case and spacing aside), else the name on its invoice, else the one vendor whose
-    name, bank texts or invoice name contain the words. Several at the first level that finds
-    any, or none: a refusal in words (no fuzzy matching). Payments with no payee text are
-    nobody's to name."""
+    """The one vendor the operator's words name: the same text as its name, one of its bank
+    texts or the name on its invoice (case and spacing aside; r1 Terra S1: one level, since a
+    card shows an unrenamed vendor under its invoice's name), else the one vendor whose name,
+    bank texts or invoice name contain the words. Several at the first level that finds any,
+    or none: a refusal in words (no fuzzy matching). Payments with no payee text are nobody's
+    to name."""
     w = kb.norm(words)
     if not w:
         raise db.Refusal("say which vendor: its name, part of it, or its bank text")
     vs = [v for v in work.vendors(conn) if v["texts"]]
-    for hits in ([v for v in vs if w in _texts(v)],
-                 [v for v in vs if kb.norm(v["invoice_name"]) == w],
+    for hits in ([v for v in vs if w in _texts(v) | {kb.norm(v["invoice_name"])}],
                  [v for v in vs if any(w in t for t in _texts(v) | {kb.norm(v["invoice_name"])})]):
         if len(hits) == 1:
             return hits[0]

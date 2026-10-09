@@ -119,6 +119,17 @@ class OneVendor(_Case):
         self.assertEqual(json.loads(b.deposits[0]["value"])["pages"],
                          ["Amazon is now called Amazon.nl."])
 
+    def test_a_bank_name_and_another_vendors_invoice_name_are_one_level(self):
+        # r1 (Terra S1): "Other supplier"'s card shows its invoice's "Acme"; the words fit both
+        self.pay("Acme", 100, "2026-08-03")
+        other = self.pay("Other supplier", 200, "2026-08-04")
+        self.matched_to(other, "Acme", amount_minor=200, document_date="2026-08-04")
+        with FakeBroker() as b:
+            out = call("rename_vendor", {"vendor": "Acme", "new_name": "Acme Tools"})
+        self.assertEqual(b.deposits, [])
+        self.assertIn("fits 2 vendors: Acme, Other supplier", out["refused"])
+        self.assertEqual(self.entries(), 0)
+
     def test_no_vendor_fits(self):
         self.pay("Zapier", 100, "2026-08-03")
         with FakeBroker() as b:
@@ -205,8 +216,7 @@ class AllVendors(_Case):
                          "No vendor needed a new name. No invoice yet: Zapier.")
 
     def test_a_refused_rename_leaves_nothing_half_done(self):
-        # the second Ryanair is refused after the first took the name; its savepoint rolls
-        # back whatever it wrote, the first's rename stays
+        # the second Ryanair is refused after the first took the name; the first's rename stays
         for t in ("Ryanair H2n0", "Ryanair Mtw0"):
             p = self.pay(t, 5000, "2026-07-03")
             self.matched_to(p, "Ryanair DAC", amount_minor=5000, document_date="2026-07-03")
@@ -216,6 +226,28 @@ class AllVendors(_Case):
         names = sorted(r[0] for r in self.conn.execute("SELECT name FROM counterparties"))
         self.assertEqual(names, ["Ryanair DAC", "Ryanair Mtw0"])
         self.assertEqual(json.loads(self.entry("Ryanair Mtw0")["patterns_json"]), [])
+
+    def test_a_refusal_after_a_write_rolls_that_vendor_back(self):
+        # r1 (Astra): a refusal raised after the rename wrote (as the store's second shared-
+        # text check can) undoes that vendor's writes only; the summary keeps its name
+        from unittest import mock
+        for t, issuer in (("Aws Emea", "Amazon Web Services EMEA SARL"), ("Zapier Inc", "Zapier")):
+            p = self.pay(t, 5000, "2026-07-03")
+            self.matched_to(p, issuer, amount_minor=5000, document_date="2026-07-03")
+            self.kb(t)
+        real = kb.upsert_in_tx
+
+        def late(conn, name, **kw):
+            out = real(conn, name, **kw)
+            if name == "Zapier Inc":
+                raise db.Refusal("late")
+            return out
+        with mock.patch.object(kb, "upsert_in_tx", late), FakeBroker() as b:
+            call("rename_vendors_to_invoice_names", {})
+        names = sorted(r[0] for r in self.conn.execute("SELECT name FROM counterparties"))
+        self.assertEqual(names, ["Amazon Web Services EMEA SARL", "Zapier Inc"])
+        self.assertIsNone(self.entry("Zapier Inc")["named_at"])
+        self.assertIn("(Zapier Inc)", b.deposits[0]["value"])
 
 
 class Skill(_Case):
