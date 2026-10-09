@@ -141,9 +141,9 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
    **`why: handover` with `holds`:** the payment already has a document and the operator
    handed one over (`handed_over`). It belongs to this payment →
    `outcome: "replace", doc_id` (the operator is asked); it does not → `outcome: "keep"`.
-   A handed-over document is `"propose"`d (the operator confirms) only for the payment it
-   belongs to: `handed_fits` lists every payment it could fit; judge by its reference,
-   billing period, then date. Another payment's → not this one's.
+   A handed-over document: `handed_fits` lists every payment it could fit, nearest date
+   first (recurring same-amount charges: match by its date and period). Sure it is this
+   one's → `match`; unsure → `"propose"`. Another payment's → not this one's.
 5. **Save what worked:** when a search found an invoice and `kb` has no such hint,
    `upsert_counterparty(name=<vendor>, hint_sender=<the sender address>, hint_subject=<a subject pattern>, pass_token)`.
 

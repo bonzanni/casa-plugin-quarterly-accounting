@@ -283,7 +283,7 @@ class DeskHandover(StoreCase):
         rows = [tuple(r) for r in self.conn.execute(
             "SELECT pid, why, outcome FROM run_work WHERE job_id='ffffffff-2'")]
         # the continuation's work list is the one payment the document fits (the 2000 one)
-        self.assertEqual(rows, [(listed[1], "handover", "propose")])     # #67: confirmed by a tap
+        self.assertEqual(rows, [(listed[1], "handover", "match")])   # operator ruling 2026-10-09
         self.assertEqual(tuple(self.conn.execute(
             "SELECT kind, state FROM work_requests WHERE request_id=?",
             (ask["request_id"],)).fetchone()), ("handover", "reported"))
