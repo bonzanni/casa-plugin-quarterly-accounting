@@ -26,13 +26,12 @@ class ShownIsNotNamed(_Case):
     def test_the_skill_and_the_tools_say_a_shown_name_is_still_renamed(self):
         start = SKILL.index("## Naming a vendor")
         s = " ".join(SKILL[start:SKILL.index("## Asks", start)].split())
-        self.assertIn("also when it already shows that name: a vendor not `named` only borrows "
-                      "its invoice's name until renamed.", s)
+        self.assertIn("also when it already shows that name (the rename pins it).", s)
         import tools  # noqa: F401
         desc = {n: " ".join(qa_server.TOOLS[n]["description"].split())
                 for n in ("rename_vendor", "list_vendors")}
-        self.assertIn("also when its cards already show that name", desc["rename_vendor"])
-        self.assertIn("until a rename pins a name", desc["list_vendors"])
+        self.assertIn("also when its cards already show that name: the rename pins it", desc["rename_vendor"])
+        self.assertIn("when false, a rename asked for still runs", desc["list_vendors"])
 
     def test_asked_for_the_name_it_already_has_the_name_is_pinned(self):
         # r1 (Astra S2): the invoice prints the stored name itself; the rename still pins it

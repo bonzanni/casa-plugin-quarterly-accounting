@@ -80,9 +80,8 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
 The operator names a vendor: "call LINKEDIN 'LinkedIn'", the name on its invoice, or invoice
 names for all vendors. Not a reading. One vendor: `rename_vendor(vendor=<their words for
 it>, new_name=<the name they give; left out for the name on its invoice>)`, whatever an
-earlier conversation found, also when it already shows that name: a vendor not `named` only
-borrows its invoice's name until renamed. All vendors: `rename_vendors_to_invoice_names()`, once. Each
-posts its outcome to the operator itself: add nothing, your whole reply is `<silent/>`
+earlier conversation found, also when it already shows that name (the rename pins it).
+All vendors: `rename_vendors_to_invoice_names()`, once. Each posts its outcome to the operator itself: add nothing, your whole reply is `<silent/>`
 (after `rename_vendor`'s receipt, `mark_rendering_delivered(render_id)` first). `refused`:
 nothing was renamed; say its words. Never rename unasked.
 
