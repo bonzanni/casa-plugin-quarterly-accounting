@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.14
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **"Call Informatique by the name on its invoice" works (#86).** Finance looked for a vendor
+  named exactly "Informatique", found none and gave up, although the vendor's invoice name was
+  known. Finance now always starts from the full list of vendors, so part of a name or a bank
+  text is enough, and it no longer repeats what an earlier conversation concluded.
+- **Naming replies are short (#87).** Renaming one vendor gets one line ("Aws Emea is now called
+  Amazon Web Services EMEA SARL.") and then the vendor's card. "Use the invoice names for all my
+  vendors" gets one short message: how many were renamed, which keep their bank names and why,
+  and which have no invoice yet.
+
 ## 0.11.13
 
 Store schema 17 (a vendor records that you named it). Same Casa floor (v0.344.67).

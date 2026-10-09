@@ -157,6 +157,10 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
         if current is not None:
             conn.execute("UPDATE counterparties SET name=? WHERE cp_id=?",
                          (new_name.strip(), current["cp_id"]))
+        # #87: the sentence the desk says for one rename, in the operator's words
+        line = f"{(current['name'] if current is not None else name).strip()} is now called " \
+               f"{new_name.strip()}"
+        line += "" if line.endswith(".") else "."
         name = new_name
     if source not in (None, "email", "portal"):
         raise db.Refusal("source is 'email' or 'portal'")
@@ -197,7 +201,10 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
     conn.execute("UPDATE counterparties SET %s WHERE cp_id=?"
                  % ", ".join(f"{k}=?" for k in sets), (*sets.values(), existing["cp_id"]))
     lineage.settle_all(conn)
-    return get_counterparty(conn, name) or {}
+    out = get_counterparty(conn, name) or {}
+    if new_name is not None:
+        out["line"] = line
+    return out
 
 
 def same_vendor(conn, a, b) -> bool:
