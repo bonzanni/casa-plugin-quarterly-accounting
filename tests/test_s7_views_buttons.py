@@ -200,10 +200,10 @@ class Verdict(_Q3):
         fx = self.sheet_fixture(guesses=2)
         prop = self.sheet()
         walk = prop["buttons"][1]["call"]["arguments"]
-        self.assertEqual(walk, {"view": "item", "pid": fx["pids"][0]})   # no walk to carry
-        with FakeBroker() as b:
-            posting.show_view(self.conn, **walk)
-        item = b.proposal()
+        # #93 r2: a keyed tap that shows the payment when tapped (no walk to carry)
+        self.assertEqual((walk["action"], walk["pid"]), ("show-item", fx["pids"][0]))
+        item = self.tap(prop, "One by one")["next"]
+        del posting
         self.assertEqual([x["label"] for x in item["buttons"]],
                          ["Right", "Wrong", "No invoice needed", "Close"])  # §4: no walk Next
         out = self.tap(item, "Wrong")

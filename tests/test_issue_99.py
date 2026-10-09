@@ -214,3 +214,39 @@ class ShowMissing(StoreCase):
         out = self.tap(prop)
         self.assertNotIn("next", out)
         self.assertIn("Adobe", out["receipt"])
+
+
+class EveryShowButtonDecidesWhenTapped(StoreCase):
+    """r2 (Astra S2): the same shape as show-missing — every button that shows another view
+    is a keyed tap; none is a stored show_view call that could answer `post`."""
+
+    def test_a_stale_show_matches_tap_answers_plain(self):
+        import matches, posting, qa_server, tools  # noqa: F401
+        self.seed_payments([{"counterparty": "Adobe", "amount_minor": 999}])
+        p = self.conn.execute("SELECT pid FROM projections").fetchone()[0]
+        mid = matches.propose_match(self.conn, pid=p, doc_id=self.doc(amount_minor=999),
+                                    expected_revision=self.rev(p), token=self.pass_(),
+                                    document_date="2026-09-14")["match_id"]
+        with FakeBroker() as b:
+            posting.show_view(self.conn, view="status", quarter="2026-Q3")
+        status = b.proposal()
+        rid = status["buttons"][0]["call"]["arguments"]["render_id"]
+        self.granted(lambda c, grant: matches.confirm_in_tx(
+            c, grant=grant, match_id=mid, expected_revision=self.rev(match_id=mid),
+            render_id=rid, bind="rendered"))
+        call = next(x["call"] for x in status["buttons"]
+                    if x["label"].startswith("Show matches to confirm"))
+        out = qa_server.TOOLS[call["tool"]]["fn"](dict(call["arguments"]))
+        self.assertNotIn("next", out)
+        self.assertIn("Nothing to check", views.displayed(out["receipt"]))
+
+    def test_no_stored_show_view_call_on_any_view(self):
+        import posting
+        self.sheet_fixture(guesses=2)
+        for view in ("status", "check", "missing"):
+            with FakeBroker() as b:
+                out = posting.show_view(self.conn, view=view, quarter="2026-Q3")
+            if out["view"] is None:
+                continue
+            tools = [x["call"]["tool"] for x in b.proposal()["buttons"] if "call" in x]
+            self.assertNotIn("show_view", tools, view)

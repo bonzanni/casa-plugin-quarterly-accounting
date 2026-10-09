@@ -7,7 +7,6 @@ import json
 
 import authority
 import binding
-import dates
 import db
 import keys
 import lineage
@@ -29,6 +28,12 @@ _ON_KIND = {"end": ("review", "confirm-all", "links"),
             "vendor-page": ("exempt-these", "leave-missing", "never", "next-page",
                             "all-quarters", "this-quarter", "leave-vendor"),
             "replace": ("keep-current", "use-new")}
+# #93: the buttons that show another view, decided when tapped (_show)
+SHOW_ACTIONS = {"show-missing": "missing", "show-check": "check", "show-item": "item"}
+SHOW_RECEIPT = {"missing": "Missing invoices:", "check": "Matches to confirm:",
+                "item": "The payment:"}
+SHOW_SAY = {"missing": "show the missing invoices", "check": "show what to check",
+            "item": "show that payment"}
 CARD_CHANGED = "That changed since it was shown — nothing applied. Here it is as it is now."
 LIST_CHANGED = "That list changed since it was shown — nothing applied. Here it is as it is now."
 
@@ -110,12 +115,12 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
     binds (render, action, pid, doc_id); a key, rendering or action that does not hold is
     a refusal — {"receipt"} only, no card."""
     import cards
-    if action not in ACTIONS + CARD_ACTIONS + ("show-missing",):
+    if action not in ACTIONS + CARD_ACTIONS + tuple(SHOW_ACTIONS):
         raise db.Refusal(keys.NO_LONGER)
     with db.tx(conn):
         keys.spend_render(conn, key, render_id, action, pid, doc_id)
-        if action == "show-missing":
-            return _show_missing(conn, render_id)
+        if action in SHOW_ACTIONS:
+            return _show(conn, render_id, SHOW_ACTIONS[action], pid)
         grant = authority.OperatorGrant("verdict", key)
         r = conn.execute("SELECT * FROM renders WHERE render_id=?", (render_id,)).fetchone()
         if r is not None and r["kind"] in cards.KINDS:
@@ -144,31 +149,30 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
     return {"receipt": views.fit_message(lines), "applied": applied}
 
 
-def _show_missing(conn, render_id) -> dict:
-    """#93 (d1, r1 Astra S2): [Show missing invoices], decided when tapped. A missing list
-    with something to act on is the next card (its pages before it); one with nothing to act
-    on is the tap's answer, plain, as stored (it binds what it shows); one longer than a
-    message says how to see it all."""
+def _show(conn, render_id, view, pid=None) -> dict:
+    """#93 (d1, r1, r2 Astra S2): a button that shows another view (the missing or the
+    check list, one payment), decided when tapped. A view with something to act on is the
+    next card (its pages before it); one with nothing to act on is the tap's answer, plain,
+    as stored (it binds what it shows); a list longer than a message says how to see it."""
     import posting
     r = conn.execute("SELECT * FROM renders WHERE render_id=?", (render_id,)).fetchone()
     q = json.loads(r["scope_json"]).get("quarter") if r is not None else None
-    if not q:
+    if view != "item" and not q:
         raise db.Refusal(keys.NO_LONGER)
-    rid = posting._compose_list(conn, "missing", q, None, None, None, None)
+    rid = posting._compose_list(conn, view, None if view == "item" else q,
+                                pid if view == "item" else None, None, None, None)
     lst = conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
     pages = json.loads(lst["scope_json"]).get("list_pages") or []
     if posting.has_actions(conn, lst):
         value, _ = posting._view_value(conn, lst)
-        return {"receipt": f"Missing invoices, {dates.quarter_label(q)}:",
-                "next": json.loads(value)}
+        return {"receipt": SHOW_RECEIPT[view], "next": json.loads(value)}
     if pages:
         # a list longer than one message cannot be one answer (r1 Astra S2: a clipped one
         # bound what it never showed); the desk posts it whole, page by page
-        return {"receipt": "Too many missing invoices for one message: say \"show the "
-                           "missing invoices\" to see them all."}
-    text = lst["text"]
+        return {"receipt": f"Too long for one message: say \"{SHOW_SAY[view]}\" to see it "
+                           "all."}
     conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?", (db.next_seq(conn), rid))
-    return {"receipt": text}
+    return {"receipt": lst["text"]}
 
 
 def _answer(conn, receipt, next_rid, in_place=False) -> dict:

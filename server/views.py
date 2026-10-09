@@ -1321,7 +1321,8 @@ def buttons_for(conn, r) -> list:
     if kind in SHEET_VIEWS and proposed:
         out = [("All good", "verdict", {"render_id": rid, "action": "all-good"},
                 ("all-good", None, None)),
-               ("One by one", "show_view", {"view": "item", "pid": proposed[0]}, None)]
+               ("One by one", "verdict", {"render_id": rid, "action": "show-item",
+                                          "pid": proposed[0]}, ("show-item", proposed[0], None))]
     elif kind == "item":
         pid = scope.get("pid")
         verdicts = {"proposed": ("right", "wrong", "no-invoice"),
@@ -1334,15 +1335,17 @@ def buttons_for(conn, r) -> list:
     q = scope.get("quarter")
     if kind != "item" and q:
         missing, check = show_counts(conn, q)
+        # d1, r1, r2 (Astra S2): every button that shows another view is a tap that decides
+        # when tapped whether that view is a card or, with nothing to act on, a plain answer
+        # (a stored show_view call could not post it plain)
         if missing and kind != "missing":
-            # d1, r1 (Astra S2): a tap decides when tapped whether the list is a card or,
-            # with nothing to act on, a plain answer (a stored show_view could not post plain)
             out.append((f"Show missing invoices ({missing})", "verdict",
                         {"render_id": rid, "action": "show-missing"},
                         ("show-missing", None, None)))
         if check and kind != "check":
-            out.append((f"Show matches to confirm ({check})", "show_view",
-                        {"view": "check", "quarter": q}, None))
+            out.append((f"Show matches to confirm ({check})", "verdict",
+                        {"render_id": rid, "action": "show-check"},
+                        ("show-check", None, None)))
     # #93: Close beside the actions, never alone — a view with nothing to act on is posted
     # as a plain message (posting.plain_post)
     return out[:5] + [CLOSE] if out else []

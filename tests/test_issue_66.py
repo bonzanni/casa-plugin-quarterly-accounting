@@ -193,7 +193,8 @@ class ShortList(_Q3):
         out, prop = self.post(view="status", quarter="2026-Q3")
         self.assertEqual(self.labels(prop), ["Show matches to confirm (3)", "Close"])
         call = prop["buttons"][0]["call"]
-        self.assertEqual(call["arguments"], {"view": "check", "quarter": "2026-Q3"})
+        # #93 r2: a keyed tap, decided when tapped
+        self.assertEqual((call["tool"], call["arguments"]["action"]), ("verdict", "show-check"))
         for b in prop["buttons"]:
             self.assertLessEqual(len(b["label"]), 32)
             if "call" in b:

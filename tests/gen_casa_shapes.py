@@ -354,7 +354,8 @@ def _item_states(sh, st, b, tag, pids):
     check = sh.call(st, b, f"{tag}:check-walk", "show_view", {"view": "check",
                                                                "quarter": QUARTER})
     one = next(x for x in check if x["label"] == "One by one")
-    item = sh.call(st, b, f"{tag}:item:proposed", "show_view", one["call"]["arguments"])
+    # #93 r2: [One by one] is a tap whose answer carries the payment's card
+    item = sh.tap(st, f"{tag}:item:proposed", one, keep=True)["next"]["buttons"]
     if labels(item)[:3] != ["Right", "Wrong", "No invoice needed"]:
         raise AssertionError(f"{tag}: a proposed item offers {labels(item)}")
     paired = sh.call(st, b, f"{tag}:item:paired", "show_view",

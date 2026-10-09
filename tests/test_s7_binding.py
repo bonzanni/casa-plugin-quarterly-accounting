@@ -225,10 +225,10 @@ class PostedOnlyQuote(_Q3):
         self.tick()                    # #53: composed a second after the fixture's sheet
         with FakeBroker() as b:
             call("show_view", view="status", quarter="2026-Q3")
-            sheet = tap(b.proposal(), "Show matches to confirm (3)")
-            prop = b.proposal()
-        r = self.conn.execute("SELECT * FROM renders WHERE render_id=?",
-                              (sheet["render_id"],)).fetchone()
+            # #93 r2: the button is a tap; its answer carries the list as the next card
+            prop = tap(b.proposal(), "Show matches to confirm (3)")["next"]
+        rid = prop["buttons"][0]["call"]["arguments"]["render_id"]
+        r = self.conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
         self.assertIsNone(r["delivered_at"])
         ref = next(k for k, v in json.loads(r["scope_json"])["refs"].items() if a[1] in v)
         out, rprop = self.propose(f"ref {ref} is wrong", quoted=prop["text"])
