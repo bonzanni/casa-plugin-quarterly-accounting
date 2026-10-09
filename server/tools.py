@@ -282,7 +282,8 @@ def t_upsert_cp(args):
           "The operator renames one vendor. vendor: their words for it (its name, part of it, "
           "a bank text, or the name on its invoice); new_name: the name they give, left out "
           "for the name on its invoice; also when its cards already show that name (`named` "
-          "false in list_vendors: the name only follows the invoice until renamed). Casa posts \"<old> is now called <new>.\" with the "
+          "false in list_vendors: the shown name follows the invoice until a rename pins "
+          "it). Casa posts \"<old> is now called <new>.\" with the "
           "vendor's card to the operator; never retell it, add nothing. After its receipt, "
           "mark_rendering_delivered(render_id); your whole reply is <silent/>. `refused`: "
           "nothing was renamed or posted; say its words.",
@@ -309,7 +310,8 @@ def t_rename_all(args):
 @register("list_vendors",
           "Read-only: every vendor of the payments, one entry each: name (its current name), "
           "shown (the name its cards show), bank_texts, named (the name is one someone gave; "
-          "false: shown only follows the invoice, and a rename asked for still keeps it), "
+          "false: shown follows its latest matched invoice, if any, until a rename pins a "
+          "name), "
           "invoice_name (the name printed for it on the latest invoice matched to one of its "
           "payments; null when none is matched), payments, latest_pid. `next`: pass it back "
           "as `after` for more. To rename a vendor: rename_vendor.",

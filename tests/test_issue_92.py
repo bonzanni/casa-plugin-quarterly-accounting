@@ -32,4 +32,17 @@ class ShownIsNotNamed(_Case):
         desc = {n: " ".join(qa_server.TOOLS[n]["description"].split())
                 for n in ("rename_vendor", "list_vendors")}
         self.assertIn("also when its cards already show that name", desc["rename_vendor"])
-        self.assertIn("a rename asked for still keeps it", desc["list_vendors"])
+        self.assertIn("until a rename pins a name", desc["list_vendors"])
+
+    def test_asked_for_the_name_it_already_has_the_name_is_pinned(self):
+        # r1 (Astra S2): the invoice prints the stored name itself; the rename still pins it
+        done = self.pay("Acme Tools", 5000, "2026-07-20")
+        self.matched_to(done, "Acme Tools", amount_minor=5000, document_date="2026-07-20")
+        with FakeBroker() as b:
+            call("rename_vendor", {"vendor": "acme"})
+        self.assertEqual(len(b.deposits), 1)
+        self.assertIn("already has that name", b.deposits[0]["value"])
+        self.assertIsNotNone(self.entry("Acme Tools")["named_at"])
+        with FakeBroker():
+            call("rename_vendor", {"vendor": "acme"})       # a second time: nothing new
+        self.assertEqual(self.entries(), 1)
