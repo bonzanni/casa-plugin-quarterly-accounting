@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.11.13
+
+Same store schema (16) and Casa floor (v0.344.67).
+
+- **You can rename any vendor (#84).** Tell Finance "call LINKEDIN 'LinkedIn'", "call Aws Emea
+  by the name on its invoice" or "use the invoice names for all my vendors". A vendor Finance
+  already knows is renamed in place: it keeps its search hints and your rules, and the bank's
+  text still finds it. The name you give wins over an invoice's issuer, also when it differs
+  only in capitals. A vendor with no matched invoice is named as such; Finance does not guess.
+  A card posted before a rename answers once with the card again, under its new name.
+- **Finance sees every vendor at once (#84),** with its current name and the issuer printed on
+  its matched invoice, so "all my vendors" covers all of them in one go.
+- **"Show me the Coolblue payment" and "anything to check?" get the card (#83),** not a
+  description in Finance's own words.
+
 ## 0.11.12
 
 Same store schema (16) and Casa floor (v0.344.67).

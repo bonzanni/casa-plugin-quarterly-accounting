@@ -19,7 +19,11 @@ _TAG = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 
 def norm(s) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+    return _spaced(s).lower()
+
+
+def _spaced(s) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
 
 
 def counterparty_for(conn, bank_counterparty):
@@ -57,6 +61,14 @@ def display_name(conn, bank_counterparty) -> str:
     return cp["name"] if cp is not None else (bank_counterparty or "Unknown payee")
 
 
+def given_name(cp, bank_texts=()) -> bool:
+    """The entry's name is one someone gave, not a bank text it stands for. #84: compared
+    with its case kept — "LinkedIn" for the bank's "LINKEDIN" is a name the operator gave,
+    which a case-blind comparison took for the bank's own text."""
+    return cp is not None and _spaced(cp["name"]) not in {
+        _spaced(t) for t in (*bank_texts, *json.loads(cp["patterns_json"])) if t}
+
+
 def readable_name(conn, bank_counterparty, cp=None, pid=None) -> str:
     """Issue #59 (1): the name a person reads for a payee — the KB entry's name when it is a
     name someone gave (not the bank's own text), else the issuer printed on the latest
@@ -66,10 +78,9 @@ def readable_name(conn, bank_counterparty, cp=None, pid=None) -> str:
     cp = cp if cp is not None else counterparty_for(conn, bank_counterparty)
     texts = {norm(bank_counterparty)} - {""}
     if cp is not None:
-        pats = {norm(p) for p in json.loads(cp["patterns_json"])}
-        if norm(cp["name"]) not in texts | pats:
+        if given_name(cp, [bank_counterparty]):
             return cp["name"]
-        texts |= pats | {norm(cp["name"])}
+        texts |= {norm(p) for p in json.loads(cp["patterns_json"])} | {norm(cp["name"])}
     if texts:
         r = conn.execute(
             "SELECT d.issuer FROM match_state m JOIN documents d ON d.doc_id=m.doc_id"
@@ -105,25 +116,41 @@ HINT_MAX = 200             # the learned search hint, each of its two values (§
 
 def upsert_counterparty(conn, name, *, patterns=(), source=None, document_link=None,
                         link_note=None, search_hint=None, notes=None, window_days=None,
-                        hint_sender=None, hint_subject=None, token=None) -> dict:
+                        hint_sender=None, hint_subject=None, new_name=None, token=None) -> dict:
     import passes
     with db.tx(conn):
         passes.check_token(conn, token)
         return upsert_in_tx(conn, name, patterns=patterns, source=source,
                             document_link=document_link, link_note=link_note,
                             search_hint=search_hint, notes=notes, window_days=window_days,
-                            hint_sender=hint_sender, hint_subject=hint_subject)
+                            hint_sender=hint_sender, hint_subject=hint_subject,
+                            new_name=new_name)
 
 
 def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, link_note=None,
                  search_hint=None, notes=None, window_days=None, hint_sender=None,
-                 hint_subject=None) -> dict:
+                 hint_subject=None, new_name=None) -> dict:
     """The upsert inside the caller's transaction (a reading's identity clause
     checks the shown revision in the same transaction as this write). hint_sender and
-    hint_subject are the vendor's learned search hint (design rev 17 §2.2 step 5, §3)."""
+    hint_subject are the vendor's learned search hint (design rev 17 §2.2 step 5, §3).
+    new_name (#84, ruling on #77 item 3): the operator renames the vendor `name` (its current
+    name or one of its bank texts). The same entry keeps everything it holds and its old name
+    stays one of its bank texts, so every text that found it still finds it; with no entry,
+    one is made under new_name for the bank text `name`."""
     import lineage
     if not (name or "").strip():
         raise db.Refusal("a counterparty needs a name")
+    if new_name is not None:
+        if not isinstance(new_name, str) or not new_name.strip():
+            raise db.Refusal("new_name is the name to show for this vendor")
+        current = _entry(conn, name) or counterparty_for(conn, name)
+        patterns = [*patterns, current["name"] if current is not None else name]
+        if current is not None:
+            _refuse_shared_bank_text(conn, current, [new_name.strip(), *patterns,
+                                                     *json.loads(current["patterns_json"])])
+            conn.execute("UPDATE counterparties SET name=? WHERE cp_id=?",
+                         (new_name.strip(), current["cp_id"]))
+        name = new_name
     if source not in (None, "email", "portal"):
         raise db.Refusal("source is 'email' or 'portal'")
     if document_link is not None and len(document_link) > LINK_MAX:
@@ -137,6 +164,10 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
     existing = _entry(conn, name)
     held = json.loads(existing["patterns_json"]) if existing is not None else []
     merged = sorted(set(held) | {p.strip() for p in patterns})
+    if new_name is not None:
+        # d1 (Astra S2): a pattern equal to the new name (a name given earlier, renamed back
+        # to) would make the name read as a bank text; the name itself still resolves it
+        merged = [p for p in merged if norm(p) != norm(name)]
     # Every bank text resolves to at most one entry (fix wave B, Astra S1; round
     # B2, Terra S1): ALL of this upsert's names and patterns — the ones it adds and
     # the ones the entry already holds — are checked against every OTHER entry's,
@@ -160,6 +191,17 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
     return get_counterparty(conn, name) or {}
 
 
+def same_vendor(conn, a, b) -> bool:
+    """#84: two vendor names are one vendor — the same text, or texts the knowledge base
+    resolves to one entry. A rename changes the display name (loop.vendor_of) while a filed
+    document, a running job's work list and a posted card keep the name they were given; the
+    renamed entry keeps its old name as a bank text, so both still resolve to it."""
+    if norm(a) == norm(b):
+        return True
+    ea, eb = counterparty_for(conn, a), counterparty_for(conn, b)
+    return ea is not None and eb is not None and ea["cp_id"] == eb["cp_id"]
+
+
 def _texts(name, patterns) -> set:
     return {t for t in (norm(name), *(norm(p) for p in patterns)) if t}
 
@@ -176,8 +218,9 @@ def _refuse_shared_bank_text(conn, entry, texts) -> None:
             import views
             owner = views.field(r["name"])
             raise db.Refusal(f"the bank text '{views.field(mine[min(shared)])}' already "
-                             f"belongs to {owner}; change {owner} instead, or give this "
-                             "counterparty another name")
+                             f"belongs to {owner}; change {owner} instead (to rename it, "
+                             f"name={owner} with new_name), or give this counterparty another "
+                             "name")
 
 
 def _require_seen_render(conn, render_id) -> None:
