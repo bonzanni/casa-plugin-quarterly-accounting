@@ -26,7 +26,7 @@ class ProposalLineCountsPurchases(LoopCase):
                      document_date="2026-09-01", amount_minor=2200, currency="USD")
         line = self.proposal_line()
         self.assertNotIn("fit", line)
-        self.assertIn("↔ invoice · USD 22.00", line)
+        self.assertIn("↔ Adobe invoice · USD 22.00 (other currency)", line)   # #102
 
     def test_the_twin_compares_by_the_purchase_normalisation(self):
         p = self.pay("Adobe", 10000, "2026-09-01")

@@ -361,8 +361,12 @@ def _proposal_line(conn, i, d) -> str:
         c = offered[0]["doc"]
         word = views.KIND_WORD.get(c["kind"], "document")
         doc = word          # #99: short names, never a raw document number
+        other = c.get("currency") and d["currency"] and c["currency"] != d["currency"]
+        if other and c.get("issuer"):
+            # #102: the amounts differ, so the line names whose document it is
+            doc = f"{views.field(c['issuer'])} {word}"
         doc += f" · {_money(c['amount_minor'], c['currency'])}"
-        if c.get("currency") and d["currency"] and c["currency"] != d["currency"]:
+        if other:
             doc += " (other currency)"
     return (f"{i}. {views.field(views.shown(d))} · {_day(d['date'])} · "
             f"{_money(d['amount_minor'], d['currency'])} ↔ {doc}")
@@ -849,6 +853,11 @@ def compose_open(conn, quarter, *, scheduled=False, links=False, package=False) 
         head = [f"{_qn(quarter)} · {_s(n, 'payment')} · all accounted for"]
     else:
         head = [f"{_qn(quarter)} · {_s(n, 'payment')}", _counts_line(c)]
+    if package and n:
+        # #102: the operator asked whether the quarter is ready for the accountant — the card
+        # answers it in one line after its title
+        head.insert(1, f"{_qn(quarter)} is ready for your accountant."
+                    if loop.complete(conn, quarter) else "Not ready yet.")
     tail = _other_quarters(st, open_missing, quarter)
     if links:
         tail += _links_lines(conn, mine, head + _confirm_room(props), tail, quarter)

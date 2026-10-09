@@ -117,7 +117,7 @@ class TestForeignCurrency(unittest.TestCase):
                          "runners_up": [], "author": "auto", "state": "proposed"}}
         lines = views.evidence(d)
         self.assertIn("The invoice is in USD 11.00; the payment is EUR 9.48.", lines)
-        self.assertIn("Not sure — say if it's wrong.", lines)
+        self.assertNotIn("Not sure — say if it's wrong.", lines)     # #102: said once
         # C1 (Astra S2): competing candidates name their own amounts too
         cand = {"match_id": 2, "document": {**doc, "doc_id": 2, "number": "B",
                                             "amount_minor": 1200}}
