@@ -246,14 +246,14 @@ def t_read_document(args):
 @register("get_counterparty",
           "The KB entry whose name or bank text equals `text` (exact, case-insensitive): "
           "expectation override, source (email/portal), researched document link, search hint. "
-          "To find a vendor by part of its name, or its invoice's issuer: list_vendors.",
+          "To find a vendor by part of its name, or the name on its invoice: list_vendors.",
           obj({"text": S}, ("text",)))
 def t_get_cp(args):
     _need(args, "text")
     # #86: a miss names where every vendor is, with its invoice's issuer
     return kb.get_counterparty(conn(), args["text"]) or {
         "found": False, "note": "No vendor has exactly this name or bank text; list_vendors "
-                                "lists every vendor with the issuer on its invoice."}
+                                "lists every vendor with the name on its invoice."}
 
 
 @register("upsert_counterparty",
@@ -261,28 +261,56 @@ def t_get_cp(args):
           "shows them; source is 'email' or 'portal'; document_link is the researched deep link "
           "to the vendor's invoice list. hint_sender and hint_subject are the vendor's learned "
           "search hint: the sender address and subject pattern of the search that found its "
-          "invoice. new_name renames the vendor `name` (its current name or a bank text, as "
-          "list_vendors gives it): the same entry keeps its patterns, hints and rulings, and "
-          "its old name stays one of its bank texts; `line` says the rename in plain words. "
-          "During a pass, pass the pass_token.",
-          obj({"name": S, "new_name": S, "patterns": A, "source": S, "document_link": S,
+          "invoice. To rename a vendor: rename_vendor. During a pass, pass the pass_token.",
+          obj({"name": S, "patterns": A, "source": S, "document_link": S,
                "link_note": S, "search_hint": S, "notes": S, "window_days": I,
                "hint_sender": S, "hint_subject": S, "pass_token": TOKEN}, ("name",)))
 def t_upsert_cp(args):
     _need(args, "name")
+    if args.get("new_name") is not None:
+        # #89: a rename posts its outcome; this tool no longer renames (it would ignore it)
+        raise db.Refusal("nothing was changed: to rename a vendor, call rename_vendor (it "
+                         "posts the rename to the operator)")
     return kb.upsert_counterparty(conn(), args["name"], token=_int(args, "pass_token"),
                                   **_pick(args, ("patterns", "source", "document_link",
                                                  "link_note", "search_hint", "notes",
                                                  "window_days", "hint_sender",
-                                                 "hint_subject", "new_name")))
+                                                 "hint_subject")))
+
+
+@register("rename_vendor",
+          "The operator renames one vendor. vendor: their words for it (its name, part of it, "
+          "a bank text, or the name on its invoice); new_name: the name they give, left out "
+          "for the name on its invoice. Casa posts \"<old> is now called <new>.\" with the "
+          "vendor's card to the operator; never retell it, add nothing. After its receipt, "
+          "mark_rendering_delivered(render_id); your whole reply is <silent/>. `refused`: "
+          "nothing was renamed or posted; say its words.",
+          obj({"vendor": S, "new_name": S}, ("vendor",)))
+@capability("view")
+def t_rename_vendor(args):
+    import naming
+    _need(args, "vendor")
+    return naming.rename_vendor(conn(), args["vendor"], args.get("new_name"))
+
+
+@register("rename_vendors_to_invoice_names",
+          "The operator asks for the invoice names for all vendors: every vendor gets the name "
+          "on its latest matched invoice, except a name the operator gave and a name that "
+          "belongs to another vendor. Casa posts one short summary to the operator; never "
+          "retell it, add nothing: your whole reply is <silent/>.",
+          obj({}))
+@capability("results")
+def t_rename_all(args):
+    import naming
+    return naming.rename_all(conn())
 
 
 @register("list_vendors",
-          "Read-only: every vendor of the payments, one entry each: name (its current name — "
-          "pass it as upsert_counterparty's name to rename it), shown (the name its cards "
-          "show), bank_texts, named (the name is one someone gave), invoice_issuer (the issuer "
-          "printed on the latest invoice matched to one of its payments; null when none is "
-          "matched), payments, latest_pid. `next`: pass it back as `after` for more.",
+          "Read-only: every vendor of the payments, one entry each: name (its current name), "
+          "shown (the name its cards show), bank_texts, named (the name is one someone gave), "
+          "invoice_name (the name printed for it on the latest invoice matched to one of its "
+          "payments; null when none is matched), payments, latest_pid. `next`: pass it back "
+          "as `after` for more. To rename a vendor: rename_vendor.",
           obj({"after": {"type": "array", "description": "the cursor from the previous "
                                                          "`next`, passed back unchanged"}}))
 def t_vendors(args):

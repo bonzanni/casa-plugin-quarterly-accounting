@@ -78,16 +78,12 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
 ## Naming a vendor
 
 The operator names a vendor: "call LINKEDIN 'LinkedIn'", the name on its invoice, or invoice
-names for all vendors. Not a reading: a fresh `list_vendors` every time, whatever an earlier
-conversation found (their words may be only part of a name or bank text), then
-`upsert_counterparty(name=<its name>, new_name=…)` for each:
-- its invoice's name: invoice_issuer; null: say none is matched, never guess;
-- all vendors: each whose invoice_issuer differs from its name, every page;
-- never rename unasked.
-Plain words, never tool, entry or pattern. One vendor: say the rename's `line`, then
-`show_view(view="item", pid=<its latest_pid>)`. All: one short message: "Renamed 14 vendors.
-6 keep their bank names: the invoice name belongs to another vendor (<names>). No invoice
-yet: <names>."
+names for all vendors. Not a reading. One vendor: `rename_vendor(vendor=<their words for
+it>, new_name=<the name they give; left out for the name on its invoice>)`, whatever an
+earlier conversation found. All vendors: `rename_vendors_to_invoice_names()`, once. Each
+posts its outcome to the operator itself: add nothing, your whole reply is `<silent/>`
+(after `rename_vendor`'s receipt, `mark_rendering_delivered(render_id)` first). `refused`:
+nothing was renamed; say its words. Never rename unasked.
 
 ## Asks: a check, a package
 

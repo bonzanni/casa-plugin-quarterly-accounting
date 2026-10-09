@@ -71,11 +71,13 @@ class _Store(LoopCase):
 # each posting tool's delivered slot and its kind (§3)
 SLOTS = {"show_view": "view", "propose_reading": "reading", "propose_account": "accounts",
          "post_results": "results", "post_package": "package", "get_package": "package",
-         "get_document": "document"}
+         "get_document": "document", "rename_vendor": "view",
+         "rename_vendors_to_invoice_names": "results"}
 KINDS = {"show_view": "operator_proposal", "propose_reading": "operator_proposal",
          "propose_account": "operator_proposal", "post_results": "operator_message",
          "post_package": "operator_file", "get_package": "operator_file",
-         "get_document": "operator_file"}
+         "get_document": "operator_file", "rename_vendor": "operator_proposal",
+         "rename_vendors_to_invoice_names": "operator_message"}
 PROPOSALS = {t for t, k in KINDS.items() if k == "operator_proposal"}
 
 
@@ -140,11 +142,11 @@ class Shapes:
             self.records.append(rec)
             return body
         prop = json.loads(body["value"])
-        if tool == "show_view":
+        if tool in ("show_view", "rename_vendor"):
             # binding r7: the checker builds Casa's real quote of this post (label, render,
             # clip) and the plugin must bind it back to this rendering, on the store copy
             rec["bind"] = {"render_id": out["render_id"], "store": self.shape}
-            if prop.get("pages"):
+            if tool == "show_view" and prop.get("pages"):
                 # #66: each plain page before the card is a rendering of its own — the
                 # checker displays and quotes every page and binds it back to its page
                 page_ids = json.loads(st.conn.execute(
@@ -152,6 +154,12 @@ class Shapes:
                     (out["render_id"],)).fetchone()[0])["list_pages"]
                 rec["page_binds"] = [{"render_id": rid, "display_expect": views.unesc(t)}
                                      for rid, t in zip(page_ids, prop["pages"], strict=True)]
+            elif tool == "rename_vendor":
+                # #89: the rename's line, a page of its own before the card
+                rid = st.conn.execute("SELECT render_id FROM renders WHERE text=? ORDER BY"
+                                      " rowid DESC LIMIT 1", (prop["pages"][0],)).fetchone()[0]
+                rec["page_binds"] = [{"render_id": rid,
+                                      "display_expect": views.unesc(prop["pages"][0])}]
         if display is True:
             rec["display_expect"] = views.unesc(prop["text"])
         else:
@@ -945,6 +953,40 @@ def gen_get_document(sh, st, b):
         raise AssertionError(f"get_document:file: posted {body}")
 
 
+def _renamable(st):
+    """#89: two payees whose matched invoices print one hostile issuer (the second keeps its
+    name: the first took it) and one with no invoice."""
+    import db
+    pids = build(st, {"clean": [hostile(0), hostile(1)], "missing": [hostile(2)]})
+    with db.tx(st.conn):
+        st.conn.execute("UPDATE documents SET issuer=?", (hostile(5, "_")[:300],))
+    return pids
+
+
+def gen_rename_vendor(sh, st, b):
+    """#89: one rename — the plain line before the vendor's card — by a given hostile name
+    and by the name on its invoice."""
+    import views
+    _renamable(st)
+    for case, args in (("rename_vendor:given", {"vendor": hostile(2),
+                                                "new_name": hostile(6, "`")[:300]}),
+                       ("rename_vendor:invoice", {"vendor": hostile(0)})):
+        n0 = len(b.deposits)
+        sh.call(st, b, case, "rename_vendor", args)
+        prop = json.loads(b.deposits[n0]["value"])
+        if len(prop.get("pages") or []) != 1 or "is now called" not in views.unesc(
+                prop["pages"][0]):
+            raise AssertionError(f"{case}: posted {prop.get('pages')}")
+
+
+def gen_rename_all(sh, st, b):
+    """#89: the invoice names for all vendors — one summary message over hostile names."""
+    _renamable(st)
+    body = sh.call(st, b, "rename_all:summary", "rename_vendors_to_invoice_names", {})
+    if not body["value"].startswith("Renamed 1 vendor to the name on their invoice. 1 keeps"):
+        raise AssertionError(f"rename_all:summary: posted {body['value'][:200]}")
+
+
 SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_single,
           gen_show_view_setup_stop, gen_legacy_rendering, gen_propose_reading,
           gen_propose_account, gen_post_results, gen_post_package,
@@ -952,7 +994,8 @@ SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_si
           gen_end_message_handover, gen_end_message_handover_close,
           gen_end_message_with_completion, gen_open_items,
           gen_all_answered, gen_ready_notice, gen_review_cards, gen_vendor_pages,
-          gen_vendor_pages_scheduled, gen_get_package, gen_get_document, gen_replace_cards]
+          gen_vendor_pages_scheduled, gen_get_package, gen_get_document, gen_replace_cards,
+          gen_rename_vendor, gen_rename_all]
 
 
 def generate(stores=None) -> Shapes:

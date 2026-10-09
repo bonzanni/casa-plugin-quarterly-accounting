@@ -95,33 +95,46 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
             r = conn.execute("SELECT * FROM renders WHERE render_id=?",
                              (_compose_list(conn, view or "status", quarter, pid, page,
                                             after, prev),)).fetchone()
-        scope = json.loads(r["scope_json"])
-        if r["kind"] in cards.KINDS:
-            # keys minted and posted_seq stamped by deposit_of, as for a tap's `next`
-            value = json.dumps(cards.deposit_of(conn, r["render_id"]), ensure_ascii=False)
-        else:
-            buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r))
-            revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
-            pages = [conn.execute("SELECT text FROM renders WHERE render_id=?",
-                                  (p,)).fetchone()[0] for p in scope.get("list_pages") or []]
-            value = _proposal(r["text"], buttons, revision, pages)
-            for p in scope.get("list_pages") or []:
-                # a page is posted with its card: a quote of it binds it (db.seen_render)
-                conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
-                             (db.next_seq(conn), p))
-            # r3 #3: stamped posted before the deposit (which stays last) — a view posted by
-            # a tap's stored call is never marked delivered, and a quote of it binds it. The
-            # stamp means "a deposit was attempted at seq n": monotone, never restored on a
-            # refusal, so a late refusal cannot erase a later post's stamp (binding §3, r4
-            # Terra S1). It only makes the row a quote candidate, and recency never picks
-            # among those (R1)
-            conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
-                         (db.next_seq(conn), r["render_id"]))
+        value, scope = _view_value(conn, r)
         # g1 (Astra S1), Casa #1312: re-posting the same rendering after a cut that lost its
         # mark_rendering_delivered sends nothing — Casa answers the original receipt
         key = delivery_key(conn, "view", [r["render_id"]])
     ref = casa_broker.deposit("view", value, key=key)
     return {"view": ref, "render_id": r["render_id"], "next": scope.get("next")}
+
+
+def _view_value(conn, r, lead=None):
+    """show_view's deposit of the stored rendering `r` (inside the caller's transaction): the
+    proposal value and the rendering's scope. `lead` (#89): one plain line Casa posts before
+    the card (its first page), e.g. a rename's "<old> is now called <new>."."""
+    import cards
+    scope = json.loads(r["scope_json"])
+    if r["kind"] in cards.KINDS:
+        # keys minted and posted_seq stamped by deposit_of, as for a tap's `next`
+        value = json.dumps(cards.deposit_of(conn, r["render_id"]), ensure_ascii=False)
+    else:
+        buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r))
+        revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
+        pages = [conn.execute("SELECT text FROM renders WHERE render_id=?",
+                              (p,)).fetchone()[0] for p in scope.get("list_pages") or []]
+        value = _proposal(r["text"], buttons, revision, pages)
+        for p in scope.get("list_pages") or []:
+            # a page is posted with its card: a quote of it binds it (db.seen_render)
+            conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
+                         (db.next_seq(conn), p))
+        # r3 #3: stamped posted before the deposit (which stays last) — a view posted by
+        # a tap's stored call is never marked delivered, and a quote of it binds it. The
+        # stamp means "a deposit was attempted at seq n": monotone, never restored on a
+        # refusal, so a late refusal cannot erase a later post's stamp (binding §3, r4
+        # Terra S1). It only makes the row a quote candidate, and recency never picks
+        # among those (R1)
+        conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
+                     (db.next_seq(conn), r["render_id"]))
+    if lead is not None:
+        v = json.loads(value)
+        v["pages"] = [views.deposit_safe(lead), *v.get("pages", [])]
+        value = json.dumps(v, ensure_ascii=False)
+    return value, scope
 
 
 def _compose_list(conn, view, quarter, pid, page, after, prev) -> str:
