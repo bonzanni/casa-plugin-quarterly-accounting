@@ -62,12 +62,12 @@ class ConflictingReadings(StoreCase):
         u = loop.payment_unit(self.conn, self.job_id)
         self.assertIn(first, [c["doc_id"] for c in u["candidates"]])
         out = decide.decide(self.conn, self.token, [{
-            "pid": pid, "outcome": "match", "doc_id": first, "document_date": "2026-04-05",
+            "pid": pid, "outcome": "match", "doc_id": first, "document_date": "2026-08-05",
             "expected_revision": u["revision"]}])
         self.assertEqual(out["applied"], 0)
         self.assertIn("unknown", out["results"][0]["refused"])
         out = decide.decide(self.conn, self.token, [{
-            "pid": pid, "outcome": "propose", "doc_id": first, "document_date": "2026-04-05",
+            "pid": pid, "outcome": "propose", "doc_id": first, "document_date": "2026-08-05",
             "expected_revision": u["revision"]}])
         self.assertEqual(out["applied"], 1)
 
@@ -142,7 +142,8 @@ class ConflictIsSticky(StoreCase):
         head, props = cards._receipts(self.conn, [doc])
         self.assertEqual([p["pid"] for p in props], [self.pid])
         (line,) = head                       # #67: the document's own line says "proposed"
-        self.assertTrue(line.endswith(": proposed for Zapier — confirm below."), line)
+        self.assertTrue(line.endswith(": proposed for Zapier · 2 Aug · EUR 10.00 — confirm "
+                                      "below."), line)
 
 
 class SchemaTwelveStoresUpgrade(StoreCase):

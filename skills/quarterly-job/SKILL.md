@@ -141,8 +141,9 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
    **`why: handover` with `holds`:** the payment already has a document and the operator
    handed one over (`handed_over`). It belongs to this payment →
    `outcome: "replace", doc_id` (the operator is asked); it does not → `outcome: "keep"`.
-   A handed-over document that belongs to a payment without `holds`: `"propose"` (the
-   operator confirms).
+   A handed-over document is `"propose"`d (the operator confirms) only for the payment it
+   belongs to: `handed_fits` lists every payment it could fit; judge by its reference,
+   billing period, then date. Another payment's → not this one's.
 5. **Save what worked:** when a search found an invoice and `kb` has no such hint,
    `upsert_counterparty(name=<vendor>, hint_sender=<the sender address>, hint_subject=<a subject pattern>, pass_token)`.
 
@@ -166,7 +167,8 @@ No read-backs.
 
 ## Never
 
-You never speak to the operator, except to answer a message in the job's topic.
+You never speak to the operator, except to answer a message in the job's topic; write
+no commentary between calls.
 Never call `get_document` (it posts to the chat); read with `read_document`. Never call
 `request_work` or `start_job`: those asks are made at your desk (skill
 quarterly-accounting), not by the job. Never fetch or send a package. Never call

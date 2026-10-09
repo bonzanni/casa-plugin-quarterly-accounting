@@ -274,6 +274,27 @@ def _gap(a, b) -> int:
     return abs((dates.parse_day(a[:10]) - dates.parse_day(b[:10])).days)
 
 
+def fit_window(row):
+    """#72 (d2/d3): the dates a document's own date may have to back this payment — from the
+    first day two months before the payment's quarter (an invoice on net-30/60 terms) to the
+    last day of the month after it (the search window's end). None for an undated payment."""
+    day = dates.effective_date(row)
+    if not day:
+        return None
+    start, end = dates.quarter_bounds(dates.quarter_of(day))
+    return dates.add_months(start, -2), dates.add_months(end, 1)
+
+
+def in_window(row, doc_date) -> bool:
+    """#72: a dated document is a candidate of a payment only inside its fit_window (the
+    books guard: a 15 Sep invoice never backs a 15 Apr charge of the same amount). An
+    undated document, or payment, is not judged here."""
+    w = fit_window(row)
+    if w is None or not doc_date:
+        return True
+    return w[0] <= doc_date[:10] < w[1]
+
+
 def candidates(conn, pid, row, vendor) -> list:
     """§2.2: filed documents that could fit — the same currency and amount from any
     vendor; another currency the FX screen does not rule out, from the payment's vendor or
@@ -284,6 +305,8 @@ def candidates(conn, pid, row, vendor) -> list:
     kind = lineage.projection(conn, pid)["exp_kind"]
     out = []
     for d in conn.execute("SELECT * FROM documents WHERE irrelevant=0 ORDER BY doc_id"):
+        if not in_window(row, d["document_date"]):
+            continue                       # #72: another period's document, never this one's
         if d["amount_minor"] is None or not d["currency"]:
             # Q2 run 1: a document of unknown amount is a candidate of its own vendor only
             # — to propose (the floor never matches it)
@@ -388,6 +411,30 @@ def payment_unit(conn, job_id):
         return u
 
 
+def _handed_fits(conn, job_id, docs) -> dict:
+    """{doc_id: [{pid, date, amount_minor, currency, holds_it}, …]} over the run's listed
+    payments each handed document of `docs` could fit, in date order."""
+    out = {}
+    if not docs:
+        return out
+    rows = []
+    for (pid,) in conn.execute("SELECT pid FROM run_work WHERE job_id=?", (job_id,)):
+        p = lineage.projection(conn, pid)
+        row = lineage.live_row(conn, p)
+        if row is not None and not p["ended"]:
+            rows.append((pid, p, row))
+    for doc in docs:
+        fits = []
+        for pid, p, row in rows:
+            if _fit_docs(conn, pid, p, row, [doc]):
+                fits.append({"pid": pid, "date": dates.effective_date(row),
+                             "amount_minor": row["amount_minor"], "currency": row["currency"],
+                             "holds_it": any(h == pid for h, _how, _d in
+                                             matches.purchase_holders(conn, doc))})
+        out[str(doc)] = sorted(fits, key=lambda f: (f["date"] or "", f["pid"]))
+    return out
+
+
 def _owed_files_unit(conn, job_id, hand_seq):
     """e1 (Astra S1, rev 18.4 §R18.2): a payment's found attachments stay owed whatever
     became of the payment — decided, or settled by the operator meanwhile — until filed,
@@ -484,6 +531,9 @@ def payment_unit_in_tx(conn, job_id, hand_seq=None):
         "vendor": vendor, "kb": _kb(conn, vendor), "search_window": search_window(row),
         "candidates": shown, "exact_fit": fx, "candidates_total": len(cands),
         "handed_over": handed_over,          # e1: the operator's handed documents, named
+        # #72: every listed payment each handed document could fit — the model gives it to
+        # the one it belongs to (reference, billing period, date); never a hand-out order
+        "handed_fits": _handed_fits(conn, job_id, handed_over),
         "searches": r["searches"],
         "searches_left": max(0, searches_max(conn, job_id) - r["searches"]),
         "files_total": len(refs),

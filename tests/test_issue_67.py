@@ -65,8 +65,8 @@ class OneUnreadInvoice(Case):
         self.assertEqual((row[0], row[1]), (2000, "EUR"))
         self.assertIsNotNone(row[2])
         text, labels = self.card()
-        self.assertIn("Zapier INV\\-7 · 4 Aug · EUR 20.00: proposed for Zapier — confirm below.",
-                      text)
+        self.assertIn("Zapier INV\\-7 · 4 Aug · EUR 20.00: proposed for Zapier · 5 Aug · EUR 20.00 "
+                      "— confirm below.", text)
         self.assertEqual(labels.count("Get package"), 1)        # its payment's quarter, Q3
         self.assertIn("Get package: the Q3 zip", text)
 

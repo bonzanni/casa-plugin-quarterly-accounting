@@ -158,7 +158,8 @@ class HandoverJoiningACheck(StoreCase):
         self.assertTrue(lines[0].startswith("Q3 checked · 2 payments"), lines)
         self.assertIn("1 to confirm · 1 missing", lines)
         (receipt,) = [ln for ln in lines if "ZAP\\-HAND" in ln and ": proposed" in ln]
-        self.assertTrue(receipt.endswith(": proposed for Zapier — confirm below."), receipt)
+        self.assertTrue(receipt.endswith(": proposed for Zapier · 5 Jul · EUR 10.00 — confirm "
+                                         "below."), receipt)
         self.assertEqual([b["label"] for b in end["buttons"]],
                          ["Review", "Confirm all", "Invoice links", "Get package"])   # #57
         # the Review order is the check's: the missing payment's vendor
@@ -184,8 +185,8 @@ class HandoverJoiningACheck(StoreCase):
             "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
             {"matched": 1, "proposed": 1})           # #67: the handed one waits for a yes
         self.assertIn("Q3 checked · 2 payments", end["text"])
-        self.assertIn("ZAP\\-HAND · 5 Jul · EUR 10.00: proposed for Zapier — confirm below.",
-                      end["text"])
+        self.assertIn("ZAP\\-HAND · 5 Jul · EUR 10.00: proposed for Zapier · 5 Jul · EUR 10.00 "
+                      "— confirm below.", end["text"])
 
     def test_a_standalone_continuation_keeps_the_handover_only_message(self):
         """A run whose only request is the handover shows only what it changed."""
@@ -200,8 +201,8 @@ class HandoverJoiningACheck(StoreCase):
                                             doc_ids=[doc["doc_id"]]))
         self.drv.run_job("d2d2d2d2-b4")
         end = self.drv.posted_end("d2d2d2d2-b4")
-        self.assertIn("Zapier ZAP\\-HAND · 5 Jul · EUR 10.00: proposed for Zapier — confirm "
-                      "below.", end["text"].split("\n")[0])
+        self.assertIn("Zapier ZAP\\-HAND · 5 Jul · EUR 10.00: proposed for Zapier · 5 Jul · "
+                      "EUR 10.00 — confirm below.", end["text"].split("\n")[0])
         self.assertNotIn("checked", end["text"])
         self.assertEqual([b["label"] for b in end["buttons"]],
                          ["Review", "Confirm all", "Get package"])

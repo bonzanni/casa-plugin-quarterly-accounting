@@ -151,12 +151,14 @@ class Shapes:
         self.records.append(rec)
         self._stored_calls(prop["buttons"])
         for b in prop["buttons"]:
-            if "key" in b["call"]["arguments"]:
+            if "call" in b and "key" in b["call"]["arguments"]:
                 self.tap(st, case, b)
         return prop["buttons"]
 
     def _stored_calls(self, buttons):
         for b in buttons:
+            if "call" not in b:
+                continue                 # #72: Casa's Close button stores no call
             self.records.append({"case": "stored_call", "tool": b["call"]["tool"],
                                  "arguments": b["call"]["arguments"]})
 
@@ -712,6 +714,22 @@ def gen_end_message_handover(sh, st, b):
     _post(sh, st, b, "end:handover", end, ": matched to")
 
 
+def gen_end_message_handover_close(sh, st, b):
+    """#72: a handover card with nothing to tap (a copy already filed, a document fitting no
+    payment) posts with Casa's Close button (v0.344.64, #1375) — a buttonless card is refused."""
+    import cards
+    loop_store(st)
+    first = st.doc(counterparty=hostile(0), issuer=hostile(0), amount_minor=10000,
+                   document_date=Q3_DAY, document_number=docnum(0), recipient="Voorbeeld BV")
+    copy = st.doc(counterparty=hostile(0), issuer=hostile(0), amount_minor=10000,
+                  document_date=Q3_DAY, document_number=docnum(0), recipient="Voorbeeld BV")
+    lone = st.doc(counterparty=hostile(2), amount_minor=1, document_number=docnum(2))
+    end = _c(st, cards.compose_end, st.job_id, scheduled=False, handover_docs=[copy, lone])
+    buttons = _post(sh, st, b, "end:handover-close", end, f": already filed as #{first}")
+    if buttons != [{"label": "Close", "close": True}]:
+        raise AssertionError(f"end:handover-close: buttons {buttons}")
+
+
 def gen_end_message_with_completion(sh, st, b):
     """D19: an owed completion notice as a line of an end message with items, and as the
     message itself when nothing is left to ask."""
@@ -920,7 +938,8 @@ SHAPES = [gen_show_view_full_stars, gen_show_view_full_hostile, gen_show_view_si
           gen_show_view_setup_stop, gen_legacy_rendering, gen_propose_reading,
           gen_propose_account, gen_post_results, gen_post_package,
           gen_end_message_operator, gen_end_message_scheduled, gen_end_message_nothing_to_ask,
-          gen_end_message_handover, gen_end_message_with_completion, gen_open_items,
+          gen_end_message_handover, gen_end_message_handover_close,
+          gen_end_message_with_completion, gen_open_items,
           gen_all_answered, gen_ready_notice, gen_review_cards, gen_vendor_pages,
           gen_vendor_pages_scheduled, gen_get_package, gen_get_document, gen_replace_cards]
 

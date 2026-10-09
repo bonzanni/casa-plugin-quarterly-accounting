@@ -166,7 +166,8 @@ class TestSheet(Base):
         a = self.add(counterparty="SeptCo", booking_date="2026-09-29")
         b = self.add(counterparty="OctCo", booking_date="2026-10-02")
         for pid in (a, b):
-            matches.propose_match(self.conn, pid=pid, doc_id=self.doc(), token=self.token,
+            matches.propose_match(self.conn, pid=pid, doc_id=self.doc(document_date="2026-09-20"),
+                                  token=self.token,
                                   expected_revision=self.rev(pid), row_snapshot=self.snapshot(pid))
         text = self.render(quarter="2026-Q4")["text"]
         self.assertIn("SeptCo", text)

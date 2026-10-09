@@ -20,7 +20,11 @@ KEEP_CARD_TOOLS = ("get_document",)
 
 
 def button_json(label, tool, args) -> dict:
-    """One deposited button: its stored call, and `keep_card` for a file it only shows."""
+    """One deposited button: its stored call, and `keep_card` for a file it only shows.
+    #72: `tool` None is Casa's Close button (v0.344.64, #1375): no call, Casa removes the
+    keyboard itself."""
+    if tool is None:
+        return {"label": label, "close": True}
     out = {"label": label, "call": {"tool": tool, "arguments": args}}
     if tool in KEEP_CARD_TOOLS:
         out["keep_card"] = True
@@ -41,7 +45,7 @@ def _keyed(conn, render_id, specs) -> list:
     transaction."""
     out = []
     for label, tool, args, key_spec in specs:
-        args = dict(args)
+        args = dict(args or {})
         if key_spec is not None:
             key = keys.mint()
             action, pid, doc_id = key_spec

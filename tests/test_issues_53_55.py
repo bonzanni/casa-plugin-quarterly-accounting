@@ -89,7 +89,8 @@ class StatusCard(_Cards):
         self.propose(q3, issuer="Zapier", document_number="ZAP-114", amount_minor=1958)
         self.pay("Twilio", 2000, "2026-08-14")
         q4 = self.pay("Notion", 900, "2026-10-02")
-        self.propose(q4, issuer="Notion", document_number="NO-1", amount_minor=900)
+        self.propose(q4, issuer="Notion", document_number="NO-1", amount_minor=900,
+                     document_date="2026-10-01")          # #72: inside its window
         with self.patch_clock(AT):
             rid = self.c(cards.compose_open, "2026-Q3")
         lines = self.text(rid).split("\n")
@@ -227,7 +228,8 @@ class EndCardIsTheQuartersCard(_Cards):
         q3 = self.pay("Zapier", 1958, "2026-09-01")
         self.propose(q3, issuer="Zapier", document_number="ZAP-114", amount_minor=1958)
         q4 = self.pay("Notion", 900, "2026-10-02")
-        self.propose(q4, issuer="Notion", document_number="NO-1", amount_minor=900)
+        self.propose(q4, issuer="Notion", document_number="NO-1", amount_minor=900,
+                     document_date="2026-10-01")          # #72: inside its window
         with db.tx(self.conn):
             self.conn.execute("UPDATE runs SET quarter='2026-Q3' WHERE job_id=?", (self.job_id,))
         rid = self.c(cards.compose_end, self.job_id, scheduled=False)
@@ -370,7 +372,8 @@ class OtherQuartersStayUnseen(_Cards):
         q3 = self.pay("Zapier", 1958, "2026-09-01")
         self.propose(q3, issuer="Zapier", document_number="ZAP-114", amount_minor=1958)
         q4 = self.pay("Notion", 900, "2026-10-02")
-        self.propose(q4, issuer="Notion", document_number="NO-1", amount_minor=900)
+        self.propose(q4, issuer="Notion", document_number="NO-1", amount_minor=900,
+                     document_date="2026-10-01")          # #72: inside its window
         with db.tx(self.conn):
             self.conn.execute("UPDATE runs SET quarter='2026-Q3' WHERE job_id=?",
                               (self.job_id,))
