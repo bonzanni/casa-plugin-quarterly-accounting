@@ -346,7 +346,8 @@ class QuestionsAreTheQuartersOnEveryBranch(_Cards):
     def test_a_q4_replace_question_stays_off_the_q3_card(self):
         import cards, replace
         p = self.pay("Notion", 900, "2026-10-02")
-        old = self.doc(issuer="Notion", document_number="NO-1", amount_minor=900)
+        old = self.doc(issuer="Notion", document_number="NO-1", amount_minor=900,
+                       document_date="2026-10-01")
         self.machine_entry(p, old)
         new = self.doc(issuer="Notion", document_number="NO-2", amount_minor=900)
         with db.tx(self.conn):

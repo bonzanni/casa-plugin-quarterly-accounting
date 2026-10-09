@@ -125,7 +125,8 @@ class LinkAndNoun(_Q3):
         self.pay("Twilio", 2000, "2026-08-14")
         q4 = self.pay("Twilio", 2100, "2026-10-14")
         self.machine_entry(q4, self.doc(issuer="Twilio", document_number="TW-9",
-                                        amount_minor=2100))
+                                        amount_minor=2100,
+                                        document_date="2026-10-01"))
         self.assertIn("Also in other quarters: 1 payment (Q4) · Never for Twilio would also "
                       "change it", untag(self.card()["text"]))
 

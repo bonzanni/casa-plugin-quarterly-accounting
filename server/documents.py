@@ -425,11 +425,32 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
             # payment's date, and the package says so
             conn.execute("UPDATE documents SET date_read_at=? WHERE doc_id=?",
                          (db.now() if fields["document_date"] else None, doc_id))
+        mark = conn.execute("SELECT coalesce(max(seq), 0) FROM log").fetchone()[0]
         lineage.settle_doc_holders(conn, doc_id)
         d = _doc(conn, doc_id)
-        return {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields,
-                "amount_minor": d["amount_minor"], "currency": d["currency"],
-                "amount_conflict": bool(d["amount_conflict"])}
+        out = {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields,
+               "amount_minor": d["amount_minor"], "currency": d["currency"],
+               "amount_conflict": bool(d["amount_conflict"])}
+        released = _released(conn, doc_id, mark)
+        if released:
+            out["released"] = released
+        return out
+
+
+def _released(conn, doc_id, mark) -> str | None:
+    """Issue #73: the reply names every job pairing this reading released because the
+    document's date no longer fits the payment (lineage._out_of_window)."""
+    import matches
+    pids = [r[0] for r in conn.execute(
+        "SELECT DISTINCT l.pid FROM log l JOIN matches m ON m.match_id=l.match_id WHERE"
+        " l.seq>? AND l.kind='retire' AND l.cause='out-of-window' AND m.doc_id=?"
+        " ORDER BY l.pid", (mark, doc_id))]
+    if not pids:
+        return None
+    d = _doc(conn, doc_id)
+    return (f"document #{doc_id} is now dated {d['document_date']}, outside the period of "
+            f"{', '.join(matches._payment_words(conn, p) for p in pids)}: that pairing is "
+            "released, so the payment the document belongs to can take it")
 
 
 def _one_purchase_one_payment(conn, doc_id) -> None:
