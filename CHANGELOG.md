@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.19
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **"Check Q3" answers with the quarter's status (#103).** It is a question about where the
+  quarter stands, as ruled on 8 October, also when the assistant passes it on as "run the
+  check". Finance posts the status card and runs nothing. The accounting check starts when
+  you ask for the work, for instance "do the Q3 accounting".
+
 ## 0.11.18
 
 Same store schema (17) and Casa floor (v0.344.67).

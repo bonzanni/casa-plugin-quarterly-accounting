@@ -1,6 +1,6 @@
 ---
 name: quarterly-accounting
-description: Finance's desk for the business books — the operator's questions, replies, files and asks about invoices, receipts, bank payments, what is missing and a quarter's package. Use in any finance turn about accounting (a swipe-reply on a Finance post, a file the operator sent, a delegation about accounting), including a delegation asking you to start or run the accounting check or quarterly-accounting:work. Not in a turn whose brief carries a `Job id:` line (that is quarterly-job).
+description: Finance's desk for the business books — the operator's questions, replies, files and asks about invoices, receipts, bank payments, what is missing and a quarter's package. Use in any finance turn about accounting (a swipe-reply on a Finance post, a file the operator sent, a delegation about accounting), including a delegation relaying an ask to run the accounting check or quarterly-accounting:work. Not in a turn whose brief carries a `Job id:` line (that is quarterly-job).
 ---
 
 # The accounting desk
@@ -23,10 +23,12 @@ the cards' shape: a bold first line, a question on its own line, one line per it
 Read the intent in any wording or language; examples are never phrases to match.
 
 **Where a quarter stands** (how it is going, what is open or missing, whether it is done;
-e.g. "how's Q3?" or "check Q3" as a question about its state): nothing runs.
+e.g. "how's Q3?", "check Q3"): nothing runs. A bare "check" is this, even relayed by a delegate as "run the check": the operator's
+words decide.
 `show_view(view="open", quarter=<the quarter, e.g. "2026-Q3">)`; with no quarter named,
 `show_view(view="open")`. Add `package=true` only when their words make clear they want
-the package ("is Q3 ready for the accountant?"). If it answers `say` instead, say that line verbatim; nothing was posted. After a card's
+the package ("is Q3 ready for the accountant?"). If it answers `say`, say that line
+verbatim; nothing was posted. After a card's
 receipt, `mark_rendering_delivered(render_id)`. The same card recovers a walk of cards that
 stopped, or a button that answered "expired" (Casa #1305).
 
@@ -35,7 +37,7 @@ earlier quarter; e.g. "do the whole Q3 accounting"): the check ask below, with t
 quarter. Never ask the operator to confirm the period: the ask moves the books' start itself, and its `line` says so.
 
 **One payment, or what is left** ("show me the Coolblue payment", "anything to check?"):
-a posted view, never your words or bank-feed's. One payment: `propose_reading`;
+a posted view, never your words. One payment: `propose_reading`;
 what is left: `show_view(view="check")`.
 
 Other questions about the books: `show_view(view=…, quarter=…, page=…, after=…)`, the view the question asks for:
@@ -89,8 +91,7 @@ nothing was renamed; say its words. Never rename unasked.
 
 ## Asks: a check, a package
 
-Getting a quarter done (above), a fresh look at the bank and email, or a delegate asking
-you to start or run the accounting check (even naming `quarterly-accounting:work`):
+Getting a quarter done (above), a fresh look at the bank and email, or a delegate relaying the operator's ask for that work (even naming `quarterly-accounting:work`):
 `request_work(kind="check", trigger="operator", quarter=<the quarter, when one is
 meant>)`. You start it yourself; never ask the delegate to. Its end card is that quarter's.
 "Send the package", "Give me Q3", "rebuild it", "the package for Q2":
@@ -112,8 +113,7 @@ asked). Otherwise always `start_job` with the ask's `start_job` exactly. Read it
 
 ## A file the operator sent
 
-A file on your desk (a swipe-reply with a document, or a delegation naming a shared path)
-is filed by you, without being asked:
+A file on your desk (a reply with a document, a delegation naming a shared path) is filed by you, without being asked:
 1. `list_inbound_files`, then `share_inbound_file(path)` for each document. A delegation
    that names a shared path skips this.
 2. `ingest_document(source_path=<the shared path>, kind=<your reading: invoice, receipt,

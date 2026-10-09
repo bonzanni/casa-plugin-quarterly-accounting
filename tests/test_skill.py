@@ -82,8 +82,8 @@ class TestBothSkills(TempEnv):
         self.assertIn("(skill quarterly-accounting)", jdesc)
         desc = SKILL.split("---")[1]
         self.assertIn("Use in any finance turn about accounting", desc)
-        self.assertIn("a delegation asking you to start or run the accounting check or "
-                      "quarterly-accounting:work", desc)
+        self.assertIn("a delegation relaying an ask to run the accounting check or "
+                      "quarterly-accounting:work", desc)                     # #103
         self.assertIn("Not in a turn whose brief carries a `Job id:` line (that is "
                       "quarterly-job).", desc)
         self.assertNotIn("Not inside the", desc)
