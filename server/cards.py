@@ -575,7 +575,14 @@ def _receipts(conn, docs, job_id=None) -> tuple:
         paired = [p for p, how in hs if how == "matched" and status[p] == "matched"]
         held = [p for p, how in hs if p not in paired]
         if paired:
-            head.append(f"{name}: matched to {_payment_words(work.describe(conn, paired[0]))}.")
+            d = work.describe(conn, paired[0])
+            # operator ruling 2026-10-09: an automatic choice is unmistakable on the card
+            auto = conn.execute("SELECT 1 FROM match_state WHERE pid=? AND doc_id=? AND"
+                                " state='matched' AND author<>'operator'",
+                                (paired[0], doc)).fetchone() is not None
+            head.append(f"{name}: matched {'automatically ' if auto else ''}to the "
+                        f"{_day(d['date'])} {_money(d['amount_minor'], d['currency'])} payment "
+                        f"({views.field(views.shown(d))}).")
             continue
         if conn.execute("SELECT 1 FROM replace_questions WHERE new_doc_id=? AND state='open'",
                         (doc,)).fetchone():
@@ -586,7 +593,7 @@ def _receipts(conn, docs, job_id=None) -> tuple:
             continue
         d = work.describe(conn, held[0]) if held else None
         if d is not None and d["status"] == "proposed":
-            head.append(f"{name}: proposed for {_payment_words(d)} — confirm below.")
+            head.append(f"{name}: proposed for {_payment_words(d)} — confirm?")
             if all(x["pid"] != d["pid"] for x in props):
                 d["vendor"] = d["counterparty"]
                 props.append(d)
@@ -942,7 +949,10 @@ def _differs(conn, old, new) -> str:
                     return _money(v, b["currency"] or a["currency"])
                 return views.field(str(v), 60)
             out.append(f"{word} {show(a[col])} → {show(b[col])}")
-    return ("Differs: " + "; ".join(out) + ".") if out else "Same reading as the current one."
+    if not out:
+        return "Same reading as the current one."
+    text = "Differs: " + "; ".join(out)
+    return text if text.endswith(".") else text + "."
 
 
 def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):

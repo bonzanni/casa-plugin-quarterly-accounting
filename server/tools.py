@@ -189,9 +189,10 @@ def t_ingest(args):
 
 
 @register("update_document_metadata",
-          "Correct a filed document's reading after you judged the actual PDF (kind, issuer, "
-          "number, date, amount, currency, recipient). A kind correction re-checks every payment "
-          "holding the document. During a pass, pass the pass_token.",
+          "Record or correct a filed document's reading after you judged the actual PDF: every "
+          "field printed on it — kind, issuer, number, date, amount, currency and recipient (the "
+          "\"Bill to\" / customer name; a reissue often differs only there). A kind correction "
+          "re-checks every payment holding the document. During a pass, pass the pass_token.",
           obj({"doc_id": I, "kind": S, "counterparty": S, "issuer": S, "document_date": S,
                "document_number": S, "amount_minor": {"type": ["integer", "null"]},
                "currency": {"type": ["string", "null"]}, "recipient": S,

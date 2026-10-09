@@ -955,10 +955,14 @@ class JobDriver:
                      if other else keep)
         elif exact():
             c = exact()[0]
-            # #67: the operator's handed document is proposed — the operator confirms it
-            entry = {**base, "outcome": "propose" if c["doc_id"] in u.get("handed_over", ())
-                     else "match", "doc_id": c["doc_id"],
-                     "document_date": c["date"] or u["date"]}
+            # operator ruling 2026-10-09: a handed document the model is sure of is matched;
+            # one that a nearer payment in handed_fits fits better is that payment's
+            fits = (u.get("handed_fits") or {}).get(str(c["doc_id"]), [])
+            if fits and fits[0]["pid"] != pid:
+                entry = {**base, "outcome": "missing", "reason": "another month's invoice"}
+            else:
+                entry = {**base, "outcome": "match", "doc_id": c["doc_id"],
+                         "document_date": c["date"] or u["date"]}
         elif [c for c in unheld() if gap(c) <= self.propose_days]:
             cs = sorted((c for c in unheld() if gap(c) <= self.propose_days),
                         key=lambda c: (gap(c), c["doc_id"]))

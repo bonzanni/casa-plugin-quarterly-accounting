@@ -59,16 +59,33 @@ class OneUnreadInvoice(Case):
         self.assertEqual(units[0]["docs"] if units[0]["unit"] == "reading" else
                          [u for u in units if u["unit"] == "reading"][0]["docs"], [doc])
         self.no_sweep(units)
-        self.assertEqual(self.work(), [(self.pids[1], "handover", "propose")])
+        self.assertEqual(self.work(), [(self.pids[1], "handover", "match")])
         row = self.conn.execute("SELECT amount_minor, currency, read_at FROM documents WHERE"
                                 " doc_id=?", (doc,)).fetchone()
         self.assertEqual((row[0], row[1]), (2000, "EUR"))
         self.assertIsNotNone(row[2])
         text, labels = self.card()
-        self.assertIn("Zapier INV\\-7 · 4 Aug · EUR 20.00: proposed for Zapier · 5 Aug · EUR 20.00 "
-                      "— confirm below.", text)
+        self.assertIn("Zapier INV\\-7 · 4 Aug · EUR 20.00: matched automatically to the 5 Aug "
+                      "EUR 20.00 payment (Zapier).", text)
         self.assertEqual(labels.count("Get package"), 1)        # its payment's quarter, Q3
         self.assertIn("Get package: the Q3 zip", text)
+
+    def test_an_automatic_match_is_undone_from_its_payments_card(self):
+        """Operator ruling 2026-10-09: an automatic match can be undone the usual way."""
+        doc = self.drv.file_unread("INV-71", "Zapier", 2000, document_date="2026-08-04")
+        self.give(doc)
+        self.go()
+        self.assertIn("matched automatically", self.drv.posted_end("bbbbbbbb-2")["text"])
+        # the usual way: the payment's own card ("show me the Zapier payment") has [Wrong]
+        import json, qa_server, tools  # noqa: F401
+        from tests.fakebroker import FakeBroker
+        with FakeBroker() as b:
+            qa_server.TOOLS["show_view"]["fn"]({"view": "item", "pid": self.pids[1]})
+            card = json.loads(b.deposits[-1]["value"])
+        wrong = next(x for x in card["buttons"] if x["label"] == "Wrong")["call"]
+        qa_server.TOOLS[wrong["tool"]]["fn"](dict(wrong["arguments"]))
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM match_state WHERE doc_id=? AND"
+                                            " state='matched'", (doc,)).fetchone())
 
     def test_the_payment_unit_of_a_handover_run_offers_no_search(self):
         doc = self.drv.file_unread("INV-8", "Zapier", 1000, document_date="2026-07-04")
@@ -152,12 +169,12 @@ class SeveralInvoices(Case):
         self.assertEqual(sorted([u for u in units if u["unit"] == "reading"][0]["docs"]),
                          sorted([a, b, c]))
         self.no_sweep(units)
-        self.assertEqual(self.work(), [(self.pids[0], "handover", "propose"),
-                                       (self.pids[2], "handover", "propose")])
+        self.assertEqual(self.work(), [(self.pids[0], "handover", "match"),
+                                       (self.pids[2], "handover", "match")])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM runs").fetchone()[0], 2)
         text, _labels = self.card()
         self.assertIn(f"Zapier OA\\-1 · 4 Jul · EUR 10.00: already filed as \\#{a}.", text)
-        self.assertEqual(text.count(": proposed for Zapier"), 2)
+        self.assertEqual(text.count(": matched automatically to the"), 2)
 
     def test_a_reissue_with_another_recipient_is_no_copy(self):
         import documents
@@ -211,7 +228,7 @@ class DeskFiling(Case):
         self.give(doc)
         units = self.go()
         self.assertEqual(kinds(units), ["reading", "payment", "view", "complete"])
-        self.assertEqual(self.work(), [(self.pids[1], "handover", "propose")])
+        self.assertEqual(self.work(), [(self.pids[1], "handover", "match")])
 
 
 class Scope(Case):

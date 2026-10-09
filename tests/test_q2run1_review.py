@@ -142,8 +142,8 @@ class ConflictIsSticky(StoreCase):
         head, props = cards._receipts(self.conn, [doc])
         self.assertEqual([p["pid"] for p in props], [self.pid])
         (line,) = head                       # #67: the document's own line says "proposed"
-        self.assertTrue(line.endswith(": proposed for Zapier · 2 Aug · EUR 10.00 — confirm "
-                                      "below."), line)
+        self.assertTrue(line.endswith(": proposed for Zapier · 2 Aug · EUR 10.00 — confirm?"),
+                        line)
 
 
 class SchemaTwelveStoresUpgrade(StoreCase):

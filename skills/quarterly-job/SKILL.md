@@ -91,8 +91,8 @@ unit's, or the probe's answer), in order, and read it (**Reading a document**):
 
 **Reading a document.** A download cannot be `Read`: file it first with no amount, date or
 number, then `read_document(doc_id)`, `Read` the path it names, and
-`update_document_metadata(doc_id, amount_minor, currency, document_date, issuer, document_number, pass_token)`
-with only what is printed on it — never a value from the payment; an amount you cannot read
+`update_document_metadata(doc_id, amount_minor, currency, document_date, issuer, document_number, recipient, pass_token)`
+(`recipient`: the "Bill to" name) with only what is printed on it — never a value from the payment; an amount you cannot read
 stays out. Call it even with nothing readable: it records the reading.
 
 ### `reading`
@@ -141,9 +141,9 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
    **`why: handover` with `holds`:** the payment already has a document and the operator
    handed one over (`handed_over`). It belongs to this payment →
    `outcome: "replace", doc_id` (the operator is asked); it does not → `outcome: "keep"`.
-   A handed-over document is `"propose"`d (the operator confirms) only for the payment it
-   belongs to: `handed_fits` lists every payment it could fit; judge by its reference,
-   billing period, then date. Another payment's → not this one's.
+   A handed-over document: `handed_fits` lists every payment it could fit, nearest date
+   first (recurring same-amount charges: match by its date and period). Sure it is this
+   one's → `match`; unsure → `"propose"`. Another payment's → not this one's.
 5. **Save what worked:** when a search found an invoice and `kb` has no such hint,
    `upsert_counterparty(name=<vendor>, hint_sender=<the sender address>, hint_subject=<a subject pattern>, pass_token)`.
 

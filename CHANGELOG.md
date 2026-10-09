@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.11.10
+
+Same store schema (16) and Casa floor (v0.344.67).
+
+- **A handed-over invoice the check is sure of is matched for you (operator ruling).** Before,
+  every handed-over invoice waited for your confirmation. Now the check reads it, looks at every
+  payment it could fit, with the nearest date first, and matches it when it is sure. It still
+  proposes it when it isn't sure, for example with several monthly charges of the same amount.
+  The card says so plainly: "matched automatically to the 13 Jul EUR 131.17 payment (OpenAI)".
+  A proposal reads "proposed for … — confirm?". To undo an automatic match, open that payment
+  ("show me the OpenAI payment") and tap [Wrong].
+- **A reissued invoice is recognised by its recipient (#77).** The check now records the
+  "Bill to" name when it reads an invoice, so a reissue addressed to the company is no longer
+  called "already filed": it reaches Keep current / Use new, which shows the recipient change.
+- The "To check" list no longer names a quarter: it holds every quarter's matches to confirm
+  (#77).
+
 ## 0.11.9
 
 A long list arrives in full. Same store schema (16); **Casa v0.344.67 or newer is required**

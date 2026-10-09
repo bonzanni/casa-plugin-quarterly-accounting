@@ -459,7 +459,8 @@ class TestJob(TempEnv):
         self.assertIn("**Reading a document.** A download cannot be `Read`: file it first "
                       "with no amount, date or number, then `read_document(doc_id)`, `Read` "
                       "the path it names, and `update_document_metadata(doc_id, amount_minor, "
-                      "currency, document_date, issuer, document_number, pass_token)` with "
+                      "currency, document_date, issuer, document_number, recipient, "
+                      "pass_token)` (`recipient`: the \"Bill to\" name) with "
                       "only what is printed on it — never a value from the payment; an amount "
                       "you cannot read stays out.", f)
         v = flat(self.vendor())
