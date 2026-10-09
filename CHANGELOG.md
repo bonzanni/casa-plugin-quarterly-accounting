@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.11.15
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **A rename shows its own outcome (#89).** Renaming one vendor now posts "Aws Emea is now
+  called Amazon Web Services EMEA SARL." with the vendor's card, straight from the rename;
+  Finance adds nothing. "Use the invoice names for all my vendors" renames them in one go and
+  posts one short message: how many were renamed, which keep their bank names because another
+  vendor has the invoice name, which keep the name you gave them, and which have no invoice
+  yet.
+- **"Call Informatique by the name on its invoice" renames it (#89).** Part of a name or a
+  bank text is enough; when the words fit several vendors, Finance says which ones instead of
+  guessing.
+- **A customer is never renamed after your own company.** The name on a sales invoice is its
+  recipient, not you; a payslip or a bank statement gives no vendor name.
+
 ## 0.11.14
 
 Same store schema (17) and Casa floor (v0.344.67).

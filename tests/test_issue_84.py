@@ -175,7 +175,7 @@ class Rename(_Q3):
 
 
 class ListVendors(_Q3):
-    def test_every_vendor_once_with_its_invoice_issuer(self):
+    def test_every_vendor_once_with_its_invoice_name(self):
         done = self.pay("Aws Emea", 1200, "2026-07-03")
         self.matched_to(done, "Amazon Web Services EMEA SARL", amount_minor=1200,
                         document_date="2026-07-03")
@@ -187,10 +187,10 @@ class ListVendors(_Q3):
             out = work.list_vendors(self.conn)
         got = {v["name"]: v for v in out["vendors"]}
         self.assertEqual(sorted(got), ["Aws Emea", "LinkedIn", "OPENAI *CHATGPT"])
-        self.assertEqual(got["Aws Emea"]["invoice_issuer"], "Amazon Web Services EMEA SARL")
+        self.assertEqual(got["Aws Emea"]["invoice_name"], "Amazon Web Services EMEA SARL")
         self.assertEqual(got["Aws Emea"]["payments"], 2)
         self.assertFalse(got["Aws Emea"]["named"])
-        self.assertIsNone(got["OPENAI *CHATGPT"]["invoice_issuer"])
+        self.assertIsNone(got["OPENAI *CHATGPT"]["invoice_name"])
         self.assertTrue(got["LinkedIn"]["named"])
         self.assertEqual(got["LinkedIn"]["bank_texts"], ["LINKEDIN"])
         self.assertIsNone(out["next"])
@@ -227,8 +227,10 @@ class ListVendors(_Q3):
         import tools  # noqa: F401
         self.pay("Aws Emea", 1300, "2026-08-03")
         self.kb("Aws Emea")
-        qa_server.TOOLS["upsert_counterparty"]["fn"](
-            {"name": "Aws Emea", "new_name": "Amazon Web Services EMEA SARL"})
+        from tests.fakebroker import FakeBroker
+        with FakeBroker():     # #89: a rename goes through rename_vendor, which posts it
+            qa_server.TOOLS["rename_vendor"]["fn"](
+                {"vendor": "Aws Emea", "new_name": "Amazon Web Services EMEA SARL"})
         out = qa_server.TOOLS["list_vendors"]["fn"]({})
         self.assertEqual([v["name"] for v in out["vendors"]], ["Amazon Web Services EMEA SARL"])
 

@@ -33,6 +33,11 @@ CAPABILITY_ENTRIES = {
     # #56: a [See PDF] button's stored call (Casa #1362 keep_card)
     "get_document": {"result": "capability", "provides": ["document"],
                      "delivers": {"document": "operator_file"}, "filename": True},
+    # #89: a rename posts its own outcome — one vendor's line and card, all vendors' summary
+    "rename_vendor": {"result": "capability", "provides": ["view"],
+                      "delivers": {"view": "operator_proposal"}},
+    "rename_vendors_to_invoice_names": {"result": "capability", "provides": ["results"],
+                                        "delivers": {"results": "operator_message"}},
 }
 
 
