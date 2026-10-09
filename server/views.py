@@ -671,7 +671,8 @@ def view_title(view, q) -> str:
     return {"status": f"Accounting · {dates.quarter_label(q)}",
             "all": f"Accounting · {dates.quarter_label(q)}",
             "missing": f"Missing · {dates.quarter_label(q)}",
-            "check": f"To check · {dates.quarter_label(q)}",
+            # #77: the list holds every quarter's matches to confirm — no quarter in its head
+            "check": "To check",
             "rest": f"Nice to have · {dates.quarter_label(q)}",
             "older": "Older, still open",
             "quarter": f"Accounting · {dates.quarter_label(q)}"}[view]

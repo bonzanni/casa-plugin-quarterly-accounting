@@ -11,6 +11,11 @@ Same store schema (16) and Casa floor (v0.344.67).
   The card says so plainly: "matched automatically to the 13 Jul EUR 131.17 payment (OpenAI)".
   A proposal reads "proposed for … — confirm?". To undo an automatic match, open that payment
   ("show me the OpenAI payment") and tap [Wrong].
+- **A reissued invoice is recognised by its recipient (#77).** The check now records the
+  "Bill to" name when it reads an invoice, so a reissue addressed to the company is no longer
+  called "already filed": it reaches Keep current / Use new, which shows the recipient change.
+- The "To check" list no longer names a quarter: it holds every quarter's matches to confirm
+  (#77).
 
 ## 0.11.9
 

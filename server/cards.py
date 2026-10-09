@@ -949,7 +949,10 @@ def _differs(conn, old, new) -> str:
                     return _money(v, b["currency"] or a["currency"])
                 return views.field(str(v), 60)
             out.append(f"{word} {show(a[col])} → {show(b[col])}")
-    return ("Differs: " + "; ".join(out) + ".") if out else "Same reading as the current one."
+    if not out:
+        return "Same reading as the current one."
+    text = "Differs: " + "; ".join(out)
+    return text if text.endswith(".") else text + "."
 
 
 def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):
