@@ -163,6 +163,25 @@ def _operator_rejections(conn, pid, proj, st, exp, row) -> list:
     return out
 
 
+def _out_of_window(conn, proj, st, row) -> list:
+    """Issue #73: a job pairing whose document's date now falls outside the payment's fit
+    window (loop.fit_window, the #72 books guard) is released — a reading that corrected the
+    date after the pairing, or a pairing made before 0.11.8 — so the payment the document
+    belongs to can take it. The operator's pairings are never released here."""
+    import loop
+    if proj["ended"] or row is None:
+        return []
+    out = []
+    for c in st.cands.values():
+        if c.author != "auto" or c.state not in F.ACTIVE + ("conflicted",):
+            continue
+        d = conn.execute("SELECT document_date FROM documents WHERE doc_id=?",
+                         (c.doc_id,)).fetchone()
+        if d is not None and not loop.in_window(row, d["document_date"]):
+            out.append(F.Retirement(c.match_id, c.activation, "rejected", "out-of-window"))
+    return out
+
+
 def _record_retirement(conn, pid, r: F.Retirement) -> None:
     append(conn, pid, "retire", "store", match_id=r.match_id, retire_activation=r.activation,
            retire_to=r.to, cause=r.cause)
@@ -216,7 +235,7 @@ def settle(conn, pid: int) -> R.Reduction:
         new, seen = [], set()
         produced = [r for r in st.produced if _holds(st, r)]
         for r in produced + _store_rules(proj, st) + _operator_rejections(
-                conn, pid, proj, st, exp, row):
+                conn, pid, proj, st, exp, row) + _out_of_window(conn, proj, st, row):
             key = (r.match_id, r.activation, r.to)
             if key in recorded or key in seen:
                 continue

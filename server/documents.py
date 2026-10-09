@@ -397,6 +397,12 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
     with db.tx(conn):
         passes.check_token(conn, token)
         _doc(conn, doc_id)
+        mark = conn.execute("SELECT coalesce(max(seq), 0) FROM log").fetchone()[0]
+        if "document_date" in fields:
+            # #73 (r1, Terra S2): the date goes in before the amount's reading settles the
+            # holders, so the fit window is judged on the date this reading leaves
+            conn.execute("UPDATE documents SET document_date=? WHERE doc_id=?",
+                         (fields["document_date"], doc_id))
         # h1/h2: every write of a document's amount goes through the one sticky conflict
         # rule (_reread), with the pass_token or without (h2, Astra S1: a job reading sent
         # without it matched a disagreeing amount; no other caller writes an amount)
@@ -427,9 +433,29 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
                          (db.now() if fields["document_date"] else None, doc_id))
         lineage.settle_doc_holders(conn, doc_id)
         d = _doc(conn, doc_id)
-        return {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields,
-                "amount_minor": d["amount_minor"], "currency": d["currency"],
-                "amount_conflict": bool(d["amount_conflict"])}
+        out = {"doc_id": doc_id, "collisions": collisions(conn, doc_id), **fields,
+               "amount_minor": d["amount_minor"], "currency": d["currency"],
+               "amount_conflict": bool(d["amount_conflict"])}
+        released = _released(conn, doc_id, mark)
+        if released:
+            out["released"] = released
+        return out
+
+
+def _released(conn, doc_id, mark) -> str | None:
+    """Issue #73: the reply names every job pairing this reading released because the
+    document's date no longer fits the payment (lineage._out_of_window)."""
+    import matches
+    pids = [r[0] for r in conn.execute(
+        "SELECT DISTINCT l.pid FROM log l JOIN matches m ON m.match_id=l.match_id WHERE"
+        " l.seq>? AND l.kind='retire' AND l.cause='out-of-window' AND m.doc_id=?"
+        " ORDER BY l.pid", (mark, doc_id))]
+    if not pids:
+        return None
+    d = _doc(conn, doc_id)
+    return (f"document #{doc_id} is now dated {d['document_date']}, outside the period of "
+            f"{', '.join(matches._payment_words(conn, p) for p in pids)}: that pairing is "
+            "released, so the payment the document belongs to can take it")
 
 
 def _one_purchase_one_payment(conn, doc_id) -> None:

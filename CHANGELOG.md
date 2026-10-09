@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.11
+
+Same store schema (16) and Casa floor (v0.344.67).
+
+- **A document whose date is corrected to another period lets go of its payment (#73).**
+  Before, an invoice the check had matched or proposed while its reading said one date (say
+  15 Apr) stayed on that payment after a later reading corrected the date to another period
+  (15 Sep), and the payment it really belongs to could not take it. Now the check releases
+  its own pairing as soon as the document's date no longer fits the payment's period, and
+  the next check matches the document where it belongs.
+  A pairing you confirmed always stays. A pairing across periods left over from before
+  0.11.8 is released the same way.
+
 ## 0.11.10
 
 Same store schema (16) and Casa floor (v0.344.67).
