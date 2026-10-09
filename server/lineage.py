@@ -88,6 +88,22 @@ def eligible(conn, row) -> bool:
     return row["account_id"] == b["account_id"] and eff is not None and eff >= b["watermark"]
 
 
+def judgement_basis(row, tags) -> str:
+    """#97 (d2, Astra + Terra S1): the facts a job's judgement was made on — every payment
+    fact the job is handed (reducer.facts_of: amount, dates, counterparty, remittance, …)
+    and the classification tags. A judgement applies only while the payment has them."""
+    return db.canonical([R.facts_of(row), sorted(tags)])
+
+
+def judged_optional(conn, pid, row, tags) -> bool:
+    """#97: the payment's latest `judge` entry was made on the facts it has now. A later
+    decision of the job (match, propose, missing) appends a revoking entry (fp NULL, d2
+    Astra S1), so a superseded judgement never comes back."""
+    r = conn.execute("SELECT fp FROM log WHERE pid=? AND kind='judge' ORDER BY seq DESC"
+                     " LIMIT 1", (pid,)).fetchone()
+    return r is not None and r["fp"] == judgement_basis(row, tags)
+
+
 def expectation_for(conn, proj, row, exempt: bool) -> ex.Expectation:
     if row is None:
         return ex.Expectation(None, "required", 4)
@@ -96,7 +112,8 @@ def expectation_for(conn, proj, row, exempt: bool) -> ex.Expectation:
     return ex.derive(row["direction"], tags, exempt=exempt,
                      counterparty_override=kb.override_of(cp),
                      chain_overrides=kb.chain_overrides(conn),
-                     zero=row.get("amount_minor") == 0)
+                     zero=row.get("amount_minor") == 0,
+                     judged_optional=judged_optional(conn, proj["pid"], row, tags))
 
 
 def _occupied(conn, pid):

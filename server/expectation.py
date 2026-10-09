@@ -111,7 +111,12 @@ def _zero(e: Expectation, zero: bool) -> Expectation:
 
 
 def derive(direction: str, tags, *, exempt: bool = False,
-           counterparty_override=None, chain_overrides=(), zero: bool = False) -> Expectation:
+           counterparty_override=None, chain_overrides=(), zero: bool = False,
+           judged_optional: bool = False) -> Expectation:
+    """`judged_optional` (#97): the job judged this payment's document nice-to-have (money
+    back from a tax authority), on the facts it still has: a required document of rows
+    6–13 becomes optional. The operator's rules win: exempt (1), a counterparty rule (2), a
+    class rule (a chain override)."""
     if exempt:                                                   # row 1
         return Expectation("none", None, 1)
     if counterparty_override is not None:                        # row 2
@@ -137,7 +142,7 @@ def derive(direction: str, tags, *, exempt: bool = False,
         if best is None or rank > best[0]:
             best = (rank, kind, tier)
     kind, tier = (best[1], best[2]) if best else DEFAULTS[row]
-    return _zero(_make(kind, tier, row), zero)
+    return _zero(_make(kind, tier, row), zero or (judged_optional and best is None))
 
 
 def _reject_colliding_scopes(chain_overrides) -> None:

@@ -55,9 +55,9 @@ The unit carries `acq`, the bank read.
    data={"accounts": [{account_id, category, label}, …]})` — before the sync: it binds
    the account.
 3. `sync`, then `record_probe(pass_token, kind="bank_sync", ok=…, detail=…, acq=<the unit's acq>, data={"queue": {"workable": <n>, "parked": <n>}})`
-   from that sync's outcome (ok=false with its error); the counts are
-   the sync's `Queue:` line. tx-classifier may classify after the sync: never
-   wait for it, nor classify yourself.
+   from that sync's outcome (ok=false with its error); the counts are the sync's `Queue:` line. When its trailer says rows await the classifier,
+   first classify them inline as skill classify-transactions does (park what you cannot
+   judge), then record the probe: a payment never tagged is no missing invoice.
 4. `list_backups` once. From that ONE answer: `record_probe(pass_token, kind="ledger",
    ok=true, data={"generation": <Restore generation>, "registered": {<workflow>: <backup id>, …},
    "instance": <the "Ledger instance:" id>, "missing": [<each workflow it marks FILE MISSING>]})`.
@@ -133,8 +133,9 @@ payment's — never yours to take), maybe an `exact_fit` — its vendor's `kb`, 
    - `"propose"` on any doubt — look-alikes: the closest date, or propose — and always for
      another currency (`alternatives`: up to 3 other doc ids); a recurring charge's invoice
      dated weeks away is another month's, not this one's;
-   - `"missing"` with a `reason` when nothing fits. Never "no invoice needed": that is the
-     operator's.
+      - `"missing"` with a `reason` when nothing fits. Never "no invoice needed": that is the
+     operator's. One exception: money coming back from a tax authority (whichever, however
+     the bank names it) is nice-to-have — `"optional"` with a `reason` saying so.
    `document_date` is the date printed on the document: its issue date, not a due,
    delivery or email date. The server enforces the floor; no date window. Re-decide only
    a refused entry. Then `job_next`.

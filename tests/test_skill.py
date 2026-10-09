@@ -373,7 +373,7 @@ class TestJob(TempEnv):
                      "vendor-and-dates search", "record_mirror", "record_not_found",
                      "certain", "reset_store", "set_aside(", "refs=["):
             self.assertIn(rule, text)
-        self.assertLessEqual(len(text), 11_000)    # queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90); 0.11.7: the reading unit, handed documents proposed (#67, +200); 0.11.8: handed_fits, no commentary (#72, +170)
+        self.assertLessEqual(len(text), 11_300)    # 0.11.18: classify first, the tax-refund exception (#98 #97, +285); queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90); 0.11.7: the reading unit, handed documents proposed (#67, +200); 0.11.8: handed_fits, no commentary (#72, +170)
 
     def test_the_units_come_in_the_loops_order(self):
         """Simple loop §2: probes, snapshot, filing, vendor, mirror, the run's one post."""
@@ -394,7 +394,9 @@ class TestJob(TempEnv):
                       'acq=<the unit\'s acq>, data=', probes)
         self.assertIn("`Queue:` line", probes)
         self.assertIn('"missing": [<each workflow it marks FILE MISSING>]', probes)
-        self.assertIn("never wait for it", probes)
+        # #98: rows awaiting the classifier are classified first, inline
+        self.assertIn("first classify them inline as skill classify-transactions does", " ".join(probes.split()))
+        self.assertNotIn("nor classify yourself", probes)
         self.assertIn('"(FILE MISSING — this workflow\'s next write mints a new restore '
                       'point)"', probes)
         self.assertNotIn("for a package", probes)

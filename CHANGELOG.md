@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.11.18
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **A payment that was never classified is no longer called a missing invoice (#98).** When
+  the bank sync says rows still await the classifier, the check classifies them first, the
+  way the classifier itself does (it uses the payment's history, so a monthly wage-tax
+  payment is recognised from the earlier ones). A payment it still cannot place shows as
+  "not classified yet", never as a missing invoice, and it keeps the quarter open.
+- **Tell Finance what a payment is (#98).** "That's wage tax" classifies it, and a fresh
+  check takes it out of the missing list.
+- **Money back from the tax authority is nice to have (#97).** The check judges, from the
+  payment itself, when money is coming back from a tax authority, and lists its document as
+  nice to have instead of a missing credit note. If the payment's details change later, it
+  is judged again. A rule you set for the payer still wins.
+
 ## 0.11.17
 
 Same store schema (17) and Casa floor (v0.344.67).

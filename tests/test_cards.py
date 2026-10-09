@@ -512,7 +512,7 @@ class Cards(LoopCase):
         st = self.c(cards.state)
         self.assertEqual({k: len(v) for k, v in st["by_bucket"].items()},
                          {"matched": 1, "proposed": 0, "missing": 2, "not_needed": 0,
-                          "pending": 1})
+                          "pending": 1, "unclassified": 0})                  # #98
         self.assertEqual(dict(st["counts"]["2026-Q2"]), {"missing": 1})
         rid = self.c(cards.compose_end, self.job_id, scheduled=False)
         lines = self.rendering(rid)[0]["text"].split("\n")

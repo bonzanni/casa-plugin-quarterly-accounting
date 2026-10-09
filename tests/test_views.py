@@ -159,8 +159,9 @@ class TestSheet(Base):
         self.assertIn("**Missing**\nSearched · ", text)
         self.assertNotIn("Unsearched", text)         # never looked for: not `missing`
         self.assertIn("3 transactions, 1 missing a document.", flat(text))
-        self.assertIn("2 new payments not checked yet", text)   # an unclassified one is unsearched
-        self.assertNotIn("not yet classified", text)
+        # #98: an untagged payment is "not yet classified" — neither missing nor unsearched
+        self.assertIn("1 new payment not checked yet", text)
+        self.assertIn("1 not yet classified", text)
 
     def test_a_week_spanning_the_boundary_is_one_view(self):
         a = self.add(counterparty="SeptCo", booking_date="2026-09-29")

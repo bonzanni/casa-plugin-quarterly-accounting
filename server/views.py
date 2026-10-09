@@ -470,17 +470,18 @@ def _searched(d):
 def _is_missing(d):
     """Missing means searched and not found (spec §Weekly pass: four states stay
     distinct). A required item nobody has looked for yet is `not searched` or
-    `not checked`, never `missing`."""
-    return _open_required(d) and _searched(d)
+    `not checked`, never `missing`; #98: nor one not classified yet."""
+    return _open_required(d) and _searched(d) and not _is_unclassified(d)
 
 
 def _is_unsearched(d):
-    return _open_required(d) and not _searched(d)
+    return _open_required(d) and not _searched(d) and not _is_unclassified(d)
 
 
 def _is_unclassified(d):
-    # §2 table: no payment is "not yet classified" any more
-    return False
+    # #98: open with expectation row 4 (no classification yet, or parked): what it is is not
+    # known yet, so it is no missing invoice (cards.unclassified, the same fact)
+    return _open_required(d) and d["expectation"]["row"] == 4
 
 
 def _is_conflict(d):
@@ -737,6 +738,7 @@ def _compose(conn, view, q, items, members, lead):
     older_open = [d for d in items if d["quarter"] and d["quarter"] < q and _open_required(d)]
     older_missing = [d for d in older_open if _is_missing(d)]
     older_unsearched = [d for d in older_open if _is_unsearched(d)]
+    older_unclassified = [d for d in older_open if _is_unclassified(d)]
     missing = [d for d in cur if _is_missing(d)]
     unsearched = [d for d in items if _is_unsearched(d)]
     guessed = [d for d in items if _needs_check(d)]
@@ -815,6 +817,8 @@ def _compose(conn, view, q, items, members, lead):
 
     def tail(printed_guessed):
         out = list(packages)
+        if view == "quarter" and uncl:              # #98 r1 (Astra): its own count here too
+            out += ["", f"{len(uncl)} not yet classified — the categories aren't in yet."]
         if view in ("status", "all", "missing"):
             counts = []
             if uncl:
@@ -832,7 +836,8 @@ def _compose(conn, view, q, items, members, lead):
                 out.append(f'+{len(nice)} nice-to-have — say "show the rest"')
             # missing and not-searched stay distinct states, each on its own line
             for ds, state in ((older_missing, "still missing"),
-                              (older_unsearched, "not searched yet")):
+                              (older_unsearched, "not searched yet"),
+                              (older_unclassified, "not classified yet")):      # #98 r1
                 if ds:
                     qs = sorted({dates.quarter_label(d["quarter"]).split()[0] for d in ds})
                     out.append(f'+{len(ds)} older {state} ({", ".join(qs)}) — say "show older"')
