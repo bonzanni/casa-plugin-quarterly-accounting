@@ -61,6 +61,8 @@ def why_work(conn, pid, p, row):
         return None                       # pending: not worked until booked; no document
     if p["status"] in _UNWORKED:
         return None                       # 0.00 rows are optional (#36): never on the list
+    if p["status"] == "open" and p["exp_row"] == 4:
+        return None                       # #105: untagged or parked — the classifier's first
     st = lineage.fold_of(conn, pid)
     if st.operator_current() is not None:
         return None                       # an operator-confirmed pairing is never reopened
@@ -1053,6 +1055,8 @@ def complete(conn, quarter) -> bool:
             return False                              # a pending payment keeps it open
         if p["status"] in ("matched", "exempt", "no-document", "optional"):
             continue
+        if p["status"] == "open" and p["exp_kind"] is None:
+            return False      # #105 d1 (Astra S1): unsettled — even one left missing earlier
         if p["status"] == "open" and p["search_state"] == "accepted-missing":
             continue                                  # [Leave missing] counts (ruled)
         return False                                  # proposed, or missing unanswered

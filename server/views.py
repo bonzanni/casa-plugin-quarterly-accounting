@@ -470,17 +470,20 @@ def _is_missing(d):
     """Missing means searched and not found (spec §Weekly pass: four states stay
     distinct). A required item nobody has looked for yet is `not searched` or
     `not checked`, never `missing`; #98: nor one not classified yet."""
-    return _open_required(d) and _searched(d) and not _is_unclassified(d)
+    return (_open_required(d) and _searched(d) and not _is_unclassified(d)
+            and not _is_conflict(d))
 
 
 def _is_unsearched(d):
-    return _open_required(d) and not _searched(d) and not _is_unclassified(d)
+    return (_open_required(d) and not _searched(d) and not _is_unclassified(d)
+            and not _is_conflict(d))
 
 
 def _is_unclassified(d):
-    # #98: open with expectation row 4 (no classification yet, or parked): what it is is not
-    # known yet, so it is no missing invoice (cards.unclassified, the same fact)
-    return _open_required(d) and d["expectation"]["row"] == 4
+    # #98, #105: open with an unknown expectation kind (row 4: no classification yet or
+    # parked; row 5: conflicting tags): no missing invoice (cards.unclassified, the same
+    # fact). A conflict keeps its own "What is this?" line on the status sheet
+    return _open_required(d) and d["expectation"]["kind"] is None and not _is_conflict(d)
 
 
 def _is_conflict(d):

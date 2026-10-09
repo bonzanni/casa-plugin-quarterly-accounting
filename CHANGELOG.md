@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.21
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **A payment whose category is not settled is never a missing invoice (#105).** That covers
+  a payment with no category, one waiting for your answer, and one whose categories
+  disagree (wage tax tagged both payroll and taxes). The cards, the package and the bank
+  ledger all say "not classified yet", and the quarter stays open. The check no longer
+  searches for a payment that has no category yet. For one whose categories disagree, it
+  judges from the payment and its history: wage tax needs no invoice, so it becomes nice
+  to have.
+
 ## 0.11.20
 
 Same store schema (17) and Casa floor (v0.344.67).
