@@ -332,6 +332,12 @@ def candidates_phrase(d) -> str:
     return f"candidates for {_amount_word(d)} {_day(d['date'])}"
 
 
+def _names_pick(d) -> bool:
+    """The evidence opens with "Matched to <document>." / "Suggested: <document>."."""
+    cur = d["current"]
+    return cur is not None and ("guessed" not in cur["labels"] or cur["author"] == "operator")
+
+
 def evidence(d: dict, cands=None) -> list:
     """`cands` are the candidates to print (default: the first
     CANDIDATES_MAX, with the phrase that shows the rest)."""
@@ -345,7 +351,7 @@ def evidence(d: dict, cands=None) -> list:
         if "amount-unknown" in d["reasons"]:
             out.append("The invoice's amount was read two different ways — check it.")
         labels = cur["labels"]
-        if "guessed" not in labels or cur["author"] == "operator":
+        if _names_pick(d):
             # a line that asks for a verdict names what it is asking about (round p7:
             # a no-ref line never named its invoice, yet "all good" confirmed it)
             out.insert(0, f"{'Suggested' if d['status'] == 'proposed' else 'Matched to'}"
@@ -711,13 +717,15 @@ def _compose(conn, view, q, items, members, lead):
     if parts["head"]:
         parts["head"].append("")
     parts["head"].append(titles[view])
-    cov = coverage(conn, members)
+    # #79: "To check" spans every quarter; one quarter's bank coverage says nothing of it
+    cov = None if view == "check" else coverage(conn, members)
     if view in ("status", "all", "quarter") and members:
         cov += f" · {_plural(len(cur), 'transaction')}, {len(missing)} missing a document."
     if view in ("status", "all") and _first_review(conn):
         # "Same sheet, preceded by `First review · bank checked through 20 Sep`"
         cov = "First review · " + cov[0].lower() + cov[1:]
-    parts["head"].append(cov)
+    if cov is not None:
+        parts["head"].append(cov)
     if b is not None and not b["watermark_announced"] and view in ("status", "all", "missing"):
         start_q = dates.quarter_of(b["watermark"])
         n = dates.parse_quarter(start_q)[1]
@@ -1001,7 +1009,10 @@ def _item_sentence(d) -> str:
 
 
 def _item_block(d, cands, more) -> _Block:
-    lines = [headline(d), _item_sentence(d), *evidence(d, cands=cands)]
+    # #79: the evidence's "Matched to …" / "Suggested: …" already names the document
+    said = ([] if d["status"] in ("matched", "proposed") and _names_pick(d)
+            else [_item_sentence(d)])
+    lines = [headline(d), *said, *evidence(d, cands=cands)]
     if _open_required(d):
         lines += _missing_detail(d)
     if more:

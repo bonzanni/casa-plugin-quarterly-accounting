@@ -341,10 +341,10 @@ class Cards(LoopCase):
         self.assertEqual(tap(fresh, "Never for Adobe")["receipt"],
                          "Adobe never needs an invoice: 50 payments changed.")
 
-    def test_a_closing_open_items_card_counts_as_seen_once_posted(self):
-        """Review round 1 ruling: Wrong during a walk turns a proposal into a missing item;
-        the closing open-items card (the tap's `next`) counts it and is posted, never
-        delivered; the next scheduled run posts nothing for it."""
+    def test_a_walk_ends_without_a_closing_card(self):
+        """#80: Wrong during a walk turns a proposal into a missing item; the walk's last
+        answer posts no quarter card (the receipt alone answers), so the item is not seen
+        and the next scheduled run tells it."""
         import cards, matches, views
         p = self.pay()
         self.propose(p)
@@ -357,15 +357,9 @@ class Cards(LoopCase):
         with db.tx(self.conn):
             matches.reject_in_tx(self.conn, grant=self.grant(), match_id=mid,
                                  expected_revision=self.rev(match_id=mid), render_id=card)
-            closing = cards.next_after(self.conn, end, 0)
-            cards.deposit_of(self.conn, closing)
-        r, _ = self.rendering(closing)
-        self.assertEqual(r["kind"], "open-items")
-        self.assertIn("Q3 · 1 payment · ", r["text"])          # 0.11.2: the status card
-        self.assertIn("\n1 missing\n", r["text"])
-        self.assertIsNone(r["delivered_at"])
-        self.assertTrue(cards.seen_state(self.conn, p, "missing"))
-        self.assertIsNone(self.c(cards.compose_end, self.job_id, scheduled=True))
+            self.assertIsNone(cards.next_after(self.conn, end, 0))
+        self.assertFalse(cards.seen_state(self.conn, p, "missing"))
+        self.assertIsNotNone(self.c(cards.compose_end, self.job_id, scheduled=True))
 
     def test_an_end_line_binds_only_the_pairing_it_names(self):
         """Review round 1: a joint set's summary line names no pairing, and binds none."""
@@ -481,7 +475,7 @@ class Cards(LoopCase):
 
     def test_the_review_order_and_next_after(self):
         """§1: proposals in line order, then one item per vendor with unanswered missing
-        payments; next_after skips what is answered and ends on the open-items card."""
+        payments; next_after skips what is answered and ends with no card (#80)."""
         import cards, work
         a = self.pay("Zeta", 300)
         b = self.pay("adobe", 200)
@@ -495,12 +489,7 @@ class Cards(LoopCase):
         self.assertEqual(order, [{"p": b}, {"p": a}, {"v": "Twilio", "pids": [t2, t1]}])
         self.assertEqual(self.rendering(self.c(cards.next_after, end, -1))[1]["pid"], b)
         self.granted(lambda c, grant: work.leave_missing_in_tx(c, [t1, t2], grant=grant))
-        nxt = self.c(cards.next_after, end, 1)             # Twilio answered meanwhile
-        r, scope = self.rendering(nxt)
-        self.assertEqual(r["kind"], "open-items")
-        # 0.11.2: the status card counts the quarter (left missing is in "missing")
-        self.assertEqual(untag(r["text"]).split("\n")[:2],
-                         ["Q3 · 5 payments", "2 to confirm · 3 missing"])
+        self.assertIsNone(self.c(cards.next_after, end, 1))  # Twilio answered meanwhile
 
     def test_counts_partition_and_earlier_quarter_line(self):
         import cards

@@ -28,7 +28,7 @@ class _Tapping(LoopCase):
 
 
 class Taps(_Tapping):
-    def test_review_walks_card_by_card_and_ends_on_all_answered(self):
+    def test_review_walks_card_by_card_and_ends_on_the_receipt(self):
         p = self.pay()
         self.propose(p)
         self.pay("Twilio")                                       # one vendor card
@@ -40,9 +40,9 @@ class Taps(_Tapping):
                                            " state='matched'", (p,)).fetchone()[0], "operator")
         self.assertIn("Card 2 of 2", out["next"]["text"])
         out = self.tap(out["next"], "Leave missing")
-        self.assertIn("· all accounted for", out["next"]["text"])
-        self.assertEqual([b["label"] for b in out["next"]["buttons"]], ["Get package"])
-        self.assertTrue(out["next"]["revision"].startswith("walk:"))
+        # #80: the walk's last answer is its receipt alone, no quarter card unasked
+        self.assertEqual(set(out), {"receipt"})
+        self.assertTrue(out["receipt"].strip())
 
     def test_leave_for_now_writes_nothing(self):
         p = self.pay()
@@ -50,9 +50,7 @@ class Taps(_Tapping):
         rev = self.rev(p)
         out = self.tap(self.tap(self.end(), "Review")["next"], "Leave for now")
         self.assertEqual(self.rev(p), rev)
-        # the open-items card (0.11.2: the quarter status card)
-        self.assertTrue(untag(out["next"]["text"]).startswith("Q3 · 1 payment\n1 to confirm\n"),
-                        out["next"]["text"])
+        self.assertEqual(set(out), {"receipt"})                    # #80: the walk's end
 
     def test_a_named_candidate_pairs_it_and_rejects_the_machines_choice(self):
         p = self.pay()
@@ -217,7 +215,7 @@ class TapsMore(_Tapping):
         card = self.tap(self.end(), "Review")["next"]
         args = dict(next(b for b in card["buttons"] if b["label"] == "Confirm")["call"]
                     ["arguments"])
-        self.assertIn("next", qa_server.TOOLS["verdict"]["fn"](dict(args)))
+        self.assertEqual(set(qa_server.TOOLS["verdict"]["fn"](dict(args))), {"receipt"})
         out = qa_server.TOOLS["verdict"]["fn"](dict(args))          # spent: single use
         self.assertEqual(out, {"receipt": keys.NO_LONGER})
 
@@ -230,12 +228,17 @@ class TapsMore(_Tapping):
         out = self.tap(out["next"], "Leave for now")
         seen.append(out)
         out = self.tap(out["next"], "Leave missing")
-        seen.append(out)
+        # #80: the walk's last answer is its receipt alone
+        self.assertEqual(set(out), {"receipt"})
+        self.assertTrue(out["receipt"].strip())
         # 0.11.2: the status card counts the quarter (the left-missing one is "missing");
         # Review counts only the open proposal
-        self.assertTrue(untag(out["next"]["text"]).startswith(
-            "Q3 · 2 payments\n1 to confirm · 1 missing\n"), out["next"]["text"])
-        seen.append(self.tap(out["next"], "Review"))
+        import cards
+        with db.tx(self.conn):
+            status = cards.deposit_of(self.conn, cards.compose_open(self.conn, "2026-Q3"))
+        self.assertTrue(untag(status["text"]).startswith(
+            "Q3 · 2 payments\n1 to confirm · 1 missing\n"), status["text"])
+        seen.append(self.tap(status, "Review"))
         self.assertIn("Card 1 of 1", seen[-1]["next"]["text"])
         for o in seen:
             self.assertEqual(set(o), {"receipt", "next"})
