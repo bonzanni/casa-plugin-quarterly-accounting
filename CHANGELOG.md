@@ -11,8 +11,9 @@ Same store schema (17) and Casa floor (v0.344.67).
   classifies.
 - **Cards that agree with themselves (#117).**
   - A payment still pending at the bank is "waiting on the bank" on every card and list
-    (its own "Waiting on the bank" lines on the quarter's sheet), never "Not classified yet …
-    what is it?".
+    (its own "Waiting on the bank" lines on the quarter's sheet, "+1 older waiting on the
+    bank (Q2)" for an earlier quarter's, "Waiting on the bank." on its own card), never "Not
+    classified yet … what is it?".
   - The quarter's sheet says "Everything matched cleanly." only when nothing else is open,
     older quarters included; otherwise "Everything else matched cleanly.".
   - "What's still missing in Q3?" shows the missing list, not the quarter's status card.

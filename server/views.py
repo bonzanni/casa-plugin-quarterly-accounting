@@ -844,7 +844,9 @@ def _compose(conn, view, q, items, members, lead):
         secs.append(_Section("", _item_blocks(nice, lambda d: [], q),
                              empty="Nothing else is missing."))
     if view == "older":
-        secs.append(_Section("", _item_blocks(older_open, _missing_detail, q),
+        secs.append(_Section("", _item_blocks(
+            older_open, lambda d: ["Waiting on the bank."] if waiting(d) else _missing_detail(d),
+            q),
                              empty="Nothing older is open."))
 
     packages = []
@@ -873,7 +875,9 @@ def _compose(conn, view, q, items, members, lead):
             # missing and not-searched stay distinct states, each on its own line
             for ds, state in ((older_missing, "still missing"),
                               (older_unsearched, "not searched yet"),
-                              (older_unclassified, "not classified yet")):      # #98 r1
+                              (older_unclassified, "not classified yet"),       # #98 r1
+                              ([d for d in older_open if waiting(d)],
+                               "waiting on the bank")):                            # #117 r2
                 if ds:
                     qs = sorted({dates.quarter_label(d["quarter"]).split()[0] for d in ds})
                     out.append(f'+{len(ds)} older {state} ({", ".join(qs)})')

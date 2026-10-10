@@ -97,6 +97,28 @@ class Bucketing(_Uncl):
                                                   quarter="2026-Q3")["text"])
         self.assertIn("Waiting on the bank", text.split("\n"))
 
+    def test_an_older_pending_payment_is_counted_and_listed(self):
+        # r2 (Astra S2, the reachable half): a Q2 payment still pending on the Q3 sheet
+        done = self.pay("Adobe", 1000, "2026-09-03")
+        self.machine_entry(done, self.doc(amount_minor=1000, document_date="2026-09-03"))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE binding SET watermark='2026-04-01'")
+        self.n += 1
+        self.row(self.n, counterparty=None, remittance="Old one", amount_minor=500,
+                 booking_date="2026-06-30", value_date="2026-06-30", status="PDNG")
+        old = self.lineage_for(self.n)
+        self.classify(old, set())
+        self.settle(old)
+        text = views.displayed(views.build_review(self.conn, view="status",
+                                                  quarter="2026-Q3")["text"])
+        self.assertIn("+1 older waiting on the bank (Q2)", text)
+        self.assertNotIn("Everything matched cleanly.", text)
+        older = views.displayed(views.build_review(self.conn, view="older",
+                                                   quarter="2026-Q3")["text"])
+        self.assertIn("Old one · EUR 5.00 · 30 Jun · pending · Q2 2026", older)
+        self.assertIn("Waiting on the bank.", older)
+        self.assertNotIn("what is it?", older)
+
     def test_its_own_card_waits_on_the_bank(self):
         # r1 (Astra S2): the one-payment card agrees with the cards' count
         p = self.pending_parked()
