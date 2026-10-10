@@ -46,7 +46,7 @@ Other questions: `show_view(view=…, quarter=…, page=…, after=…)`:
 - `rest`: its nice-to-have documents not found;
 - `older`: earlier quarters' open payments;
 - `all`: the `status` sheet with every item;
-- `quarter`: its figures, missing payments, packages sent;
+- `quarter`: its figures and packages sent;
 - `item` with `pid`: one payment.
 
 For "more" or "all of them", call `propose_reading` (below), then call `show_view` with the
@@ -56,12 +56,12 @@ never press them and never call a button's tool.
 
 ## What a payment is
 
-Words saying what a payment is or what its document needs ("that's wage tax", "wage tax is
-nice to have") skip `propose_reading`: they are about the payment under discussion (replied
-to or talked about); ask which only when several fit. Tag it as skill
-classify-transactions does (tagged already: nothing to tag). Its tags decide its document:
-taxes or fees → a statement, nice to have; salary or payroll → a payslip, nice to have; else
-an invoice, required. Then the check ask for its quarter, unasked.
+Words saying what a payment is ("that's wage tax", "classify wage tax as nice to have") skip
+`propose_reading`: they are about the payment under discussion; ask which only when several
+fit. Tag it as skill classify-transactions does (if not tagged already). By default a payment
+out tagged taxes, interest or fees needs a statement, salary or payroll a payslip, both nice
+to have (both together: the check judges). Then the check ask for its quarter, unasked. What
+a payment needs ("needs no invoice") stays a reading.
 
 ## The operator's words about the books
 

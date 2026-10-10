@@ -29,34 +29,44 @@ class Classify(unittest.TestCase):
         # before the propose_reading section, so it is read first
         self.assertLess(DESK.index("## What a payment is"),
                         DESK.index("## The operator's words about the books"))
-        self.assertIn('Words saying what a payment is or what its document needs ("that\'s '
-                      'wage tax", "wage tax is nice to have") skip `propose_reading`', self.sec)
-        self.assertIn("the payment under discussion", self.sec)
-        self.assertIn("ask which only when several fit", self.sec)
+        self.assertIn('Words saying what a payment is ("that\'s wage tax", "classify wage tax as '
+                      'nice to have") skip `propose_reading`', self.sec)
+        self.assertIn("the payment under discussion; ask which only when several fit", self.sec)
+
+    def test_what_a_payment_needs_stays_a_reading(self):
+        """r1 (Astra, Terra S1): a document rule is the reply grammar's (`exempt`, `never`),
+        never a classification."""
+        self.assertIn('What a payment needs ("needs no invoice") stays a reading.', self.sec)
+        self.assertIn('"no invoices ever for Adobe"',
+                      flat(section(DESK, "## The operator's words", "## Naming")))
 
     def test_it_asks_for_the_check_of_its_quarter_unasked(self):
         self.assertIn("Then the check ask for its quarter, unasked.", self.sec)
         self.assertNotIn("Run the check now?", DESK)
 
-    def test_the_document_it_names_is_the_one_derived(self):
-        """The skill's mapping, sentence by sentence, against expectation.derive (a debit
-        classified by those tags alone, no override)."""
-        m = re.search(r"Its tags decide its document: (.+?)\. Then", self.sec)
+    def test_the_documents_it_names_are_the_derived_defaults(self):
+        """The skill's defaults against expectation.derive, for a payment out with no
+        operator rule; r1 (Terra S1): payroll and taxes together conflict, and the skill says
+        the check judges it."""
+        m = re.search(r"By default a payment out tagged (.+?) needs a statement, (.+?) a "
+                      r"payslip, both nice to have \(both together: the check judges\)\.",
+                      self.sec)
         self.assertIsNotNone(m)
-        words = {"a statement": "statement", "a payslip": "payslip", "an invoice": "invoice"}
-        tiers = {"nice to have": "optional", "required": "required"}
-        parts = m.group(1).split("; ")
-        self.assertEqual(len(parts), 3)
-        for part in parts:
-            if part.startswith("else "):
-                tags, doc = [("software",), ("food", "dining")], part[len("else "):]
-            else:
-                lhs, doc = part.split(" → ")
-                tags = [(t,) for t in lhs.split(" or ")]
-            what, tier = doc.split(", ")
+        stmt = re.split(r", | or ", m.group(1))
+        slip = re.split(r", | or ", m.group(2))
+        self.assertEqual(stmt, ["taxes", "interest", "fees"])
+        self.assertEqual(slip, ["salary", "payroll"])
+        for tags, kind in [(stmt, "statement"), (slip, "payslip")]:
             for t in tags:
-                e = ex.derive("DBIT", set(t))
-                self.assertEqual((e.kind, e.tier), (words[what], tiers[tier]), (t, part))
+                e = ex.derive("DBIT", {t})
+                self.assertEqual((e.kind, e.tier), (kind, "optional"), t)
+        for a in stmt:
+            for b in slip:
+                e = ex.derive("DBIT", {a, b})
+                self.assertTrue(e.conflict and e.kind is None, (a, b))
+        # the prod wage-tax chain
+        e = ex.derive("DBIT", {"taxes", "recurring", "wage-tax"})
+        self.assertEqual((e.kind, e.tier), ("statement", "optional"))
 
     def test_tagging_is_not_forbidden_by_the_setup_line(self):
         self.assertNotIn("never change anything about bank-feed", flat(DESK))
