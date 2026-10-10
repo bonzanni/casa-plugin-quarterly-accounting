@@ -60,8 +60,8 @@ Words saying what a payment is ("that's wage tax", "classify wage tax as nice to
 `propose_reading`: they are about the payment under discussion; ask which only when several
 fit. Tag it as skill classify-transactions does (if not tagged already). By default a payment
 out tagged taxes, interest or fees needs a statement, salary or payroll a payslip, both nice
-to have (both together: the check judges). Then the check ask for its quarter, unasked. What
-a payment needs ("needs no invoice") stays a reading.
+to have (both together: the check judges). Then the check ask for its quarter, unasked. "Needs
+no invoice" (no document at all) stays a reading.
 
 ## The operator's words about the books
 

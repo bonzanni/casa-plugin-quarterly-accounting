@@ -36,7 +36,7 @@ class Classify(unittest.TestCase):
     def test_what_a_payment_needs_stays_a_reading(self):
         """r1 (Astra, Terra S1): a document rule is the reply grammar's (`exempt`, `never`),
         never a classification."""
-        self.assertIn('What a payment needs ("needs no invoice") stays a reading.', self.sec)
+        self.assertIn('"Needs no invoice" (no document at all) stays a reading.', self.sec)
         self.assertIn('"no invoices ever for Adobe"',
                       flat(section(DESK, "## The operator's words", "## Naming")))
 
