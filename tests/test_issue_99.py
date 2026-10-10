@@ -176,7 +176,7 @@ class ShowMissing(StoreCase):
                              "amount_minor": 1000 + i} for i in range(120)])
         out = self.tap(self.status())
         self.assertNotIn("next", out)
-        self.assertIn('say "show the missing invoices"', out["receipt"])
+        self.assertIn("ask me to show the missing invoices", out["receipt"])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE kind='missing'"
                                            " AND posted_seq IS NOT NULL").fetchone()[0], 0)
 
@@ -317,7 +317,7 @@ class Views102(LoopCase):
         fake = [{"quarter": "2026-Q3"}] * 150
         with m.patch.object(views, "membership", lambda *a: range(150)), \
                 m.patch.object(views.work, "describe", lambda c, p: fake[0]), \
-                m.patch.object(views, "_needs_check", lambda d: True):
+                m.patch.object(views, "_guess", lambda d: True):
             label = views.check_label(self.conn, "2026-Q3", 300)
         self.assertEqual(label, "Show 300 to confirm")         # the split would be 34
         self.assertLessEqual(len(label), 32)

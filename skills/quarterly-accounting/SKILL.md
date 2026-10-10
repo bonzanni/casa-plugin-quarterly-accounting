@@ -21,7 +21,7 @@ the cards' shape: a bold first line, a question on its own line, one line per it
 
 Read the intent in any wording or language; examples are never phrases to match.
 
-**Where a quarter stands** (how it is going, what is open or missing, whether it is done;
+**Where a quarter stands** (how it is going, what is open, whether it is done;
 e.g. "how's Q3?", "check Q3"): nothing runs. A bare "check" is this, even relayed by a delegate as "run the check": the operator's
 words decide.
 `show_view(view="open", quarter=<the quarter named, else the one talked about, e.g.
@@ -41,7 +41,7 @@ what is left: `show_view(view="check")`.
 
 Other questions: `show_view(view=…, quarter=…, page=…, after=…)`:
 - `status`: a quarter's full sheet;
-- `missing`: its payments missing a document;
+- `missing`: its payments missing a document ("what's missing?");
 - `check`: suggested matches waiting for a yes or no, in the quarter and every earlier one;
 - `rest`: its nice-to-have documents not found;
 - `older`: earlier quarters' open payments;

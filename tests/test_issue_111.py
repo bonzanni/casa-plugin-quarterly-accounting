@@ -110,7 +110,7 @@ class NotClassified(_Uncl):
             rid = cards.compose_open(self.conn, "2026-Q3")
         text = views.displayed(self.render_text(rid))
         self.assertEqual(text.count("— what is it?"), 3)
-        self.assertIn('+2 more — say "show the missing"', text)
+        self.assertIn("+2 more not shown", text)
 
 
 class PackageNotes(_Uncl):
@@ -163,8 +163,7 @@ class InvoiceNamesSummary(_Uncl):
         self.assertEqual(views.displayed(b.deposits[0]["value"]).split("\n"), [
             "Renamed 1 vendor to the name on their invoice.",
             "No invoice yet: Anthropic, Zapier.",
-            'Anthropic and Anthropic, PBC may be one vendor: say "merge Anthropic into '
-            'Anthropic, PBC" if so.'])
+            "Anthropic and Anthropic, PBC may be one vendor — ask me to merge them if so."])
 
 
 class WageTaxReply(_Uncl):

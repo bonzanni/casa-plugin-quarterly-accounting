@@ -138,7 +138,7 @@ class TestAlertBatching(StoreCase):
             renders += 1
             self.assertLessEqual(views.utf16_len(speak["text"]), views.BODY_LIMIT)
             self.assertIn("books-2026-Q3-2026-10-14.zip", speak["text"])
-            self.assertIn('Say "rebuild Q3"', speak["text"])
+            self.assertIn("ask me for a fresh Q3 package", speak["text"])
             again = self.finish()                         # not delivered yet: the same offer
             self.assertEqual(again, speak)
             views.mark_rendering_delivered(self.conn, speak["render_id"])

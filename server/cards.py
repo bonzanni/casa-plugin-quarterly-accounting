@@ -156,7 +156,7 @@ def _bucket(d) -> str:
     """§6.1's partition: pending first, then status. An open payment absent from the latest
     bank read (not fresh: decide refuses it until a later import observes it) is counted
     pending, never missing (Task 6/7 carry): each payment in exactly one bucket (§6.1)."""
-    if d["pending"] or (d["status"] == "open" and not d["fresh"]):
+    if views.waiting(d):
         return "pending"
     if unclassified(d):
         return "unclassified"
@@ -378,7 +378,7 @@ def _proposal_line(conn, i, d) -> str:
 
 
 def _ready_line(q, ref) -> str:
-    return f'{_qn(q, ref)} complete · package ready — say "send the {_qn(q, ref)} package"'
+    return f"{_qn(q, ref)} complete · package ready"
 
 
 # ---- fitting and storing ---------------------------------------------------------------------
@@ -502,7 +502,7 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
             uncl = [f"{views.headline(d, quarter)} — {views.WHAT_IS_IT}"
                     for d in unclassified[:UNCL_SHOWN]]
             left = len(unclassified) - len(uncl)
-            uncl += [f'+{left} more — say "show the missing"'] if left else []
+            uncl += [f"+{left} more not shown"] if left else []
             tail = [views.title("Not classified yet"), *uncl, *([""] if tail else []), *tail]
         # #99: the title and facts, then the question on its own line above the list its
         # buttons refer to, then the rest — one blank line between the groups
@@ -936,7 +936,7 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
     CANDIDATE_BUTTONS, each bound only when its line is displayed whole; the rest counted),
     then the rest of the evidence. None when the payment is no longer to confirm."""
     d = work.describe(conn, pid)
-    if d["status"] != "proposed":
+    if _bucket(d) != "proposed":       # #117 r4: one waiting on the bank is not to confirm
         return None
     offered = _one_per_purchase(conn, _offered(conn, d))
     with views.named([{**d, "candidates": [{"document": c["doc"]} for c in offered]}],
@@ -947,7 +947,7 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
                   for k, c in enumerate(offered[:CANDIDATE_BUTTONS], 1)]
 
         def closing(left):
-            return f"{left} more could fit — say \"{views.candidates_phrase(d)}\""
+            return f"{left} more could fit — ask me to show them"
         k = _fit_count(head, clines, closing, total=len(offered))
         shown = offered[:k]
         left = len(offered) - k

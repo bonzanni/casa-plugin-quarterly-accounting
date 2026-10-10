@@ -124,13 +124,13 @@ class TestSheet(Base):
         self.assertIn("Adobe · EUR 100.00 · 14 Sep", text)
         self.assertIn("https://adobe.example/invoices", text)
         self.assertIn("Picked invoice 8841 (17 Sep); 8712 \\(10 Sep\\) also fits.", text)
-        self.assertIn('"the Zapier one is wrong"', text)
+        self.assertIn("Tell me if one is wrong.", text)       # #117: no words to copy
 
     def test_a_long_list_caps_largest_first_and_counts_the_rest(self):
         for i in range(20):
             self.add(amount_minor=1000 * (i + 1), counterparty=f"Vendor{i:02d}")
         text = self.render()["text"]
-        self.assertIn('+12 more — say "all of them"', text)
+        self.assertIn("+12 more not shown", text)
         self.assertIn("Vendor19", text)
         self.assertNotIn("Vendor00 ", text)
         self.assertLessEqual(views.utf16_len(text), views.BODY_LIMIT)
@@ -248,8 +248,8 @@ class TestSheet(Base):
                                  row_snapshot=self.snapshot(pid), token=self.token,
                                  labels=("guessed",), runners_up=["x (1 Sep)"])
         text = self.render()["text"]
-        example = re.search(r'"the (\S+) one is wrong"', text).group(1)
-        self.assertEqual(example, "G11")                 # largest first: the first one printed
+        self.assertIn("Tell me if one is wrong.", text)  # #117: no example to copy
+        self.assertIn("G11", text)                       # largest first: the first one printed
         self.assertNotIn("G00", text)
 
     def test_first_review_survives_an_earlier_item_or_stop_rendering(self):
@@ -278,7 +278,7 @@ class TestSheet(Base):
                 lineage.settle(self.conn, pid)
         r = self.render()
         self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
-        self.assertIn('+142 more — say "all of them"', r["text"])
+        self.assertIn("+142 more not shown", r["text"])
         self.assertEqual(r["next"]["view"], "all")
         views.mark_rendering_delivered(self.conn, r["render_id"])
         left = self.conn.execute("SELECT COUNT(*) FROM residue WHERE shown_render IS NULL"
@@ -304,7 +304,7 @@ class TestSheet(Base):
         for i in range(200):
             self.add(counterparty=f"Vend{i:03d}", amount_minor=1000 + i)
         capped = self.render("missing")
-        self.assertIn('+192 more — say "all of them"', capped["text"])
+        self.assertIn("+192 more not shown", capped["text"])
         self.assertEqual(capped["next"], {"view": "missing", "quarter": "2026-Q3", "page": 1,
                                           "prev": capped["render_id"]})
         for view in ("all", "missing"):
@@ -434,7 +434,7 @@ class TestSheet(Base):
         self.add(counterparty="NowSeen", tags=("internal-transfer",))
         self.end_live_pass("interrupted", {"checked": 1, "total": 4})
         text = self.render()["text"]
-        self.assertIn('+3 older not searched yet (Q2) — say "show older"', flat(text))
+        self.assertIn("+3 older not searched yet (Q2)", flat(text))
         older = self.render("older")["text"]
         for i in range(3):
             self.assertIn(f"OldNew{i} · ", older)
@@ -445,8 +445,7 @@ class TestSheet(Base):
         self._older("OldNew", searched=False)
         self.add(counterparty="NowNew", searched=False)
         text = flat(self.render()["text"])
-        self.assertIn('+1 older still missing (Q2) — say "show older" · '
-                      '+1 older not searched yet (Q2) — say "show older"', text)
+        self.assertIn("+1 older still missing (Q2) · +1 older not searched yet (Q2)", text)
         # the current quarter's line counts the current quarter only: nothing twice
         self.assertIn("1 new payment not checked yet — the next pass looks.", text)
         older = self.render("older")["text"]

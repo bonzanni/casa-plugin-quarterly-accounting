@@ -71,8 +71,8 @@ class NoHardWrap(StoreCase):
                             for i in range(3)])
         r = views.build_review(self.conn, "status", quarter="2026-Q3")
         lines = r["text"].split("\n")
-        self.assertIn('Download the PDFs and email them to yourself, then say "check '
-                      'emailed invoices" to file them now.', lines)
+        self.assertIn("Download the PDFs and email them to yourself, then ask me to check "
+                      "emailed invoices.", lines)
         heads = [ln for ln in lines if ln.startswith("A" * 50)]
         self.assertEqual(len(heads), 3, lines)
         self.assertTrue(all("EUR" in ln and "14 Sep" in ln for ln in heads), heads)

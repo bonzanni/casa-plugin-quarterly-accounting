@@ -99,7 +99,7 @@ class TestTelegram(Base):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 1)
         text = views.build_review(self.conn, view="status", quarter="2026-Q3")["text"]
         self.assertIn(views.field(self.pkg["filename"]), text)
-        self.assertIn('say "send it again"', text)
+        self.assertIn("I can send it again", text)
         self.assertEqual(delivery.resendable(self.conn), self.pkg["package_id"])
         again = delivery.stage_for_delivery(self.conn, channel="telegram",
                                             package_id=delivery.resendable(self.conn))
@@ -124,10 +124,10 @@ class TestTelegram(Base):
         _record(self.conn, delivery_id=out["delivery_id"], outcome="uncertain")
         for view, page in (("status", None), ("all", 1)):
             text = views.build_review(self.conn, view=view, quarter="2026-Q3", page=page)["text"]
-            self.assertIn('say "send it again"', text, view)
+            self.assertIn("I can send it again", text, view)
             self.assertLessEqual(views.utf16_len(text), views.BODY_LIMIT)
             # #54: the offer is one whole line; the client wraps it
-            self.assertTrue(any(ln.endswith('may not have arrived — say "send it again".')
+            self.assertTrue(any(ln.endswith("may not have arrived — I can send it again.")
                                 for ln in text.splitlines()), (view, text))
             for word in views.FORBIDDEN:
                 self.assertNotIn(word, text, (view, word))
