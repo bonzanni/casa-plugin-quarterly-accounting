@@ -496,6 +496,7 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
     order, then `vendors`."""
     with views.named(list(proposals) + list(unclassified), quarter):
         plines = [_proposal_line(conn, i, d) for i, d in enumerate(proposals, 1)]
+        shown_uncl = list(unclassified[:UNCL_SHOWN])
         if unclassified:
             # #111: the card names the payments not classified yet and asks what each is
             uncl = [f"{views.headline(d, quarter)} — {views.WHAT_IS_IT}"
@@ -518,6 +519,10 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
             + after
         listed = proposals[:k]
         bound = {d["pid"]: len(before) + j for j, d in enumerate(listed)}
+        # r1 (Astra S2): a not-classified line is bound, so a reply about it binds as on the
+        # views; its lines follow the blank line and the title that open `after`
+        at = len(lines) - len(after) + 2
+        bound.update({d["pid"]: at + j for j, d in enumerate(shown_uncl)})
         docs = {d["pid"]: ({d["current"]["match_id"]: bound[d["pid"]]}
                            if d["current"] is not None else {}) for d in listed}
         chosen = [d["pid"] for d in listed if d["current"] is not None]
@@ -529,7 +534,7 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
                                  "missing": _walk_missing(conn, vendors, quarter, scheduled)},
                  "order": [{"q": q["question_id"]} for q in questions]
                  + [{"p": d["pid"]} for d in proposals] + list(vendors),
-                 **_grammar(listed), **(extra_scope or {})}
+                 **_grammar(listed + shown_uncl), **(extra_scope or {})}
         return _store(conn, kind, lines, scope, bound, states, docs=docs)
 
 
@@ -757,7 +762,8 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         head += _fit_receipts(receipts, head, _confirm_room(new_props) + tail)
         return _summary(conn, "end", q, head, new_props, _vendor_items(new_miss), tail,
                         reported, scheduled=True, extra_scope=extra_scope,
-                        questions=new_qs)       # e1 (Astra S2): only this run's new ones
+                        questions=new_qs,       # e1 (Astra S2): only this run's new ones
+                        unclassified=new_uncl)  # r1 (Terra S2): named, as on the other cards
     c = st["counts"].get(q, collections.Counter())
     n = sum(c.values())
     all_qs = replace.open_ones(conn)

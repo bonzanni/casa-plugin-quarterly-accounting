@@ -69,6 +69,27 @@ class NotClassified(_Uncl):
                                         "it?")
         self.assertIsNotNone(p)
 
+    def test_a_reply_about_the_named_payment_binds(self):
+        # r1 (Astra S2): the card's not-classified line binds as the views' does
+        from tests._base import apply_now
+        p = self.parked()
+        with FakeBroker():
+            out = posting.show_view(self.conn, view="open", quarter="2026-Q3")
+        self.assertIn(p, views.render_items(self.conn, out["render_id"]))
+        res = apply_now(self.conn, "Loonadministratie NL needs no invoice",
+                        quoted=self.render_text(out["render_id"]))
+        self.assertIsNotNone(res["proposal"], res)
+        self.assertIn("Loonadministratie NL", views.displayed(res["proposal"]))
+
+    def test_a_scheduled_end_card_names_the_new_one(self):
+        # r1 (Terra S2): the scheduled run's card names it too
+        self.parked()
+        with db.tx(self.conn):
+            rid = cards.compose_end(self.conn, self.job_id, scheduled=True)
+        text = views.displayed(self.render_text(rid))
+        self.assertIn("1 not classified yet", text)
+        self.assertIn("Loonadministratie NL · EUR 1,480.00 · 2 Sep — what is it?", text)
+
     def test_the_status_card_counts_past_three(self):
         for n in range(5):
             self.parked(remittance=f"Loon {n}")
