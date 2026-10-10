@@ -25,4 +25,4 @@ class CheckIsStatus(StoreCase):
         d = flat(qa_server.TOOLS["request_work"]["description"])
         self.assertIn("when the operator asks for the work", d)
         self.assertIn('A bare "check Q3" asks where the quarter stands: '
-                      'show_view(view="open"), not this.', d)
+                      'show_view(view="open", quarter="2026-Q3"), not this.', d)   # #126

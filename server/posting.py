@@ -96,17 +96,39 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
             r = conn.execute("SELECT * FROM renders WHERE render_id=?",
                              (_compose_list(conn, view or "status", quarter, pid, page,
                                             after, prev),)).fetchone()
+        shown = _shown_quarter(r, render_id is None and view != "item" and quarter is None)
         if not has_actions(conn, r):
-            return {"view": None, **plain_post(conn, r)}
+            out = plain_post(conn, r)
+            return {"view": None, **out, **shown,
+                    "note": " ".join(filter(None, [out["note"], shown.get("note")]))}
         value, scope = _view_value(conn, r)
         # g1 (Astra S1), Casa #1312: re-posting the same rendering after a cut that lost its
         # mark_rendering_delivered sends nothing — Casa answers the original receipt
         key = delivery_key(conn, "view", [r["render_id"]])
     ref = casa_broker.deposit("view", value, key=key)
     # #106: the posted view is the whole answer — no narration of the post
-    return {"view": ref, "render_id": r["render_id"], "next": scope.get("next"),
-            "note": "Casa posts this view itself; never describe it. After its receipt, "
-                    "mark_rendering_delivered(render_id); your whole reply is <silent/>."}
+    return {"view": ref, "render_id": r["render_id"], "next": scope.get("next"), **shown,
+            "note": " ".join(filter(None, [
+                "Casa posts this view itself; never describe it. After its receipt, "
+                "mark_rendering_delivered(render_id); your whole reply is <silent/>.",
+                shown.get("note")]))}
+
+
+def _shown_quarter(r, defaulted) -> dict:
+    """#126: the quarter a view shows, in show_view's answer, so the desk sees which one it
+    posted. A call that named none got the store's default (ruling Q2b: the quarter the
+    newest check named), which need not be the one the operator is talking about: the note
+    says so, for the desk to judge."""
+    if r["kind"] == "item":
+        return {}
+    q = json.loads(r["scope_json"]).get("quarter")
+    if not q:
+        return {}
+    out = {"quarter": q}
+    if defaulted:
+        out["note"] = (f"No quarter was named, so this is {q}. If the operator named another "
+                       "quarter, show_view again with theirs.")
+    return out
 
 
 POST_NOTE = ("Nothing on it to act on, so it goes as a plain message: post_results(render_ids="
