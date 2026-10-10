@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.25
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **A payment the bank gave no payee for reads by its name (#113).** The cards, notes.md and
+  ledger.csv all name it by the name its SEPA bank text carries ("Loonadministratie NL"), not
+  by the clipped start of that text with a hash on the end, and ledger.csv no longer says
+  "Unknown payee" for it. Its ledger.csv row carries the whole bank text in `notes`
+  ("bank: SEPA Overboeking Naam: … Omschrijving: LH 2026-09 …"). A bank text without a name
+  field is used whole, as before.
+
 ## 0.11.24
 
 Same store schema (17) and Casa floor (v0.344.67).
