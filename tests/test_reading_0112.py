@@ -99,7 +99,7 @@ class Reading(_Tapping):
         rid = self.end()["buttons"][0]["call"]["arguments"]["render_id"]
         views.mark_rendering_delivered(self.conn, rid)
         text = self.conn.execute("SELECT text FROM renders WHERE render_id=?", (rid,)).fetchone()[0]
-        res = apply_now(self.conn, "the Notion one is wrong",
+        res = apply_now(self.conn, [("reject", q)],   # #121: ops
                         "\U0001f4ca Alex\n" + views.displayed(text))
         self.assertIn("Reject the suggested document for Notion · EUR 9.00 · 2 Sep.",
                       res["proposal"])

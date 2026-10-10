@@ -37,7 +37,7 @@ class Classify(unittest.TestCase):
         """r1 (Astra, Terra S1): a document rule is the reply grammar's (`exempt`, `never`),
         never a classification."""
         self.assertIn('"Needs no invoice" (no document at all) stays a reading.', self.sec)
-        self.assertIn('"no invoices ever for Adobe"',
+        self.assertIn("a payment needs no document, whose payment it is, a vendor never needs one",
                       flat(section(DESK, "## The operator's words", "## Naming")))
 
     def test_it_asks_for_the_check_of_its_quarter_unasked(self):

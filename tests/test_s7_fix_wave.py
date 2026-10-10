@@ -26,11 +26,21 @@ class _Q3(StoreCase):
         views.mark_rendering_delivered(self.conn, out["render_id"])
         return out
 
-    def propose(self, text, quoted=None):
+    def propose(self, ops, quoted=None):
+        import posting
+        from tests._base import as_ops
+        with FakeBroker() as b:
+            out = posting.propose_reading(self.conn, as_ops(ops), quoted)
+        return out, (b.proposal() if b.deposits else None)
+
+    def more(self, quoted=None):
+        """#121: "more" / "all of them" is the bound post's continuation —
+        reading_context's `next` (show_view arguments, or None)."""
         import posting
         with FakeBroker() as b:
-            out = posting.propose_reading(self.conn, text, quoted)
-        return out, (b.proposal() if b.deposits else None)
+            ctx = posting.reading_context(self.conn, quoted)
+        self.assertEqual(b.deposits, [])
+        return ctx["next"]
 
     def tap(self, prop, label):
         import tools, qa_server  # noqa: F401
@@ -40,7 +50,7 @@ class _Q3(StoreCase):
 
 class TypedMore(_Q3):
     """I-1: a desk turn is a fresh session; the reading returns the bound rendering's
-    `next` as ready show_view arguments."""
+    `next` as ready show_view arguments. #121: reading_context returns it."""
     from tests.test_s7_views_buttons import PagedSheet as _P
     big_sheet = _P.big_sheet
     del _P
@@ -51,10 +61,7 @@ class TypedMore(_Q3):
         self.big_sheet()
         out = self.show(view="check")
         self.assertIsNone(out["next"])
-        r, prop = self.propose("all of them",
-                               quoted=views.displayed(self.render_text(out["render_id"])))
-        self.assertIsNone(prop)
-        self.assertEqual(r["instructions"], [])
+        self.assertIsNone(self.more(views.displayed(self.render_text(out["render_id"]))))
 
     def test_more_past_six_pages_returns_the_cards_cursor(self):
         """#66: a list longer than one post (Casa's six pages) ends its card with "say
@@ -65,11 +72,10 @@ class TypedMore(_Q3):
         first = self.show(view="check")
         self.assertIn("after", first["next"])
         self.assertIn("There are more after these.", self.render_text(first["render_id"]))
-        r, _ = self.propose("more")
-        (ins,) = r["instructions"]
-        self.assertEqual(ins, {"show_view": first["next"]})
-        self.assertIsNone(arguments_ok(ins["show_view"]))
-        self.assertTrue(all(type(x) is int for x in ins["show_view"]["after"]))
+        nxt = self.more()
+        self.assertEqual(nxt, first["next"])
+        self.assertIsNone(arguments_ok(nxt))
+        self.assertTrue(all(type(x) is int for x in nxt["after"]))
         second = self.show(**first["next"])
         a = set(views.render_items(self.conn, first["render_id"]))
         b = set(views.render_items(self.conn, second["render_id"]))
@@ -78,11 +84,9 @@ class TypedMore(_Q3):
         self.assertLessEqual(a | b, set(pids))
 
     def test_more_with_nothing_more_says_so(self):
+        # #121: "says so" is the desk's (next is null: there is nothing more)
         self.sheet_fixture()
-        r, prop = self.propose("more")
-        self.assertIsNone(prop)
-        self.assertEqual(r["instructions"], [])
-        self.assertIn("nothing more", r["say"])
+        self.assertIsNone(self.more())
 
 
 class SendAgainBinding(StoreCase):
@@ -165,7 +169,7 @@ class ImportDoesNotStaleAReading(_Q3):
     def test_a_row_high_water_bump_does_not_stale_apply(self):
         import db
         fx = self.sheet_fixture()
-        _, prop = self.propose(f"the {fx['payee']} one is wrong")
+        _, prop = self.propose([("reject", fx["pid"])])
         with db.tx(self.conn):
             self.conn.execute("UPDATE binding SET row_high_water=row_high_water+7,"
                               " watermark_announced=1, package_name_announced=1")
@@ -177,7 +181,7 @@ class ImportDoesNotStaleAReading(_Q3):
     def test_a_watermark_change_still_stales_it(self):
         import db
         fx = self.sheet_fixture()
-        _, prop = self.propose(f"the {fx['payee']} one is wrong")
+        _, prop = self.propose([("reject", fx["pid"])])
         with db.tx(self.conn):
             self.conn.execute("UPDATE binding SET watermark='2026-01-01'")
         self.assertIn("Something changed", self.tap(prop, "Apply")["receipt"])
@@ -296,16 +300,13 @@ class R3LegacyMore(_Q3):
         with db.tx(self.conn):
             self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
                               (db.canonical(scope), page1["render_id"]))
-        r, _ = self.propose("more")
-        self.assertEqual(r["instructions"],
-                         [{"show_view": {"view": "check", "quarter": "2026-Q3", "page": 1}}])
+        self.assertEqual(self.more(), {"view": "check", "quarter": "2026-Q3", "page": 1})
 
     def test_an_explicit_null_next_still_says_nothing_more(self):
         self.big_sheet(n=2)
         page1 = self.show(view="check", page=1)
         self.assertIsNone(page1["next"])
-        r, _ = self.propose("more")
-        self.assertEqual(r["instructions"], [])
+        self.assertIsNone(self.more())
 
 
 class R3Minors(_Q3):

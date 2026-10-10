@@ -1,4 +1,8 @@
 # tests/test_reply.py
+"""#121: the regex grammar is gone — the desk reads the operator's words and passes explicit
+operations by pid. What stays here are the write rules a reading still owns: binding to the
+post, stale/not-shown re-show, set-aside all-or-none, effects listing, the size limit,
+refusals said in operator words, and the receipts."""
 import re
 import unittest
 from unittest import mock
@@ -19,11 +23,11 @@ def assert_operator_words(text):
     assert re.search(r"#\d|\br\d+\b|\ba [aeiou]", text) is None, text
 
 
-def apply_now(conn, text, quoted=None):
-    """S7 §8 (Task 6): what apply_reply did — the words read (propose_reading) and, when a
+def apply_now(conn, ops, quoted=None):
+    """S7 §8 (Task 6), #121: the desk's operations proposed (propose_reading) and, when a
     reading was posted, its Apply tapped (tests._base.apply_now). The proposal and the
     receipt both speak operator words."""
-    out = _base.apply_now(conn, text, quoted)
+    out = _base.apply_now(conn, ops, quoted)
     assert_operator_words(out["receipt"])
     assert_operator_words(out["proposal"] or "")
     return out
@@ -73,13 +77,22 @@ class Base(StoreCase):
     def operator_entries(self):
         return self.conn.execute("SELECT COUNT(*) FROM log WHERE author='operator'").fetchone()[0]
 
+    def not_on_post(self, ops):
+        """#121: a pid not on the bound post is refused to the desk; nothing is read."""
+        with self.assertRaises(db.Refusal) as cm:
+            apply_now(self.conn, ops)
+        self.assertIn("is not on the post", str(cm.exception))
+
+    def readings(self):
+        return self.conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0]
+
 
 class TestGrammar(Base):
     def test_a_negative_verdict_unpairs_only_what_it_names(self):
         z = self.item("Zapier", 9900, "2026-09-17")
         v = self.item("Vercel", 1210, "2026-09-18")
         self.deliver()
-        out = apply_now(self.conn, "the Zapier one is wrong")
+        out = apply_now(self.conn, [("reject", z)])
         self.assertIn("Removed the match for Zapier · EUR 99.00 · 17 Sep.", out["receipt"])
         self.assertIsNone(self.author(z))
         self.assertEqual(self.author(v)[0], "auto")
@@ -92,228 +105,32 @@ class TestGrammar(Base):
         del pid
 
     def test_all_good_confirms_only_what_was_shown(self):
+        # #121: ops — a payment created after the sheet was sent is refused to the desk
         a = self.item("Adobe", 5445, "2026-09-14")
         self.deliver()
         late = self.item("Figma", 1815, "2026-09-15")          # created after the sheet was sent
-        apply_now(self.conn, "all good")
-        self.assertEqual(self.author(a)[0], "operator")
-        self.assertEqual(self.author(late)[0], "auto")
-
-    def test_the_guesses_named_together_are_the_sheet_reply(self):
-        # issue #11: the operator's own words, from two live runs
-        for text in ("Those six guesses are all right, confirm them.",
-                     "All six proposals are right — confirm them"):
-            with self.subTest(text=text):
-                self.setUp()
-                pids = [self.item(f"Vendor{i}", 1000 + i, f"2026-09-{10 + i:02d}")
-                        for i in range(6)]
-                self.deliver()
-                out = apply_now(self.conn, text)
-                self.assertEqual(len(out["applied"]), 6, out["receipt"])
-                self.assertEqual([self.author(p)[0] for p in pids], ["operator"] * 6)
-                self.assertNotIn("didn't understand", out["receipt"])
-
-    def test_a_count_that_is_not_the_sheets_confirms_nothing(self):
-        pids = [self.item(f"Vendor{i}", 1000 + i, f"2026-09-{10 + i:02d}") for i in range(3)]
-        self.deliver()
-        # R1 Astra: a count in the trailing "confirm …" is checked as well
-        for text in ("those five guesses are right", "confirm all 4", "both guesses are good",
-                     "all the guesses look right, confirm both pairings",
-                     "these three guesses are right, confirm all four"):
-            with self.subTest(text=text):
-                out = apply_now(self.conn, text)
-                self.assertEqual(out["applied"], [])
-                self.assertIn("that sheet has 3 pairings waiting for your approval, not ",
-                              out["receipt"])
-                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
-        out = apply_now(self.conn, "confirm all three")
-        self.assertEqual(len(out["applied"]), 3)
-
-    def test_a_pronoun_or_a_bare_the_guesses_confirms_no_more_than_was_named(self):
-        # R2 Astra: "them" may mean the ones just named — never the whole sheet
-        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
-                for i, n in enumerate(("Zapier", "Vercel", "Adobe", "Figma"))]
-        self.deliver()
-        for text in ("Zapier and Vercel are right. Confirm them.",
-                     "Zapier and Vercel are right. They're all good.",
-                     "Zapier and Vercel are right. The guesses are right, confirm them.",
-                     "Zapier and Vercel are right. Confirm them all."):
-            with self.subTest(text=text):
-                apply_now(self.conn, text)
-                self.assertEqual([self.author(p)[0] for p in pids[2:]], ["auto", "auto"])
-
-    def test_an_exception_on_its_own_line_approves_no_sheet(self):
-        # R3 Astra: the line break must not cut the exception loose from the approval
-        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
-                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
-        self.deliver()
-        for text in ("Confirm all three,\nexcept the Zapier one.", "All good,\nexcept the Zapier one",
-                     "All three guesses are right.\nBut not the Zapier one.",
-                     # R4 Astra: any clause the grammar does not understand may qualify it
-                     "Confirm all three,\nwith the exception of the Zapier one.",
-                     "Confirm all three,\nexcluding the Zapier one.",
-                     "Confirm all three.\n— except the Zapier one",
-                     "All good.\nZapier not so sure.", "All good. 1 wrong."):
-            with self.subTest(text=text):
-                out = apply_now(self.conn, text)
-                self.assertEqual(out["applied"], [])
-                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
-                self.assertIn("something else in the same message", out["receipt"])
-                self.assertEqual(self.operator_entries(), 0)
-
-    def test_an_approval_beside_understood_clauses_still_applies(self):
-        # the form the receipts recommend: the approval and the correction, two sentences
-        z = self.item("Zapier", 9900, "2026-09-17")
-        v = self.item("Vercel", 1210, "2026-09-18")
-        self.deliver()
-        out = apply_now(self.conn, "All good. The Zapier one is wrong.")
-        # R5: the sheet is approved last, for what no other clause named
-        self.assertIsNone(self.author(z))
-        self.assertEqual(self.author(v)[0], "operator")
-        self.assertNotIn("something else in the same message", out["receipt"])
-
-    def test_a_correction_beside_a_collective_is_never_confirmed(self):
-        # R5 Terra: the collective used to confirm Zapier before its correction ran.
-        # R8: a collective beside a verdict applies nothing (it may refer back to it)
-        for text in ("All three guesses are right. The Zapier one is wrong.",
-                     "The Zapier one is wrong. All three guesses are right."):
-            with self.subTest(text=text):
-                self.setUp()
-                z = self.item("Zapier", 9900, "2026-09-17")
-                others = [self.item("Vercel", 1210, "2026-09-18"),
-                          self.item("Adobe", 5445, "2026-09-14")]
-                self.deliver()
-                out = apply_now(self.conn, text)
-                self.assertIsNone(self.author(z), out["receipt"])
-                self.assertEqual([self.author(p)[0] for p in others], ["auto"] * 2)
-                self.assertIn("something else in the same message", out["receipt"])
-
-    def test_a_collective_after_named_approvals_confirms_only_those(self):
-        # R8 Astra: "those two guesses" refers back to the two just named
-        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
-                for i, n in enumerate(("Zapier", "Vercel", "Adobe", "Figma"))]
-        self.deliver()
-        for text in ("Zapier and Vercel are right. Those two guesses are all right, confirm them.",
-                     "Zapier and Vercel are right. All those guesses are right, confirm them."):
-            with self.subTest(text=text):
-                apply_now(self.conn, text)
-                self.assertEqual([self.author(p)[0] for p in pids[2:]], ["auto", "auto"])
-
-    def test_an_unresolved_clause_leaves_the_sheet_unapproved(self):
-        a1 = self.item("Adobe", 5445, "2026-09-14")
-        a2 = self.item("Adobe", 2999, "2026-09-03")
-        v = self.item("Vercel", 1210, "2026-09-18")
-        self.deliver()
-        out = apply_now(self.conn, "All good. The Adobe one is wrong.")   # which Adobe?
-        self.assertEqual([self.author(p)[0] for p in (a1, a2, v)], ["auto"] * 3)
-        self.assertEqual(self.operator_entries(), 0)
-        self.assertIn("something else in the same message", out["receipt"])
-
-    def test_a_question_beside_a_sheet_wide_approval_leaves_the_sheet_unapproved(self):
-        # R6 Astra: a question may carry an exclusion
-        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
-                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
-        self.deliver()
-        for text in ("Confirm all three. Can you leave the Zapier one unconfirmed?",
-                     "All good. Is Vercel right?"):
-            with self.subTest(text=text):
-                out = apply_now(self.conn, text)
-                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
-                self.assertIn("something else in the same message", out["receipt"])
-
-    def test_two_sheet_wide_clauses_are_one_approval(self):
-        # R7 Astra: a count one clause states bounds every other sheet-wide clause
-        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
-                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
-        self.deliver()
-        for text in ("Those two guesses are all right. Confirm all those guesses.",
-                     "Confirm all those guesses. Those two guesses are all right.",
-                     "All good. Both guesses are right."):
-            with self.subTest(text=text):
-                out = apply_now(self.conn, text)
-                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
-                self.assertIn("that sheet has 3 pairings waiting", out["receipt"])
-        out = apply_now(self.conn, "All good. All three guesses are right.")
-        self.assertEqual([self.author(p)[0] for p in pids], ["operator"] * 3)
-
-    def test_a_search_request_beside_all_good_takes_nothing_from_it(self):
-        # R6 Astra S2: only a verdict on a pairing takes it out of the sheet-wide approval
-        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
-                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
-        self.deliver()
-        apply_now(self.conn, "All good. Have another look at Zapier.")
-        self.assertEqual([self.author(p)[0] for p in pids], ["operator"] * 3)
-
-    def test_a_qualifier_that_names_no_payment_leaves_the_sheet_unapproved(self):
-        # R5 Astra: "Only Vercel is right" parses as a confirm whose target resolves to
-        # nothing — it is unresolved, so the sheet-wide approval applies nothing
-        pids = [self.item(n, 1000 + i, f"2026-09-{10 + i:02d}")
-                for i, n in enumerate(("Zapier", "Vercel", "Adobe"))]
-        self.deliver()
-        for text in ("Confirm all three. Only Vercel is right.",
-                     "Only Vercel is right. Confirm all three."):
-            with self.subTest(text=text):
-                apply_now(self.conn, text)
-                self.assertEqual([self.author(p)[0] for p in pids], ["auto"] * 3)
-                self.assertEqual(self.operator_entries(), 0)
-
-    def test_a_collective_confirmation_binds_like_all_good(self):
-        a = self.item("Adobe", 5445, "2026-09-14")
-        self.deliver()
-        late = self.item("Figma", 1815, "2026-09-15")          # created after the sheet was sent
-        apply_now(self.conn, "all the guesses are right, confirm them")
+        self.not_on_post([("confirm", a), ("confirm", late)])
+        self.assertEqual(self.author(a)[0], "auto")
+        apply_now(self.conn, [("confirm", a)])
         self.assertEqual(self.author(a)[0], "operator")
         self.assertEqual(self.author(late)[0], "auto")
 
     def test_identity_is_not_an_exemption(self):
         pid = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)
         self.deliver()
-        out = apply_now(self.conn, "the BCK*XYZ one is my accountant")
+        out = apply_now(self.conn, [("identity", pid, "my accountant")])
         self.assertIn("BCK\\*XYZ: my accountant; still missing a document.", out["receipt"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE kind='exempt'")
                          .fetchone()[0], 0)
         self.assertEqual(self.conn.execute("SELECT status FROM projections WHERE pid=?",
                                            (pid,)).fetchone()[0], "open")
 
-    def test_a_target_list_without_a_verb_applies_nothing(self):
-        self.item("Zapier", 9900, "2026-09-17")
-        self.item("Vercel", 1210, "2026-09-18")
-        self.deliver()
-        out = apply_now(self.conn, "Zapier and Vercel")
-        self.assertEqual(out["applied"], [])
-        self.assertIn('"Zapier and Vercel are wrong"', out["receipt"])
-
-    def test_ambiguous_bulk_applies_nothing(self):
-        self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
-        out = apply_now(self.conn, "all good except the Zapier")
-        self.assertEqual((out["applied"], self.operator_entries()), ([], 0))
-        self.assertIn('"all good"', out["receipt"])
-
-    def test_two_matches_ask_with_dates_and_amounts(self):
-        self.item("Adobe", 5445, "2026-09-14")
-        self.item("Adobe", 2999, "2026-09-03")
-        self.deliver()
-        out = apply_now(self.conn, "the Adobe one is wrong")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("EUR 54.45 · 14 Sep", out["receipt"])
-        self.assertIn("EUR 29.99 · 3 Sep", out["receipt"])
-        out = apply_now(self.conn, "the Adobe 54.45 one is wrong")
-        self.assertEqual(len(out["applied"]), 1)
-
-    def test_no_match_is_said_and_never_redirected(self):
-        self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
-        out = apply_now(self.conn, "the Zapiér one is wrong")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("Nothing open matches", out["receipt"])
-
     def test_an_item_never_shown_is_refused_and_nothing_applies(self):
         # binding R3: words resolve only on the one bound rendering; nothing names it
+        # (#121: a pid not on the post is refused to the desk, nothing read)
         pid = self.item("Zapier", 9900, "2026-09-17")
-        out = apply_now(self.conn, "the Zapier one is wrong")
-        self.assertEqual((out["applied"], out["reshow"]), ([], []))
-        self.assertIn("isn't on the last list I sent", out["receipt"])
+        self.not_on_post([("reject", pid)])
+        self.assertEqual(self.readings(), 0)
         self.assertEqual(self.author(pid)[0], "auto")
 
     def test_a_pass_that_moved_one_item_refuses_it_and_applies_the_rest(self):
@@ -323,30 +140,23 @@ class TestGrammar(Base):
         matches.relabel_match(self.conn, match_id=self.conn.execute(
             "SELECT current_match FROM projections WHERE pid=?", (z,)).fetchone()[0],
             labels=("guessed", "no-ref"), token=self.token)      # the running pass moved it
-        out = apply_now(self.conn, "the Zapier one is wrong; the Vercel one is wrong")
+        out = apply_now(self.conn, [("reject", z), ("reject", v)])
         self.assertEqual(out["reshow"], [z])
         self.assertIsNone(self.author(v))
         self.assertEqual(self.author(z)[0], "auto")
 
-    def test_a_question_is_never_a_correction(self):
+    def test_the_receipt_comes_from_the_commit(self):
         z = self.item("Zapier", 9900, "2026-09-17")
         self.deliver()
-        out = apply_now(self.conn, "is the Zapier one right?")
-        self.assertTrue(out["not_a_reply"])
-        self.assertEqual(self.author(z)[0], "auto")
-
-    def test_the_receipt_comes_from_the_commit(self):
-        self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
         with mock.patch.object(matches, "reject_in_tx", side_effect=db.Busy("locked")):
-            out = apply_now(self.conn, "the Zapier one is wrong")
+            out = apply_now(self.conn, [("reject", z)])
         self.assertNotIn("Removed the match", out["receipt"])
         self.assertIn("not applied", out["receipt"])
 
     def test_exemption_by_amount_says_what_it_dropped(self):
         pid = self.item("Adobe", 18000, "2026-09-16")
         self.deliver()
-        out = apply_now(self.conn, "the 180.00 one needs no invoice")
+        out = apply_now(self.conn, [("no_document", pid)])
         self.assertIn("needs no document", out["receipt"])
         self.assertIn("removed its match", out["receipt"])
         self.assertEqual(self.conn.execute("SELECT status FROM projections WHERE pid=?",
@@ -355,7 +165,7 @@ class TestGrammar(Base):
     def test_no_invoices_ever_is_a_counterparty_expectation(self):
         pid = self.item("Adobe", 18000, "2026-09-16", paired=False)
         self.deliver()
-        apply_now(self.conn, "no invoices ever for Adobe")
+        apply_now(self.conn, [("never", pid)])
         row = self.conn.execute("SELECT exp_kind, exp_row FROM projections WHERE pid=?",
                                 (pid,)).fetchone()
         self.assertEqual(tuple(row), ("none", 2))
@@ -363,40 +173,25 @@ class TestGrammar(Base):
                          .fetchone()[0], 0)
 
     def test_more_asks_for_the_next_page(self):
-        # final fix wave I-1: "more" returns the bound rendering's `next` as show_view
-        # arguments; a one-page list has none, and the receipt says there is nothing more
+        # final fix wave I-1: "more" is the bound rendering's `next` as show_view arguments;
+        # a one-page list has none (#121: the desk reads it from reading_context)
+        import posting
         self.item("Zapier", 9900, "2026-09-17")
         self.deliver(view="all")
-        out = apply_now(self.conn, "more")
-        self.assertEqual((out["instructions"], out["applied"]), ([], []))
-        self.assertIn(reply.NOTHING_MORE, out["receipt"])
-
-    def test_instructions_are_returned_not_performed(self):
-        # S7 §8: a rebuild beside a write waits for its Apply (the proposal says so); a
-        # rebuild on its own is returned as the instruction, never performed
-        self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
-        out = apply_now(self.conn, "Zapier is wrong; rebuild it")
-        self.assertEqual(out["instructions"], [])
-        self.assertIn(reply.REBUILD_PENDING, out["proposal"])
-        self.assertEqual(len(out["applied"]), 1)
-        out = apply_now(self.conn, "rebuild q3")
-        self.assertEqual(out["instructions"], ["rebuild 2026-Q3"])
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM packages").fetchone()[0], 0)
+        self.assertIsNone(posting.reading_context(self.conn)["next"])
 
     def test_identity_on_an_unseen_item_applies_nothing_and_a_changed_one_lists_it(self):
         self.deliver()
         pid = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)    # never shown
-        out = apply_now(self.conn, "the BCK*XYZ one is my accountant")
         # binding R2/R3: no provenance on the bound rendering — refused, nothing re-shown
-        self.assertEqual((out["applied"], out["reshow"]), ([], []))
-        self.assertIn("isn't on the last list I sent", out["receipt"])
+        # (#121: refused to the desk)
+        self.not_on_post([("identity", pid, "my accountant")])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
         self.deliver()
         self.row(self.n, counterparty="BCK*XYZ", amount_minor=17000, booking_date="2026-09-16",
                  value_date="2026-09-16")                                # changed since shown
         self.settle(pid)
-        out = apply_now(self.conn, "the BCK*XYZ one is my accountant")
+        out = apply_now(self.conn, [("identity", pid, "my accountant")])
         # R2: provenance is the named payment on R; the payment it changes is listed in the
         # proposal as it is now (170.00), and Apply's replay-and-compare guards that set
         self.assertEqual((len(out["applied"]), out["reshow"]), (1, []))
@@ -407,14 +202,12 @@ class TestGrammar(Base):
         # round p6 (Terra S1); binding R2: provenance, not a re-show of every payment
         self.deliver()
         pid = self.item("Adobe", 5445, "2026-09-14")                     # paired, unseen
-        out = apply_now(self.conn, "no invoices ever for Adobe")
-        self.assertEqual((out["applied"], out["reshow"]), ([], []))
-        self.assertIn("isn't on the last list I sent", out["receipt"])
+        self.not_on_post([("never", pid)])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties WHERE"
                                            " exp_kind IS NOT NULL").fetchone()[0], 0)
         self.assertEqual(self.author(pid)[0], "auto")                   # the pairing survives
         self.deliver()
-        out = apply_now(self.conn, "no invoices ever for Adobe")
+        out = apply_now(self.conn, [("never", pid)])
         self.assertEqual(len(out["applied"]), 1)
 
     def test_an_identity_lists_every_payment_it_changes(self):
@@ -425,10 +218,10 @@ class TestGrammar(Base):
         kb.upsert_counterparty(self.conn, "my accountant")
         kb.set_expectation(self.conn, scope_type="counterparty", scope="my accountant",
                            kind="none", author="specialist")
-        self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)
+        shown = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)
         self.deliver()
         hidden = self.item("BCK*XYZ", 25000, "2026-09-18")              # paired, never shown
-        out = apply_now(self.conn, "the BCK*XYZ 180.00 one is my accountant")
+        out = apply_now(self.conn, [("identity", shown, "my accountant")])
         self.assertEqual((len(out["applied"]), out["reshow"]), (1, []))
         self.assertIn("It changes 2 payments", out["proposal"])
         self.assertIn("250.00", out["proposal"])
@@ -442,37 +235,16 @@ class TestGrammar(Base):
         r = views.build_review(self.conn, view="missing", quarter="2026-Q2")
         views.mark_rendering_delivered(self.conn, r["render_id"])
         # S7 §8: the reading's touched quarter is the one the rule changes (the quarter a
-        # delivered package's "rebuild it" line names); the rebuild waits for the Apply
+        # delivered package's "no longer matches" line names); a rebuild waits for the Apply
+        # (#121: rebuild is get_package, never a reading operation)
+        ops = reply.check_ops(_base.as_ops([("never", pid)]))
         with db.tx(self.conn):
-            read = reply.reading_in_tx(self.conn, "no invoices ever for Adobe; rebuild it")
-        self.assertEqual((read["quarters"], read["instructions"]), (["2026-Q2"], []))
-        out = apply_now(self.conn, "no invoices ever for Adobe; rebuild it")
-        self.assertIn(reply.REBUILD_PENDING, out["proposal"])
+            read = reply.reading_in_tx(self.conn, ops)
+        self.assertEqual(read["quarters"], ["2026-Q2"])
+        out = apply_now(self.conn, [("never", pid)])
         self.assertEqual(len(out["applied"]), 1)
         self.assertEqual(self.conn.execute("SELECT exp_kind FROM projections WHERE pid=?",
                                            (pid,)).fetchone()[0], "none")
-
-    def test_rebuild_is_decided_after_the_whole_reply(self):
-        self.deliver()
-        self.item("Zapier", 9900, "2026-09-17")                            # unseen
-        for text in ("rebuild it; Zapier is wrong", "all good except the Zapier; rebuild it"):
-            out = apply_now(self.conn, text)
-            self.assertEqual(out["instructions"], [], text)
-            self.assertIn("Not rebuilding yet", out["receipt"], text)
-
-    def test_an_unresolved_correction_blocks_its_rebuild(self):
-        self.deliver()
-        self.item("Zapier", 9900, "2026-09-17")                            # unseen
-        out = apply_now(self.conn, "Zapier is wrong; rebuild it")
-        self.assertEqual(out["instructions"], [])
-        self.assertIn("Not rebuilding yet", out["receipt"])
-
-    def test_a_bare_number_is_not_a_line_reference(self):
-        self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
-        out = apply_now(self.conn, "4 good")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("no numbered lines", out["receipt"])
 
     def test_a_reply_after_the_quarter_shipped_offers_a_rebuild(self):
         z = self.item("Zapier", 9900, "2026-09-17")
@@ -485,10 +257,10 @@ class TestGrammar(Base):
             self.conn.execute("INSERT INTO deliveries(package_id, channel, staged_path, status,"
                               " created_at, settled_at) VALUES (?, 'telegram', '/x', 'delivered',"
                               " 'x', '2026-10-14T10:00:00Z')", (pk,))
-        out = apply_now(self.conn, "the Zapier one is wrong")
-        self.assertIn('say "rebuild it"', out["receipt"])
+        out = apply_now(self.conn, [("reject", z)])
+        # #121: the receipt offers the rebuild without teaching a phrase
+        self.assertIn("no longer matches — I can build a fresh one.", out["receipt"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM packages").fetchone()[0], 1)
-        del z
 
 
 class TestPreflightRulings(Base):
@@ -503,40 +275,31 @@ class TestPreflightRulings(Base):
         def refuse(conn, name, *, grant):
             raise db.Refusal("the zip name cannot change right now")
         self.patch(binding, "set_package_name_in_tx", refuse)
-        out = apply_now(self.conn, "the Zapier one is wrong; call the zips acme")
+        out = apply_now(self.conn, [("reject", z), ("zip_name", "acme")])
         self.assertIsNone(self.author(z))
         self.assertIn("Removed the match for Zapier · EUR 99.00 · 17 Sep.", out["receipt"])
         self.assertIn("The zip name: not applied", out["receipt"])
-        self.assertEqual(len(out["applied"]), 1)
-
-    def test_a_clause_that_is_no_longer_a_reading_says_so(self):
-        # 0.11.2 (#55): "start from Q3" is no longer a reading at all
-        z = self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
-        out = apply_now(self.conn, "the Zapier one is wrong; start from Q3")
-        self.assertIsNone(self.author(z))
-        self.assertIn("I didn't understand \u201cstart from q3\u201d \u2014 nothing applied for it.",
-                      out["receipt"])
         self.assertEqual(len(out["applied"]), 1)
 
     def test_every_setting_clause_is_guarded(self):
         with db.tx(self.conn):
             self.conn.execute("DELETE FROM binding")
         # 0.11.2 (#55): "start from …" is no longer a setting clause
-        out = apply_now(self.conn, "stop chasing Q2; call the zips acme; the bank"
-                                           " ledger was reset")
+        out = apply_now(self.conn, [("stop_chasing", "2026-Q2"), ("zip_name", "acme"),
+                                    ("ledger_reset",)])
         self.assertEqual(len(out["applied"]), 1)              # stop chasing: nothing to stop
         self.assertEqual(out["receipt"].count("no account is bound yet"), 2)
 
     def test_a_rule_with_no_sheet_sent_says_so_in_operator_words(self):
-        self.item("Adobe", 18000, "2026-09-16", paired=False)
-        out = apply_now(self.conn, "no invoices ever for Adobe")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("isn't on the last list I sent", out["receipt"])
-        self.assertNotIn("render", out["receipt"])
+        # #121: with no post the words could be about, the desk is refused; nothing is read
+        pid = self.item("Adobe", 18000, "2026-09-16", paired=False)
+        self.not_on_post([("never", pid)])
+        self.assertEqual(self.readings(), 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties WHERE"
+                                           " exp_kind IS NOT NULL").fetchone()[0], 0)
 
     def test_store_refusals_are_translated(self):
-        self.item("Zapier", 9900, "2026-09-17")
+        z = self.item("Zapier", 9900, "2026-09-17")
         pid = self.item("Vercel", 1210, "2026-09-18")
         self.deliver()
         for msg, said in (("this payment needs a receipt, and this is a invoice",
@@ -544,7 +307,7 @@ class TestPreflightRulings(Base):
                           (f"that document has since been matched to payment #{pid}",
                            "matched to another payment (Vercel · EUR 12.10 · 18 Sep)")):
             with mock.patch.object(matches, "confirm_in_tx", side_effect=db.Refusal(msg)):
-                out = apply_now(self.conn, "the Zapier one is good")
+                out = apply_now(self.conn, [("confirm", z)])
             self.assertIn(said, out["receipt"])
             self.assertIn("not applied", out["receipt"])
 
@@ -553,34 +316,13 @@ class TestPreflightRulings(Base):
         second "right" says it was already fine and writes nothing."""
         z = self.item("Zapier", 9900, "2026-09-17")
         self.deliver()
-        apply_now(self.conn, "the Zapier one is good")
+        apply_now(self.conn, [("confirm", z)])
         self.assertEqual(self.author(z)[0], "operator")
         n = self.conn.execute("SELECT count(*) FROM log WHERE pid=?", (z,)).fetchone()[0]
-        out = apply_now(self.conn, "the Zapier one is good")
+        out = apply_now(self.conn, [("confirm", z)])
         self.assertIn("already fine", out["receipt"])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE pid=?",
                                            (z,)).fetchone()[0], n)
-
-    def test_a_question_beside_a_correction_changes_only_the_correction(self):
-        z = self.item("Zapier", 9900, "2026-09-17")
-        v = self.item("Vercel", 1210, "2026-09-18")
-        self.deliver()
-        out = apply_now(self.conn, "the Vercel one is wrong. is the Zapier one right?")
-        self.assertFalse(out["not_a_reply"])
-        self.assertIsNone(self.author(v))
-        self.assertEqual(self.author(z)[0], "auto")
-        self.assertIn("a question", out["receipt"])
-
-    def test_all_good_answers_only_a_sheet_sent_last(self):
-        a = self.item("Adobe", 5445, "2026-09-14")
-        self.deliver()
-        r = views.build_review(self.conn, view="item", quarter="2026-Q3", pid=a)
-        views.mark_rendering_delivered(self.conn, r["render_id"])
-        out = apply_now(self.conn, "all good")
-        self.assertEqual(out["applied"], [])
-        self.assertEqual(self.author(a)[0], "auto")
-        self.assertIn("\"all good\"", out["receipt"])
-
 
 
 class TestFixRound1(Base):
@@ -601,7 +343,7 @@ class TestFixRound1(Base):
         pid, docs = self.candidates()
         documents.update_document_metadata(self.conn, docs[0], document_date="2026-09-01")
         before = self.states()
-        out = apply_now(self.conn, "the Adobe one is wrong")
+        out = apply_now(self.conn, [("reject", pid)])
         self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
         self.assertEqual(self.states(), before)
         self.assertNotIn("rejected", self.states())
@@ -610,18 +352,17 @@ class TestFixRound1(Base):
 
     def test_unchanged_candidates_are_all_set_aside(self):
         pid, _ = self.candidates()
-        out = apply_now(self.conn, "the Adobe one is wrong")
+        out = apply_now(self.conn, [("reject", pid)])
         self.assertEqual(self.states(), ["rejected", "rejected"])
         self.assertIn("Ruled out both invoices for Adobe", out["receipt"])
         self.assertEqual(len(out["applied"]), 1)
-        del pid
 
     def test_a_numbered_refusal_keeps_its_noun(self):
-        self.item("Zapier", 9900, "2026-09-17")
+        z = self.item("Zapier", 9900, "2026-09-17")
         self.deliver()
         with mock.patch.object(matches, "reject_in_tx",
                                side_effect=db.Refusal("there is no pairing #12")):
-            out = apply_now(self.conn, "the Zapier one is wrong")
+            out = apply_now(self.conn, [("reject", z)])
         self.assertIn("there is no such pairing", out["receipt"])
         self.assertEqual(reply._say(self.conn, db.Refusal("see document #4 first")),
                          "see that document first")
@@ -631,97 +372,12 @@ class TestFixRound1(Base):
             "this payment needs a credit-note, and this is a other"))
         self.assertEqual(said, "this payment needs a credit note, and this is a document")
 
-    def test_a_rule_for_an_unknown_vendor_creates_nothing(self):
-        self.item("Adobe", 18000, "2026-09-16", paired=False)
-        self.deliver()
-        out = apply_now(self.conn, "no invoices ever for Adbe")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("Nothing open matches", out["receipt"])
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
-
-    def test_a_no_op_correction_blocks_its_rebuild(self):
-        self.item("Zapier", 9900, "2026-09-17", paired=False)
-        self.deliver()
-        for text in ("Zapier is wrong; rebuild it", "Zapier is good; rebuild it"):
-            out = apply_now(self.conn, text)
-            self.assertEqual(out["instructions"], [], text)
-            self.assertIn("Not rebuilding yet", out["receipt"], text)
-
-    def test_the_escape_word_binds_anywhere(self):
-        z = self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
-        out = apply_now(self.conn, "the Zapier one is wrong, accounting")
-        self.assertIsNone(self.author(z))
-        self.assertIn("Removed the match for Zapier", out["receipt"])
-        self.assertNotIn("didn't understand", out["receipt"])
-
-    def test_bulk_except_cites_the_vendor_written(self):
-        self.item("Vercel", 1210, "2026-09-18")
-        self.deliver()
-        out = apply_now(self.conn, "all good except the Vercel")
-        self.assertIn('"the Vercel one is wrong"', out["receipt"])
-        self.assertNotIn("Zapier", out["receipt"])
-
-
-
-class TestFixRound2(Base):
-    def test_the_escape_word_is_a_marker_not_clause_content(self):
-        abc = self.item("ABC Accounting Services", 9900, "2026-09-17")
-        z = self.item("Zapier", 1210, "2026-09-18")
-        v = self.item("Vercel", 2000, "2026-09-19")
-        self.deliver()
-        out = apply_now(self.conn, "the ABC Accounting Services one is wrong")
-        self.assertIsNone(self.author(abc))
-        self.assertIn("Removed the match for ABC Accounting Services", out["receipt"])
-        out = apply_now(self.conn, "the Zapier one is wrong, accounting")
-        self.assertIsNone(self.author(z))
-        out = apply_now(self.conn, "accounting: the Vercel one is wrong")
-        self.assertIsNone(self.author(v))
-        self.assertNotIn("didn't understand", out["receipt"])
-
-    def test_a_zip_name_may_say_accounting(self):
-        import binding
-        out = apply_now(self.conn, "call the zips accounting.zip")
-        self.assertEqual(len(out["applied"]), 1, out["receipt"])
-        self.assertEqual(self.conn.execute("SELECT package_name FROM binding").fetchone()[0],
-                         binding.slug("accounting.zip"))
-
-
-
-class TestFixRound3(Base):
-    def both_apply(self, text):
-        z = self.item("Zapier", 9900, "2026-09-17")
-        v = self.item("Vercel", 1210, "2026-09-18")
-        self.deliver()
-        out = apply_now(self.conn, text)
-        self.assertEqual(len(out["applied"]), 2, out["receipt"])
-        self.assertEqual(self.author(z)[0], "operator")
-        self.assertIsNone(self.author(v))
-
-    def test_a_period_without_a_space_still_ends_a_sentence(self):
-        self.both_apply("Zapier is fine.Vercel is wrong")
-
-    def test_a_period_and_a_space_ends_a_sentence(self):
-        self.both_apply("Zapier is fine. Vercel is wrong")
-
-    def test_numbers_and_file_names_stay_inside_their_clause(self):
-        self.assertEqual(reply._clauses("call the zips accounting.zip"),
-                         ["call the zips accounting.zip"])
-        self.assertEqual(reply._clauses("the Adobe 99.00 one is wrong.the 1.234,56 one is"
-                                         " good. the 14.09 one needs no invoice"),
-                         ["the adobe 99.00 one is wrong", "the 1.234,56 one is good",
-                          "the 14.09 one needs no invoice"])
-        self.assertEqual(reply._clauses("send invoice.pdf again.Adobe is wrong"),
-                         ["send invoice.pdf again", "adobe is wrong"])
-        self.assertEqual(reply._clauses("Zapier is fine.Adobe is wrong"),
-                         ["zapier is fine", "adobe is wrong"])
-
-
 
 class TestFixWaveD(Base):
     def test_all_good_binds_to_the_sheet_delivered_last_within_one_second(self):
         # Astra S1: delivered_at has one-second resolution; B then A delivered in the
-        # same second must bind "all good" to A (delivery order), never to B (creation order).
+        # same second must bind the reading to A (delivery order), never to B (creation
+        # order). #121: ops — Figma, only on B, is refused to the desk
         a = self.item("Adobe", 5445, "2026-09-14")
         sheet_a = views.build_review(self.conn, view="status", quarter="2026-Q3")
         f = self.item("Figma", 1815, "2026-09-15")
@@ -730,7 +386,8 @@ class TestFixWaveD(Base):
         with mock.patch.object(db, "now", lambda: "2026-09-27T10:00:00Z"):
             views.mark_rendering_delivered(self.conn, sheet_b["render_id"])
             views.mark_rendering_delivered(self.conn, sheet_a["render_id"])
-        out = apply_now(self.conn, "all good")
+        self.not_on_post([("confirm", f)])
+        out = apply_now(self.conn, [("confirm", a)])
         self.assertEqual(self.operator_entries(), 1)
         self.assertEqual(self.author(a)[0], "operator")
         self.assertEqual(self.author(f)[0], "auto")
@@ -759,57 +416,51 @@ class TestReceiptPages(Base):
 
     def test_a_hundred_rejections_are_refused_whole_and_sixty_apply_whole(self):
         import posting
-        text = " ".join("Vendor %03d Holding is wrong." % i for i in range(1, 101))
-        self.assertLess(views.utf16_len(text), views.BODY_LIMIT)
         with self.assertRaises(db.Refusal) as cm:
-            apply_now(self.conn, text)
+            apply_now(self.conn, [("reject", p) for p in self.pids])
         self.assertEqual(str(cm.exception), posting.READING_TOO_LONG)
         self.assertEqual(self.operator_entries(), 0)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0], 0)
-        out = apply_now(self.conn, " ".join("Vendor %03d Holding is wrong." % i
-                                            for i in range(1, 61)))
-        self.assertEqual(len(out["applied"]), 60)
-        self.assertEqual(self.operator_entries(), 60)
+        self.assertEqual(self.readings(), 0)
+        n = 60
+        out = apply_now(self.conn, [("reject", p) for p in self.pids[:n]])
+        self.assertEqual(len(out["applied"]), n)
+        self.assertEqual(self.operator_entries(), n)
         for t in (out["proposal"], out["receipt"]):
             self.assertLessEqual(views.utf16_len(t), views.BODY_LIMIT)
         lines = out["receipt"].splitlines()
-        self.assertEqual(len(lines), 60)
-        for i in range(1, 61):
+        self.assertEqual(len(lines), n)
+        for i in range(1, n + 1):
             self.assertEqual(sum(1 for ln in lines
                                  if ln.startswith("Removed the match for Vendor %03d Holding" % i)), 1, i)
+        with self.assertRaises(db.Refusal):                      # past the sanity bound
+            posting.propose_reading(self.conn, [{"op": "reject", "pid": 1}] * (reply.OPS_MAX + 1))
 
     # S7 §8: test_one_overlong_line_is_split_and_nothing_is_lost is deleted with
     # reply._pages — a reading's answer is one proposal, one receipt or one `say`.
 
     def test_a_short_receipt_is_one_message(self):
-        out = apply_now(self.conn, "Vendor 001 Holding is wrong.")
+        out = apply_now(self.conn, [("reject", self.pids[0])])
         self.assertTrue(out["receipt"].startswith("Removed the match for Vendor 001 Holding"))
         self.assertEqual(len(out["receipt"].splitlines()), 1)
 
-    def test_a_non_reply_says_nothing(self):
-        out = apply_now(self.conn, "is this about Adobe?")
-        self.assertEqual((out["reading"], out["receipt"], out["not_a_reply"]), (None, "", True))
-
 
 class TestReceiptSplit(Base):
-    def test_a_which_one_listing_too_long_to_show_is_refused_whole(self):
+    def test_a_proposal_too_long_to_show_is_refused_whole(self):
         # fix wave D round 2 (Astra S2): the splitter appended ";" to a full
-        # piece and produced a 4097-unit page. S7 §8: the proposal lists what is not
-        # included; one that cannot be shown whole is refused and nothing is read
+        # piece and produced a 4097-unit page. S7 §8: one that cannot be shown whole is
+        # refused and nothing is read. #121: ops — a vendor-wide rule lists every payment
+        # it moves (147 here), which cannot fit one proposal
         import posting
         adobe = [self.item("Adobe", 1000 if i == 0 else 10000, "2026-09-01", paired=False)
                  for i in range(147)]
         figma = self.item("Figma", 1815, "2026-09-15")
         self.show(*adobe, figma)
         with self.assertRaises(db.Refusal) as cm:
-            apply_now(self.conn, "Adobe is wrong; Figma is wrong")
+            apply_now(self.conn, [("never", adobe[0]), ("reject", figma)])
         self.assertEqual(str(cm.exception), posting.READING_TOO_LONG)
         self.assertEqual(self.author(figma)[0], "auto")
-        out = apply_now(self.conn, "Adobe is wrong")           # no write: said, fitted
-        self.assertIsNone(out["reading"])
-        self.assertLessEqual(views.utf16_len(out["receipt"]), views.BODY_LIMIT)
-        self.assertTrue(out["receipt"].startswith("Which one?"))
-        out = apply_now(self.conn, "Figma is wrong")
+        self.assertEqual(self.readings(), 0)
+        out = apply_now(self.conn, [("reject", figma)])
         self.assertEqual(out["receipt"], "Removed the match for Figma · EUR 18.15 · 15 Sep.")
         self.assertIsNone(self.author(figma))
 
@@ -829,7 +480,7 @@ class TestFieldClip(Base):
         self.assertIn(views.CLIP_MARK, r["text"])                 # the payee field was clipped
         self.assertLess(views.utf16_len(r["text"]), 1500)
         self.assertEqual(sorted(views.render_items(self.conn, r["render_id"])), sorted([a, b]))
-        apply_now(self.conn, "all good")
+        apply_now(self.conn, [("confirm", a), ("confirm", b)])
         self.assertEqual((self.author(a)[0], self.author(b)[0]), ("operator", "operator"))
 
     def test_a_long_invoice_number_never_hides_the_next_candidate(self):
@@ -840,7 +491,7 @@ class TestFieldClip(Base):
         self.assertIn("HIDDEN\\-B", r["text"])
         self.assertIn(views.CLIP_MARK, r["text"])
         self.assertLess(views.utf16_len(r["text"]), 1000)
-        out = apply_now(self.conn, "the Adobe one is wrong")
+        out = apply_now(self.conn, [("reject", pid)])
         self.assertIn("Ruled out both invoices", out["receipt"])
 
 
@@ -920,10 +571,10 @@ class TestIdentity(Base):
                                              document_date="2026-09-02"))   # a joint set
         r = self.deliver(view="check")
         flat = " ".join(r["text"].split())
-        self.assertIn("invoice SAME \u00b7Adobe (2 Sep)", flat)
-        self.assertIn("invoice SAME \u00b7Adobe Ireland (2 Sep)", flat)
+        self.assertIn("invoice SAME ·Adobe (2 Sep)", flat)
+        self.assertIn("invoice SAME ·Adobe Ireland (2 Sep)", flat)
         self.assertEqual(len(self.bound(r["render_id"], pid)), 2)
-        out = apply_now(self.conn, "the Adobe one is wrong")
+        out = apply_now(self.conn, [("reject", pid)])
         self.assertIn("Ruled out both invoices", out["receipt"])
         self.assertEqual(out["reshow"], [])
 
@@ -946,7 +597,7 @@ class TestIdentity(Base):
         shas = [self.conn.execute("SELECT sha256 FROM documents WHERE doc_id=?", (d,))
                 .fetchone()[0] for d in docs]
         flat = " ".join(r["text"].split())
-        self.assertEqual(flat.count("invoice SAME \u00b7Adobe\u00b7"), 2, flat)
+        self.assertEqual(flat.count("invoice SAME ·Adobe·"), 2, flat)
         self.assertEqual(len(self.bound(r["render_id"], pid)), 2)
         del shas
 
@@ -956,22 +607,8 @@ class TestIdentity(Base):
         r = self.deliver()
         self.assertEqual(sorted(views.render_items(self.conn, r["render_id"])), sorted([a, b]))
         self.assertEqual(" ".join(r["text"].split()).count("Adobe · EUR 54.45 · 14 Sep · ref "), 2)
-        apply_now(self.conn, "all good")
+        apply_now(self.conn, [("confirm", a), ("confirm", b)])
         self.assertEqual((self.author(a)[0], self.author(b)[0]), ("operator", "operator"))
-
-    def test_identical_payments_are_named_by_their_ref(self):
-        a = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
-        b = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
-        r = self.deliver()
-        out = apply_now(self.conn, "the Adobe one is wrong")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("or the ref", out["receipt"])
-        ref = views.lineage_ref(b)[:4]
-        self.assertIn("ref " + ref, " ".join(r["text"].split()))
-        self.assertIn("ref " + ref, out["receipt"])
-        out = apply_now(self.conn, f"the Adobe ref {ref} one is wrong")
-        self.assertIsNone(self.author(b))
-        self.assertEqual(self.author(a)[0], "auto")
 
     def conflicted(self, pid, specs, shas=None):
         docs = [self.doc(document_number=n, issuer=i, document_date="2026-09-02",
@@ -988,38 +625,12 @@ class TestIdentity(Base):
                                   (mid, pid, doc))
         return docs
 
-    def test_a_payee_literally_named_like_a_ref_is_not_a_ref(self):
-        # round 6 (Astra S1): "Adobe ref e40c" was parsed as pid 1's ref
-        a = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
-        forged = "Adobe ref " + views.lineage_ref(a)[:4]
-        b = self.item(forged, 5445, "2026-09-14", labels=("guessed",))
-        r = self.deliver()
-        self.assertNotIn(" · ref ", r["text"])                 # nothing needed a generated ref
-        out = apply_now(self.conn, f"the {forged} one is wrong")
-        self.assertIsNone(self.author(b))                        # the payment it names
-        self.assertEqual(self.author(a)[0], "auto")              # untouched
-        del out
-
-    def test_a_literal_name_and_a_delivered_ref_together_ask(self):
-        a = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
-        twin = self.item("Adobe", 5445, "2026-09-14", labels=("guessed",))
-        r = self.deliver()
-        ref = views.lineage_ref(a)[:4]
-        self.assertIn("ref " + ref, " ".join(r["text"].split()))
-        c = self.item("Adobe ref " + ref, 7000, "2026-09-16", labels=("guessed",))
-        self.deliver()
-        out = apply_now(self.conn, f"the Adobe ref {ref} one is wrong")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("Which one?", out["receipt"])
-        self.assertEqual((self.author(a)[0], self.author(c)[0], self.author(twin)[0]),
-                         ("auto", "auto", "auto"))
-
     def test_a_literal_number_cannot_forge_a_generated_identity(self):
         # round 6 (Astra S2): SAME, SAME and literally "SAME from Adobe ·7692"
         pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
         docs = self.conflicted(pid, [("SAME", "Adobe"), ("SAME", "Adobe"),
-                                     ("SAME from Adobe \u00b77692", "Adobe"),
-                                     ("SAME \u00b7Adobe", "Adobe"), ("SAME", "Adobe \u00b7x")],
+                                     ("SAME from Adobe ·7692", "Adobe"),
+                                     ("SAME ·Adobe", "Adobe"), ("SAME", "Adobe ·x")],
                                shas=["7692" + "1" * 60, "1234" + "2" * 60, "3" * 64,
                                      "4" * 64, "5" * 64])
         r = self.deliver(view="check")
@@ -1027,9 +638,9 @@ class TestIdentity(Base):
         it = views.build_review(self.conn, view="item", pid=pid)
         flat = " ".join(it["text"].split())
         # a literal never prints the reserved mark: generated text is unforgeable
-        self.assertIn("invoice SAME from Adobe \u20227692", flat)
-        self.assertIn("invoice SAME \u2022Adobe", flat)
-        self.assertNotIn("SAME from Adobe \u00b77692", flat)
+        self.assertIn("invoice SAME from Adobe •7692", flat)
+        self.assertIn("invoice SAME •Adobe", flat)
+        self.assertNotIn("SAME from Adobe ·7692", flat)
         page, after, bound = None, None, set()
         while True:
             kw = {"page": page, "after": after} if page else {}
@@ -1040,30 +651,15 @@ class TestIdentity(Base):
                 break
             page, after = it["next"]["page"], it["next"]["after"]
         self.assertEqual(len(bound), len(docs))
-        out = apply_now(self.conn, "the Adobe one is wrong")
+        out = apply_now(self.conn, [("reject", pid)])
         self.assertIn("Ruled out 5 invoices", out["receipt"])
-
-    def test_a_name_that_displays_like_another_asks(self):
-        # round 7 (Astra S1): "A·B" displays as "A•B"; "the A•B one is wrong" unpaired the
-        # literal "A•B" while the payment shown as "A•B" stayed — no question asked
-        a = self.item("A\u00b7B", 5445, "2026-09-14", labels=("guessed",))
-        b = self.item("A\u2022B", 7000, "2026-09-16", labels=("guessed",))
-        r = self.deliver()
-        self.assertEqual(" ".join(r["text"].split()).count("A\u2022B \u00b7 EUR"), 2)
-        out = apply_now(self.conn, "the A\u2022B one is wrong")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("Which one?", out["receipt"])
-        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
-        out = apply_now(self.conn, "the A\u2022B 54.45 one is wrong")
-        self.assertIsNone(self.author(a))                       # the amount tells them apart
-        self.assertEqual(self.author(b)[0], "auto")
 
     def alias_after(self, between):
         # round 8 (Astra + Terra S1): an alert or an unrelated item view delivered after the
         # sheet dropped the alias, and the reply unpaired the EUR 70.00 payment silently
         import passes
-        a = self.item("A\u00b7B", 5445, "2026-09-14", labels=("guessed",))
-        b = self.item("A\u2022B", 7000, "2026-09-16", labels=("guessed",))
+        a = self.item("A·B", 5445, "2026-09-14", labels=("guessed",))
+        b = self.item("A•B", 7000, "2026-09-16", labels=("guessed",))
         z = self.item("Zapier", 9900, "2026-09-17")
         self.deliver()
         if between == "alert":
@@ -1075,69 +671,22 @@ class TestIdentity(Base):
         else:
             it = views.build_review(self.conn, view="item", pid=z)
             views.mark_rendering_delivered(self.conn, it["render_id"])
-        out = apply_now(self.conn, "the A\u2022B one is wrong")
         # binding R3: unquoted words bind what came last, which shows neither payment
-        self.assertEqual(out["applied"], [])
-        self.assertIn("isn't on the last list I sent", out["receipt"])
+        # (#121: ops — refused to the desk)
+        self.not_on_post([("reject", b)])
         self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
-        # quoting the sheet, the alias it printed still asks between both payments
+        # quoting the sheet binds it: the payment the desk names there is the one changed
         sheet = self.conn.execute("SELECT text FROM renders WHERE kind='status' ORDER BY"
                                   " rowid DESC LIMIT 1").fetchone()[0]
-        out = apply_now(self.conn, "the A\u2022B one is wrong", quoted=views.displayed(sheet))
-        self.assertEqual(out["applied"], [])
-        self.assertIn("Which one?", out["receipt"])
-        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
+        out = apply_now(self.conn, [("reject", b)], quoted=views.displayed(sheet))
+        self.assertEqual(len(out["applied"]), 1)
+        self.assertEqual((self.author(a)[0], self.author(b)), ("auto", None))
 
     def test_a_display_alias_survives_a_delivered_alert(self):
         self.alias_after("alert")
 
     def test_a_display_alias_survives_an_unrelated_item_view(self):
         self.alias_after("item")
-
-    def at_pid(self, pid):
-        """The next lineage gets this pid (payments far apart share a ref prefix)."""
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE sqlite_sequence SET seq=? WHERE name='projections'",
-                              (pid - 1,))
-
-    def test_a_ref_printed_on_two_payments_asks(self):
-        # round 9 (Astra S1): payments 73 (Alpha) and 223 (Beta) both printed "ref 7291";
-        # the scope kept 7291 -> 223 only and "ref 7291 is wrong" unpaired Beta silently
-        self.item("Seed", 100, "2026-09-01")                    # creates the sequence row
-        self.at_pid(73)
-        alpha = self.item("Alpha", 5445, "2026-09-14", labels=("guessed",))
-        self.item("Alpha", 5445, "2026-09-14", labels=("guessed",))
-        self.at_pid(223)
-        beta = self.item("Beta", 7000, "2026-09-16", labels=("guessed",))
-        self.item("Beta", 7000, "2026-09-16", labels=("guessed",))
-        self.assertEqual((alpha, beta), (73, 223))
-        r = self.deliver(view="check")
-        self.assertEqual(" ".join(r["text"].split()).count("ref 7291"), 2)
-        out = apply_now(self.conn, "ref 7291 is wrong")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("Which one?", out["receipt"])
-        self.assertEqual((self.author(alpha)[0], self.author(beta)[0]), ("auto", "auto"))
-        apply_now(self.conn, "the Alpha ref 7291 one is wrong")
-        self.assertIsNone(self.author(alpha))
-        self.assertEqual(self.author(beta)[0], "auto")
-
-    def test_a_name_that_displays_like_another_asks_with_equal_facts(self):
-        a = self.item("A\u00b7B", 5445, "2026-09-14", labels=("guessed",))
-        b = self.item("A\u2022B", 5445, "2026-09-14", labels=("guessed",))
-        r = self.deliver()
-        self.assertEqual(" ".join(r["text"].split()).count(" \u00b7 ref "), 2)
-        out = apply_now(self.conn, "the A\u2022B one is wrong")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("or the ref", out["receipt"])
-        self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
-
-    def test_a_rule_for_a_name_that_displays_like_another_asks(self):
-        self.item("A\u00b7B", 5445, "2026-09-14", labels=("guessed",))
-        self.item("A\u2022B", 7000, "2026-09-16", labels=("guessed",))
-        self.deliver()
-        out = apply_now(self.conn, "no invoices ever for A\u2022B")
-        self.assertEqual(out["applied"], [])
-        self.assertIn("Which one?", out["receipt"])
 
     def test_a_four_hex_digest_collision_is_lengthened(self):
         # round 5 (Astra S1): "A"*65+"149" and +"257" share the digest 0844
@@ -1149,8 +698,8 @@ class TestIdentity(Base):
         self.pair(y, n2, labels=("guessed",))
         r = self.deliver()
         flat = " ".join(r["text"].split())
-        self.assertIn("\u00b70844d4d4", flat)
-        self.assertIn("\u00b708449d0c", flat)
+        self.assertIn("·0844d4d4", flat)
+        self.assertIn("·08449d0c", flat)
         self.assertEqual(sorted(views.render_items(self.conn, r["render_id"])), sorted([x, y]))
 
     def test_a_hundred_runners_up_leave_the_item_bindable_everywhere(self):
@@ -1176,10 +725,9 @@ class TestIdentity(Base):
         r = self.deliver(view="check")
         self.assertEqual(len(self.bound(r["render_id"], pid)), views.CANDIDATES_MAX)
         self.assertIn("57 more could fit — ask me to show them.", r["text"])
-        out = apply_now(self.conn, "the Adobe one is wrong")      # not all shown
+        out = apply_now(self.conn, [("reject", pid)])            # not all shown
         self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
-        out = apply_now(self.conn, "candidates for 54.45 14 Sep")
-        self.assertEqual(out["instructions"], ["show item %d" % pid])
+        # #121: "show them" is the desk's show_view(view="item", pid), paged below
         seen, kw = set(), {"view": "item", "pid": pid}
         page = None
         for _ in range(20):
@@ -1195,7 +743,7 @@ class TestIdentity(Base):
             kw, page = dict(it["next"]), it["next"]["page"]
         self.assertGreater(page or 1, 1)
         self.assertEqual(len(seen), 60)
-        out = apply_now(self.conn, "the Adobe one is wrong")
+        out = apply_now(self.conn, [("reject", pid)])
         self.assertIn("Ruled out 60 invoices", out["receipt"])
 
 
@@ -1203,7 +751,7 @@ class TestIntegration(Base):
     def test_a_counted_but_unprinted_payment_is_refused_not_changed(self):
         # a never-searched payment is counted ("not searched"), not printed: the
         # operator never saw its line, so a correction naming it applies nothing (binding
-        # R3: it is not on the bound rendering)
+        # R3: it is not on the bound rendering; #121: refused to the desk)
         self.n += 1
         self.row(self.n, counterparty="BCK*XYZ", amount_minor=18000,
                  booking_date="2026-09-16", value_date="2026-09-16")
@@ -1211,59 +759,10 @@ class TestIntegration(Base):
         self.classify(pid, {"software"})
         self.settle(pid)
         self.deliver()
-        out = apply_now(self.conn, "the BCK*XYZ one is my accountant")
-        self.assertEqual((out["applied"], out["reshow"]), ([], []))
-        self.assertIn("isn't on the last list I sent", out["receipt"])
+        self.not_on_post([("identity", pid, "my accountant")])
+        self.assertEqual(self.readings(), 0)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
-        del pid
 
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestUnderstood(Base):
-    """#39: `understood` says whether anything in the message was read as a reply, so
-    Ellen can answer a message that is not one as conversation instead of relaying "I
-    didn't understand". It changes nothing a reading commits."""
-
-    def test_a_message_that_is_not_a_reply_is_not_understood(self):
-        z = self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
-        for text in ("thanks, talk tomorrow about the accounting stuff",
-                     "12 eggs",                                   # a numbered-lines lookalike
-                     "is the Zapier one right?"):                 # a question
-            out = apply_now(self.conn, text)
-            self.assertFalse(out["understood"], text)
-            self.assertEqual(out["applied"], [], text)
-        self.assertEqual(self.author(z)[0], "auto")
-        self.assertEqual(self.operator_entries(), 0)
-
-    def test_a_reply_with_one_clause_read_is_understood(self):
-        v = self.item("Vercel", 1210, "2026-09-18")
-        self.deliver()
-        out = apply_now(self.conn, "the Vercel one is wrong. and blah blah")
-        self.assertTrue(out["understood"])
-        self.assertIn("didn't understand", out["receipt"])        # the rest is still said
-        self.assertIsNone(self.author(v))
-
-    def test_a_verdict_that_did_not_apply_is_still_understood(self):
-        self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
-        with mock.patch.object(matches, "reject_in_tx", side_effect=db.Refusal("no")):
-            out = apply_now(self.conn, "the Zapier one is wrong")
-        self.assertTrue(out["understood"])
-        self.assertIn("not applied", out["receipt"])
-
-    def test_naming_payments_without_a_verdict_is_understood(self):
-        self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
-        out = apply_now(self.conn, "Zapier")
-        self.assertTrue(out["understood"])
-        self.assertIn("are they wrong or good?", out["receipt"])
-
-    def test_all_good_and_instructions_are_understood(self):
-        self.item("Zapier", 9900, "2026-09-17")
-        self.deliver()
-        self.assertTrue(apply_now(self.conn, "send it again")["understood"])
-        self.assertTrue(apply_now(self.conn, "all good")["understood"])

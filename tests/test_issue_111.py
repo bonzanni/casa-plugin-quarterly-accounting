@@ -76,7 +76,7 @@ class NotClassified(_Uncl):
         with FakeBroker():
             out = posting.show_view(self.conn, view="open", quarter="2026-Q3")
         self.assertIn(p, views.render_items(self.conn, out["render_id"]))
-        res = apply_now(self.conn, "Loonadministratie NL needs no invoice",
+        res = apply_now(self.conn, [("no_document", p)],   # #121: ops
                         quoted=self.render_text(out["render_id"]))
         self.assertIsNotNone(res["proposal"], res)
         self.assertIn("Loonadministratie NL", views.displayed(res["proposal"]))

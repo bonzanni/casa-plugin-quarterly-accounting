@@ -746,23 +746,56 @@ def t_verdict(args):
                         _int(args, "pid"), args.get("key"), doc_id=_int(args, "doc_id"))
 
 
+@register("reading_context",
+          "What the operator's words about the books are about: pass the quoted post's text "
+          "as quoted when your context has one (else the last post they were sent counts). "
+          "Returns `items`, every open payment with its pid, `line` (as the cards print it), "
+          "`state`, `document` (its paired or suggested document), `candidates`, `ref` (the "
+          "ref the post printed to tell equal payments apart) and `on_post` (shown on that "
+          "post); the post's own come first. `next`: the post's "
+          "continuation — for \"more\", call show_view with exactly those arguments (null: "
+          "there is nothing more). `render_id`: the post (for \"send it again\" on a quoted "
+          "post, stage_for_delivery(resend=true, render_id=…)). `say` instead: say it "
+          "verbatim, then show_view with its `show_view` arguments. Posts nothing.",
+          obj({"quoted": S}))
+def t_reading_context(args):
+    import posting
+    return posting.reading_context(conn(), args.get("quoted"))
+
+
+_OP = {"type": "object", "properties": {
+    "op": {"type": "string", "enum": ["confirm", "reject", "no_document", "needs_document",
+                                      "look_again", "identity", "never", "class_none",
+                                      "stop_chasing", "zip_name", "ledger_reset"]},
+    "pid": I, "who": S, "kind": {"type": "string", "enum": ["payslips", "statements",
+                                                          "receipts"]},
+    "quarter": Q, "name": S}, "required": ["op"]}
+
+
 @register("propose_reading",
-          "The operator's words about the accounting (a swipe-reply's words, or the brief "
-          "of a delegation): pass them VERBATIM as text, and the quoted post's text as "
-          "quoted when your context has one. Nothing is applied: a change is posted to "
-          "the operator to Apply. `say`: say it as your answer, verbatim. `instructions`: "
-          "run each (an instruction {\"show_view\": {…}} is show_view with exactly those "
-          "arguments — \"more\" and \"all of them\" come so; show_view for \"show the rest\", "
-          "\"show older\", \"show item N\"; "
-          "get_package(quarter=Qn) for \"rebuild Qn\"; resend and send-last as "
-          "your skill says). `reshow`: show_view(view=\"item\", pid=…) for each. "
-          "`understood: false`: nothing was read as an accounting reply.",
-          obj({"text": S, "quoted": S}, ("text",)))
+          "Post the operator's decision about the books for them to Apply: the operations "
+          "YOU read in their words (any wording, any language), each naming a payment by its "
+          "pid from reading_context (pass the same quoted). Nothing is applied until they "
+          "tap Apply on the posted card, which lists every change. Operations: confirm(pid): "
+          "its suggested document is right (\"all good\": one confirm per payment the post "
+          "suggests); reject(pid): it is wrong (a suggested or matched document, or all its "
+          "candidates); no_document(pid): the payment needs no document at all; "
+          "needs_document(pid): it needs one after all; look_again(pid): search for its "
+          "document again; identity(pid, who): whose payment it is (e.g. \"my landlord\"); "
+          "never(pid): that payment's vendor never needs a document; class_none(kind): "
+          "payslips, statements or receipts are never needed; stop_chasing(quarter): stop "
+          "looking for what that quarter still misses; zip_name(name): what the package "
+          "files are called; ledger_reset: the bank ledger was reset on purpose. A payment "
+          "with on_post false cannot be decided from this post: show_view(view=\"item\", "
+          "pid) instead. `reading` set: posted — your whole reply is <silent/> and nothing "
+          "else (no reasoning, never a pid). `say`: say "
+          "it verbatim. `reshow`: show_view(view=\"item\", pid=…) for each. `refused`: "
+          "nothing posted; fix the call or tell the operator in your own words.",
+          obj({"ops": {"type": "array", "items": _OP}, "quoted": S}, ("ops",)))
 @capability("reading")
 def t_propose_reading(args):
     import posting
-    _need(args, "text")
-    return posting.propose_reading(conn(), args["text"], args.get("quoted"))
+    return posting.propose_reading(conn(), args.get("ops"), args.get("quoted"))
 
 
 @register("apply_reading",
@@ -877,12 +910,12 @@ def t_get_package(args):
 # --- packaging ---------------------------------------------------------------------
 @register("stage_for_delivery",
           "Stage a built package (package_id) to post to the operator. Then "
-          "post_package(delivery_id), then record_delivery. For propose_reading's `resend` "
-          "instruction (\"send it again\") pass resend=true and neither id: it stages the "
-          "exact file the last view the operator saw offered, or refuses with the words to "
-          "say; its `stage_for_delivery` instruction (a reply to one message) gives the "
-          "arguments, render_id included. For its `send last` instruction pass last_built=true (and the quarter it "
-          "names, if any) and neither id: the last package built, unchanged. channel is telegram "
+          "post_package(delivery_id), then record_delivery. For \"send it again\" pass "
+          "resend=true and neither id: it stages the exact file the last view the operator "
+          "saw offered (a reply to one post: also that post's render_id from "
+          "reading_context), or refuses with the words to say. For \"send me the last "
+          "package you built\" pass last_built=true (and the quarter named, if any) and "
+          "neither id: the last package built, unchanged. channel is telegram "
           "(the default). During a pass, pass the pass_token.",
           obj({"channel": S, "package_id": I, "resend": B, "render_id": S, "last_built": B,
                "quarter": Q, "pass_token": TOKEN}))
@@ -895,7 +928,7 @@ def t_stage(args):
     package_id = _int(args, "package_id")
     render_id = args.get("render_id")
     if render_id is not None and not resend:
-        raise db.Refusal("render_id goes with resend=true, as the reading's instruction says")
+        raise db.Refusal("render_id goes with resend=true")
     if resend:
         if package_id is not None:
             raise db.Refusal("resend stages what the operator was offered: name no package "

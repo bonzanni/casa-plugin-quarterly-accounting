@@ -137,13 +137,15 @@ class LongList(_Q3):
                          ["render_id"], out["render_id"])
 
     def test_more_quoting_a_posted_page_posts_nothing_again(self):
-        """Every page went out together: a page leads nowhere a typed "more" should go."""
+        """Every page went out together: a page leads nowhere a typed "more" should go.
+        #121: "more" is the quoted post's continuation, reading_context's `next`."""
         import posting
         self.guesses()
         out, prop = self.post(view="check", quarter="2026-Q3")
         with FakeBroker() as b:
-            r = posting.propose_reading(self.conn, "more", "📊 Finance\n" + views.displayed(prop["pages"][0]))
-        self.assertEqual(r.get("instructions") or [], [])
+            ctx = posting.reading_context(self.conn,
+                                          "📊 Finance\n" + views.displayed(prop["pages"][0]))
+        self.assertIsNone(ctx["next"])
         self.assertEqual(b.deposits, [])
 
     def test_a_stored_card_reposts_with_its_pages(self):

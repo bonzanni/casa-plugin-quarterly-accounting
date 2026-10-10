@@ -130,8 +130,7 @@ class TestSendItAgainAfterATimeout(ToolCase):
         for f in os.listdir(self.outbox):          # Casa consumed the outbox copy on send
             os.unlink(self.outbox / f)
         _json("mark_rendering_delivered", render_id=speak["render_id"])
-        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
-        self.assertIn("resend", _json("propose_reading", text="send it again")["instructions"])
+        # S7 §6.3/§8, #121: "send it again" is stage_for_delivery(resend=true), not a reading
         again = _json("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(again["filename"], self.pkg["filename"])
         self.assertNotEqual(again["path"], staged["path"])          # a path of its own

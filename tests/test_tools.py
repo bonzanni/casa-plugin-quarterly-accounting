@@ -41,6 +41,8 @@ EXPECTED = {
     "show_view", "verdict",
     # S7 §8 (Task 6): typed words read into a reading, and its Apply / Cancel buttons
     "propose_reading", "apply_reading", "cancel_reading",
+    # #121: what the operator's words can be about, by pid
+    "reading_context",
     # S7 §11 (Task 7): the business account chosen by button
     "propose_account", "bind_account",
     # S7 §5 (Task 10): the job posts its own results
@@ -109,7 +111,7 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 45)     # #90: + merge_vendors; #89: + rename_vendor, rename_vendors_to_invoice_names; #84: + list_vendors; #56: + get_document; S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
+        self.assertEqual(len(EXPECTED), 46)     # #121: + reading_context; #90: + merge_vendors; #89: + rename_vendor, rename_vendors_to_invoice_names; #84: + list_vendors; #56: + get_document; S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
                                                 # Task 7: + 2; T8: + ask_state; T9: - job_report (§9);
                                                 # T10: + post_results (§5); T11: + post_package (§6.1);
                                                 # simple loop T4: + decide, record_missing (§2.2);
@@ -122,7 +124,7 @@ class TestSurface(TempEnv):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
         m = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
-        self.assertEqual(len(m["casa"]["provides_tools"]), 45)
+        self.assertEqual(len(m["casa"]["provides_tools"]), 46)
         # Casa's uninstall eraser (v0.329.0): argument-free, declared safe, protected
         self.assertEqual(m["casa"]["eraseTool"], "reset_store")
         self.assertEqual([t["name"] for t in m["casa"]["protectedTools"]], ["reset_store"])
@@ -223,7 +225,7 @@ class TestPassTokens(ToolCase):
 
 
 class TestResend(ToolCase):
-    """'send it again': propose_reading returns the instruction `resend`; the desk turn
+    """'send it again' (#121: no longer a reading's instruction): the desk turn
     calls stage_for_delivery(resend=true), which stages what the last delivered
     rendering offered (delivery.resend_target)."""
     def setUp(self):
@@ -258,8 +260,7 @@ class TestResend(ToolCase):
         self.send(self.a["package_id"], "uncertain")
         self.send(self.b["package_id"], "delivered")
         self.assertIn(views.field(self.a["filename"]), self.show())
-        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
-        self.assertIn("resend", _json("propose_reading", text="send it again")["instructions"])
+        # S7 §6.3/§8, #121: "send it again" is stage_for_delivery(resend=true), not a reading
         staged = _json("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(staged["filename"], self.a["filename"])
         self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),

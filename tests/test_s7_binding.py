@@ -57,13 +57,21 @@ class _Q3(StoreCase):
 
     tick = _tick
 
-    def propose(self, text, quoted=None):
+    def propose(self, ops, quoted=None):
+        """#121: the desk's operations (tests._base.as_ops shorthand), not the words."""
         import posting
+        from tests._base import as_ops
         with FakeBroker() as b:
             # #99: the operator quotes what they saw (bold markers are formatting)
-            out = posting.propose_reading(self.conn, text, views.displayed(quoted)
+            out = posting.propose_reading(self.conn, as_ops(ops), views.displayed(quoted)
                                           if isinstance(quoted, str) else quoted)
         return out, (b.proposal() if b.deposits else None)
+
+    def context(self, quoted=None):
+        """#121: reading_context — the bound post's facts the desk reads the words against."""
+        import posting
+        return posting.reading_context(self.conn, views.displayed(quoted)
+                                       if isinstance(quoted, str) else quoted)
 
     def readings(self):
         return self.conn.execute("SELECT count(*) FROM readings").fetchone()[0]
@@ -145,26 +153,26 @@ class OldSheetQuote(_Q3):
 
     def test_all_good_on_the_old_sheet_commits_nothing(self):
         f, old, quote, second = self._old_and_newer()
-        out, prop = self.propose("all good", quoted=quote)
+        out, prop = self.propose([("confirm", f["pid"])], quoted=quote)   # #121: "all good"
         self.assertIsNone(out["reading"])
         self.assertEqual(self.readings(), 0)
         self.assertIn("changed since", out["say"])
         self.assertEqual([self.operator_rows(f["match_id"]), self.operator_rows(
             second["match_id"])], [0, 0])
 
-    def _named(self, words):
+    def _named(self, op):
         f, old, quote, second = self._old_and_newer()
-        out, _ = self.propose(words, quoted=quote)
+        out, _ = self.propose([(op, f["pid"])], quoted=quote)
         self.assertIsNone(out["reading"])
         self.assertIn("changed since", out["say"])
         self.assertEqual([self.operator_rows(f["match_id"]),
                           self.operator_rows(second["match_id"])], [0, 0])
 
     def test_the_x_one_is_good_on_the_old_sheet_commits_nothing(self):
-        self._named("the Zapier one is good")
+        self._named("confirm")          # #121: "the Zapier one is good"
 
     def test_the_x_one_is_wrong_on_the_old_sheet_commits_nothing(self):
-        self._named("the Zapier one is wrong")
+        self._named("reject")           # #121: "the Zapier one is wrong"
 
 
 class MergedSurvivor(StoreCase):
@@ -200,11 +208,22 @@ class MergedSurvivor(StoreCase):
             self.conn.execute("UPDATE projections SET merged_into=? WHERE pid=?",
                               (survivor, loser))
         import posting
-        with FakeBroker():
-            out = posting.propose_reading(self.conn, "the Zapier one is good",
-                                          views.displayed(r1["text"]))
-        self.assertIsNone(out["reading"])
-        self.assertEqual(out["reshow"], [survivor])
+        # #121 r1 (Terra S1): the loser's pid never stands for its survivor, for any
+        # operation — refused to the desk, nothing read
+        for op in ({"op": "confirm"}, {"op": "look_again"}, {"op": "never"},
+                   {"op": "identity", "who": "my landlord"}):
+            with self.assertRaises(db.Refusal, msg=op):
+                posting.propose_reading(self.conn, [dict(op, pid=loser)],
+                                        views.displayed(r1["text"]))
+            # the survivor is not on R either (R recorded no row for it): the desk is told to
+            # post its own card
+            with self.assertRaises(db.Refusal, msg=op) as cm:
+                posting.propose_reading(self.conn, [dict(op, pid=survivor)],
+                                        views.displayed(r1["text"]))
+            self.assertIn(f'pid={survivor}', str(cm.exception))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM readings").fetchone()[0], 0)
+        ctx = posting.reading_context(self.conn, views.displayed(r1["text"]))
+        self.assertEqual([i["on_post"] for i in ctx["items"] if i["pid"] == survivor], [False])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE author='operator'"
                                            ).fetchone()[0], 0)
 
@@ -230,8 +249,8 @@ class PostedOnlyQuote(_Q3):
         rid = prop["buttons"][0]["call"]["arguments"]["render_id"]
         r = self.conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
         self.assertIsNone(r["delivered_at"])
-        ref = next(k for k, v in json.loads(r["scope_json"])["refs"].items() if a[1] in v)
-        out, rprop = self.propose(f"ref {ref} is wrong", quoted=prop["text"])
+        # #121: "ref <x> is wrong" — the desk names the payment by pid
+        out, rprop = self.propose([("reject", a[1])], quoted=prop["text"])
         self.assertIsNotNone(out["reading"])
         self.assertEqual(self.readings(), 1)
         self.assertEqual(self.conn.execute("SELECT render_id FROM readings").fetchone()[0],
@@ -246,7 +265,7 @@ class PostedOnlyQuote(_Q3):
         with FakeBroker() as b:
             sh = call("show_view", view="check", quarter="2026-Q3")
             prop = b.proposal()
-        out, rprop = self.propose("no invoices ever for Zapier", quoted=prop["text"])
+        out, rprop = self.propose([("never", f["pid"])], quoted=prop["text"])
         self.assertIsNotNone(out["reading"])
         self.assertEqual(self.readings(), 1)
         self.assertEqual(self.conn.execute("SELECT render_id FROM readings").fetchone()[0],
@@ -301,36 +320,23 @@ class NotOnR(_Q3):
         return f
 
     def test_a_name_only_on_an_older_sheet(self):
+        # #121: a payment not on the bound post is refused to the desk, with its card
+        import db
         f = self._two_then_item()
-        out, _ = self.propose("the Zapier one is wrong")
-        self.assertIsNone(out["reading"])
-        self.assertIn("isn't on the last list I sent", out["say"])
+        with self.assertRaises(db.Refusal) as cm:
+            self.propose([("reject", f["pid"])])
+        self.assertIn(f'show_view(view="item", pid={f["pid"]})', str(cm.exception))
+        self.assertEqual(self.readings(), 0)
         self.assertEqual(self.operator_rows(f["match_id"]), 0)
-
-    def test_a_ref_only_on_an_older_sheet(self):
-        f = self._two_then_item()
-        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
-                                             " render_id=?", (f["render_id"],)).fetchone()[0])
-        refs = scope.get("refs") or {}
-        if not refs:
-            # the fixture prints no ref (no payee collision): give the sheet one
-            import db
-            refs = {"e40c": [f["pid"]]}
-            scope["refs"] = refs
-            with db.tx(self.conn):
-                self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
-                                  (db.canonical(scope), f["render_id"]))
-        ref = next(iter(refs))
-        out, _ = self.propose(f"ref {ref} is wrong")
-        self.assertIsNone(out["reading"])
-        self.assertEqual(self.operator_rows(), 0)
 
     def test_quoted_words_naming_what_the_quote_lacks(self):
         f = self._two_then_item()
         item = self.conn.execute("SELECT render_id FROM renders WHERE kind='item'").fetchone()[0]
-        out, _ = self.propose("the Zapier one is wrong", quoted=self.text_of(item))
-        self.assertIsNone(out["reading"])
-        self.assertIn("isn't on the message you replied to", out["say"])
+        import db
+        with self.assertRaises(db.Refusal) as cm:      # #121: refused to the desk
+            self.propose([("reject", f["pid"])], quoted=self.text_of(item))
+        self.assertIn("not on the post", str(cm.exception))
+        self.assertEqual(self.readings(), 0)
         self.assertEqual(self.operator_rows(f["match_id"]), 0)
 
 
@@ -371,11 +377,13 @@ class ContinuedPages(StoreCase):
             self.machine_entry(self.pid, did)      # a joint machine set: two candidates
         self.assertEqual(len(work.describe(self.conn, self.pid)["candidates"]), 2)
 
-    def propose(self, text, quoted=None):
+    def propose(self, ops, quoted=None):
+        """#121: the desk's operations (tests._base.as_ops shorthand), not the words."""
         import posting
+        from tests._base import as_ops
         with FakeBroker() as b:
             # #99: the operator quotes what they saw (bold markers are formatting)
-            out = posting.propose_reading(self.conn, text, views.displayed(quoted)
+            out = posting.propose_reading(self.conn, as_ops(ops), views.displayed(quoted)
                                           if isinstance(quoted, str) else quoted)
         return out, (b.proposal() if b.deposits else None)
 
@@ -413,7 +421,7 @@ class ContinuedPages(StoreCase):
         self.assertEqual(len(mrevs), 2)
         self.assertEqual([x["label"] for x in prop["buttons"]], ["No invoice needed", "Close"])
         call("mark_rendering_delivered", render_id=out["render_id"])
-        o, rprop = self.propose("the Adobe one is wrong", quoted=views.displayed(prop["text"]))
+        o, rprop = self.propose([("reject", self.pid)], quoted=views.displayed(prop["text"]))
         self.assertIsNotNone(o["reading"])
         tap(rprop, "Apply")
         self.assertEqual(self.unpairs(), 2)
@@ -446,7 +454,7 @@ class ContinuedPages(StoreCase):
             "SELECT match_revisions_json FROM render_items WHERE render_id=? AND pid=?",
             (p2["render_id"], self.pid)).fetchone()[0])
         self.assertEqual(len(mrevs), 2)          # page 1's candidate + its own
-        out, rprop = self.propose("the Adobe one is wrong", quoted=prop2["text"])
+        out, rprop = self.propose([("reject", self.pid)], quoted=prop2["text"])
         self.assertIsNotNone(out["reading"])
         plan = json.loads(self.conn.execute("SELECT plan_json FROM readings").fetchone()[0])
         self.assertEqual([s["op"] for s in plan], ["set_aside"])
@@ -469,7 +477,7 @@ class ContinuedPages(StoreCase):
                                     ).fetchone()
         self.assertIsNotNone(refused["posted_seq"])
         p2, prop2 = self.more(prop)              # the ORIGINAL page's `next`
-        out, _ = self.propose("the Adobe one is wrong", quoted=prop2["text"])
+        out, _ = self.propose([("reject", self.pid)], quoted=prop2["text"])
         self.assertIsNone(out["reading"])
         self.assertEqual(self.readings_count(), 0)
         self.assertEqual(self.unpairs(), 0)
@@ -487,7 +495,7 @@ class ContinuedPages(StoreCase):
             (p2["render_id"], self.pid)).fetchone()[0])
         self.assertEqual(len(mrevs), 1)
         views.mark_rendering_delivered(self.conn, p2["render_id"])
-        out, _ = self.propose("the Adobe one is wrong", quoted=views.displayed(p2["text"]))
+        out, _ = self.propose([("reject", self.pid)], quoted=views.displayed(p2["text"]))
         self.assertIsNone(out["reading"])
         self.assertEqual(self.unpairs(), 0)
 
@@ -502,7 +510,7 @@ class ContinuedPages(StoreCase):
             "SELECT match_revisions_json FROM render_items WHERE render_id=? AND pid=?",
             (p2["render_id"], self.pid)).fetchone()[0])
         self.assertEqual(len(mrevs), 1)
-        out, _ = self.propose("the Adobe one is wrong", quoted=prop2["text"])
+        out, _ = self.propose([("reject", self.pid)], quoted=prop2["text"])
         self.assertIsNone(out["reading"])
         self.assertEqual(self.unpairs(), 0)
         self.assertTrue(views)
@@ -612,11 +620,13 @@ class _Long(StoreCase):
         views.mark_rendering_delivered(self.conn, r["render_id"])
         return r
 
-    def propose(self, text, quoted=None):
+    def propose(self, ops, quoted=None):
+        """#121: the desk's operations (tests._base.as_ops shorthand), not the words."""
         import posting
+        from tests._base import as_ops
         with FakeBroker() as b:
             # #99: the operator quotes what they saw (bold markers are formatting)
-            out = posting.propose_reading(self.conn, text, views.displayed(quoted)
+            out = posting.propose_reading(self.conn, as_ops(ops), views.displayed(quoted)
                                           if isinstance(quoted, str) else quoted)
         return out, (b.proposal() if b.deposits else None)
 
@@ -643,8 +653,10 @@ class RawTruncation(_Long):
             b = self.deliver()
             self.assertEqual(views.bound_rendering(self.conn, self.quote(b["render_id"]))
                              ["render_id"], b["render_id"])
-            out, _ = self.propose("show older", quoted=self.quote(b["render_id"]))
-            self.assertNotIn("more than one version", out.get("say") or "")
+            import posting               # #121: what the words are about, read only
+            ctx = posting.reading_context(self.conn, views.displayed(self.quote(b["render_id"])))
+            self.assertNotIn("more than one version", ctx.get("say") or "")
+            self.assertEqual(ctx["render_id"], b["render_id"])
         self.assertEqual(views.bound_rendering(self.conn, self.quote(a["render_id"]))
                          ["render_id"], a["render_id"])
 
@@ -672,17 +684,17 @@ class LegacyAmbiguity(_Long):
         self.assertNotEqual(na, nb)
         diff = next(i for i, (x, y) in enumerate(zip(na, nb)) if x != y)
         self.assertGreater(diff, 2000)
-        out, _ = self.propose("the Vendor00 one is good", quoted=self.quote(b["render_id"]))
+        out, _ = self.propose([("confirm", self.pids[0])], quoted=self.quote(b["render_id"]))
         self.assertIsNone(out["reading"])
         self.assertIn("more than one version", out["say"])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM readings").fetchone()[0], 0)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE author='operator'"
                                            ).fetchone()[0], 0)
-        rec = [i for i in out["instructions"] if isinstance(i, dict) and "show_view" in i]
-        self.assertEqual(len(rec), 1)
+        rec = out["show_view"]                      # #121: the quote refusal's recovery
+        self.assertIsInstance(rec, dict)
         self.tick()
         with FakeBroker() as br:
-            fresh = call("show_view", **rec[0]["show_view"])
+            fresh = call("show_view", **rec)
             ftext = br.proposal()["text"]
         self.assertRegex(views.displayed(ftext).split("\n")[0], TAG_RE)
         self.assertEqual(views.bound_rendering(self.conn, LABEL + views.displayed(ftext))["render_id"],
@@ -741,7 +753,7 @@ class SameFactsLegacy(_Q3):
                                    it["match_revisions_json"]))
         quote = self.text_of(f["render_id"])
         self.assertEqual(views.bound_rendering(self.conn, quote)["render_id"], f["render_id"])
-        out, _ = self.propose("all good", quoted=quote)
+        out, _ = self.propose([("confirm", f["pid"])], quoted=quote)      # #121: "all good"
         self.assertIsNotNone(out["reading"])
         self.assertEqual(self.conn.execute("SELECT render_id FROM readings").fetchone()[0],
                          f["render_id"])
@@ -768,7 +780,7 @@ class IdenticalSheets(_Q3):
         self.assertEqual(body(f["render_id"]), body(b["render_id"]))  # identical sheets
         quote = self.text_of(f["render_id"])
         self.assertEqual(views.bound_rendering(self.conn, quote)["render_id"], f["render_id"])
-        out, _ = self.propose("all good", quoted=quote)
+        out, _ = self.propose([("confirm", f["pid"])], quoted=quote)      # #121: "all good"
         self.assertIsNone(out["reading"])
         self.assertIn("changed since", out["say"])
         self.assertEqual([self.operator_rows(f["match_id"]),
@@ -779,13 +791,12 @@ class IdenticalSheets(_Q3):
         f, new, b = self._a_and_b()
         self.make_legacy(f["render_id"], b["render_id"])
         quote = self.text_of(f["render_id"])
-        out, _ = self.propose("all good", quoted=quote)
+        out, _ = self.propose([("confirm", f["pid"])], quoted=quote)      # #121: "all good"
         self.assertIsNone(out["reading"])
         self.assertIn("more than one version", out["say"])
         self.assertEqual([self.operator_rows(f["match_id"]),
                           self.operator_rows(new["match_id"])], [0, 0])
-        rec = next(i["show_view"] for i in out["instructions"]
-                   if isinstance(i, dict) and "show_view" in i)
+        rec = out["show_view"]                      # #121: the quote refusal's recovery
         self.tick()
         with FakeBroker() as br:
             fresh = call("show_view", **rec)
@@ -807,7 +818,7 @@ class UnmatchedQuote(_Q3):
             r = views.build_review(self.conn, view="check", quarter="2026-Q3")
             views.mark_rendering_delivered(self.conn, r["render_id"])
         self.assertEqual(views.bound_rendering(self.conn, old)["render_id"], f["render_id"])
-        out, _ = self.propose("all good", quoted=old)
+        out, _ = self.propose([("confirm", f["pid"])], quoted=old)        # #121: "all good"
         self.assertIsNone(out["reading"])
         self.assertIn("changed since", out["say"])
         self.assertEqual([self.operator_rows(f["match_id"]),
@@ -815,11 +826,12 @@ class UnmatchedQuote(_Q3):
 
     def test_a_quote_matching_nothing_refuses(self):
         f = self.sheet_fixture()
-        out, _ = self.propose("all good", quoted=LABEL + "a message I never sent")
+        out, _ = self.propose([("confirm", f["pid"])],                     # #121: "all good"
+                              quoted=LABEL + "a message I never sent")
         self.assertIsNone(out["reading"])
         self.assertEqual(self.readings(), 0)
         self.assertIn("I can't find the message you replied to", out["say"])
-        self.assertIn({"show_view": {"view": "status"}}, out["instructions"])
+        self.assertEqual(out["show_view"], {"view": "status"})
         self.assertEqual(self.operator_rows(f["match_id"]), 0)
 
 
@@ -845,21 +857,24 @@ class LegacyQuarterFacts(_Q3):
     def test_different_quarters_refuse(self):
         self.bind()
         self._two([{"quarter": "2026-Q2"}, {"quarter": "2026-Q3"}])
-        out, _ = self.propose("more", quoted="Your books\nNothing is missing.")
-        self.assertIsNone(out["reading"])
-        self.assertIn("more than one version", out["say"])
-        self.assertEqual(out["instructions"], [{"show_view": {"view": "status"}}])
+        # #121: "more" is reading_context's `next`; the ambiguous quote binds nothing
+        ctx = self.context("Your books\nNothing is missing.")
+        self.assertNotIn("next", ctx)
+        self.assertIn("more than one version", ctx["say"])
+        self.assertEqual(ctx["show_view"], {"view": "status"})
 
     def test_different_item_pids_refuse(self):
         self.bind()
         self._two([{"quarter": "2026-Q3", "pid": 1}, {"quarter": "2026-Q3", "pid": 2}],
                   kind="item")
-        out, _ = self.propose("more", quoted="Your books\nNothing is missing.")
-        self.assertIn("more than one version", out["say"])
-        self.assertEqual(out["instructions"], [{"show_view": {"view": "status"}}])
+        ctx = self.context("Your books\nNothing is missing.")     # #121: "more"
+        self.assertNotIn("next", ctx)
+        self.assertIn("more than one version", ctx["say"])
+        self.assertEqual(ctx["show_view"], {"view": "status"})
 
-    def test_reply_reads_exactly_the_v3_fields(self):
-        """V3: every grammar-read scope field is a binding fact. A new read joins the list."""
+    def test_reply_reads_only_v3_fields(self):
+        """V3: every scope field reply.py reads is a binding fact. A new read joins the list.
+        #121: the grammar's reads left with it — a subset now; FACT_FIELDS unchanged."""
         import views
         tree = ast.parse((ROOT / "server" / "reply.py").read_text("utf-8"))
         reads = set()
@@ -876,7 +891,8 @@ class LegacyQuarterFacts(_Q3):
                     and any(isinstance(c, ast.Name) and c.id == "scope"
                             for c in node.comparators):
                 reads.add(node.left.value)
-        self.assertEqual(reads, set(views.FACT_FIELDS))
+        self.assertTrue(reads, "the AST walk found no scope read")
+        self.assertLessEqual(reads, set(views.FACT_FIELDS))
         self.assertEqual(set(views.FACT_FIELDS), {"names", "refs", "proposed", "offers",
                                                   "next", "walk", "quarter", "pid"})
 
@@ -908,11 +924,13 @@ class BroadProvenance(StoreCase):
         views.mark_rendering_delivered(self.conn, r["render_id"])
         return r
 
-    def propose(self, text, quoted=None):
+    def propose(self, ops, quoted=None):
+        """#121: the desk's operations (tests._base.as_ops shorthand), not the words."""
         import posting
+        from tests._base import as_ops
         with FakeBroker() as b:
             # #99: the operator quotes what they saw (bold markers are formatting)
-            out = posting.propose_reading(self.conn, text, views.displayed(quoted)
+            out = posting.propose_reading(self.conn, as_ops(ops), views.displayed(quoted)
                                           if isinstance(quoted, str) else quoted)
         return out, (b.proposal() if b.deposits else None)
 
@@ -920,7 +938,7 @@ class BroadProvenance(StoreCase):
         pids = [self.item("Bank %d" % i, 1000 + i, "2026-09-17", paired=False,
                           tags=("fees",)) for i in range(2)]
         self.item_view(pids[0])
-        out, prop = self.propose("statements don't matter")
+        out, prop = self.propose([("class_none", "statements")])
         self.assertIsNotNone(out["reading"])
         self.assertEqual(out["reshow"], [])
         self.assertIn("Bank 0", prop["text"])
@@ -937,9 +955,10 @@ class BroadProvenance(StoreCase):
         self.item("Bank 0", 1000, "2026-09-17", paired=False, tags=("fees",))
         sw = self.item("Zapier", 9900, "2026-09-17", paired=False)
         self.item_view(sw)
-        out, _ = self.propose("statements don't matter")
-        self.assertIsNone(out["reading"])
-        self.assertEqual(out["reshow"], [])
+        import db
+        with self.assertRaises(db.Refusal):           # #121: refused to the desk
+            self.propose([("class_none", "statements")])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM readings").fetchone()[0], 0)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM chain_overrides"
                                            ).fetchone()[0], 0)
 
@@ -947,7 +966,7 @@ class BroadProvenance(StoreCase):
         pids = [self.item("Adobe", 1000 + i, "2026-09-1%d" % (i + 6), paired=False)
                 for i in range(2)]
         self.item_view(pids[0])
-        out, prop = self.propose("no invoices ever for Adobe")
+        out, prop = self.propose([("never", pids[0])])
         self.assertIsNotNone(out["reading"])
         self.assertEqual(out["reshow"], [])
         self.assertIn("10.01", prop["text"])
@@ -956,11 +975,13 @@ class BroadProvenance(StoreCase):
                                            " exp_author='operator'").fetchone()[0], 1)
 
     def test_never_rule_without_provenance_applies_nothing(self):
-        self.item("Adobe", 1000, "2026-09-16", paired=False)
+        adobe = self.item("Adobe", 1000, "2026-09-16", paired=False)
         sw = self.item("Zapier", 9900, "2026-09-17", paired=False)
         self.item_view(sw)
-        out, _ = self.propose("no invoices ever for Adobe")
-        self.assertIsNone(out["reading"])
+        import db
+        with self.assertRaises(db.Refusal):           # #121: Adobe is not on the post
+            self.propose([("never", adobe)])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM readings").fetchone()[0], 0)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM counterparties WHERE"
                                            " exp_author='operator'").fetchone()[0], 0)
 
@@ -968,7 +989,7 @@ class BroadProvenance(StoreCase):
         pids = [self.item("ACME BV 123", 1000 + i, "2026-09-1%d" % (i + 6), paired=False)
                 for i in range(2)]
         self.item_view(pids[0])
-        out, prop = self.propose("the acme bv 123 one is my landlord")
+        out, prop = self.propose([("identity", pids[0], "my landlord")])
         self.assertIsNotNone(out["reading"], out)
         self.assertEqual(out["reshow"], [])
         self.assertIn("10.01", prop["text"])
@@ -1019,10 +1040,15 @@ class Tags(_Q3):
 # ---------------------------------------------------------------------------------------
 class QuotedResend(_Q3):
     def test_a_quote_offering_nothing_says_so(self):
+        # #121: "send it again" quoting a post is stage_for_delivery(resend, its render_id)
+        import db
         f = self.sheet_fixture()
-        out, _ = self.propose("send it again", quoted=self.text_of(f["render_id"]))
-        self.assertNotIn("resend", out["instructions"])
-        self.assertIn("that message offers no package to send again", out["say"])
+        rid = self.context(self.text_of(f["render_id"]))["render_id"]
+        self.assertEqual(rid, f["render_id"])
+        with self.assertRaises(db.Refusal) as cm:
+            call("stage_for_delivery", resend=True, render_id=rid)
+        self.assertIn("that message offers no package to send again", str(cm.exception))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM deliveries").fetchone()[0], 0)
 
     def test_resend_target_reads_the_named_rendering(self):
         import db
@@ -1041,135 +1067,18 @@ class QuotedResend(_Q3):
         with db.tx(self.conn):
             self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
                               (db.canonical(scope), f["render_id"]))
-        out, _ = self.propose("send it again", quoted=self.text_of(f["render_id"]))
-        self.assertIn({"stage_for_delivery": {"resend": True, "render_id": f["render_id"]}},
-                      out["instructions"])
+        # #121: the desk's resend names the quoted post's render_id from reading_context
+        self.assertEqual(self.context(self.text_of(f["render_id"]))["render_id"],
+                         f["render_id"])
 
 
 # ---------------------------------------------------------------------------------------
 # r5 (Astra S2) — a rendering that LACKS a field a clause reads refuses that clause
 # ---------------------------------------------------------------------------------------
 class LegacyFields(_Q3):
-    """Round 5 ruling: a reading bound to a view rendering whose scope lacks a grammar-read
-    field (views.FACT_FIELDS) refuses the clause that reads it in plain words, with a fresh
-    show_view of that rendering's view and quarter (pid for an item) as the recovery. An
-    explicitly present empty value stays empty. Generalises r3 #4's legacy `next`."""
-
-    def _legacy(self, rid, keep=("quarter", "pid", "names", "refs")):
-        """What v0.9.0 (a404990) stored for a view: no first-line tag; quarter and pid, and
-        names/refs only when non-empty — no proposed, next, offers or walk."""
-        import db
-        self.make_legacy(rid)
-        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
-                                             " render_id=?", (rid,)).fetchone()[0])
-        old = {k: v for k, v in scope.items() if k in keep and (k in ("quarter", "pid") or v)}
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
-                              (db.canonical(old), rid))
-
-    def _migrated(self):
-        """The store copied into the v10 schema and opened (10 -> 12), as
-        review_migrated_sheet.py does."""
-        import db
-        import tools
-        from tests.schema_history import DDL_V10
-        path = self.tmp / "schema10.sqlite"
-        c = sqlite3.connect(path)
-        c.executescript(DDL_V10)
-        tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'"
-                                          " AND name NOT LIKE 'sqlite_%'")]
-        for table in tables:
-            # the columns both schemas have: schema 12 dropped the machinery v10 carried
-            # (a dropped table copies nothing; a dropped column keeps v10's default)
-            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
-            cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})") if r[1] in have]
-            if not cols:
-                continue
-            names = ",".join(cols)
-            rows = self.conn.execute(f"SELECT {names} FROM {table}").fetchall()
-            c.execute(f"DELETE FROM {table}")
-            c.executemany(f"INSERT INTO {table} ({names}) VALUES"
-                          f" ({','.join('?' for _ in cols)})", [tuple(r) for r in rows])
-        c.execute("UPDATE meta SET value='10' WHERE key='schema_version'")
-        c.commit()
-        c.close()
-        migrated = db.open_store(path)
-        self.addCleanup(migrated.close)
-        old = tools._CONN
-        tools._CONN = migrated
-        self.addCleanup(setattr, tools, "_CONN", old)
-        return migrated
-
-    def test_all_good_on_a_migrated_v090_sheet_refuses_with_a_recovery(self):
-        """Astra r5 S2 (review_migrated_sheet.py): the sheet has no `proposed`."""
-        import views
-        f = self.sheet_fixture()
-        self._legacy(f["render_id"])
-        quote = self.text_of(f["render_id"])
-        m = self._migrated()
-        with FakeBroker() as b:
-            out = call("propose_reading", text="all good", quoted=quote)
-            self.assertEqual(len(b.deposits), 0)
-            self.assertEqual(m.execute("SELECT count(*) FROM readings").fetchone()[0], 0)
-            self.assertEqual(m.execute("SELECT count(*) FROM log WHERE author='operator'"
-                                       ).fetchone()[0], 0)
-            rec = [i["show_view"] for i in out["instructions"]
-                   if isinstance(i, dict) and "show_view" in i]
-            self.assertEqual(rec, [{"view": "check", "quarter": "2026-Q3"}], out)
-            self.assertIn(views.LACKS, out["say"])
-            call("show_view", **rec[0])                       # the recovery, then its quote
-            out = call("propose_reading", text="all good",
-                       quoted=views.displayed(b.proposal()["text"]))
-            self.assertIsNotNone(out["reading"])
-            tap(b.proposal(), "Apply")
-        self.assertEqual(m.execute("SELECT count(*) FROM readings").fetchone()[0], 1)
-        self.assertEqual(m.execute("SELECT count(*) FROM log WHERE author='operator'"
-                                   ).fetchone()[0], 1)
-
-    def test_a_named_verdict_on_a_rendering_without_names(self):
-        import db
-        import views
-        f = self.sheet_fixture()
-        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
-                                             " render_id=?", (f["render_id"],)).fetchone()[0])
-        del scope["names"]
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
-                              (db.canonical(scope), f["render_id"]))
-        out, _ = self.propose("the Zapier one is wrong", quoted=self.text_of(f["render_id"]))
-        self.assertIsNone(out["reading"])
-        self.assertIn(views.LACKS, out["say"])
-        self.assertIn({"show_view": {"view": "check", "quarter": "2026-Q3"}},
-                      out["instructions"])
-        self.assertEqual(self.operator_rows(), 0)
-
-    def test_an_item_rendering_without_refs_recovers_its_item(self):
-        import views
-        f = self.sheet_fixture()
-        r = views.build_review(self.conn, view="item", pid=f["pid"])
-        views.mark_rendering_delivered(self.conn, r["render_id"])
-        self._legacy(r["render_id"])
-        out, _ = self.propose("the Zapier one is wrong", quoted=self.text_of(r["render_id"]))
-        self.assertIsNone(out["reading"])
-        self.assertIn({"show_view": {"view": "item", "quarter": "2026-Q3", "pid": f["pid"]}},
-                      out["instructions"])
-        self.assertEqual(self.operator_rows(), 0)
-
-    def test_a_present_empty_value_stays_empty(self):
-        import db
-        f = self.sheet_fixture()
-        scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
-                                             " render_id=?", (f["render_id"],)).fetchone()[0])
-        self.assertIn("names", scope)
-        self.assertIn("refs", scope)                  # composed explicitly, even when empty
-        self.assertIn("offers", scope)
-        scope["names"] = {}
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE renders SET scope_json=? WHERE render_id=?",
-                              (db.canonical(scope), f["render_id"]))
-        out, prop = self.propose("the Zapier one is wrong", quoted=self.text_of(f["render_id"]))
-        self.assertIsNotNone(out["reading"])          # stored names still resolve it
-        self.assertEqual(scope["refs"], {})
+    """Round 5: every view composes every views.FACT_FIELDS field. (#121: the r5 refusal of
+    a clause reading a field a legacy rendering lacks pinned the phrase grammar's reads —
+    gone; operations bind by R's render_items.)"""
 
     def test_every_view_composes_every_grammar_field(self):
         import views
@@ -1200,7 +1109,7 @@ class LabelOnlyOnTheQuote(_Q3):
             call("mark_rendering_delivered", render_id=s["render_id"])
             self.assertEqual(views.bound_rendering(self.conn, quote)["render_id"],
                              s["render_id"])
-            out = call("propose_reading", text="the \U0001f4ca Analytics one is wrong",
+            out = call("propose_reading", ops=[{"op": "reject", "pid": f["pid"]}],
                        quoted=quote)
             self.assertIsNotNone(out["reading"], out)
             self.assertEqual(self.readings(), 1)
@@ -1245,7 +1154,9 @@ class ClippedQuote(_Long):
             self.assertTrue(quote.endswith(CASA_CLIP))
             self.assertEqual(views.bound_rendering(self.conn, quote)["render_id"],
                              r["render_id"])
-            out = call("propose_reading", text="all good", quoted=quote)
+            # #121: "all good" — one confirm per payment the page suggests
+            out = call("propose_reading", ops=[{"op": "confirm", "pid": p} for p in self.pids],
+                       quoted=quote)
             self.assertIsNotNone(out["reading"], out)
             self.assertEqual(self.conn.execute("SELECT render_id FROM readings").fetchone()[0],
                              r["render_id"])

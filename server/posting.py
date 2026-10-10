@@ -438,28 +438,39 @@ def get_package(conn, quarter) -> dict:
             "alerts": alerts_}
 
 
-READING_TOO_LONG = ("That is more than I can show for one Apply — nothing was read. Send it "
-                    "in shorter parts.")
+READING_TOO_LONG = ("That is more than I can show for one Apply — nothing was read. Ask "
+                    "for it in smaller parts.")
 
 
-def propose_reading(conn, text, quoted=None) -> dict:
-    """§8: read the operator's words; with a write, post them as a reading to Apply."""
+def reading_context(conn, quoted=None) -> dict:
+    """#121: what the operator's words are about (reply.context); posts nothing."""
     import reply
-    if not isinstance(text, str) or not text.strip():
-        raise db.Refusal("text is the operator's words, verbatim")
     if quoted is not None and not isinstance(quoted, str):
         raise db.Refusal("quoted is the quoted post's text, as the desk context gave it")
     with db.tx(conn):
-        out = reply.reading_in_tx(conn, text, quoted)
-        base = {k: out[k] for k in ("instructions", "reshow", "understood", "not_a_reply")}
+        return reply.context(conn, quoted)
+
+
+def propose_reading(conn, ops, quoted=None) -> dict:
+    """§8, #121: the operations the desk read in the operator's words, run under a rehearsal;
+    with a write, posted as a reading to Apply. `reshow`: payments changed since the post
+    (each re-shown by the desk, beside the reading or alone)."""
+    import reply
+    ops = reply.check_ops(ops)
+    if quoted is not None and not isinstance(quoted, str):
+        raise db.Refusal("quoted is the quoted post's text, as the desk context gave it")
+    with db.tx(conn):
+        try:
+            out = reply.reading_in_tx(conn, ops, quoted)
+        except views.QuoteRefusal as exc:
+            return {"reading": None, "say": exc.line, "reshow": [], "show_view": exc.view}
         if not out["plan"]:
             say = "\n".join(out["receipt"])
-            return {"reading": None,
-                    "say": views.fit_message(say, views.FIT_CLOSING) if say else "", **base}
+            return {"reading": None, "reshow": out["reshow"],
+                    "say": views.fit_message(say, views.FIT_CLOSING) if say else ""}
         body = [views.title("I read this as:")] + [f"· {x}" for x in out["propose"]]
         if out["unresolved"]:
             body += ["", "Not included:"] + [f"· {x}" for x in out["unresolved"]]
-        body += [x for x in out["receipt"] if x.startswith("Not rebuilding yet")]
         text_ = "\n".join(body)
         if not views.fits_proposal(text_):
             raise db.Refusal(READING_TOO_LONG)
@@ -467,10 +478,11 @@ def propose_reading(conn, text, quoted=None) -> dict:
         # a newer reading supersedes an unanswered older one (§8: `↻ replaced`)
         conn.execute("UPDATE readings SET state='stale', settled_at=? WHERE state='open'", (now,))
         key = keys.mint()
+        # #121: `text` holds the operations (canonical JSON), replayed at Apply
         rid = conn.execute("INSERT INTO readings(key, text, quoted, render_id, plan_json,"
                            " created_seq, created_at, state) VALUES (?,?,?,?,?,?,?, 'open')",
-                           (key, text, quoted, out["render_id"], db.canonical(out["plan"]),
-                            db.next_seq(conn), now)).lastrowid
+                           (key, db.canonical(ops), quoted, out["render_id"],
+                            db.canonical(out["plan"]), db.next_seq(conn), now)).lastrowid
         value = _proposal(text_, [("Apply", "apply_reading", {"reading_id": rid, "key": key}),
                                   ("Cancel", "cancel_reading", {"reading_id": rid, "key": key})],
                           "reading")
@@ -482,7 +494,7 @@ def propose_reading(conn, text, quoted=None) -> dict:
             conn.execute("UPDATE readings SET state='stale', settled_at=? WHERE reading_id=?"
                          " AND state='open'", (db.now(), rid))
         raise
-    return {"reading": ref, "reading_id": rid, **base}
+    return {"reading": ref, "reading_id": rid, "reshow": out["reshow"]}
 
 
 ACCOUNTS_PER_PAGE = 5

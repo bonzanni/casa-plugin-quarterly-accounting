@@ -2,7 +2,7 @@
 interpreter); otherwise skips, naming the command (Global Constraints). The gate also fails
 on an empty, truncated or thinned file, and on a deposit with no display expectation and no
 explicit skip (review r1)."""
-import json, os, subprocess, sys, tempfile, unittest
+import json, os, re, subprocess, sys, tempfile, unittest
 from tests._base import ROOT
 from tests.gen_casa_shapes import KINDS as KIND, kind_of
 
@@ -141,7 +141,7 @@ class CasaGate(unittest.TestCase):
             rec["next"]["buttons"] = (rec["next"]["buttons"] * 7)[:7]
         r, case = self.variant(lambda rec: "next" in rec, seven)
         self.assertNotEqual(r.returncode, 0, r.stdout)
-        self.assertRegex(r.stdout, rf"FAIL \d+ \S+ {case}")
+        self.assertRegex(r.stdout, rf"FAIL \d+ \S+ {re.escape(case)}")   # a label carries "(40)"
 
     def test_a_next_card_without_a_receipt_fails(self):
         r, case = self.variant(lambda rec: "next" in rec, lambda rec: rec.update(receipt=" "))

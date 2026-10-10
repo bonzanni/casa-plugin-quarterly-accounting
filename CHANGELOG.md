@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.28
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **Say it your way (#121).** What you tell Finance about the books — "Zapier's match is off",
+  "looks right, go ahead with all of them", "all fine apart from Figma", "that charge doesn't
+  need any paperwork", "Notion va bene" — is read by Finance itself, in any wording or
+  language, instead of having to fit a fixed set of phrases. Nothing changes until you tap
+  Apply on the card that lists every change, as before; Cancel still applies nothing.
+  Finance asks which payment you mean only when several fit, and no message tells you words
+  to type any more.
+- A change that reaches several payments (a vendor that never needs a document, whose
+  payment it is) lists every payment it changes on the Apply card, not the first eight.
+- "Show me the Zapier payment", "more", "send it again" and "rebuild it" go straight to the
+  view or the file.
+- A reading card left open from an earlier version answers Apply with "Something changed
+  since I read your message — nothing was applied." Say it again.
+
 ## 0.11.27
 
 Same store schema (17) and Casa floor (v0.344.67).

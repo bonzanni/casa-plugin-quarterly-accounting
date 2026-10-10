@@ -490,7 +490,10 @@ def apply_reading(conn, reading_id, key) -> dict:
         grant = authority.OperatorGrant("apply_reading", key)
         try:
             with db.savepoint(conn, "replay"):
-                out = reply.replay(conn, row, grant)
+                try:
+                    out = reply.replay(conn, row, grant)
+                except db.Refusal:
+                    raise _Changed from None     # #121: an operation no longer applies
                 if db.canonical(out["plan"]) != row["plan_json"]:
                     raise _Changed
         except _Changed:
@@ -499,8 +502,7 @@ def apply_reading(conn, reading_id, key) -> dict:
             return {"receipt": CHANGED}
         conn.execute("UPDATE readings SET state='applied', settled_at=? WHERE reading_id=?",
                      (db.now(), reading_id))
-        lines = [x for x in out["receipt"] if not x.startswith("Not rebuilding yet")]
-        lines += reply.package_lines(conn, out["quarters"])
+        lines = out["receipt"] + reply.package_lines(conn, out["quarters"])
     return {"receipt": views.fit_message(lines, views.FIT_CLOSING)}
 
 

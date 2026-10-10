@@ -190,12 +190,9 @@ class TestDesk(TempEnv):
         ans = flat(section(SKILL, "## Two intents about a quarter", "## The operator's words"))
         self.assertIn("`show_view(view=…, quarter=…, page=…, after=…)`", ans)
         # final fix wave I-1: a fresh desk session cannot know the last view's `next`;
-        # the reading returns it as show_view arguments
-        self.assertIn('For "more" or "all of them", call `propose_reading` (below), then call '
-                      "`show_view` with the arguments the reading returns, unchanged", ans)
-        words = flat(section(SKILL, "## The operator's words", "## Asks"))
-        self.assertIn('`{"show_view": {…}}` (for "more", "all of them"): call `show_view` with '
-                      "the arguments the reading returns, exactly", words)
+        # #121: reading_context returns it as show_view arguments
+        self.assertIn('"More", "all of them": `show_view` with `reading_context`\'s `next`, '
+                      "unchanged.", ans)
         self.assertIn("After its receipt, `mark_rendering_delivered(render_id)`.", ans)
         self.assertIn("you never press them and never call a button's tool", ans)
 
@@ -245,7 +242,7 @@ class TestDesk(TempEnv):
                        'when one is meant>)`',
                        "Its end card is that quarter's.",
                        '"Send the package", "Give me Q3", "rebuild it", "the package for Q2": '
-                       "`get_package(quarter=…)`, also for the reading's \"rebuild Qn\"; a "
+                       "`get_package(quarter=…)`; a "
                        "bare \"send the package\" names no quarter: `get_package()` sends "
                        "the quarter the operator last checked.",
                        "built now from what the last check knew; say nothing more after it.",
@@ -258,9 +255,8 @@ class TestDesk(TempEnv):
                        "request_id>)`, and say its `line`",
                        "The ask stays recorded."):
             self.assertIn(phrase, asks, phrase)
-        # 0.11.2: "check emailed invoices" is the reading's instruction for the check ask
-        self.assertIn('"check emailed invoices": the check ask below',
-                      flat(section(SKILL, "## The operator's words", "## Asks")))
+        # 0.11.2: a fresh look at the email is the check ask (#121: asked directly, no reading)
+        self.assertIn("a fresh look at the bank and email", asks)
         self.assertLess(asks.index("`request_work("), asks.index("`start_job`"))
         # simple loop §1: the desk never builds through the old staging path for a package
         # ask; staging is only "send it again" / "send the last one" (Sending again)
@@ -282,17 +278,19 @@ class TestDesk(TempEnv):
         propose_reading; when it understood nothing, the message is conversation."""
         rep = flat(section(SKILL, "## The operator's words about the books",
                            "## Asks"))
-        self.assertIn("A swipe-reply on a Finance post, or a delegation about an accounting "
-                      "decision", rep)
-        self.assertIn("`propose_reading(text=<their words, verbatim; for a delegation, the "
-                      "brief>, quoted=", rep)
+        self.assertIn("A swipe-reply on a Finance post, or a delegation, deciding something "
+                      "about the books", rep)
+        # #121: the desk reads the words; the tools take operations by pid
+        self.assertIn("`reading_context(quoted=<the quoted post's text from your context, "
+                      "when there is one>)`, then `propose_reading(quoted=<the same>, ops=[…])`",
+                      rep)
+        self.assertIn("You read the words; when it is unclear which payment, ask", rep)
         self.assertIn("Nothing is applied by you", rep)
         # issue #59 (5): nothing the desk could repeat as a narration
-        self.assertIn("`reading` set: Casa posted it with its buttons. Your whole reply is "
+        self.assertIn("`reading` set: Casa posted it with Apply. Your whole reply is "
                       "`<silent/>`.", rep)
         self.assertNotIn("posted with Apply and Cancel", rep)
-        self.assertIn("`understood: false` and nothing else: it was not about the books. "
-                      "Answer it as conversation.", rep)
+        self.assertNotIn("verbatim;", rep)              # #121: no words passed to a grammar
         self.assertNotIn("contains the word", rep)
 
     def test_the_desk_never_does_the_jobs_work(self):

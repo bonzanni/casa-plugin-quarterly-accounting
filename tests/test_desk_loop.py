@@ -60,7 +60,8 @@ class Desk(StoreCase):
             cards.deposit_of(self.conn, rid)
         quoted = self.conn.execute("SELECT text FROM renders WHERE render_id=?",
                                    (rid,)).fetchone()[0]
-        apply_now(self.conn, "confirm all 2", quoted=quoted)
+        # #121: ops — the desk confirms each of the end message's pids
+        apply_now(self.conn, [("confirm", p) for p in pids], quoted=quoted)
         for p in pids:
             self.assertEqual(self.conn.execute("SELECT author FROM match_state WHERE pid=? AND"
                                                " state='matched'", (p,)).fetchone()[0],
@@ -104,47 +105,11 @@ class DeskMore(StoreCase):
             cards.deposit_of(self.conn, rid)
         return self.conn.execute("SELECT * FROM renders WHERE render_id=?", (rid,)).fetchone()
 
-    def test_a_reply_bound_to_a_card_recovers_with_a_view_show_view_takes(self):
-        """Task 7 carry: the recovery of a reading bound to an end message (or any card) is
-        the open-items card, never the card's own kind, which show_view refuses."""
-        import qa_server, reply, tools  # noqa: F401
-        self.proposal(1)
-        r = self.end_message()
-        rec = reply._Scope(self.conn, r).recovery()
-        self.assertEqual(rec, {"view": "open", "quarter": "2026-Q3"})
-        self.assertEqual(reply._Scope(self.conn, r).recovery(more=True), rec)
-        with FakeBroker() as broker:
-            out = qa_server.TOOLS["show_view"]["fn"](rec)
-        posted = self.conn.execute("SELECT kind FROM renders WHERE render_id=?",
-                                   (out["render_id"],)).fetchone()[0]
-        self.assertEqual(posted, "open-items")
-        self.assertIn("Q3 · 1 payment\n1 to confirm\n",
-                      untag(json.loads(broker.deposits[0]["value"])["text"]))
-
     def test_an_ambiguous_quote_among_cards_recovers_with_the_open_items_card(self):
         import views
         self.proposal(1)
         a, b = self.end_message(), self.end_message()
         self.assertEqual(views._common_view([a, b]), {"view": "open", "quarter": "2026-Q3"})
-
-    def test_all_good_does_not_bind_a_review_card(self):
-        """The sheet-wide approval binds the sheets and the end / open-items messages only:
-        a Review card is answered by its own buttons."""
-        import cards
-        p = self.proposal(1)
-        r = self.end_message()
-        with db.tx(self.conn):
-            card = cards.next_after(self.conn, r["render_id"], -1)
-            cards.deposit_of(self.conn, card)
-        self.assertEqual(self.conn.execute("SELECT kind FROM renders WHERE render_id=?",
-                                           (card,)).fetchone()[0], "review")
-        text = self.conn.execute("SELECT text FROM renders WHERE render_id=?",
-                                 (card,)).fetchone()[0]
-        out = apply_now(self.conn, "all good", quoted=text)
-        self.assertEqual(out["applied"], [])
-        self.assertIn("not a sheet to approve", out["receipt"])
-        self.assertEqual(self.conn.execute("SELECT author FROM match_state WHERE pid=? AND"
-                                           " state='proposed'", (p,)).fetchone()[0], "auto")
 
     def test_all_good_on_an_open_items_card_confirms_its_proposals(self):
         import qa_server, tools  # noqa: F401
@@ -152,7 +117,8 @@ class DeskMore(StoreCase):
         with FakeBroker() as broker:
             qa_server.TOOLS["show_view"]["fn"]({"view": "open"})
         quoted = json.loads(broker.deposits[0]["value"])["text"]
-        apply_now(self.conn, "all good", quoted=quoted)
+        # #121: ops — the desk confirms each of the card's pids
+        apply_now(self.conn, [("confirm", p) for p in pids], quoted=quoted)
         for p in pids:
             self.assertEqual(self.conn.execute("SELECT author FROM match_state WHERE pid=? AND"
                                                " state='matched'", (p,)).fetchone()[0],

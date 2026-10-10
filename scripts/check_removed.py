@@ -95,6 +95,14 @@ REMOVED = [
     (r"\b(calls_made|CALLS_SOFT|CALLS_HARD|unit_room|unit_fits|MIN_WORK|max_calls|UnitBudget|"
      r"CLOSING_TOOLS)\b|\bloop\.CLOSING\b|\bqueues\.COST\b|['\"]end-batch['\"]",
      "the call budget: calls_made, max_calls, end-batch (operator ruling 2026-10-07)"),
+    # #121: the reply grammar — the desk reads the words, propose_reading takes operations
+    (r"\breply\.(PATTERNS|DIRECTIVES|_polite|_POLITE|_clauses|_parse|_parse_target|_resolve|"
+     r"_names|_begins|_matches|_matches_loose|_targets|_dotted_names|_COLLECTIVE|_CONFIRM_ALL|"
+     r"_ALL_GOOD|_counts|_COUNT|_NUMBERS|_EXCEPTION|_NUMBERED|_clause|_apply|_Lacks|_refused|"
+     r"_shows_payee|REBUILD_PENDING|REBUILD_BLOCKED|NOTHING_MORE|EFFECTS_MAX|_quarter|"
+     r"_SENTENCE_END|_EXTENSIONS|_KEPT_DOT|_ESCAPE_LEAD|_ESCAPE_TAIL|_REF|_AMOUNT|_DATE|"
+     r"_MONTHS)\b|\bviews\.LACKS\b|\bnot_a_reply\b|\breading_in_tx\(\s*[^,]+,\s*[\"f]",
+     "the reply grammar and its words-in reading (#121)"),
     # test helpers
     (r"\bself\.(handed|close_chunk|hand_empty_chunk|end_with_counts|package_built_unsent|"
      r"stage_stalled_package|check_round|bind_round_and_take|sweep_to_zero|start_job_pass|"

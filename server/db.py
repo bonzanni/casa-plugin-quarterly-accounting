@@ -128,7 +128,7 @@ RUNS_DDL_V10 = """CREATE TABLE IF NOT EXISTS runs (
 READINGS_DDL = """CREATE TABLE IF NOT EXISTS readings (
   reading_id INTEGER PRIMARY KEY AUTOINCREMENT,
   key TEXT NOT NULL UNIQUE,      -- 128 random bits, minted into the proposal's deposit only
-  text TEXT NOT NULL,            -- the words the desk turn received, verbatim
+  text TEXT NOT NULL,            -- the operations the desk read, canonical JSON (#121)
   quoted TEXT,                   -- the quoted post's text, when the desk context had one
   render_id TEXT,                -- the rendering the reading was bound to (§8)
   plan_json TEXT NOT NULL,       -- the writes, each with the revisions it read

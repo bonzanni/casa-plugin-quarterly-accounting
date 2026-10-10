@@ -14,8 +14,8 @@ notes current (`record_mirror`) and ends with one message and its cards, in fres
 silently and speaks only when there is something to say. The operator's taps (`verdict`) are recorded at once and each answer posts the next card; the
 bank ledger's tags and notes follow at the next check. The
 finance specialist's desk (skill `skills/quarterly-accounting/SKILL.md`) answers the operator
-with posted views and their buttons, reads the operator's words into a reading to Apply
-(`propose_reading`), files the documents the operator sends, and asks for the check
+with posted views and their buttons, reads the operator's words into explicit operations on
+the payments (`reading_context`) posted as a reading to Apply (`propose_reading`), files the documents the operator sends, and asks for the check
 (`request_work`, then Casa's `start_job`). `get_package` builds the freshest quarter package
 from the store on request and sends it as a file in Telegram, open items or not; nothing is
 emailed. `job_status` answers, read-only, whether the job may end; `set_aside` closes a job
