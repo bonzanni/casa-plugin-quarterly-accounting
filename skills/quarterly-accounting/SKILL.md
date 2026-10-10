@@ -52,7 +52,7 @@ Other questions: `show_view(view=…, quarter=…, page=…, after=…)`:
 - `item` with `pid`: one payment.
 
 Every view of a quarter the operator named takes it as `quarter`: left out, a view shows a
-default (the last check's quarter), which may not be theirs. The answer's `quarter` is the
+default (often the last check's quarter), which may not be theirs. The answer's `quarter` is the
 one shown.
 
 "More", "all of them": `show_view` with `reading_context`'s `next`, unchanged. After its

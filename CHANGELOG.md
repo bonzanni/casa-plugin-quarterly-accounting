@@ -5,8 +5,8 @@
 Same store schema (17) and Casa floor (v0.344.67).
 
 - **The quarter you ask about is the one you see (#126).** When Finance shows a view without
-  naming a quarter, it shows a default one (the quarter of your last check), which is why
-  "how's Q3?" could bring up the Q2 sheet. Finance is now told to pass the quarter you
+  naming a quarter, it shows a default one (the quarter your last check named, when it named
+  one), which is how "how's Q3?" could bring up the Q2 sheet. Finance is now told to pass the quarter you
   named to every view, and each view's answer tells Finance which quarter it showed, with a
   note when that was the default, so it can show yours instead.
 

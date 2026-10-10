@@ -58,7 +58,7 @@ class ShownQuarter(StoreCase):
 class Words(StoreCase):
     def test_the_skill_and_the_tool_say_the_named_quarter_is_passed(self):
         self.assertIn("Every view of a quarter the operator named takes it as `quarter`: left "
-                      "out, a view shows a default (the last check's quarter), which may not be "
+                      "out, a view shows a default (often the last check's quarter), which may not be "
                       "theirs. The answer's `quarter` is the one shown.", flat(DESK))
         self.assertLessEqual(len(DESK), 10_000)
         desc = qa_server.TOOLS["show_view"]["description"]

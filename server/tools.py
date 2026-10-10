@@ -526,7 +526,8 @@ def t_job_status(args):
 @register("request_work",
           "Your desk's way to start the accounting check when the operator asks for the "
           "work, also relayed by a delegate (even naming quarterly-accounting:work). A bare "
-          "\"check Q3\" asks where the quarter stands: show_view(view=\"open\"), not this. "
+          "\"check Q3\" asks where the quarter stands: show_view(view=\"open\", quarter=\"2026-Q3\"), "
+          "not this. "
           "Record a check (kind=check, trigger=operator) or a filed document handed over "
           "(kind=handover, trigger=operator, doc_ids) BEFORE start_job — getting a quarter "
           "done carries quarter (one before the books' start moves the start, no question "
