@@ -344,11 +344,12 @@ def describe(conn, pid: int) -> dict:
         "direction": row.get("direction"), "pending": is_pending(row),
         "counterparty": kb.display_name(conn, row.get("counterparty")),
         "bank_counterparty": row.get("counterparty"),
-        # issue #59 (1): the name the operator reads (display only); #111: a payment with no
-        # payee text is read by its bank description, never "Unknown payee" while one is there
+        # issue #59 (1): the name the operator reads (display only); #111/#113: a payment with
+        # no payee text is read by its bank description's name, never "Unknown payee" while
+        # the description is there
         "readable": (kb.readable_name(conn, row.get("counterparty"), cp, pid)
                      if (row.get("counterparty") or "").strip()
-                     else (row.get("remittance") or "").strip() or kb.UNKNOWN),
+                     else kb.bank_name(row.get("remittance"))),
         "expectation": {"kind": p["exp_kind"], "tier": p["exp_tier"], "row": p["exp_row"]},
         "last_known_kind": p["last_known_kind"],
         "current": _match_summary(conn, p["current_match"]) if p["current_match"] else None,

@@ -58,6 +58,20 @@ def chain_overrides(conn) -> list:
 
 UNKNOWN = "Unknown payee"
 
+# #113: a SEPA description's name field — "Naam: Loonadministratie NL Omschrijving: …" or
+# "/NAME/Loonadministratie NL/" — ends at the next "Label:" or "/"
+_SEPA_NAME = re.compile(r"(?i)\b(?:naam|name)\s*:(?!\s*[a-z]+\s*:)\s*(.+?)(?=\s+[a-z]+\s*:|$)"
+                        r"|/name/([^/]+)")
+
+
+def bank_name(remittance) -> str:
+    """#113: the name a payment the bank gave no payee for is read by — the name field its
+    bank description carries, else the whole description, else UNKNOWN. Display only."""
+    text = _spaced(remittance)
+    m = _SEPA_NAME.search(text)
+    name = _spaced(m.group(1) or m.group(2)) if m else ""
+    return name or text or UNKNOWN
+
 
 def display_name(conn, bank_counterparty) -> str:
     cp = counterparty_for(conn, bank_counterparty)

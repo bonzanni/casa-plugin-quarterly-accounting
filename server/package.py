@@ -20,6 +20,7 @@ import amounts
 import binding
 import dates
 import db
+import kb
 import lineage
 import reducer as R
 import work
@@ -218,7 +219,14 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 anomalies.append(f"{_head(d)}: the bank ledger could not take its tag.")
         in_scope += status != "UNTRACKED"
         open_ += status in OPEN
-        vendor = d["counterparty"] if d else (r["counterparty"] or "")
+        # #113: a row the bank gave no payee for is named as notes.md and the cards name it,
+        # and carries its bank description, so the CSV alone says what it is
+        bank_text = " ".join((r["remittance"] or "").split())
+        no_payee = not (r["counterparty"] or "").strip()
+        vendor = (_who(d) if d else kb.bank_name(bank_text) if no_payee and bank_text
+                  else r["counterparty"] or "")
+        if no_payee and bank_text and bank_text != vendor:
+            notes.append(f"bank: {bank_text}")
         table.append([dates.effective_date(r) or "", f"{r['amount_minor'] // 100}.{r['amount_minor'] % 100:02d}",
                       r["currency"], r["direction"], r["counterparty"] or "", vendor, status,
                       confidence, exp["kind"] or "", exp["tier"] or "", docname, link,
@@ -313,10 +321,14 @@ def _successor(f) -> str:
     return f", replaced by the {day} {amounts.fmt(f['amount_minor'], f['currency'])} row"
 
 
+def _who(d) -> str:
+    """#111/#113: the payee's stored name; a payment with no payee text is named by its bank
+    description's name (work.describe `readable`), as the cards name it."""
+    return d["counterparty"] if (d["bank_counterparty"] or "").strip() else d["readable"]
+
+
 def _head(d) -> str:
-    # #111: a payment with no payee text is named by its bank description, as the cards do
-    who = d["counterparty"] if (d["bank_counterparty"] or "").strip() else d["readable"]
-    return (f"{who} · {amounts.fmt(d['amount_minor'], d['currency'])} · "
+    return (f"{_who(d)} · {amounts.fmt(d['amount_minor'], d['currency'])} · "
             f"{dates.short_day(d['date']) if d['date'] else 'no date'}")
 
 
