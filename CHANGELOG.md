@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.11.26
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **Saying what a payment is gets it classified (#116).** Words like "that's wage tax" or "yes,
+  classify wage tax as nice to have" are about the payment being discussed: Finance tags it
+  in the bank ledger and starts the check for that payment's quarter, instead of trying to read
+  the words as a correction, saying it could not apply them, and asking you to reply to the
+  payment's own message. It asks which payment only when several fit. It also knows what a
+  classification means for the paperwork (taxes or fees need a statement, salary a payslip,
+  both nice to have), so "wage tax is nice to have" is answered as already true. It no longer
+  asks "Run the check now?" first.
+- **A status card stays on the quarter being talked about (#116).** Asked where things stand
+  without naming a quarter, Finance shows the quarter the conversation is about, not the
+  newest one.
+
 ## 0.11.25
 
 Same store schema (17) and Casa floor (v0.344.67).

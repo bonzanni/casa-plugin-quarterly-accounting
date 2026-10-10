@@ -33,7 +33,8 @@ class Skills(unittest.TestCase):
                   "mark_rendering_delivered", "<silent/>", "forward it from Telegram",
                   "I couldn't start the check", 'show_view(view="open")',
                   "Where a quarter stands",            # 0.11.2: intents, not phrases
-                  "#1305", 'quarter=<the quarter, e.g. "2026-Q3">', "check_setup"):
+                  "#1305", "check_setup",
+                  'quarter=<the quarter named, else the one talked about'):  # #116
             self.assertIn(s, DESK, s)
         for gone in ("job_report", "apply_reply", "build_review(", "send_media", "email it",
                      "request_package", "note_render_id"):  # removed-name: asserted absent
