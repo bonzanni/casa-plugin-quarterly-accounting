@@ -57,8 +57,10 @@ class TestCoverage(Base):
     def test_membership_precedes_the_missing_filter(self):
         self.add(tags=("software",), observed="2026-09-22T10:00:00Z")
         self.add(tags=("internal-transfer",), observed="2026-09-13T10:00:00Z")
-        text = self.render("missing")["text"]
+        text = self.render("status")["text"]
         self.assertIn("classification through 13 Sep", text)
+        # #111: a list carries no coverage line; the quarter's sheet does
+        self.assertNotIn("classification through", self.render("missing")["text"])
 
     def test_an_older_unprinted_lineage_is_a_member(self):
         q2 = self.add(tags=("internal-transfer",), observed="2026-09-13T10:00:00Z",
@@ -313,7 +315,8 @@ class TestSheet(Base):
                 n += 1
                 self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
                 self.assertNotIn("all of them", r["text"])
-                self.assertIn("classification through", flat(r["text"]))
+                # #111: the sheet carries the coverage line, a list none
+                self.assertEqual("classification through" in flat(r["text"]), view == "all")
                 got = re.findall(r"Vend\d{3}", r["text"])
                 self.assertFalse(seen & set(got))
                 seen |= set(got)

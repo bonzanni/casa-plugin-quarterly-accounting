@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.11.24
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **Residuals after 0.11.23 (#111).**
+  - A payment not classified yet asks "what is it?" on its own card, on the lists and on the
+    status card ("check Q3" names it now, not only a count); its own card no longer says
+    "Not searched yet.", and the lists no longer say "Not classified yet" twice.
+  - A payment the bank gave no payee for is named by its bank description
+    ("Loonadministratie NL"), not "Unknown payee", on the cards and in notes.md.
+  - After a merge or a rename, the card shown is the vendor's latest payment with an amount
+    (never a EUR 0.00 one), and a payment's card no longer replaces another payment's card
+    that is still open.
+  - notes.md no longer ends a nice-to-have line with "— None".
+  - The Missing, Nice-to-have and older lists no longer open with a coverage line ("Not
+    checked yet."); the quarter's sheet keeps it, as "Bank not checked yet".
+  - "Use the invoice names for all my vendors" answers one line per part, and names vendors
+    that read as one ("Anthropic and Anthropic, PBC may be one vendor: say …").
+  - "That's wage tax" is answered with one question: "Run the check now?".
+
 ## 0.11.23
 
 Same store schema (17) and Casa floor (v0.344.67).

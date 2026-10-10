@@ -8,6 +8,7 @@ The store's rename (kb.upsert_in_tx's new_name, #84) and its refusals are unchan
 from __future__ import annotations
 
 import json
+import re
 
 import casa_broker
 import db
@@ -17,6 +18,7 @@ import work
 
 CANDIDATES_SHOWN = 8       # an ambiguous vendor's refusal names at most this many
 LIST_SHOWN = 25            # a summary's name list, then "and N more"
+ALIKE_SHOWN = 3            # #111: near-duplicate vendor pairs a summary suggests merging
 
 POSTED = ("Casa posts this to the operator itself; never retell it. After its receipt, "
           "{after}your whole reply is <silent/>.")
@@ -89,8 +91,15 @@ def rename_vendor(conn, vendor, new_name=None) -> dict:
         else:
             kb.upsert_in_tx(conn, v["name"], new_name=target)
             lead = _line(v["name"], target)
-        out = _line_and_card(conn, max(v["pids"]), lead, "rename")
+        out = _line_and_card(conn, _card_pid(conn, v["pids"]), lead, "rename")
     return _deposit(out)
+
+
+def _card_pid(conn, pids) -> int:
+    """#111: the payment whose card shows the vendor — its latest one with an amount (a
+    EUR 0.00 authorisation says nothing of the vendor), else its latest."""
+    with_amount = [p for p in pids if work.describe(conn, p)["amount_minor"]]
+    return max(with_amount or pids)
 
 
 def _line_and_card(conn, pid, lead, what) -> dict:
@@ -150,7 +159,7 @@ def merge_vendors(conn, vendor, into) -> dict:
         lead = (f"{views.field(x['name'].strip())} is now part of "
                 f"{views.field(y['name'].strip())}")
         lead += "" if lead.endswith(".") else "."
-        out = _line_and_card(conn, max(x["pids"] + y["pids"]), lead, "merge")
+        out = _line_and_card(conn, _card_pid(conn, x["pids"] + y["pids"]), lead, "merge")
     return _deposit(out)
 
 
@@ -169,6 +178,26 @@ def _lead_rendering(conn, card, text) -> str:
                  (rid, card["render_id"]))
     conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?", (db.next_seq(conn), rid))
     return rid
+
+
+def _words(name) -> list:
+    return re.findall(r"\w+", (name or "").lower())
+
+
+def _alike(conn, skip) -> list:
+    """#111: vendor pairs whose names read as one ("Anthropic", "Anthropic, PBC": one name's
+    words begin the other's), at most ALIKE_SHOWN — a suggestion to merge, never a merge.
+    Vendors named in `skip` (already told to merge) are left out."""
+    names = sorted({v["name"].strip() for v in work.vendors(conn)
+                    if v["texts"] and kb.norm(v["name"]) not in skip}, key=str.lower)
+    out = []
+    for a in names:
+        wa = _words(a)
+        for b in names:
+            wb = _words(b)
+            if wa and len(wa) < len(wb) and wb[:len(wa)] == wa:
+                out.append((a, b))
+    return out[:ALIKE_SHOWN]
 
 
 def _names(names) -> str:
@@ -202,6 +231,7 @@ def rename_all(conn) -> dict:
                     # #90: with the vendor whose name (or bank text) the invoice name is
                     owner = kb.counterparty_for(conn, target)
                     kept.append((v["name"], owner["name"] if owner is not None else target))
+        alike = _alike(conn, {kb.norm(a) for a, _ in kept})
     parts = []
     if renamed:
         parts.append(f"Renamed {len(renamed)} vendor{'s' if len(renamed) != 1 else ''} to the "
@@ -218,6 +248,10 @@ def rename_all(conn) -> dict:
         parts.append(f"Kept the names you gave: {_names(given)}.")
     if none:
         parts.append(f"No invoice yet: {_names(none)}.")
-    body = views.deposit_safe(views.fit_message(" ".join(parts)))
+    for a, b in alike:
+        parts.append(f"{views.field(a)} and {views.field(b)} may be one vendor: say \"merge "
+                     f"{views.field(a)} into {views.field(b)}\" if so.")
+    # #111: one line each, never one long paragraph
+    body = views.deposit_safe(views.fit_message("\n".join(parts)))
     ref = casa_broker.deposit("results", body)
     return {"results": ref, "renamed": len(renamed), "note": POSTED.format(after="")}

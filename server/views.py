@@ -511,7 +511,8 @@ def _missing_detail(d) -> list:
         return ["Who was this payment to?"]
     out = []
     if not d["search"].get("last_searched_at"):
-        if d["search_state"] == "active":
+        # #111: a payment not classified yet is asked about, never "not searched"
+        if d["search_state"] == "active" and d["expectation"]["kind"] is not None:
             out.append("Not searched yet.")
     elif d["search"].get("incomplete"):
         out.append("Search incomplete — resumes next pass.")
@@ -547,7 +548,7 @@ def coverage(conn, members) -> str:
     snap = conn.execute("SELECT bank_through FROM snapshots ORDER BY snapshot_id DESC"
                         " LIMIT 1").fetchone()
     if snap is None or snap["bank_through"] is None:
-        return "Not checked yet."
+        return "Bank not checked yet"
     obs = [lineage.projection(conn, p)["class_observed_at"] for p in members]
     seen = [o for o in obs if o]
     never = len(obs) - len(seen)
@@ -721,11 +722,7 @@ def _first_review(conn) -> bool:
 CHECK_Q = "Are these the right documents?"      # #102: the check view's question
 
 
-def _uncl_line(ds) -> str:
-    """#106: how to settle the payments the "Not classified yet" section lists (r1 Astra +
-    Terra: the payments themselves are blocks, so a reply about one binds it)."""
-    what = "it is" if len(ds) == 1 else "they are"
-    return f"Not classified yet — tell me what {what} (\"that's wage tax\")."
+WHAT_IS_IT = "what is it?"     # #111: a payment not classified yet asks, on its line
 
 
 def view_title(view, q) -> str:
@@ -773,8 +770,9 @@ def _compose(conn, view, q, items, members, lead):
     if parts["head"]:
         parts["head"].append("")
     parts["head"].append(title(titles[view]))
-    # #79: "To check" spans earlier quarters too; one quarter's bank coverage says nothing of it
-    cov = None if view == "check" else coverage(conn, members)
+    # #79: "To check" spans earlier quarters too; one quarter's bank coverage says nothing of it.
+    # #111: a list (missing, rest, older) carries none either: only the quarter's sheets do
+    cov = coverage(conn, members) if view in ("status", "all", "quarter") else None
     if view in ("status", "all", "quarter") and members:
         cov += f" · {_plural(len(cur), 'transaction')}, {len(missing)} missing a document."
     if view in ("status", "all") and _first_review(conn):
@@ -808,9 +806,12 @@ def _compose(conn, view, q, items, members, lead):
         # #99: one tight line per payment, its detail after it
         # #102: on the missing view the title already says it; no second heading
         secs.append(_Section(title("Missing") if view != "missing" else "",
-                             _item_blocks(missing, _missing_detail, q, inline=True)))
-        # #106 r1: the payments not classified yet, each a bindable line, under their title
-        secs.append(_Section(title("Not classified yet"), _item_blocks(uncl, lambda d: [], q)))
+                             _item_blocks(missing, _missing_detail, q, inline=True),
+                             empty="Nothing is missing." if view == "missing" else None))
+        # #106 r1: the payments not classified yet, each a bindable line, under their title;
+        # #111: each line asks what it is (the title is not said twice)
+        secs.append(_Section(title("Not classified yet"), _item_blocks(
+            uncl, lambda d: [WHAT_IS_IT], q, inline=True)))
     if view in ("status", "all"):
         secs.append(_Section(title("What is this?"), _item_blocks(
             conflicts, lambda d: ["The categories on it disagree — which is it?"], q)))
@@ -835,12 +836,8 @@ def _compose(conn, view, q, items, members, lead):
 
     def tail(printed_guessed):
         out = list(packages)
-        if view == "quarter" and uncl:              # #98 r1 (Astra): its own count here too
-            out += ["", _uncl_line(uncl)]
         if view in ("status", "all", "missing"):
             counts = []
-            if uncl:
-                counts.append(_uncl_line(uncl))
             # one line, one source: an interrupted pass's lead already says how
             # many it did not reach, from the run record
             # older ones are counted on their own quarter's line below
@@ -1070,7 +1067,8 @@ def _item_sentence(d) -> str:
     if d["status"] == "ineligible":
         return "Before the start date; not tracked."
     if kind is None:
-        return "Not yet classified, so nothing was searched."
+        # #111: the payment's own card asks what it is
+        return f"Not classified yet — {WHAT_IS_IT} (\"that's wage tax\")"
     n = len(d["search"].get("queries", []))
     return f"No {word} yet." + (f" Searched {n} ways." if n else "")
 

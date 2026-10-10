@@ -197,10 +197,10 @@ class AllVendors(_Case):
         self.assertEqual(len(b.deposits), 1)
         self.assertEqual(b.deposits[0]["slot"], "results")
         self.assertEqual(views.displayed(b.deposits[0]["value"]),
-                         "Renamed 2 vendors to the name on their invoice. 1 keeps the bank "
+                         "Renamed 2 vendors to the name on their invoice.\n1 keeps the bank "
                          "name: the invoice name belongs to another vendor (Ryanair Mtw0 → Ryanair "
-                         "DAC). Ask to merge them if they are the same vendor. "
-                         "Kept the names you gave: ElevenLabs. No invoice yet: LINKEDIN, "
+                         "DAC). Ask to merge them if they are the same vendor.\n"
+                         "Kept the names you gave: ElevenLabs.\nNo invoice yet: LINKEDIN, "
                          "OPENAI *CHATGPT.")
         self.assertEqual(out["renamed"], 2)
         self.assertIn("<silent/>", out["note"])
@@ -216,7 +216,7 @@ class AllVendors(_Case):
         with FakeBroker() as b:
             call("rename_vendors_to_invoice_names", {})
         self.assertEqual(b.deposits[0]["value"],
-                         "No vendor needed a new name. No invoice yet: Zapier.")
+                         "No vendor needed a new name.\nNo invoice yet: Zapier.")
 
     def test_a_refused_rename_leaves_nothing_half_done(self):
         # the second Ryanair is refused after the first took the name; the first's rename stays
