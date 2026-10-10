@@ -755,6 +755,13 @@ def _compose(conn, view, q, items, members, lead):
     every page, the announcement printed once, the sections, and a tail built
     from what was actually printed."""
     stop, gmail_down, interrupted, absent = lead
+    # #117 r3: ONE partition first, as cards._bucket orders it — a payment waiting on the bank
+    # is in the waiting lists and in no other, whatever its status; every other list below
+    # is built from the rest only
+    waiting_all = [d for d in items if _tracked(d) and waiting(d)]
+    items = [d for d in items if not (_tracked(d) and waiting(d))]
+    waits = [d for d in waiting_all if d["quarter"] == q]
+    older_waits = [d for d in waiting_all if d["quarter"] and d["quarter"] < q]
     cur = [d for d in items if d["quarter"] == q]
     # every older open item, searched or not: an older payment nobody has looked
     # for yet is still open work the default quarter must not hide (issue #4)
@@ -765,13 +772,10 @@ def _compose(conn, view, q, items, members, lead):
     missing = [d for d in cur if _is_missing(d)]
     unsearched = [d for d in items if _is_unsearched(d)]
     guessed = [d for d in items if _guess(d)]
-    nice = [d for d in cur if _tracked(d) and d["status"] == "optional" and not waiting(d)]
+    nice = [d for d in cur if _tracked(d) and d["status"] == "optional"]
     uncl = [d for d in cur if _is_unclassified(d)]
-    conflicts = [d for d in cur if _is_conflict(d) and not waiting(d)]
-    # #117 r1: waiting on the bank comes first, whatever the status (cards._bucket's order)
-    waits = [d for d in cur if _tracked(d) and waiting(d)]
-    matched_clean = [d for d in cur if d["status"] == "matched" and not _needs_check(d)
-                     and not waiting(d)]
+    conflicts = [d for d in cur if _is_conflict(d)]
+    matched_clean = [d for d in cur if d["status"] == "matched" and not _needs_check(d)]
     b = binding.get(conn)
     parts = {"view": view, "head": [], "announce": [], "sections": [], "silent": [],
              "tail": None}
@@ -791,7 +795,7 @@ def _compose(conn, view, q, items, members, lead):
     # #111: a list (missing, rest, older) carries none either: only the quarter's sheets do
     cov = coverage(conn, members) if view in ("status", "all", "quarter") else None
     if view in ("status", "all", "quarter") and members:
-        cov += f" · {_plural(len(cur), 'transaction')}, {len(missing)} missing a document."
+        cov += f" · {_plural(len(cur) + len(waits), 'transaction')}, {len(missing)} missing a document."
     if view in ("status", "all") and _first_review(conn):
         # "Same sheet, preceded by `First review · bank checked through 20 Sep`"
         cov = "First review · " + cov[0].lower() + cov[1:]
@@ -844,9 +848,8 @@ def _compose(conn, view, q, items, members, lead):
         secs.append(_Section("", _item_blocks(nice, lambda d: [], q),
                              empty="Nothing else is missing."))
     if view == "older":
-        secs.append(_Section("", _item_blocks(
-            older_open, lambda d: ["Waiting on the bank."] if waiting(d) else _missing_detail(d),
-            q),
+        secs.append(_Section("", _item_blocks(older_open, _missing_detail, q)
+                             + _item_blocks(older_waits, lambda d: ["Waiting on the bank."], q),
                              empty="Nothing older is open."))
 
     packages = []
@@ -876,8 +879,7 @@ def _compose(conn, view, q, items, members, lead):
             for ds, state in ((older_missing, "still missing"),
                               (older_unsearched, "not searched yet"),
                               (older_unclassified, "not classified yet"),       # #98 r1
-                              ([d for d in older_open if waiting(d)],
-                               "waiting on the bank")):                            # #117 r2
+                              (older_waits, "waiting on the bank")):            # #117 r2
                 if ds:
                     qs = sorted({dates.quarter_label(d["quarter"]).split()[0] for d in ds})
                     out.append(f'+{len(ds)} older {state} ({", ".join(qs)})')
@@ -887,7 +889,7 @@ def _compose(conn, view, q, items, members, lead):
             if matched_clean:
                 # #117: "Everything" only when the sheet shows nothing else open
                 others = (guessed or missing or uncl or conflicts or waits or older_open
-                          or unsearched)
+                          or older_waits or unsearched or nice)
                 out.append("Everything else matched cleanly." if others
                            else "Everything matched cleanly.")
             if printed_guessed:
@@ -1087,12 +1089,12 @@ def _item_sentence(d) -> str:
         return "Several documents could fit, and none is picked."   # D3: a joint machine set
     if d["status"] == "proposed":
         return f"Paired with {_docname(cur['document'])}, not confirmed."
-    if d["status"] in ("exempt", "no-document"):
-        return "Needs no document."
     if d["status"] == "ineligible":
         return "Before the start date; not tracked."
     if waiting(d):
-        return "Waiting on the bank."          # #117: as the cards count it
+        return "Waiting on the bank."          # #117: as the cards count it (r3: first)
+    if d["status"] in ("exempt", "no-document"):
+        return "Needs no document."
     if d["status"] == "optional":
         return f"No {word} found (nice to have)."
     if kind is None:
@@ -1103,11 +1105,16 @@ def _item_sentence(d) -> str:
 
 
 def _item_block(d, cands, more) -> _Block:
+    if waiting(d) and _tracked(d):
+        # #117 r3: waiting on the bank, as the cards count it — no pairing question, nothing
+        # bound but the payment itself
+        return _Block([title(headline(d)), "Waiting on the bank."], pid=d["pid"],
+                      ident=headline(d), pairings={})
     # #79: the evidence's "Matched to …" / "Suggested: …" already names the document
     said = ([] if d["status"] in ("matched", "proposed") and _names_pick(d)
             else [_item_sentence(d)])
     lines = [title(headline(d)), *said, *evidence(d, cands=cands)]     # #99: its title
-    if _open_required(d) and not waiting(d):
+    if _open_required(d):
         lines += _missing_detail(d)
     if more:
         lines += ["", MORE_LINE]
@@ -1118,6 +1125,8 @@ def _item_page(d, after):
     """The item view pages EVERY candidate (round 4): as many as fit one
     message after the cursor (the last match id printed), each page binding
     the candidates it prints. Returns (block, cursor or None)."""
+    if waiting(d) and _tracked(d):
+        return _item_block(d, [], False), None          # #117 r3: nothing to page
     rest = [c for c in d["candidates"] if after is None or c["match_id"] > after[0]]
     n = 1 if rest else 0
     while n < len(rest) and utf16_len(_text(_item_block(d, rest[:n + 1],

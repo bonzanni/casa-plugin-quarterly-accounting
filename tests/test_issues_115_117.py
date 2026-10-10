@@ -4,6 +4,7 @@ ledger's tags), never "Run the check now?". #117: small inconsistencies — a st
 lists open items never says "Everything matched cleanly."; a payment still pending at the bank
 is "waiting on the bank" on the views as on the cards, never "what is it?"; "what's missing"
 is the missing list; no card prescribes words to type."""
+import json
 import pathlib
 import re
 
@@ -119,6 +120,57 @@ class Bucketing(_Uncl):
         self.assertIn("Waiting on the bank.", older)
         self.assertNotIn("what is it?", older)
 
+    def test_a_pending_proposal_card_asks_nothing(self):
+        # r3 (Astra S2): bank-feed's reconciliation can put a booked row back to pending
+        p = self.pay("Adobe", 1000, "2026-09-03")
+        self.propose(p, amount_minor=1000, document_date="2026-09-03")
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE bank_rows SET status='PDNG' WHERE row_id=?", (self.n,))
+        self.settle(p)
+        r = views.build_review(self.conn, view="item", pid=p)
+        text = views.displayed(r["text"])
+        self.assertIn("Waiting on the bank.", text)
+        self.assertNotIn("still right?", text)
+        self.assertNotIn("Suggested", text)
+        self.assertEqual(views.render_items(self.conn, r["render_id"]), [p])
+        row = self.conn.execute("SELECT match_revisions_json FROM render_items WHERE"
+                                " render_id=? AND pid=?", (r["render_id"], p)).fetchone()
+        self.assertEqual(json.loads(row[0]), {})
+
+    def test_an_older_pending_payment_of_any_status_is_listed(self):
+        # r3 (Astra S2): an earlier quarter's pending payment tagged as needing no invoice
+        done = self.pay("Adobe", 1000, "2026-09-03")
+        self.machine_entry(done, self.doc(amount_minor=1000, document_date="2026-09-03"))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE binding SET watermark='2026-04-01'")
+        self.n += 1
+        self.row(self.n, counterparty=None, remittance="Old tax", amount_minor=500,
+                 booking_date="2026-06-30", value_date="2026-06-30", status="PDNG")
+        old = self.lineage_for(self.n)
+        self.classify(old, {"taxes"})
+        self.settle(old)
+        text = views.displayed(views.build_review(self.conn, view="status",
+                                                  quarter="2026-Q3")["text"])
+        self.assertIn("+1 older waiting on the bank (Q2)", text)
+        self.assertNotIn("Everything matched cleanly.", text)
+        older = views.displayed(views.build_review(self.conn, view="older",
+                                                   quarter="2026-Q3")["text"])
+        self.assertIn("Old tax · EUR 5.00 · 30 Jun", older)
+        self.assertIn("Waiting on the bank.", older)
+
+    def test_a_nice_to_have_is_not_everything(self):
+        # r3 (Astra S2)
+        done = self.pay("Adobe", 1000, "2026-09-03")
+        self.machine_entry(done, self.doc(amount_minor=1000, document_date="2026-09-03"))
+        t = self.pay("Belastingdienst", 2000, "2026-09-04")
+        self.classify(t, {"taxes"})
+        self.settle(t)
+        text = views.displayed(views.build_review(self.conn, view="status",
+                                                  quarter="2026-Q3")["text"])
+        self.assertIn("+1 nice-to-have not shown", text)
+        self.assertNotIn("Everything matched cleanly.", text)
+        self.assertIn("Everything else matched cleanly.", text)
+
     def test_its_own_card_waits_on_the_bank(self):
         # r1 (Astra S2): the one-payment card agrees with the cards' count
         p = self.pending_parked()
@@ -126,6 +178,16 @@ class Bucketing(_Uncl):
         self.assertIn("Waiting on the bank.", text)
         self.assertNotIn("what is it?", text)
         self.assertNotIn("No document", text)
+
+    def test_a_pending_no_document_payment_waits_on_its_card(self):
+        # r3 (Terra S2): tagged as needing no document while still pending
+        p = self.pending_parked()
+        self.classify(p, {"internal-transfer"})
+        self.settle(p)
+        self.assertEqual(cards.state(self.conn)["counts"]["2026-Q3"]["pending"], 1)
+        text = views.displayed(views.build_review(self.conn, view="item", pid=p)["text"])
+        self.assertIn("Waiting on the bank.", text)
+        self.assertNotIn("Needs no document.", text)
 
     def test_everything_matched_only_when_nothing_else_is_open(self):
         done = self.pay("Adobe", 1000, "2026-09-03")
