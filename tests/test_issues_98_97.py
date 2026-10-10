@@ -143,9 +143,8 @@ class Skills(StoreCase):
         self.assertIn('`"optional"` with a `reason` saying so', j)
 
     def test_the_desk_says_how_words_classify_a_payment(self):
-        self.assertIn("Words saying what a payment is (\"that's wage tax\") classify it: tag "
-                      "it as skill classify-transactions does, then reply only \"Run the check "
-                      "now?\"; on a yes, the ask.", flat(DESK))                # #106, #111
+        self.assertIn("Tag it as skill classify-transactions does (tagged already: nothing to "
+                      "tag).", flat(DESK))                       # #106, #111, #116
         self.assertLessEqual(len(DESK), 10_000)
 
 

@@ -236,7 +236,7 @@ class TestDesk(TempEnv):
         setup = flat(section(SKILL, "## Setup", "## Test install"))
         self.assertIn("call `propose_account()`: the operator taps the account. Never bind one "
                       "yourself.", setup)
-        self.assertIn("never change anything about bank-feed or Gmail from here", setup)
+        self.assertIn("never change bank-feed's accounts or Gmail from here", setup)  # #116
 
     def test_every_flow_and_its_line(self):
         asks = flat(section(SKILL, "## Asks", "## A file the operator sent"))

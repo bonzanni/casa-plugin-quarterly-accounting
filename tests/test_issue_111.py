@@ -168,6 +168,8 @@ class InvoiceNamesSummary(_Uncl):
 
 
 class WageTaxReply(_Uncl):
-    def test_the_desk_answers_with_one_question(self):
-        self.assertIn('then reply only "Run the check now?"; on a yes, the ask.', flat(SKILL))
-        self.assertLessEqual(len(SKILL), 9978)
+    def test_the_desk_starts_the_check_after_tagging(self):
+        # #116 supersedes the one question: the check is asked for, unasked
+        self.assertNotIn("Run the check now?", SKILL)
+        self.assertIn("Then the check ask for its quarter, unasked.", flat(SKILL))
+        self.assertLessEqual(len(SKILL), 10_000)
