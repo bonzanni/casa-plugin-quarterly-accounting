@@ -204,6 +204,11 @@ class _Scope:
             self.next = {"view": self.kind, "page": 1,
                          **({"quarter": self.quarter} if self.quarter else {}),
                          **({"pid": scope.get("pid")} if self.kind == "item" else {})}
+        import cards
+        if bound is not None and self.kind in cards.KINDS and not self.next:
+            # r2 (Terra S2): "more" on a card (an end message, the open items, a tap's card)
+            # is the quarter's open-items card, afresh (simple loop §1 Recovery)
+            self.next = {"view": "open", **({"quarter": self.quarter} if self.quarter else {})}
 
 
 class _Run:
@@ -427,7 +432,7 @@ def replay(conn, row, grant) -> dict:
 
 
 # --- reading_context (#121) ---------------------------------------------------------------
-CONTEXT_MAX = 150                # open payments listed; the post's own always come first
+CONTEXT_MAX = 150                # open payments listed beyond the post's own (all listed, first)
 STATE_WORDS = {"pending": "waiting on the bank", "unclassified": "not classified",
                "matched": "matched", "proposed": "suggested", "missing": "missing a document",
                "not_needed": "no document needed"}
@@ -468,8 +473,10 @@ def context(conn, quoted=None) -> dict:
     items = _open_items(conn)
     items.sort(key=lambda d: d["date"] or "", reverse=True)
     items.sort(key=lambda d: d["pid"] not in sc.pids)          # stable: the post's own first
+    # r2 (Astra S2): every payment on the post is listed; the cap holds only the others
+    keep = max(CONTEXT_MAX, sum(1 for d in items if d["pid"] in sc.pids))
     out = []
-    for d in items[:CONTEXT_MAX]:
+    for d in items[:keep]:
         e = {"pid": d["pid"], "line": views.unesc(views.headline(d)), "quarter": d["quarter"],
              "state": _state(d), "on_post": d["pid"] in sc.pids}
         if d["pid"] in sc.refs:
@@ -480,7 +487,7 @@ def context(conn, quoted=None) -> dict:
             e["candidates"] = [_doc_line(c["document"]) for c in d["candidates"]]
         out.append(e)
     post = {"kind": sc.kind, "quarter": sc.quarter} if bound is not None else None
-    return {"post": post, "items": out, "more_open": max(0, len(items) - CONTEXT_MAX),
+    return {"post": post, "items": out, "more_open": max(0, len(items) - keep),
             "next": sc.next, "render_id": sc.rid}
 
 

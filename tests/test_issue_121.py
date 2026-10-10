@@ -55,6 +55,27 @@ class Context(Base):
         self.assertIn("ref " + refs[a], text)
         self.assertIn("ref " + refs[b], text)
 
+    def test_every_payment_on_the_post_is_listed_past_the_cap(self):
+        # r2 (Astra S2): the cap holds only payments off the post
+        pids = [self.item("V%03d" % i, 1000 + i, "2026-09-10") for i in range(reply.CONTEXT_MAX + 5)]
+        off = self.item("Offpost", 999, "2026-09-11")
+        self.show(*pids)
+        ctx = posting.reading_context(self.conn)
+        listed = {i["pid"] for i in ctx["items"] if i["on_post"]}
+        self.assertEqual(listed, set(pids))
+        self.assertNotIn(off, {i["pid"] for i in ctx["items"]})
+        self.assertEqual(ctx["more_open"], 1)
+
+    def test_more_on_a_card_is_the_quarters_open_items_card(self):
+        # r2 (Terra S2): 0.11.27 recovered "more" on a card with the open-items card
+        import cards
+        self.item("Zapier", 9900, "2026-09-17")
+        with db.tx(self.conn):
+            rid = cards.compose_open(self.conn, "2026-Q3")
+        views.mark_rendering_delivered(self.conn, rid)
+        self.assertEqual(posting.reading_context(self.conn)["next"],
+                         {"view": "open", "quarter": "2026-Q3"})
+
     def test_a_quote_that_binds_nothing_is_said_with_its_recovery(self):
         self.item("Zapier", 9900, "2026-09-17")
         self.deliver("check")
