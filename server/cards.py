@@ -484,15 +484,25 @@ def _questions_line(qs) -> list:
             f"{'it' if len(qs) == 1 else 'them'}."]
 
 
+UNCL_SHOWN = 3      # #111: the not-classified payments a status card names, then a count
+
+
 def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, scheduled,
-             extra_scope=None, questions=()) -> str:
+             extra_scope=None, questions=(), unclassified=()) -> str:
     """The end-message composer (§1), shared by the end message and the open-items card:
     `head` lines, then "To confirm:" and the numbered proposal lines that fit whole (the
     rest behind one closing line: Review shows them, Confirm all is left out), then `tail`.
     The Review order is every replace question (rev 18.4 §R18.3), every proposal in line
     order, then `vendors`."""
-    with views.named(proposals, quarter):
+    with views.named(list(proposals) + list(unclassified), quarter):
         plines = [_proposal_line(conn, i, d) for i, d in enumerate(proposals, 1)]
+        if unclassified:
+            # #111: the card names the payments not classified yet and asks what each is
+            uncl = [f"{views.headline(d, quarter)} — {views.WHAT_IS_IT}"
+                    for d in unclassified[:UNCL_SHOWN]]
+            left = len(unclassified) - len(uncl)
+            uncl += [f'+{left} more — say "show the missing"'] if left else []
+            tail = [views.title("Not classified yet"), *uncl, *([""] if tail else []), *tail]
         # #99: the title and facts, then the question on its own line above the list its
         # buttons refer to, then the rest — one blank line between the groups
         before = views.groups(head, _questions_line(questions),
@@ -784,7 +794,8 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
     head += _fit_receipts(receipts, head, _confirm_room(props) + earlier + tail)
     return _summary(conn, "end", q, head, props, _vendor_items(mine),
                     earlier + tail, reported, scheduled=False, extra_scope=extra_scope,
-                    questions=qs)
+                    questions=qs,
+                    unclassified=[d for d in st["unclassified"] if d["quarter"] == q])
 
 
 def _other_quarters(st, open_missing, q) -> list:
@@ -868,6 +879,7 @@ def compose_open(conn, quarter, *, scheduled=False, links=False, package=False) 
         tail += _links_lines(conn, mine, head + _confirm_room(props), tail, quarter)
     return _summary(conn, "open-items", quarter, head, props, _vendor_items(mine),
                     tail, reported, scheduled=scheduled, questions=qs,
+                    unclassified=[d for d in st["unclassified"] if d["quarter"] == quarter],
                     extra_scope={"package": bool(package and n), "links_offer": bool(mine),
                                  "links": links})
 

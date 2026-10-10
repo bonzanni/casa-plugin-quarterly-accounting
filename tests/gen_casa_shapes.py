@@ -1008,7 +1008,7 @@ def gen_rename_all(sh, st, b):
     """#89: the invoice names for all vendors — one summary message over hostile names."""
     _renamable(st)
     body = sh.call(st, b, "rename_all:summary", "rename_vendors_to_invoice_names", {})
-    if not body["value"].startswith("Renamed 1 vendor to the name on their invoice. 1 keeps"):
+    if not body["value"].startswith("Renamed 1 vendor to the name on their invoice.\n1 keeps"):
         raise AssertionError(f"rename_all:summary: posted {body['value'][:200]}")
 
 

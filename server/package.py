@@ -249,7 +249,9 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         notes += [f"- {_head(d)}" + (f" — holds {', '.join(names)}, set aside until it is "
                                      "seen again" if names else "") for d, names in unread]
     notes += ["", "## Nice to have, not found", ""]
-    notes += [f"- {_head(d)} — {d['expectation']['kind']}" for d in nice] or ["- none"]
+    # #111: a nice-to-have judged on conflicting tags has no kind: its line names none
+    notes += [f"- {_head(d)}" + (f" — {d['expectation']['kind']}" if d["expectation"]["kind"]
+                                 else "") for d in nice] or ["- none"]
     notes += ["", "## Unresolved candidates", ""]
     notes += [f"- {_head(d)}: {name}" for d, name in unresolved_lines] or ["- none"]
     notes += ["", "## Documents filed but not matched", ""]
@@ -312,7 +314,9 @@ def _successor(f) -> str:
 
 
 def _head(d) -> str:
-    return (f"{d['counterparty']} · {amounts.fmt(d['amount_minor'], d['currency'])} · "
+    # #111: a payment with no payee text is named by its bank description, as the cards do
+    who = d["counterparty"] if (d["bank_counterparty"] or "").strip() else d["readable"]
+    return (f"{who} · {amounts.fmt(d['amount_minor'], d['currency'])} · "
             f"{dates.short_day(d['date']) if d['date'] else 'no date'}")
 
 

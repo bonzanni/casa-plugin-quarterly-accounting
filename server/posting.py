@@ -150,7 +150,10 @@ def _view_value(conn, r, lead=None):
         value = json.dumps(cards.deposit_of(conn, r["render_id"]), ensure_ascii=False)
     else:
         buttons = _keyed(conn, r["render_id"], views.buttons_for(conn, r))
-        revision = f"view:{r['kind']}:{scope.get('quarter') or ''}"[:64]
+        # #111: one payment's card supersedes only an earlier card of the same payment, never
+        # another payment's card still open (Casa replaces a live card of the same revision)
+        what = scope.get("pid") if r["kind"] == "item" else scope.get("quarter")
+        revision = f"view:{r['kind']}:{what or ''}"[:64]
         pages = [conn.execute("SELECT text FROM renders WHERE render_id=?",
                               (p,)).fetchone()[0] for p in scope.get("list_pages") or []]
         value = _proposal(r["text"], buttons, revision, pages)

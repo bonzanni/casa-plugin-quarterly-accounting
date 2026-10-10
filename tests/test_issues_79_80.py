@@ -41,11 +41,16 @@ class ToCheckHead(LoopCase):
         self.assertNotIn("Bank checked through", text)
         self.assertIn("Suggested:", text)
 
-    def test_a_quarter_view_keeps_it(self):
+    def test_a_quarter_sheet_keeps_it_and_a_list_has_none(self):
+        # #111: the Missing and Nice-to-have lists opened with a bare "Not checked yet."
         import views
         self.pay()
-        text = views.build_review(self.conn, view="missing", quarter="2026-Q3")["text"]
-        self.assertIn("Not checked yet.", text)
+        text = views.build_review(self.conn, view="status", quarter="2026-Q3")["text"]
+        self.assertIn("bank not checked yet ·", text)
+        for view in ("missing", "rest", "older"):
+            text = views.build_review(self.conn, view=view, quarter="2026-Q3")["text"]
+            self.assertNotIn("checked yet", text.split("\n")[1], view)
+            self.assertNotIn("Bank checked through", text, view)
 
 
 class ViewsDescribed(LoopCase):

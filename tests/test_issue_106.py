@@ -16,7 +16,9 @@ class Wording(LoopCase):
         lines = r["text"].split("\n")
         at = lines.index("**Not classified yet**")
         self.assertTrue(lines[at + 1].startswith("Loonadministratie · EUR 1,480.00"), lines)
-        self.assertIn("Not classified yet — tell me what it is (\"that's wage tax\").", lines)
+        # #111: the line asks what it is; the title is not said twice
+        self.assertTrue(lines[at + 1].endswith(" — what is it?"), lines)
+        self.assertEqual(r["text"].count("Not classified yet"), 1)
         # r1 (Astra, Terra): the named payment is bound to the view, so a reply about it binds
         self.assertIn(p, views.render_items(self.conn, r["render_id"]))
 

@@ -56,9 +56,12 @@ def chain_overrides(conn) -> list:
             for r in conn.execute("SELECT * FROM chain_overrides ORDER BY scope")]
 
 
+UNKNOWN = "Unknown payee"
+
+
 def display_name(conn, bank_counterparty) -> str:
     cp = counterparty_for(conn, bank_counterparty)
-    return cp["name"] if cp is not None else (bank_counterparty or "Unknown payee")
+    return cp["name"] if cp is not None else (bank_counterparty or UNKNOWN)
 
 
 def given_name(cp, bank_texts=()) -> bool:
@@ -95,7 +98,7 @@ def readable_name(conn, bank_counterparty, cp=None, pid=None) -> str:
             (pid if pid is not None else -1, *sorted(texts))).fetchone()
         if r is not None:
             return r[0].strip()
-    return cp["name"] if cp is not None else (bank_counterparty or "Unknown payee")
+    return cp["name"] if cp is not None else (bank_counterparty or UNKNOWN)
 
 
 def _entry(conn, name):
