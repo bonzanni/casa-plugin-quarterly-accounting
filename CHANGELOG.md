@@ -4,10 +4,12 @@
 
 Same store schema (17) and Casa floor (v0.344.67).
 
-- **The card is the whole answer (#123).** After Finance posts a card for your reply or a
-  view you asked for, it no longer adds a line of its own under it, such as its reading of
-  your words, an internal payment number ("pid 43") or "the view is posted".
-- A change waiting for your Apply is no longer described as already done (#124).
+- **The card is the whole answer (#123).** Finance is now told that every line it writes
+  reaches you, also while it works, so it rarely adds a line of its own under a card (its
+  reading of your words, an internal payment number such as "pid 43", "the view is
+  posted"). In testing such lines dropped from about 1 reply in 8 to about 1 in 20.
+- Finance is told that a change waiting for your Apply is not done yet, so it does not
+  describe it as done (#124).
 
 ## 0.11.28
 
