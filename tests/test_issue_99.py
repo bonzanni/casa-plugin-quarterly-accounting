@@ -317,7 +317,7 @@ class Views102(LoopCase):
         fake = [{"quarter": "2026-Q3"}] * 150
         with m.patch.object(views, "membership", lambda *a: range(150)), \
                 m.patch.object(views.work, "describe", lambda c, p: fake[0]), \
-                m.patch.object(views, "_needs_check", lambda d: True):
+                m.patch.object(views, "_guess", lambda d: True):
             label = views.check_label(self.conn, "2026-Q3", 300)
         self.assertEqual(label, "Show 300 to confirm")         # the split would be 34
         self.assertLessEqual(len(label), 32)

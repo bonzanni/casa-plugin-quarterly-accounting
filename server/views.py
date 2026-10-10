@@ -498,6 +498,12 @@ def _is_conflict(d):
     return _tracked(d) and "classification-conflict" in d["reasons"]
 
 
+def _guess(d) -> bool:
+    """A pairing the lists ask the operator to check: #117 r1 (Terra S2), never one waiting on
+    the bank — the cards count that one "waiting on the bank", not "to confirm"."""
+    return _needs_check(d) and not waiting(d)
+
+
 def _needs_check(d):
     if not _tracked(d):
         return False
@@ -758,12 +764,14 @@ def _compose(conn, view, q, items, members, lead):
     older_unclassified = [d for d in older_open if _is_unclassified(d)]
     missing = [d for d in cur if _is_missing(d)]
     unsearched = [d for d in items if _is_unsearched(d)]
-    guessed = [d for d in items if _needs_check(d)]
-    nice = [d for d in cur if _tracked(d) and d["status"] == "optional"]
+    guessed = [d for d in items if _guess(d)]
+    nice = [d for d in cur if _tracked(d) and d["status"] == "optional" and not waiting(d)]
     uncl = [d for d in cur if _is_unclassified(d)]
-    conflicts = [d for d in cur if _is_conflict(d)]
-    waits = [d for d in cur if _open_required(d) and waiting(d)]
-    matched_clean = [d for d in cur if d["status"] == "matched" and not _needs_check(d)]
+    conflicts = [d for d in cur if _is_conflict(d) and not waiting(d)]
+    # #117 r1: waiting on the bank comes first, whatever the status (cards._bucket's order)
+    waits = [d for d in cur if _tracked(d) and waiting(d)]
+    matched_clean = [d for d in cur if d["status"] == "matched" and not _needs_check(d)
+                     and not waiting(d)]
     b = binding.get(conn)
     parts = {"view": view, "head": [], "announce": [], "sections": [], "silent": [],
              "tail": None}
@@ -1077,13 +1085,15 @@ def _item_sentence(d) -> str:
         return f"Paired with {_docname(cur['document'])}, not confirmed."
     if d["status"] in ("exempt", "no-document"):
         return "Needs no document."
-    if d["status"] == "optional":
-        return f"No {word} found (nice to have)."
     if d["status"] == "ineligible":
         return "Before the start date; not tracked."
+    if waiting(d):
+        return "Waiting on the bank."          # #117: as the cards count it
+    if d["status"] == "optional":
+        return f"No {word} found (nice to have)."
     if kind is None:
-        # #111: the payment's own card asks what it is
-        return f"Not classified yet — {WHAT_IS_IT} (\"that's wage tax\")"
+        # #111: the payment's own card asks what it is; #117: no example words to copy
+        return f"Not classified yet — {WHAT_IS_IT}"
     n = len(d["search"].get("queries", []))
     return f"No {word} yet." + (f" Searched {n} ways." if n else "")
 
@@ -1093,7 +1103,7 @@ def _item_block(d, cands, more) -> _Block:
     said = ([] if d["status"] in ("matched", "proposed") and _names_pick(d)
             else [_item_sentence(d)])
     lines = [title(headline(d)), *said, *evidence(d, cands=cands)]     # #99: its title
-    if _open_required(d):
+    if _open_required(d) and not waiting(d):
         lines += _missing_detail(d)
     if more:
         lines += ["", MORE_LINE]
@@ -1337,7 +1347,7 @@ def show_counts(conn, q) -> tuple:
     payments (the `missing` view) and the proposed matches to confirm (the `check` view)."""
     items = [work.describe(conn, p) for p in membership(conn, "status", q)]
     return (sum(1 for d in items if d["quarter"] == q and _is_missing(d)),
-            sum(1 for d in items if _needs_check(d)))
+            sum(1 for d in items if _guess(d)))
 
 
 def check_label(conn, q, check) -> str:
@@ -1345,7 +1355,7 @@ def check_label(conn, q, check) -> str:
     a quarter's card counts its own. The label says both when they differ and it fits
     Casa's 32 characters (d1 Terra), else the count of what it opens."""
     items = [work.describe(conn, p) for p in membership(conn, "status", q)]
-    mine = sum(1 for d in items if _needs_check(d) and d["quarter"] == q)
+    mine = sum(1 for d in items if _guess(d) and d["quarter"] == q)
     if mine == check:
         return f"Show matches to confirm ({check})"
     if not mine:
