@@ -522,6 +522,11 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
         # r1 (Astra S2): a not-classified line is bound, so a reply about it binds as on the
         # views; its lines follow the blank line and the title that open `after`
         at = len(lines) - len(after) + 2
+        # r2 (Astra S2): only those the card prints whole (as _store will fit it) — a card
+        # crowded by receipts cuts its tail, and a cut bound line would lose the card
+        whole = views.fit_lines([views.title(lines[0]), *lines[1:]],
+                                tag=views.tag_now())[1] if lines else 0
+        shown_uncl = [d for j, d in enumerate(shown_uncl) if at + j < whole]
         bound.update({d["pid"]: at + j for j, d in enumerate(shown_uncl)})
         docs = {d["pid"]: ({d["current"]["match_id"]: bound[d["pid"]]}
                            if d["current"] is not None else {}) for d in listed}

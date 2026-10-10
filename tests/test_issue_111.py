@@ -90,6 +90,19 @@ class NotClassified(_Uncl):
         self.assertIn("1 not classified yet", text)
         self.assertIn("Loonadministratie NL · EUR 1,480.00 · 2 Sep — what is it?", text)
 
+    def test_a_crowded_card_cuts_the_lines_and_still_posts(self):
+        # r2 (Astra S2): receipts that fill the card cut the not-classified lines; the card
+        # is still stored, binding only what it prints whole
+        p = self.parked()
+        head = ["Q3 checked"] + [f"Receipt vendor {n:02d} Services International BV · 3 Sep"
+                                 for n in range(120)]
+        with db.tx(self.conn):
+            uncl = cards.state(self.conn)["unclassified"]
+            rid = cards._summary(self.conn, "end", "2026-Q3", head, [], [], [], {},
+                                 scheduled=False, unclassified=uncl)
+        self.assertNotIn(p, views.render_items(self.conn, rid))
+        self.assertNotIn("what is it?", self.render_text(rid))
+
     def test_the_status_card_counts_past_three(self):
         for n in range(5):
             self.parked(remittance=f"Loon {n}")
