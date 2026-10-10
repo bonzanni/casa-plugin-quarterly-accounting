@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.29
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **The card is the whole answer (#123).** After Finance posts a card for your reply or a
+  view you asked for, it no longer adds a line of its own under it, such as its reading of
+  your words, an internal payment number ("pid 43") or "the view is posted".
+- A change waiting for your Apply is no longer described as already done (#124).
+
 ## 0.11.28
 
 Same store schema (17) and Casa floor (v0.344.67).
