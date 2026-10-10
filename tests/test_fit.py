@@ -134,7 +134,7 @@ class TestViewsProperty(Base):
                 clipped += views.CLIP_MARK in r["text"]
                 nxt = r["next"]
                 if nxt is not None:
-                    self.assertTrue(views.MORE_LINE in r["text"] or 'say "all of them"' in r["text"],
+                    self.assertTrue(views.MORE_LINE in r["text"] or "more not shown" in r["text"],
                                     (view, r["text"][-120:]))
                 flat = _flat(r["text"])
                 for pid in views.render_items(self.conn, r["render_id"]):

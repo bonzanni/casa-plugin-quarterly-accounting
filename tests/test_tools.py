@@ -299,7 +299,7 @@ class TestPaging(ToolCase):
             with db.tx(self.conn):       # the search's bookkeeping alone (no job run)
                 work.record_search_in_tx(self.conn, pid=pid, token=token, queries=["x"])
         r = _json("build_review", view="missing", quarter="2026-Q3")
-        self.assertIn('say "all of them"', r["text"])
+        self.assertIn("more not shown", r["text"])
         seen, pages = set(re.findall(r"Vend\d{3}", r["text"])), 0
         nxt = r["next"]
         while nxt is not None:

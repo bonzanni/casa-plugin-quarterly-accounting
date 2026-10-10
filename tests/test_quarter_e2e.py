@@ -305,7 +305,7 @@ class CheckQ2(StoreCase):
         self.assertIn('Q2 complete · package ready', end["text"])
         # #94: a job's end card never offers the package; its line says how to ask
         self.assertNotIn("Get package", [b["label"] for b in end["buttons"]])
-        self.assertIn('say "send the Q2 package"', end["text"])
+        self.assertIn("Q2 complete · package ready", end["text"])
         # the notice was delivered with the message: owed no more
         self.assertNotIn("2026-Q2", loop.owed_notices(self.conn))
 

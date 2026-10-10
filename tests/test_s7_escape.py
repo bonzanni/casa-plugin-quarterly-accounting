@@ -59,8 +59,8 @@ class Escape(StoreCase):
     def test_composers_that_bypassed_field_now_escape(self):
         import delivery, views
         self.assertEqual(delivery.offer_lines("a*b_c.zip")[0],
-                         "a\\*b\\_c.zip may not have arrived — say \"send it again\".")
+                         "a\\*b\\_c.zip may not have arrived — I can send it again.")
         self.assertEqual(delivery.offer_lines("a*b.zip", "failed")[0],
-                         "a\\*b.zip didn't go out — say \"send it again\".")
+                         "a\\*b.zip didn't go out — I can send it again.")
         # a scope["names"] value is stored as the operator's words, unescaped
         self.assertEqual(views.field_raw("*Acme*"), "*Acme*")

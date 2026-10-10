@@ -140,8 +140,8 @@ PACKAGE = {
     "package-not-sent": "I couldn't send the {quarter} package{why} — ask again when you want it.",
     "package-revoked": "The bank was re-read before I could send the {quarter} package — ask "
                        "for it again and I'll rebuild it.",
-    "package-send-failed": "The {quarter} package didn't go out. Say \"send it again\" and "
-                           "I'll send it.",
+    "package-send-failed": "The {quarter} package didn't go out — ask me and I'll send "
+                           "it again.",
 }
 OFFERING = ("package-uncertain", "package-send-failed")
 
@@ -257,7 +257,8 @@ def _lines(units) -> tuple:
 
     def close():
         q = pkg[1].split("-")[1]
-        put(f'Your accountant holds the old numbers. Say "rebuild {q}" if they need a fresh one.')
+        put(f'Your accountant holds the old numbers — ask me for a fresh {q} package if they '
+            'need one.')
     for alert_id, group, wrapped in units:
         if group != pkg:
             if pkg is not None:

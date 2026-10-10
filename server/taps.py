@@ -200,8 +200,8 @@ def _show(conn, render_id, view, pid=None) -> dict:
     if pages:
         # a list longer than one message cannot be one answer (r1 Astra S2: a clipped one
         # bound what it never showed); the desk posts it whole, page by page
-        return {"receipt": f"Too long for one message: say \"{SHOW_SAY[view]}\" to see it "
-                           "all."}
+        return {"receipt": f"Too long for one message — ask me to {SHOW_SAY[view]} and I'll "
+                           "post it all."}
     conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?", (db.next_seq(conn), rid))
     return {"receipt": lst["text"]}
 

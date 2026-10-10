@@ -22,7 +22,7 @@ the cards' shape: a bold first line, a question on its own line, one line per it
 
 Read the intent in any wording or language; examples are never phrases to match.
 
-**Where a quarter stands** (how it is going, what is open or missing, whether it is done;
+**Where a quarter stands** (how it is going, what is open, whether it is done;
 e.g. "how's Q3?", "check Q3"): nothing runs. A bare "check" is this, even relayed by a delegate as "run the check": the operator's
 words decide.
 `show_view(view="open", quarter=<the quarter, e.g. "2026-Q3">)`; with no quarter named,
@@ -42,7 +42,7 @@ what is left: `show_view(view="check")`.
 
 Other questions about the books: `show_view(view=…, quarter=…, page=…, after=…)`, the view the question asks for:
 - `status`: one quarter's full sheet: missing documents, unclear categories, my guesses;
-- `missing`: one quarter's payments still missing a document;
+- `missing`: one quarter's payments still missing a document ("what's missing?");
 - `check`: suggested matches waiting for a yes or no, in the quarter and every earlier one;
 - `rest`: one quarter's nice-to-have documents not found;
 - `older`: earlier quarters' payments still open;
@@ -77,7 +77,8 @@ quoted post's text from your context, when there is one>)`. Nothing is applied b
   conversation.
 
 Words saying what a payment is ("that's wage tax") classify it: tag it as skill
-classify-transactions does, then reply only "Run the check now?"; on a yes, the ask.
+classify-transactions does (even if already tagged), then the check ask below, with its
+quarter.
 
 ## Naming a vendor
 

@@ -176,7 +176,7 @@ class ShowMissing(StoreCase):
                              "amount_minor": 1000 + i} for i in range(120)])
         out = self.tap(self.status())
         self.assertNotIn("next", out)
-        self.assertIn('say "show the missing invoices"', out["receipt"])
+        self.assertIn("ask me to show the missing invoices", out["receipt"])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE kind='missing'"
                                            " AND posted_seq IS NOT NULL").fetchone()[0], 0)
 

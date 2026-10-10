@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.11.26
+
+Same store schema (17) and Casa floor (v0.344.67).
+
+- **A payment you classify is not asked about again (#115).** Telling Finance what a payment
+  is ("that's wage tax") tags it and runs the check right away (also when the tag was already
+  there), so the books read the new tag; Finance no longer answers "Run the check now?", and
+  the next card no longer asks "what is it?" about a payment the bank ledger already
+  classifies.
+- **Cards that agree with themselves (#117).**
+  - A payment still pending at the bank is "waiting on the bank" on every card and list
+    (its own "Waiting on the bank" lines on the quarter's sheet), never "Not classified yet …
+    what is it?".
+  - The quarter's sheet says "Everything matched cleanly." only when nothing else is open,
+    older quarters included; otherwise "Everything else matched cleanly.".
+  - "What's still missing in Q3?" shows the missing list, not the quarter's status card.
+  - Cards and notices no longer tell you words to type ("say \"show the rest\""): they say
+    what is there ("+3 more not shown", "I can send it again"); ask in your own words.
+
 ## 0.11.25
 
 Same store schema (17) and Casa floor (v0.344.67).

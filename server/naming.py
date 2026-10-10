@@ -249,8 +249,8 @@ def rename_all(conn) -> dict:
     if none:
         parts.append(f"No invoice yet: {_names(none)}.")
     for a, b in alike:
-        parts.append(f"{views.field(a)} and {views.field(b)} may be one vendor: say \"merge "
-                     f"{views.field(a)} into {views.field(b)}\" if so.")
+        parts.append(f"{views.field(a)} and {views.field(b)} may be one vendor — ask me to "
+                     "merge them if so.")
     # #111: one line each, never one long paragraph
     body = views.deposit_safe(views.fit_message("\n".join(parts)))
     ref = casa_broker.deposit("results", body)

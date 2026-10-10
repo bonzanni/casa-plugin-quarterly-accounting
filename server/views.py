@@ -425,8 +425,8 @@ def evidence(d: dict, cands=None) -> list:
         out.append("Could be: " + ", ".join(ident(c["document"]) + _fx(c["document"], d)
                                             for c in shown) + ".")
     if cands is None and len(d["candidates"]) > len(shown):
-        out.append(f"{len(d['candidates']) - len(shown)} more could fit — say "
-                   f"\"{candidates_phrase(d)}\".")
+        out.append(f"{len(d['candidates']) - len(shown)} more could fit — ask me to show "
+                   "them.")
     return out
 
 
@@ -457,6 +457,13 @@ def _open_required(d):
     return _tracked(d) and d["status"] == "open"
 
 
+def waiting(d) -> bool:
+    """#117: waiting on the bank — pending at the bank, or open and absent from the latest
+    bank read (not fresh). THE one predicate: cards._bucket counts these "waiting on the
+    bank" first, so a view never asks what one is or calls it missing."""
+    return bool(d.get("pending")) or (d["status"] == "open" and not d.get("fresh", True))
+
+
 def _searched(d):
     """Looked for, or no longer to be looked for: an item the operator stopped
     chasing (or a merge carried `accepted-missing` onto) is never searched
@@ -471,19 +478,20 @@ def _is_missing(d):
     distinct). A required item nobody has looked for yet is `not searched` or
     `not checked`, never `missing`; #98: nor one not classified yet."""
     return (_open_required(d) and _searched(d) and not _is_unclassified(d)
-            and not _is_conflict(d))
+            and not _is_conflict(d) and not waiting(d))
 
 
 def _is_unsearched(d):
     return (_open_required(d) and not _searched(d) and not _is_unclassified(d)
-            and not _is_conflict(d))
+            and not _is_conflict(d) and not waiting(d))
 
 
 def _is_unclassified(d):
     # #98, #105: open with an unknown expectation kind (row 4: no classification yet or
     # parked; row 5: conflicting tags): no missing invoice (cards.unclassified, the same
     # fact). A conflict keeps its own "What is this?" line on the status sheet
-    return _open_required(d) and d["expectation"]["kind"] is None and not _is_conflict(d)
+    return (_open_required(d) and d["expectation"]["kind"] is None and not _is_conflict(d)
+            and not waiting(d))
 
 
 def _is_conflict(d):
@@ -754,6 +762,7 @@ def _compose(conn, view, q, items, members, lead):
     nice = [d for d in cur if _tracked(d) and d["status"] == "optional"]
     uncl = [d for d in cur if _is_unclassified(d)]
     conflicts = [d for d in cur if _is_conflict(d)]
+    waits = [d for d in cur if _open_required(d) and waiting(d)]
     matched_clean = [d for d in cur if d["status"] == "matched" and not _needs_check(d)]
     b = binding.get(conn)
     parts = {"view": view, "head": [], "announce": [], "sections": [], "silent": [],
@@ -812,6 +821,10 @@ def _compose(conn, view, q, items, members, lead):
         # #111: each line asks what it is (the title is not said twice)
         secs.append(_Section(title("Not classified yet"), _item_blocks(
             uncl, lambda d: [WHAT_IS_IT], q, inline=True)))
+    if view in ("status", "all", "quarter"):
+        # #117: the payments the cards count "waiting on the bank", under that title
+        secs.append(_Section(title("Waiting on the bank"), _item_blocks(
+            waits, lambda d: [], q, inline=True)))
     if view in ("status", "all"):
         secs.append(_Section(title("What is this?"), _item_blocks(
             conflicts, lambda d: ["The categories on it disagree — which is it?"], q)))
@@ -832,7 +845,7 @@ def _compose(conn, view, q, items, members, lead):
                                " ON d.package_id=p.package_id WHERE p.quarter=? AND"
                                " d.status='delivered' ORDER BY d.settled_at", (q,)):
             packages.append(f"Sent {pk['filename']} on {_day(pk['settled_at'])}.")
-        packages.append(f'Say "rebuild {dates.quarter_label(q).split()[0]}" for a fresh package.')
+        packages.append("Ask me for a fresh package when you need one.")
 
     def tail(printed_guessed):
         out = list(packages)
@@ -848,27 +861,29 @@ def _compose(conn, view, q, items, members, lead):
             if counts:
                 out += ["", *counts]
             if nice:
-                out.append(f'+{len(nice)} nice-to-have — say "show the rest"')
+                out.append(f"+{len(nice)} nice-to-have not shown")
             # missing and not-searched stay distinct states, each on its own line
             for ds, state in ((older_missing, "still missing"),
                               (older_unsearched, "not searched yet"),
                               (older_unclassified, "not classified yet")):      # #98 r1
                 if ds:
                     qs = sorted({dates.quarter_label(d["quarter"]).split()[0] for d in ds})
-                    out.append(f'+{len(ds)} older {state} ({", ".join(qs)}) — say "show older"')
+                    out.append(f'+{len(ds)} older {state} ({", ".join(qs)})')
         if view in ("status", "all"):
             if printed_guessed or matched_clean:
                 out.append("")
             if matched_clean:
-                out.append("Everything else matched cleanly." if (guessed or missing)
+                # #117: "Everything" only when the sheet shows nothing else open
+                others = (guessed or missing or uncl or conflicts or waits or older_open
+                          or unsearched)
+                out.append("Everything else matched cleanly." if others
                            else "Everything matched cleanly.")
             if printed_guessed:
-                # the example names an item this very text shows
-                out.append(f'Tell me if one is wrong — "the {field(printed_guessed[0])} one is '
-                           'wrong".')
+                # #117: no wording to copy — the operator says it their way
+                out.append("Tell me if one is wrong.")
         if view in ("status", "all", "missing") and missing:
-            out.append('Download the PDFs and email them to yourself, then say "check emailed '
-                       'invoices" to file them now.')
+            out.append("Download the PDFs and email them to yourself, then ask me to check "
+                       "emailed invoices.")
         return out
     parts["tail"] = tail
     return parts
@@ -905,7 +920,7 @@ def _emit(parts, picks, *, announce, more=None, cap=None, all_sections_empty_msg
             if blk.guessed:
                 printed_guessed.append(blk.name)
         if cap is not None and len(sec.blocks) > len(blocks):
-            out.append(f'+{len(sec.blocks) - len(blocks)} more — say "all of them"')
+            out.append(f"+{len(sec.blocks) - len(blocks)} more not shown")
     if more is not None:
         out += ["", more]
     else:
@@ -926,7 +941,7 @@ def _capped(parts, cap):
 # #66: show_view posts every page of a list at once (Casa `pages`), so a page that continues
 # says so; the typed "more" is the action card's own line (list_card)
 MORE_LINE = "Continued in the next message."
-SAY_MORE = 'There are more after these — say "more" to see them.'
+SAY_MORE = "There are more after these."
 
 
 def _day_ordinal(day) -> int:
@@ -1233,7 +1248,7 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
         closing = FIT_CLOSING
         if nxt is not None:
             closing = (MORE_LINE if "after" in nxt
-                       else 'The rest did not fit — say "all of them".')
+                       else "The rest did not fit.")
         body = text.split("\n")
         out, whole = fit_lines(body, closing, tag=_TAG)
         text, cut = "\n".join(out), whole < len(body)

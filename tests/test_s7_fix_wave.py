@@ -64,7 +64,7 @@ class TypedMore(_Q3):
         pids = self.big_sheet()
         first = self.show(view="check")
         self.assertIn("after", first["next"])
-        self.assertIn('say "more"', self.render_text(first["render_id"]))
+        self.assertIn("There are more after these.", self.render_text(first["render_id"]))
         r, _ = self.propose("more")
         (ins,) = r["instructions"]
         self.assertEqual(ins, {"show_view": first["next"]})
