@@ -936,7 +936,7 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
     CANDIDATE_BUTTONS, each bound only when its line is displayed whole; the rest counted),
     then the rest of the evidence. None when the payment is no longer to confirm."""
     d = work.describe(conn, pid)
-    if d["status"] != "proposed":
+    if _bucket(d) != "proposed":       # #117 r4: one waiting on the bank is not to confirm
         return None
     offered = _one_per_purchase(conn, _offered(conn, d))
     with views.named([{**d, "candidates": [{"document": c["doc"]} for c in offered]}],

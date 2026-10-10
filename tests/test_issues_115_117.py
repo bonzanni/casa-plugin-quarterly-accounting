@@ -171,6 +171,19 @@ class Bucketing(_Uncl):
         self.assertNotIn("Everything matched cleanly.", text)
         self.assertIn("Everything else matched cleanly.", text)
 
+    def test_review_offers_no_confirmation_card_for_a_waiting_payment(self):
+        # r4 (Astra S2): a Review tap after the payment went back to pending
+        p = self.pay("Adobe", 1000, "2026-09-03")
+        self.propose(p, amount_minor=1000, document_date="2026-09-03")
+        with db.tx(self.conn):
+            self.assertIsNotNone(cards._proposal_card(self.conn, "r", 0, 1, "2026-Q3", False,
+                                                      p))
+        with db.tx(self.conn):
+            self.conn.execute("UPDATE bank_rows SET status='PDNG' WHERE row_id=?", (self.n,))
+        self.settle(p)
+        with db.tx(self.conn):
+            self.assertIsNone(cards._proposal_card(self.conn, "r", 0, 1, "2026-Q3", False, p))
+
     def test_its_own_card_waits_on_the_bank(self):
         # r1 (Astra S2): the one-payment card agrees with the cards' count
         p = self.pending_parked()
