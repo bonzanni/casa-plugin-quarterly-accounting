@@ -750,8 +750,9 @@ def t_verdict(args):
           "What the operator's words about the books are about: pass the quoted post's text "
           "as quoted when your context has one (else the last post they were sent counts). "
           "Returns `items`, every open payment with its pid, `line` (as the cards print it), "
-          "`state`, `document` (its paired or suggested document), `candidates` and "
-          "`on_post` (shown on that post); the post's own come first. `next`: the post's "
+          "`state`, `document` (its paired or suggested document), `candidates`, `ref` (the "
+          "ref the post printed to tell equal payments apart) and `on_post` (shown on that "
+          "post); the post's own come first. `next`: the post's "
           "continuation — for \"more\", call show_view with exactly those arguments (null: "
           "there is nothing more). `render_id`: the post (for \"send it again\" on a quoted "
           "post, stage_for_delivery(resend=true, render_id=…)). `say` instead: say it "
@@ -786,7 +787,8 @@ _OP = {"type": "object", "properties": {
           "looking for what that quarter still misses; zip_name(name): what the package "
           "files are called; ledger_reset: the bank ledger was reset on purpose. A payment "
           "with on_post false cannot be decided from this post: show_view(view=\"item\", "
-          "pid) instead. `reading` set: posted — your whole reply is <silent/>. `say`: say "
+          "pid) instead. `reading` set: posted — your whole reply is <silent/> and nothing "
+          "else (no reasoning, never a pid). `say`: say "
           "it verbatim. `reshow`: show_view(view=\"item\", pid=…) for each. `refused`: "
           "nothing posted; fix the call or tell the operator in your own words.",
           obj({"ops": {"type": "array", "items": _OP}, "quoted": S}, ("ops",)))

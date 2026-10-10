@@ -170,19 +170,12 @@ UNPAIR_WORDS = {True: {"act": "Reject the suggested document for",
 _LIVE = "SELECT pid, revision FROM projections WHERE merged_into IS NULL AND ended IS NULL"
 
 
-def _survivor(conn, pid):
-    try:
-        return lineage.resolve_pid(conn, pid)
-    except db.Refusal:
-        return pid
-
-
 class _Scope:
     """THE bound rendering R's own record (binding §1): every write reads only this — R's
     render_items rows (`rev`, `mrevs`, by the pid R recorded) and the scope fields
     views.FACT_FIELDS lists (an AST pin holds this module to that list). With no R it is
-    empty. A recorded pid maps to its lineage survivor in `pids`; R recorded no row for the
-    survivor, so a merge fails closed at bind (matches._operator_pid's shape)."""
+    empty. A payment merged since R was posted is on R by neither pid: its old pid is no
+    longer open, and R recorded no row for its survivor."""
 
     def __init__(self, conn, bound):
         self.conn = conn
@@ -193,8 +186,16 @@ class _Scope:
                             (self.rid,)).fetchall() if bound is not None else []
         self.rev = {r["pid"]: r["projection_revision"] for r in rows}
         self.mrevs = {r["pid"]: json.loads(r["match_revisions_json"]) for r in rows}
-        self.pids = {_survivor(conn, p) for p in self.rev}
+        # r1 (Terra S1): the payments R recorded, by the pid it recorded — a merge's survivor
+        # is not on R (it was never shown in that form): the desk posts its own card
+        self.pids = set(self.rev)
         self.quarter = scope.get("quarter")
+        # r1 (Astra S2): the ref R printed on each payment ("Adobe · … · ref e40c"), so the
+        # desk can tell two otherwise-equal payments apart as the operator does
+        self.refs = {}
+        for ref, ps in (scope.get("refs") or {}).items():
+            for p in (ps if isinstance(ps, list) else [ps]):
+                self.refs[p] = ref
         # a list page's continuation (reading_context). r3 #4: a view page an earlier version
         # composed stored no `next` — "more" on it starts the same view again at page 1 (an
         # explicit null stays "nothing more")
@@ -333,11 +334,13 @@ NOT_OPEN = "there is no open payment {pid}: take the pid from reading_context"
 def _target(conn, run, op, items) -> dict:
     """The open payment a pid operation names, on R — or a refusal to the desk (#121: a
     mechanical fact about the call, never the operator's to read)."""
-    pid = _survivor(conn, op["pid"])
+    pid = op["pid"]
     if pid not in items:
-        raise db.Refusal(NOT_OPEN.format(pid=op["pid"]))
+        # r1 (Terra S1): a merged payment's old pid never stands for its survivor — the
+        # survivor is decided from its own place on the post, through reading_context
+        raise db.Refusal(NOT_OPEN.format(pid=pid))
     if pid not in run.scope.pids:
-        raise db.Refusal(NOT_ON_POST.format(pid=op["pid"]))
+        raise db.Refusal(NOT_ON_POST.format(pid=pid))
     return work.describe(conn, pid)     # as it stands after the reading's earlier operations
 
 
@@ -469,6 +472,8 @@ def context(conn, quoted=None) -> dict:
     for d in items[:CONTEXT_MAX]:
         e = {"pid": d["pid"], "line": views.unesc(views.headline(d)), "quarter": d["quarter"],
              "state": _state(d), "on_post": d["pid"] in sc.pids}
+        if d["pid"] in sc.refs:
+            e["ref"] = sc.refs[d["pid"]]
         if d["current"] is not None:
             e["document"] = _doc_line(d["current"]["document"])
         if d["candidates"]:

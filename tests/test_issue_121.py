@@ -43,6 +43,18 @@ class Context(Base):
         self.assertEqual((second["pid"], second["on_post"]), (off, False))
         self.assertEqual(second["state"], "missing a document")
 
+    def test_twin_payments_carry_the_ref_the_post_printed(self):
+        # r1 (Astra S2): two payments alike in payee, amount and date are told apart by the
+        # ref the post printed, as the operator reads them
+        a = self.item("Adobe", 5445, "2026-09-14")
+        b = self.item("Adobe", 5445, "2026-09-14")
+        r = self.deliver("check")
+        refs = {i["pid"]: i.get("ref") for i in posting.reading_context(self.conn)["items"]}
+        self.assertTrue(refs[a] and refs[b] and refs[a] != refs[b], refs)
+        text = views.displayed(self.render_text(r["render_id"]))
+        self.assertIn("ref " + refs[a], text)
+        self.assertIn("ref " + refs[b], text)
+
     def test_a_quote_that_binds_nothing_is_said_with_its_recovery(self):
         self.item("Zapier", 9900, "2026-09-17")
         self.deliver("check")

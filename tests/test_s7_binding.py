@@ -208,12 +208,22 @@ class MergedSurvivor(StoreCase):
             self.conn.execute("UPDATE projections SET merged_into=? WHERE pid=?",
                               (survivor, loser))
         import posting
-        with FakeBroker():
-            # #121: "the Zapier one is good" — the desk names the loser R recorded
-            out = posting.propose_reading(self.conn, [{"op": "confirm", "pid": loser}],
-                                          views.displayed(r1["text"]))
-        self.assertIsNone(out["reading"])
-        self.assertEqual(out["reshow"], [survivor])
+        # #121 r1 (Terra S1): the loser's pid never stands for its survivor, for any
+        # operation — refused to the desk, nothing read
+        for op in ({"op": "confirm"}, {"op": "look_again"}, {"op": "never"},
+                   {"op": "identity", "who": "my landlord"}):
+            with self.assertRaises(db.Refusal, msg=op):
+                posting.propose_reading(self.conn, [dict(op, pid=loser)],
+                                        views.displayed(r1["text"]))
+            # the survivor is not on R either (R recorded no row for it): the desk is told to
+            # post its own card
+            with self.assertRaises(db.Refusal, msg=op) as cm:
+                posting.propose_reading(self.conn, [dict(op, pid=survivor)],
+                                        views.displayed(r1["text"]))
+            self.assertIn(f'pid={survivor}', str(cm.exception))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM readings").fetchone()[0], 0)
+        ctx = posting.reading_context(self.conn, views.displayed(r1["text"]))
+        self.assertEqual([i["on_post"] for i in ctx["items"] if i["pid"] == survivor], [False])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM log WHERE author='operator'"
                                            ).fetchone()[0], 0)
 
