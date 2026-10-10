@@ -427,7 +427,7 @@ class Cards(LoopCase):
         r, scope = self.rendering(rid)
         self.assert_binds_exactly_what_it_shows(rid)
         self.assertIn("Card 1 of 1 · to confirm", r["text"])
-        self.assertIn("2 more could fit — say \"candidates for", r["text"])
+        self.assertIn("2 more could fit — ask me to show them", r["text"])
         it = self.conn.execute("SELECT match_revisions_json FROM render_items WHERE"
                                " render_id=?", (rid,)).fetchone()[0]
         shown = sorted(int(m) for m in json.loads(it))
@@ -558,7 +558,7 @@ class Cards(LoopCase):
                      extra=["Bank not synced since 28 Sep · bank-feed needs attention"])
         r, scope = self.rendering(rid)
         self.assertEqual(r["kind"], "end")
-        self.assertIn('Q2 complete · package ready — say "send the Q2 package"', r["text"])
+        self.assertIn("Q2 complete · package ready", r["text"])
         # 0.11.2: the notice is the last line (#99: no legend after it)
         self.assertTrue(r["text"].split("\n")[-1].endswith("bank-feed needs attention"))
         self.assertEqual(scope["ready_quarters"], ["2026-Q2"])

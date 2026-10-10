@@ -1175,7 +1175,7 @@ class TestIdentity(Base):
                              ["2026-09-%02d" % (1 + i % 28) for i in range(2, 60)])
         r = self.deliver(view="check")
         self.assertEqual(len(self.bound(r["render_id"], pid)), views.CANDIDATES_MAX)
-        self.assertIn('57 more could fit — say "candidates for 54.45 14 Sep".', r["text"])
+        self.assertIn("57 more could fit — ask me to show them.", r["text"])
         out = apply_now(self.conn, "the Adobe one is wrong")      # not all shown
         self.assertEqual((out["applied"], out["reshow"]), ([], [pid]))
         out = apply_now(self.conn, "candidates for 54.45 14 Sep")

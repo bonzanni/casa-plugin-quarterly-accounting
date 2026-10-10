@@ -126,7 +126,7 @@ class TestSendItAgainAfterATimeout(ToolCase):
         out = _json("record_delivery", delivery_id=staged["delivery_id"], outcome="uncertain")
         speak = out["speak"]
         self.assertEqual(speak["text"], f"{views.field(self.pkg['filename'])} may not have arrived — "
-                                        'say "send it again".')
+                                        'I can send it again.')
         for f in os.listdir(self.outbox):          # Casa consumed the outbox copy on send
             os.unlink(self.outbox / f)
         _json("mark_rendering_delivered", render_id=speak["render_id"])
@@ -156,8 +156,8 @@ class TestSendItAgainAfterATimeout(ToolCase):
             if outcome == "delivered":
                 self.assertIsNone(out.get("speak"), outcome)
                 continue
-            self.assertEqual(out["speak"]["text"], "The Q3 2026 package didn't go out. Say "
-                                                   '"send it again" and I\'ll send it.')
+            self.assertEqual(out["speak"]["text"], "The Q3 2026 package didn't go out — ask me "
+                                                   "and I'll send it again.")
             scope = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
                                                  " render_id=?",
                                                  (out["speak"]["render_id"],)).fetchone()[0])
