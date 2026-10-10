@@ -224,6 +224,7 @@ class TestReplyProperty(Base):
         and applies nothing; one that is shown applies exactly the payments it listed, and
         its receipt names every one of them."""
         import posting
+        import reply
         rng = random.Random(3)
         pids, names = {}, []
         for i in range(rng.randint(60, 140)):
@@ -235,20 +236,26 @@ class TestReplyProperty(Base):
         shared = [self.item("Shared Payee Group", 50000 + i, False)
                   for i in range(rng.randint(30, 150))]
         outcomes = set()
-        for k, ask in ((rng.randint(1, 8), False), (rng.randint(1, 8), True),
-                       (rng.randint(60, 80), False), (rng.randint(9, 20), False)):
+        # #121: ops — the big batch's reading also carries a vendor-wide rule on the shared
+        # payee, whose effect list (every payment it changes) cannot fit one proposal
+        for k, ask, broad in ((rng.randint(1, 8), False, False), (rng.randint(1, 8), True, False),
+                              (rng.randint(60, 80), False, True),
+                              (rng.randint(9, 20), False, False)):
             live = [n for n in names if self.conn.execute(
                 "SELECT 1 FROM match_state WHERE pid=? AND state IN ('matched','proposed')",
                 (pids[n],)).fetchone()]
             self.show(*[pids[n] for n in live], *shared)
-            picked = rng.sample(live, min(k, len(live)))
-            clauses = [f"{n} is wrong" for n in picked] + ["what is this?"] + (
-                ["Shared Payee Group is wrong"] if ask else [])
-            rng.shuffle(clauses)
+            # #121: ops — at most OPS_MAX operations a reading; a "no" on an unpaired
+            # payment rides as a note (Not included) beside the writes
+            picked = rng.sample(live, min(k, len(live), reply.OPS_MAX - 1))
+            ops = [("reject", pids[n]) for n in picked] + (
+                [("reject", rng.choice(shared))] if ask else []) + (
+                [("never", shared[0])] if broad else [])
+            rng.shuffle(ops)
             before = self.conn.execute("SELECT COUNT(*) FROM log WHERE author='operator'"
                                        ).fetchone()[0]
             try:
-                out = apply_now(self.conn, ". ".join(clauses))
+                out = apply_now(self.conn, ops)
             except db.Refusal as exc:
                 self.assertEqual(str(exc), posting.READING_TOO_LONG)
                 self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM log WHERE"
@@ -463,139 +470,3 @@ class TestBindable(unittest.TestCase):
         text = "Adobe\nEUR 1.00 · 1\nSep"
         self.assertEqual(views._bindable([self.blk(1, "Adobe · EUR 1.00 · 1 Sep", {})], text),
                          {1: set()})
-
-
-class TestSeenNameProperty(Base):
-    """fix wave D round 7: a reply resolves names against what the operator
-    SAW as well as the stored names. Payees whose literal values display alike
-    ("A·B" and "A•B"): a correction never lands on a payment other than the
-    one meant — it applies to exactly that one, or asks and applies nothing."""
-    def test_a_correction_never_lands_on_another_payment(self):
-        rng = random.Random(7)
-        family = ("A\u00b7B", "A\u2022B", "a\u2022b", "A\u00b7 B", "A \u2022B")
-        pids = {}
-        for i in range(rng.randint(6, 12)):
-            name = rng.choice(family)
-            amount = rng.choice((5445, 7000))
-            day = rng.choice(("2026-09-14", "2026-09-16"))
-            self.n += 1
-            self.row(self.n, counterparty=name, amount_minor=amount, booking_date=day,
-                     value_date=day)
-            pid = self.lineage_for(self.n)
-            self.classify(pid, {"software"})
-            self.settle(pid)
-            d = self.doc(counterparty=name, issuer=name, amount_minor=amount,
-                         document_date=day, document_number="N%d" % i)
-            matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
-                                 expected_revision=self.rev(pid), row_snapshot=self.snapshot(pid),
-                                 token=self.token, labels=("guessed",))
-            pids[pid] = (name, amount, day)
-
-        def paired(p):
-            return self.conn.execute("SELECT 1 FROM match_state WHERE pid=? AND state IN"
-                                     " ('matched','proposed')", (p,)).fetchone() is not None
-        other = self.item("Zapier", 9900, True)            # unrelated to the family
-        for step in range(12):
-            r = views.build_review(self.conn, view="status", quarter="2026-Q3")
-            views.mark_rendering_delivered(self.conn, r["render_id"])
-            # round 8: unrelated deliveries between the sheet and the reply
-            for _ in range(rng.randint(0, 2)):
-                if rng.random() < 0.5:
-                    it = views.build_review(self.conn, view="item", pid=other)
-                    views.mark_rendering_delivered(self.conn, it["render_id"])
-                else:
-                    t = self.pass_()
-                    passes.record_probe(self.conn, t, "gmail", False, "down %d %d" % (step, _))
-                    speak = self.end_and_speak()
-                    if speak:
-                        views.mark_rendering_delivered(self.conn, speak["render_id"])
-                    self.token = self.pass_()
-                    passes.record_probe(self.conn, self.token, "gmail", True)
-            live = [p for p in pids if paired(p)]
-            if not live:
-                break
-            target = rng.choice(live)
-            name, amount, day = pids[target]
-            shown = views.field(name)
-            words = [shown] + rng.choice(([], ["%.2f" % (amount / 100)],
-                                          ["%.2f" % (amount / 100), views._day(day)]))
-            before = {p: paired(p) for p in pids}
-            # binding R1/R3: a reply quoting the sheet resolves on it; unquoted words bind
-            # whatever came last, and refuse when it does not show the payee
-            quoted = views.displayed(r["text"]) if rng.random() < 0.5 else None
-            out = apply_now(self.conn, "the %s one is wrong" % " ".join(words), quoted=quoted)
-            changed = [p for p in pids if before[p] != paired(p)]
-            self.assertLessEqual(set(changed), {target}, (words, out["receipt"]))
-            if not changed:
-                self.assertTrue("Which one?" in out["receipt"] or out["reshow"]
-                                or "not applied" in out["receipt"]
-                                or "isn't on the last list I sent" in out["receipt"],
-                                out["receipt"])
-
-
-def _ref_collisions(k=3, upto=4000):
-    """Pairs of pids whose 4-hex lineage refs coincide."""
-    seen, out = {}, []
-    for p in range(2, upto):
-        h = views.lineage_ref(p)[:4]
-        if h in seen and (not out or seen[h] > out[-1][1]):
-            out.append((seen[h], p))
-            if len(out) == k:
-                break
-        seen.setdefault(h, p)
-    return out
-
-
-class TestRefCollisionProperty(Base):
-    """fix wave D round 9: refs are distinct only within a payee-collision group,
-    so two groups can print the same "ref <hex>". A ref reading unions every
-    payment printed with that ref: a correction never lands on another payment."""
-    def test_a_ref_correction_never_lands_on_another_payment(self):
-        rng = random.Random(9)
-        self.item("Seed", 1, False)
-        pids = {}
-        for a, b in _ref_collisions():
-            for start, name in ((a, "Alpha%d" % a), (b, "Beta%d" % b)):
-                with db.tx(self.conn):
-                    self.conn.execute("UPDATE sqlite_sequence SET seq=? WHERE"
-                                      " name='projections'", (start - 1,))
-                amount = rng.choice((5445, 7000))
-                for _ in range(2):                            # twins: a ref is printed
-                    self.n += 1
-                    self.row(self.n, counterparty=name, amount_minor=amount,
-                             booking_date="2026-09-14", value_date="2026-09-14")
-                    pid = self.lineage_for(self.n)
-                    self.classify(pid, {"software"})
-                    self.settle(pid)
-                    d = self.doc(counterparty=name, issuer=name, amount_minor=amount,
-                                 document_date="2026-09-14", document_number="N%d" % pid)
-                    matches.record_match(self.conn, pid=pid, doc_id=d, author="auto",
-                                         expected_revision=self.rev(pid),
-                                         row_snapshot=self.snapshot(pid), token=self.token,
-                                         labels=("guessed",))
-                    pids[pid] = name
-
-        def paired(p):
-            return self.conn.execute("SELECT 1 FROM match_state WHERE pid=? AND state IN"
-                                     " ('matched','proposed')", (p,)).fetchone() is not None
-        asked = 0
-        for _ in range(10):
-            r = views.build_review(self.conn, view="check", quarter="2026-Q3")
-            views.mark_rendering_delivered(self.conn, r["render_id"])
-            refs = json.loads(self.conn.execute("SELECT scope_json FROM renders WHERE"
-                                                " render_id=?", (r["render_id"],))
-                              .fetchone()[0]).get("refs", {})
-            live = [p for p in pids if paired(p) and any(p in v for v in refs.values())]
-            if not live:
-                break
-            target = rng.choice(live)
-            hexes = [h for h, v in refs.items() if target in v]
-            words = rng.choice((["ref", hexes[0]], [pids[target], "ref", hexes[0]]))
-            before = {p: paired(p) for p in pids}
-            out = apply_now(self.conn, "the %s one is wrong" % " ".join(words))
-            changed = [p for p in pids if before[p] != paired(p)]
-            self.assertLessEqual(set(changed), {target}, (words, out["receipt"]))
-            if words[0] == "ref" and len(refs[hexes[0]]) > 1:
-                self.assertEqual(changed, [], out["receipt"])
-                asked += 1
-        self.assertGreater(asked, 0)                  # the generator reached a shared ref

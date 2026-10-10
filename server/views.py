@@ -1323,7 +1323,7 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
         if seen:
             scope["names"] = seen
     # r5: every grammar-read field (FACT_FIELDS) is stored, an empty one explicitly — a
-    # field a rendering LACKS is one an earlier version never recorded (reply._Lacks)
+    # field a rendering lacks is one an earlier version never recorded
     for k, empty in (("names", {}), ("refs", {}), ("offers", []), ("walk", None)):
         scope.setdefault(k, empty)
     conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"
@@ -1526,14 +1526,12 @@ def _bindable(chosen, text) -> dict:
 
 _LABEL_LINE = "\U0001f4ca "        # Casa's "📊 <display name>" label, first line of a post
 QUOTE_CAP = 2000                   # Casa quotes a post's first 2,000 characters (§2)
-# binding V3: every scope field the grammar (reply.py) reads — "same binding facts" is
-# equality of these, the kind and the rendering's render_items rows. A new grammar read
-# joins this list (an AST pin holds reply.py to it)
+# binding V3: the scope fields that decide what a reading or a tap binds — "same binding
+# facts" is equality of these, the kind and the rendering's render_items rows. A new read
+# by reply.py joins this list (an AST pin holds reply.py to it)
 FACT_FIELDS = ("names", "refs", "proposed", "offers", "next", "walk", "quarter", "pid")
 AMBIGUOUS = "I sent more than one version of that list — reply to the newest one."
 UNMATCHED = "I can't find the message you replied to — here is the list as it is now."
-LACKS = ("that message is from an earlier version of me and lacks what this needs — here is "
-         "the list as it is now; nothing applied for it.")
 
 
 class QuoteRefusal(Exception):

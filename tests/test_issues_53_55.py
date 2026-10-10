@@ -157,12 +157,6 @@ class GetItDone(StoreCase):
         asks.request_work(self.conn, "check", "cron", quarter="2026-Q2")
         self.assertEqual(self.wm(), "2026-07-01")
 
-    def test_the_start_from_reading_is_gone(self):
-        from tests._base import apply_now
-        res = apply_now(self.conn, "start from Q2")
-        self.assertIsNone(res["proposal"])
-        self.assertEqual(self.wm(), "2026-07-01")
-
 
 class OnePurchaseOnTheReviewCard(_Cards):
     def test_an_invoice_and_its_receipt_are_one_line_and_one_choice(self):
@@ -193,7 +187,7 @@ class PlainWords(_Cards):
         self.propose(p, issuer="Zapier", document_number="ZAP-114", amount_minor=1958)
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         views.mark_rendering_delivered(self.conn, end)
-        res = apply_now(self.conn, "the Zapier one is wrong",
+        res = apply_now(self.conn, [("reject", p)],   # #121: ops
                         "\U0001f4ca Alex\n" + views.displayed(self.text(end)))
         self.assertIn("Reject the suggested document for Zapier · EUR 19.58 · 1 Sep.", res["proposal"])
         self.assertEqual(res["receipt"],

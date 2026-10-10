@@ -70,7 +70,7 @@ class Cards(LoopCase):
         self.c(cards.deposit_of, rid)
         quote = "\U0001f4ca Finance\n" + views.displayed(self.text(rid))
         self.assertEqual(views.bound_rendering(self.conn, quote)["render_id"], rid)
-        out = apply_now(self.conn, "all good", quoted=self.text(rid))
+        out = apply_now(self.conn, [("confirm", p)], quoted=self.text(rid))   # #121: ops
         self.assertTrue(out["applied"])
 
     def test_a_handover_card_names_what_happened_and_states_a_pair_once(self):

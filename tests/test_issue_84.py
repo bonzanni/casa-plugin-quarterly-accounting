@@ -113,14 +113,14 @@ class Rename(_Q3):
         self.kb(self.RAW)
         self.show(p)
         kb.upsert_counterparty(self.conn, self.RAW, new_name="ElevenLabs")
-        out = apply_now(self.conn, f"the {self.RAW} one needs no invoice")
-        # it binds to the payment by its old name; a renamed payee is a changed line (lineage
+        out = apply_now(self.conn, [("no_document", p)])
+        # #121: ops by pid. A renamed payee is a changed line (lineage
         # p6), so the first answer re-shows the card under its new name and applies nothing
         self.assertEqual(out["reshow"], [p])
         self.assertIn("ElevenLabs", out["receipt"])
         self.assertEqual(out["applied"], [])
         self.show(p)
-        out = apply_now(self.conn, f"the {self.RAW} one needs no invoice")
+        out = apply_now(self.conn, [("no_document", p)])
         self.assertTrue(out["applied"], out)
         self.assertEqual(lineage.projection(self.conn, p)["status"], "exempt")
 

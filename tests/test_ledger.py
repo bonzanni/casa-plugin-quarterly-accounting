@@ -736,8 +736,7 @@ class TestFirstSendChecksTheBuildSnapshot(RealLedger):
         r = _call("build_review", view="status", quarter="2026-Q3")
         self.assertIn(views.field(pkg["filename"]), r["text"])                     # offered again
         _call("mark_rendering_delivered", render_id=r["render_id"])
-        # S7 §6.3/§8: "send it again" is a direct — propose_reading returns it, posts nothing
-        self.assertIn("resend", _call("propose_reading", text="send it again")["instructions"])
+        # S7 §6.3/§8, #121: "send it again" is stage_for_delivery(resend=true), not a reading
         staged = _call("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(staged["filename"], pkg["filename"])
         self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),
@@ -788,7 +787,7 @@ class TestImportRevokesAnUnsentFirstSend(RealLedger):
             os.unlink(self.outbox / f)
         r = _call("build_review", view="status", quarter="2026-Q3")
         _call("mark_rendering_delivered", render_id=r["render_id"])
-        self.assertIn("resend", _call("propose_reading", text="send it again")["instructions"])
+        # #121: "send it again" is stage_for_delivery(resend=true), not a reading
         again = _call("stage_for_delivery", channel="telegram", resend=True)
         self.begin()                                                # import N+1
         self.end_live_pass()

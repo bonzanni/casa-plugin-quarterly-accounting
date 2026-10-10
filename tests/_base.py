@@ -561,12 +561,26 @@ def untag(text: str) -> str:
                                       first) + sep + rest)
 
 
-def apply_now(conn, text, quoted=None) -> dict:
-    """S7 §8: the operator's words read (propose_reading) and, when a reading was posted,
-    its Apply tapped — what apply_reply did in one call before S7. The result is shaped
-    like the old one: `receipt` is the Apply receipt, or `say` when nothing was proposed;
-    `applied` is the reading's plan once applied ([] otherwise); `instructions`, `reshow`,
-    `understood` and `not_a_reply` come from the proposal; `proposal` is the posted text."""
+def pid_of(conn, payee, amount_minor=None) -> int:
+    """#121: the pid of the one open payment whose payee (stored or as read) is `payee` (and
+    whose amount is `amount_minor`, when given) — what the desk takes from reading_context."""
+    import reply
+    hits = [d["pid"] for d in reply._open_items(conn)
+            if payee.lower() in {(d["counterparty"] or "").lower(),
+                                 (d["bank_counterparty"] or "").lower(),
+                                 (d["readable"] or "").lower()}
+            and (amount_minor is None or d["amount_minor"] == amount_minor)]
+    assert len(hits) == 1, (payee, hits)
+    return hits[0]
+
+
+def apply_now(conn, ops, quoted=None) -> dict:
+    """S7 §8, #121: the desk's operations proposed (propose_reading) and, when a reading was
+    posted, its Apply tapped. `ops` is the list propose_reading takes, or one (op, pid-or-arg)
+    tuple-like shorthand list: [("reject", pid), ("zip_name", "acme")]. The result: `receipt`
+    is the Apply receipt, or `say` when nothing was proposed; `applied` is the reading's plan
+    once applied ([] otherwise); `reshow` comes from the proposal; `proposal` is the posted
+    text."""
     import json
     import posting
     import qa_server
@@ -575,7 +589,7 @@ def apply_now(conn, text, quoted=None) -> dict:
     import views
     with FakeBroker() as b:
         # #99: the operator quotes what they saw (the bold markers are formatting)
-        out = posting.propose_reading(conn, text, views.displayed(quoted)
+        out = posting.propose_reading(conn, as_ops(ops), views.displayed(quoted)
                                       if isinstance(quoted, str) else quoted)
     res = dict(out, proposal=None, applied=[])
     if out["reading"] is None:
@@ -590,6 +604,29 @@ def apply_now(conn, text, quoted=None) -> dict:
     if row["state"] == "applied":
         res["applied"] = json.loads(row["plan_json"])
     return res
+
+
+_ARG = {"identity": None, "class_none": "kind", "stop_chasing": "quarter", "zip_name": "name"}
+
+
+def as_ops(ops) -> list:
+    """#121 test shorthand: ("reject", 3) -> {"op": "reject", "pid": 3}; ("identity", 3,
+    "my landlord"); ("zip_name", "acme"); ("ledger_reset",). Dicts pass through."""
+    out = []
+    for o in ops:
+        if isinstance(o, dict):
+            out.append(o)
+            continue
+        name, *rest = o
+        if name == "identity":
+            out.append({"op": name, "pid": rest[0], "who": rest[1]})
+        elif name in _ARG:
+            out.append({"op": name, _ARG[name]: rest[0]})
+        elif rest:
+            out.append({"op": name, "pid": rest[0]})
+        else:
+            out.append({"op": name})
+    return out
 
 
 class LoopCase(StoreCase):

@@ -432,26 +432,27 @@ def gen_legacy_rendering(sh, st, b):
 
 # -- the shapes (brief items 3–6) ------------------------------------------------------
 READING_WRITES = 8
-# the operator's own words, echoed in the reading's "Not included" lines: a question (it
-# changes nothing, and a correction beside it still applies) with every marker, a control
-# character and 2,000+ characters; no dot (a dot ends a clause — the payees carry `www.`)
-ECHO = "is *Acme* _x_ `y` [a](b) a<b>c ACME\x01Corp 1) " + "Z" * 2000 + "?"
 
 
 def gen_propose_reading(sh, st, b):
-    """Item 3: a reading of eight writes ("all good": confirm the sheet's eight guesses,
-    seven of whose payees are hostile). Then a reading that echoes the operator's hostile
-    words as not included, beside one write (a question beside a correction leaves the
-    correction standing; beside "all good" it would approve nothing). Apply and Cancel are
-    tapped on each."""
+    """Item 3: a reading of eight writes (the desk's "all good": a confirm of each of the
+    sheet's eight guesses, seven of whose payees are hostile). Then a reading whose "Not
+    included" line carries a hostile payee (#121: the operator's own words are no longer
+    echoed — a write-level note is: the hostile payment's match rejected, then a confirm of
+    it finds no match), beside that one write. Apply and Cancel are tapped on each."""
+    import posting
     import views
     build(st, {"guessed": [hostile(i) for i in range(READING_WRITES - 1)] + ["Zapier"]})
     r = views.build_review(st.conn, view="check", quarter=QUARTER)
     views.mark_rendering_delivered(st.conn, r["render_id"])
-    for case, text, writes in (("reading:eight", "all good", READING_WRITES),
-                               ("reading:echo", f"the Zapier one is wrong. {ECHO}", 1)):
+    shown = [e for e in posting.reading_context(st.conn)["items"] if e["on_post"]]
+    pids = [e["pid"] for e in shown]
+    odd = next(e["pid"] for e in shown if "Zapier" not in e["line"])
+    for case, ops, writes in (
+            ("reading:eight", [{"op": "confirm", "pid": p} for p in pids], READING_WRITES),
+            ("reading:note", [{"op": "reject", "pid": odd}, {"op": "confirm", "pid": odd}], 1)):
         n0 = len(sh.records)
-        buttons = sh.call(st, b, case, "propose_reading", {"text": text})
+        buttons = sh.call(st, b, case, "propose_reading", {"ops": ops})
         if [x["label"] for x in buttons] != ["Apply", "Cancel"]:
             raise AssertionError(f"{case}: the buttons are {buttons}")
         rid = buttons[0]["call"]["arguments"]["reading_id"]
@@ -460,7 +461,7 @@ def gen_propose_reading(sh, st, b):
         if len(plan) != writes:
             raise AssertionError(f"{case}: {len(plan)} writes, not {writes}")
         if writes == 1 and "Not included:" not in sh.records[n0]["display_expect"]:
-            raise AssertionError(f"{case}: the operator's hostile words are not echoed")
+            raise AssertionError(f"{case}: the hostile payee's note is not listed")
 
 
 ACCOUNT_SETS = [

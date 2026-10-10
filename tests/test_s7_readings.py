@@ -16,10 +16,12 @@ class Readings(StoreCase):
         cm.__enter__()
         self.addCleanup(cm.__exit__, None, None, None)
 
-    def propose(self, text, quoted=None):
+    def propose(self, ops, quoted=None):
+        """#121: the desk's operations (tests._base.as_ops shorthand)."""
         import posting
+        from tests._base import as_ops
         with FakeBroker() as b:
-            out = posting.propose_reading(self.conn, text, quoted)
+            out = posting.propose_reading(self.conn, as_ops(ops), quoted)
         return out, (b.proposal() if b.deposits else None)
 
     def tap(self, prop, label):
@@ -32,7 +34,7 @@ class Readings(StoreCase):
 
     def test_a_typed_verdict_commits_nothing_until_apply(self):
         fx = self.sheet_fixture()
-        out, prop = self.propose(f"the {fx['payee']} one is wrong")
+        out, prop = self.propose([("reject", fx["pid"])])
         self.assertRegex(out["reading"], r"^casa-cap-")
         self.assertTrue(prop["text"].lstrip("*").startswith("I read this as:"))
         self.assertIn("Remove the match for", prop["text"])
@@ -46,7 +48,7 @@ class Readings(StoreCase):
     def test_cancel_applies_nothing_and_spends_the_key(self):
         import taps
         fx = self.sheet_fixture()
-        _, prop = self.propose(f"the {fx['payee']} one is wrong")
+        _, prop = self.propose([("reject", fx["pid"])])
         self.assertIn("nothing was applied", self.tap(prop, "Cancel")["receipt"])
         # Ruling F4: a cancelled reading answers a later tap with the code's own words
         self.assertIn(taps.DONE["cancelled"], self.tap(prop, "Apply")["receipt"])
@@ -55,7 +57,7 @@ class Readings(StoreCase):
     def test_apply_after_the_payment_changed_applies_nothing(self):
         """Review Focus 2."""
         fx = self.sheet_fixture(guesses=2)
-        _, prop = self.propose("all good")
+        _, prop = self.propose([("confirm", p) for p in fx["pids"]])
         self.rejudge(fx["pids"][0])
         rec = self.tap(prop, "Apply")
         self.assertEqual(rec["receipt"], __import__("taps").CHANGED)
@@ -67,33 +69,28 @@ class Readings(StoreCase):
         """Plan round 2, Astra S2: two steps where the second reads what the first
         wrote; nothing changes between reading and Apply — it applies."""
         fx = self.sheet_fixture()
-        _, prop = self.propose(f"the {fx['payee']} one is right. have another look at "
-                               f"the {fx['payee']} one")
+        _, prop = self.propose([("confirm", fx["pid"]), ("look_again", fx["pid"])])
         rec = self.tap(prop, "Apply")
         self.assertIn("Confirmed", rec["receipt"])
         self.assertEqual(self.operator_rows(), 1)
 
     def test_a_newer_reading_makes_the_older_stale(self):
         fx = self.sheet_fixture()
-        _, old = self.propose(f"the {fx['payee']} one is wrong")
-        _, new = self.propose(f"the {fx['payee']} one is good")
+        _, old = self.propose([("reject", fx["pid"])])
+        _, new = self.propose([("confirm", fx["pid"])])
         self.assertIn("no longer applies", self.tap(old, "Apply")["receipt"])
         self.assertIn("Confirmed", self.tap(new, "Apply")["receipt"])
 
     def test_no_write_no_deposit(self):
-        out, prop = self.propose("show the rest")
+        # #121: ops — a reading whose only outcome is a note (a confirm of a payment already
+        # confirmed) posts nothing; the note is said
+        fx = self.sheet_fixture()
+        _, prop = self.propose([("confirm", fx["pid"])])
+        self.tap(prop, "Apply")
+        out, prop = self.propose([("confirm", fx["pid"])])
         self.assertIsNone(prop)
         self.assertIsNone(out["reading"])
-        self.assertEqual(out["instructions"], ["show the rest"])
-        out, prop = self.propose("what about the weather?")
-        self.assertIsNone(prop)
-        self.assertFalse(out["understood"])
-
-    def test_a_rebuild_waits_for_a_pending_write(self):
-        fx = self.sheet_fixture()
-        out, prop = self.propose(f"the {fx['payee']} one is wrong. rebuild it")
-        self.assertNotIn("rebuild", " ".join(out["instructions"]))
-        self.assertIn("Not rebuilding yet", prop["text"])
+        self.assertIn("was already fine.", out["say"])
 
     def test_quoted_binds_to_that_rendering(self):
         """Two sheets delivered; the operator swipe-replied "all good" on the OLDER one.
@@ -110,20 +107,23 @@ class Readings(StoreCase):
             newer = views.build_review(self.conn, view="check")
         views.mark_rendering_delivered(self.conn, newer["render_id"])
         quoted = "📊 Finance\n" + views.displayed(older["text"])[:300]
-        out, prop = self.propose("all good", quoted=quoted)
+        # #121: ops — the newer sheet's payment is not on the quoted post: refused to the desk
+        with self.assertRaisesRegex(__import__("db").Refusal, "is not on the post"):
+            self.propose([("confirm", a["pid"]), ("confirm", b[1])], quoted=quoted)
+        out, prop = self.propose([("confirm", a["pid"])], quoted=quoted)
         self.assertIsNotNone(prop, out)
         self.assertEqual(prop["text"].count("Confirm "), 1)
 
     def test_the_proposal_never_carries_the_key_in_the_result(self):
         fx = self.sheet_fixture()
-        out, prop = self.propose(f"the {fx['payee']} one is wrong")
+        out, prop = self.propose([("reject", fx["pid"])])
         key = prop["buttons"][0]["call"]["arguments"]["key"]
         self.assertNotIn(key, json.dumps(out))
 
     def test_apply_reading_is_refused_without_the_key(self):
         import tools, qa_server  # noqa: F401
         fx = self.sheet_fixture()
-        out, _ = self.propose(f"the {fx['payee']} one is wrong")
+        out, _ = self.propose([("reject", fx["pid"])])
         rec = qa_server.TOOLS["apply_reading"]["fn"]({"reading_id": out["reading_id"],
                                                      "key": "0" * 32})
         self.assertIn("no longer applies", rec["receipt"])
@@ -134,10 +134,11 @@ class Readings(StoreCase):
         delivered one; a quote of a longer post binds the rendering its text begins with."""
         import views
         fx = self.sheet_fixture(guesses=2)
-        out, prop = self.propose("all good", quoted="📊 Finance\nsomething never posted")
+        out, prop = self.propose([("confirm", p) for p in fx["pids"]],
+                                 quoted="📊 Finance\nsomething never posted")
         self.assertIsNone(prop)
         self.assertIn(views.UNMATCHED, out["say"])
-        self.assertEqual(out["instructions"], [{"show_view": {"view": "status"}}])
+        self.assertEqual(out["show_view"], {"view": "status"})
         r = self.conn.execute("SELECT * FROM renders WHERE render_id=?",
                               (fx["render_id"],)).fetchone()
         long = "📊 Finance\n" + views.displayed(r["text"]) + "\n" + "x " * 300
@@ -174,7 +175,7 @@ class Readings(StoreCase):
         with FakeBroker() as b:
             b.refuse = "proposal_invalid"
             out = qa_server.TOOLS["propose_reading"]["fn"](
-                {"text": f"the {fx['payee']} one is wrong"})
+                {"ops": [{"op": "reject", "pid": fx["pid"]}]})
         self.assertIsNone(out["reading"])
         self.assertIn("proposal_invalid", out["refused"])
         self.assertEqual(self.conn.execute("SELECT state FROM readings").fetchone()[0], "stale")
