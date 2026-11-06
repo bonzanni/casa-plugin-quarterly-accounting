@@ -29,7 +29,7 @@ class UnlistedEmail(StoreCase):
         self.u = self.drv.to_unit(JOB, "payment")
         self.pid = self.u["pid"]
 
-    def search(self, emails, queries=("ME280426000457",), refs=()):
+    def search(self, emails, queries=("ME000000000002",), refs=()):
         return self.drv._tool("record_search", {
             "pass_token": self.drv.token, "pids": [self.pid], "search": "payment",
             "queries": list(queries), "refs": list(refs), "emails": emails})
@@ -81,7 +81,7 @@ class UnlistedEmail(StoreCase):
         """Listed at its first search, reported unlisted by a later one — the
         listing already happened; missing is not refused."""
         self.search([{"id": "m-ship", "listed": True}])
-        self.search([{"id": "m-ship", "listed": False}], queries=("ME280426000457 bis",))
+        self.search([{"id": "m-ship", "listed": False}], queries=("ME000000000002 bis",))
         self.assertEqual(self.missing()["applied"], 1)
 
     def test_a_listing_report_moves_no_age_out_count(self):
@@ -93,7 +93,7 @@ class UnlistedEmail(StoreCase):
         # A search that found a candidate (no fruitless pass counted) …
         self.drv._tool("record_search", {
             "pass_token": self.drv.token, "pids": [self.pid], "search": "payment",
-            "queries": ["ME280426000457"], "refs": ["m-other:att-1"], "found_candidate": True,
+            "queries": ["ME000000000002"], "refs": ["m-other:att-1"], "found_candidate": True,
             "emails": [{"id": "m-ship", "listed": False}]})
         self.drv._tool("set_aside", {"pass_token": self.drv.token,
                                      "items": [{"ref": "m-other:att-1"}], "reason": "terms"})
@@ -177,7 +177,7 @@ class UnlistedEmail(StoreCase):
         a key in any state)."""
         self.search([{"id": "m-ship", "listed": False}])
         self.search([{"id": "m-ship", "listed": True}], queries=())
-        self.search([{"id": "m-ship", "listed": False}], queries=("ME280426000457 bis",))
+        self.search([{"id": "m-ship", "listed": False}], queries=("ME000000000002 bis",))
         self.assertEqual(items(self.conn, JOB, kind="email")[0][3], "done")
         self.assertEqual(self.missing()["applied"], 1)
 

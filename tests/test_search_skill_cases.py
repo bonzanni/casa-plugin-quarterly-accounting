@@ -23,16 +23,16 @@ class VendorSearches(StoreCase):
         # (a) paid 1 Jul; the invoice was emailed 24 Jun, before the window, naming the reference
         a = drv.pay_once(REGISTRY, 8000, "2026-07-01", remittance="260189773 To Registry PU")
         g.invoice(REGISTRY, 8000, "EUR", "2026-06-24", "KVK-1", mentions=["260189773"])
-        # (b) paid 28 Jul, order ME280726000457: the invoice rides on a "shipped" email whose
+        # (b) paid 28 Jul, order ME000000000003: the invoice rides on a "shipped" email whose
         # PDF only list_attachments shows, behind 25 later shipping notices (a page is 20)
-        b = drv.pay_once(SHOP, 69580, "2026-07-28", remittance="ME280726000457 Shop B.V.")
+        b = drv.pay_once(SHOP, 69580, "2026-07-28", remittance="ME000000000003 Shop B.V.")
         g.invoice(SHOP, 69580, "EUR", "2026-07-28", "M003188553", sender="notify@shop.example",
-                  mentions=["ME280726000457"], listed=True)
+                  mentions=["ME000000000003"], listed=True)
         g.notices(SHOP, [f"2026-08-{d:02d}" for d in range(6, 31)], sender="notify@shop.example")
-        # (c) paid 4 Aug, order ME040826000902: one "shipped" email, PDF listed only
-        c = drv.pay_once(SHOP, 27796, "2026-08-04", remittance="ME040826000902 Shop B.V.")
+        # (c) paid 4 Aug, order ME000000000001: one "shipped" email, PDF listed only
+        c = drv.pay_once(SHOP, 27796, "2026-08-04", remittance="ME000000000001 Shop B.V.")
         g.invoice(SHOP, 27796, "EUR", "2026-08-05", "M003193800", sender="notify@shop.example",
-                  mentions=["ME040826000902"], listed=True)
+                  mentions=["ME000000000001"], listed=True)
         drv.search_mode = mode
         drv.casa_cut = 80
         drv.run_job(job_id)
@@ -50,7 +50,7 @@ class VendorSearches(StoreCase):
         self.assertEqual(sorted(status.values()), ["matched"] * 3)
         undated = [q for v, k, q in drv.search_log if "after:" not in q]
         self.assertIn("260189773", undated)
-        self.assertIn("ME280726000457", undated)
+        self.assertIn("ME000000000003", undated)
         # the pre-window invoice matched with its own printed date
         doc = self.conn.execute("SELECT document_date FROM documents WHERE document_number"
                                 "='KVK-1'").fetchone()
