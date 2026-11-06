@@ -11,7 +11,7 @@ from tests.sim_job import JobDriver
 REGISTRY, SHOP = "Registry", "Shop"
 
 
-class R7Searches(StoreCase):
+class VendorSearches(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
@@ -40,7 +40,7 @@ class R7Searches(StoreCase):
                                         (drv.pid_of(no),)).fetchone()[0] for no in (a, b, c)}
         return drv, status
 
-    def test_r7_vendor_searches_alone_decide_all_three_missing(self):
+    def test_vendor_searches_alone_decide_all_three_missing(self):
         drv, status = self.quarter("dated", "c7c7c7c7-11")
         self.assertEqual(sorted(status.values()), ["open"] * 3)        # decided missing
         self.assertTrue(all("after:" in q for _, _, q in drv.search_log))

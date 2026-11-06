@@ -143,7 +143,7 @@ class OfferedDropsSetAside(_Tapping):
         self.assertNotIn(alt, [c["doc"]["doc_id"] for c in offered])
 
 
-class R5Fixes(VendorCardQuarter):
+class CountLineFixes(VendorCardQuarter):
     def test_a_full_vendor_walk_with_other_quarters_shows_every_payment(self):
         """The count line is sized into the pages, so none drops off."""
         name = "V*_[](){}-!|#<>~" * 4                     # escapes double its width

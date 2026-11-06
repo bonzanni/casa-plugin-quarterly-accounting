@@ -22,7 +22,7 @@ class ReadingUnderPathScope(StoreCase):
         return drv, dict(self.conn.execute(
             "SELECT status, count(*) FROM projections GROUP BY status").fetchall())
 
-    def test_r7_reading_a_download_first_is_denied_and_loses_the_invoices(self):
+    def test_reading_a_download_first_is_denied_and_loses_the_invoices(self):
         drv, statuses = self.quarter(6, "c7c7c7c7-01", "handoff")
         self.assertFalse(any(p.startswith(drv.SESSION) for p in drv.reads))
         self.assertNotIn("matched", statuses)                     # every invoice set aside

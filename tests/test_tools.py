@@ -111,7 +111,7 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 46)     # #121: + reading_context; #90: + merge_vendors; #89: + rename_vendor, rename_vendors_to_invoice_names; #84: + list_vendors; #56: + get_document; before those: 38; S7 - 8; + 2; + 3;
+        self.assertEqual(len(EXPECTED), 46)     # #121: + reading_context; #90: + merge_vendors; #89: + rename_vendor, rename_vendors_to_invoice_names; #84: + list_vendors; #56: + get_document; before those: 38; - 8; + 2; + 3;
                                                 # + 2; + ask_state; - job_report;
                                                 # + post_results; + post_package;
                                                 # + decide, record_missing;

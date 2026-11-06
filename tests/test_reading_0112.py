@@ -125,7 +125,7 @@ class Reading(_Tapping):
         self.assertNotIn("A document button", card["text"])      # #99: no legend
 
 
-class R7Fixes(Reading):
+class PageAndVendorFixes(Reading):
     def test_an_answered_middle_page_does_not_end_the_vendors_walk(self):
         """Page 2's payments matched meanwhile; Next page goes on to page 3."""
         pids = [self.pay("Adobe", 100 + i, "2026-08-14") for i in range(60)]
@@ -152,7 +152,7 @@ class R7Fixes(Reading):
         self.assertIn("Confirm all", self.labels(end))
 
 
-class R8Fixes(Reading):
+class CompactLineFixes(Reading):
     def test_two_lines_that_read_the_same_without_the_payee_are_told_apart(self):
         """Belastingdienst / BELASTINGDIENST, same amount and day."""
         self.pay("Belastingdienst", 2000, "2026-08-14")

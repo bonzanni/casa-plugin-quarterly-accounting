@@ -109,7 +109,7 @@ class D1Folds(_Loop):
         self.assertEqual(self.proj(wage)["status"], "open")
 
 
-class R1Folds(_Loop):
+class Folds(_Loop):
     def test_a_left_missing_payment_whose_tags_now_conflict_is_walked_again(self):
         import loop
         p = self.tagged({"software"}, amount=1000)

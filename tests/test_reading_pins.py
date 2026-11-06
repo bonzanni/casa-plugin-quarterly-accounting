@@ -219,7 +219,7 @@ class NotPostedNotice(StoreCase):
 
 # --- further pins -------------
 
-class R3PostedSendLeftThePlugin(StoreCase):
+class PostedSendLeftThePlugin(StoreCase):
     """A posted send has left the plugin. A new run's claim
     settles it `uncertain` before anything can requeue its ask; no import revokes it; one
     ask gets exactly one file. Port of DuplicateAsk (the real-outbox capture is replaced
@@ -261,7 +261,7 @@ class R3PostedSendLeftThePlugin(StoreCase):
                          ("staged", None))
 
 
-class R3DeliveredNeedsAPost(StoreCase):
+class DeliveredNeedsAPost(StoreCase):
     """A package send never posted cannot be recorded delivered."""
 
     def test_delivered_without_a_post_is_refused(self):
@@ -277,7 +277,7 @@ class R3DeliveredNeedsAPost(StoreCase):
         self.assertEqual(out["status"], "uncertain")
 
 
-class R3LegacyMore(_Q3):
+class LegacyMore(_Q3):
     """A page delivered by v0.9.0 code stored no `next` key; "more" on it
     returns a fresh paged view of the same view and quarter, never "nothing more". Port of
     LegacyMore (the v0.9.0 store is replaced by a delivered page with its `next` key
@@ -308,7 +308,7 @@ class R3LegacyMore(_Q3):
         self.assertIsNone(self.more())
 
 
-class R3Minors(_Q3):
+class PlainRefusalWords(_Q3):
     """Plain refusal words."""
 
     def test_already_posted_and_refused_words_name_no_tool_and_no_code(self):
@@ -319,7 +319,7 @@ class R3Minors(_Q3):
         self.assertNotIn("record_delivery", posting.PKG_REFUSED)
 
 
-class R3QuoteBindsAPostedPage(_Q3):
+class QuoteBindsAPostedPage(_Q3):
     """A view posted by a navigation tap (the More button's
     stored show_view, a turn with no room for mark_rendering_delivered) is stamped posted;
     an explicit quote binds it. """

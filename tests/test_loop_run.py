@@ -85,7 +85,7 @@ def _dt(day):
 
 
 class Carries(StoreCase):
-    """The items carried into Task 10 (task-10-carries.md), each pinned on the run."""
+    """Carried-over items, each pinned on the run."""
 
     def setUp(self):
         super().setUp()
