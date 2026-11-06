@@ -1,6 +1,5 @@
 # tests/test_issues_34_36.py
-"""Issues #34–#36, the v0.7.0 live retest (design
-docs/superpowers/specs/2026-10-02-issues-34-36-design.md): an operator's rejection sticks
+"""Issues #34–#36: an operator's rejection sticks
 (G), a 0.00 row wants its document optionally (Z), and a foreign-currency document is
 screened by the bank's own rate (R)."""
 import unittest
@@ -72,7 +71,7 @@ class TestARejectionSticks(Base):
         self.assertEqual(self.machine(doc)["state"], "proposed")
 
     def test_a_rejection_from_before_0_8_does_not_block(self):
-        # D1 (Astra S1): it recorded neither side, so a corrected document could never
+        # It recorded neither side, so a corrected document could never
         # lift it — 0.7.0's behaviour: the operator is asked again, and that answer sticks
         doc = self.doc()
         self.reject(self.machine(doc)["match_id"])
@@ -85,7 +84,7 @@ class TestARejectionSticks(Base):
             self.machine(doc)
 
     def test_the_rejection_binds_the_facts_the_operator_saw(self):
-        # D1 (Astra S1): proposed at 100.00, the payment corrected to 90.00, then rejected
+        # Proposed at 100.00, the payment corrected to 90.00, then rejected
         doc = self.doc()
         mid = self.machine(doc)["match_id"]
         self.row(1, amount_minor=9000)
@@ -95,7 +94,7 @@ class TestARejectionSticks(Base):
             self.machine(doc)
 
     def test_a_merge_keeps_the_rejection(self):
-        # D1 (Astra S1, Terra S1): the rejected id and another id for the same document
+        # The rejected id and another id for the same document
         doc = self.doc()
         self.reject(self.machine(doc)["match_id"])
         self.row(2)                                          # identical facts
@@ -112,7 +111,7 @@ class TestARejectionSticks(Base):
             matches.row_fx(row)))
 
     def test_a_date_read_in_the_same_call_lifts_it(self):
-        # C1 (Terra S1, Astra S1): the specialist's documented calling pattern
+        # The specialist's documented calling pattern
         doc = self.doc(document_date="2026-07-02")
         self.reject(self.machine(doc)["match_id"])
         with self.assertRaises(db.Refusal):
@@ -124,7 +123,7 @@ class TestARejectionSticks(Base):
         self.assertEqual(out["state"], "proposed")
 
     def test_a_merge_does_not_bring_back_a_rejected_pairing(self):
-        # C1 (Astra S1): the twin's machine proposal for the rejected document is retired
+        # The twin's machine proposal for the rejected document is retired
         doc = self.doc()
         self.reject(self.machine(doc)["match_id"])
         self.row(2)
@@ -140,7 +139,7 @@ class TestARejectionSticks(Base):
         self.assertNotEqual(lineage.projection(self.conn, twin)["status"], "proposed")
 
     def test_a_merge_does_not_offer_a_rejected_document_as_a_candidate(self):
-        # C2 (Astra S1): the collision makes it conflicted before the rule looks
+        # The collision makes it conflicted before the rule looks
         rejected = self.doc(document_number="REJECTED")
         self.reject(self.machine(rejected)["match_id"])
         self.machine(self.doc(document_number="OTHER"))
@@ -159,7 +158,7 @@ class TestARejectionSticks(Base):
         self.assertNotIn("REJECTED", " ".join(views.evidence(d)))
 
     def test_wrong_on_merged_duplicates_sets_them_all_aside(self):
-        # C3 (Astra S1): rejecting the first must not move the revision the second is
+        # Rejecting the first must not move the revision the second is
         # bound to — every rejection is recorded, then the payment settles once
         import fold as F
         doc = self.doc()
@@ -181,14 +180,13 @@ class TestARejectionSticks(Base):
         d = work.describe(self.conn, self.pid)
         self.assertEqual(sorted(c["match_id"] for c in d["candidates"]), sorted([first, second]))
         rid = self.show(self.pid)
-        # S7: reply._set_aside_all's write is reject_all_in_tx under a tap's grant
+        # Reply._set_aside_all's write is reject_all_in_tx under a tap's grant
         self.granted(matches.reject_all_in_tx, self.pid, [(first, rid), (second, rid)])
         self.assertEqual(sorted(r[0] for r in self.conn.execute(
             "SELECT match_id FROM log WHERE kind='unpair' AND author='operator'")),
             sorted([first, second]))
 
     def test_the_same_rate_written_differently_is_the_same_evidence(self):
-        # C1 (Astra S1)
         self.row(1, fx_rate="1.10", fx_unit="EUR")
         self.settle(self.pid)
         doc = self.doc(currency="USD", amount_minor=11000)
@@ -199,7 +197,7 @@ class TestARejectionSticks(Base):
             self.machine(doc)
 
     def test_a_changed_rate_moves_the_revisions_an_old_review_binds(self):
-        # C1 (Astra S1): the converted amount is shown, so a new rate is a new question
+        # The converted amount is shown, so a new rate is a new question
         self.row(1, fx_rate="1.10", fx_unit="EUR")
         self.settle(self.pid)
         mid = self.machine(self.doc(currency="USD", amount_minor=11000))["match_id"]
@@ -216,7 +214,7 @@ class TestARejectionSticks(Base):
         self.assertEqual((self.rev(self.pid), self.rev(match_id=mid)), before)
 
     def test_a_corrected_exchange_rate_lifts_it(self):
-        # D1 (Terra S1): the rate is evidence for #35's screen
+        # The rate is evidence for #35's screen
         self.row(1, fx_rate="1.10", fx_unit="EUR")
         self.settle(self.pid)
         doc = self.doc(currency="USD", amount_minor=11000)
@@ -297,7 +295,7 @@ class TestTheBanksRate(Base):
         self.assertIsNone(fx.screen(None, 952, "EUR", 718, "USD"))         # no rate
 
     def test_the_tolerance_boundaries(self):
-        # C1 (Astra: mutants survived): 3% of the expected amount, never less than 0.02
+        # 3% of the expected amount, never less than 0.02
         fx_ = {"rate": "1.105", "unit": "EUR"}                        # 1000 -> 1105
         self.assertIsNone(fx.screen(fx_, 1000, "EUR", 1105 + 34, "USD"))
         self.assertIsNotNone(fx.screen(fx_, 1000, "EUR", 1105 + 35, "USD"))

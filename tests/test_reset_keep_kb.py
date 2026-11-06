@@ -1,4 +1,4 @@
-"""Simple loop §6.8: a second run on a fresh store that keeps the KB — the store is reset,
+"""A second run on a fresh store that keeps the KB — the store is reset,
 the KB tables (learned hints included) and the binding and watermark come back."""
 import importlib.util
 import json

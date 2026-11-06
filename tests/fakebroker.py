@@ -1,6 +1,6 @@
 """An in-process stand-in for Casa's broker deposit route: a Unix-socket HTTP server on a
 thread. It records every deposit body and answers a fresh reference, or the error code set
-in `refuse`. It does NOT validate: Casa's validators run in the Task 14 gate.
+in `refuse`. It does NOT validate: Casa's validators run in the Casa gate.
 `honour_keys` (Casa #1312): a deposit whose `key` was delivered before sends nothing —
 the original reference comes back; `sent` lists only what was sent."""
 import http.server, json, os, secrets, socketserver, tempfile, threading
@@ -68,7 +68,7 @@ class FakeBroker:
 
 
 # casa:stored_calls.py arguments_ok at bcebd66b, stdlib only (the `is_reference` check is
-# the broker's _REF_RE) — Task 14's gate asserts it agrees with Casa's on every recorded call
+# the broker's _REF_RE) — the Casa gate asserts it agrees with Casa's on every recorded call
 import re
 KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _REF_RE = re.compile(r"^casa-cap-[0-9a-f]{32}$")

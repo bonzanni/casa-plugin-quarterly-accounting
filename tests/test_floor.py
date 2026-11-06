@@ -1,4 +1,4 @@
-"""Simple loop §2 "The floor": same currency and an exactly equal amount to match; a
+"""Simple loop same currency and an exactly equal amount to match; a
 different currency only proposed (FX screen kept, #35); taken counts proposals and a
 live proposal's alternatives; a payment's own machine pairing is not taken against its own
 re-decision, which replaces it; a re-decision with the same outcome and document writes
@@ -48,7 +48,7 @@ class Floor(StoreCase):
                 self.write(kind, self.p2, d)
 
     def test_an_alternative_of_a_live_proposal_holds_nothing(self):
-        """Rev 18.4 §R18.4 (r2 Astra S1 #2): only a match or a proposal's primary holds."""
+        """Only a match or a proposal's primary holds."""
         a, b = self.doc(), self.doc()
         self.write("propose", self.p1, a, alternatives=[b])
         self.assertTrue(self.write("pair", self.p2, b)["applied"])
@@ -65,7 +65,7 @@ class Floor(StoreCase):
                                         (self.p1,)).fetchall())
         self.assertEqual(states[b], "proposed")          # the new proposal, b chosen
         self.assertEqual(states[a], "rejected")          # the own machine match, replaced
-        # a is only the proposal's alternative: it holds nothing (rev 18.4 §R18.4)
+        # a is only the proposal's alternative: it holds nothing
         self.assertTrue(self.write("pair", self.p2, a)["applied"])
 
     def test_the_same_outcome_and_document_writes_nothing(self):
@@ -88,7 +88,7 @@ class Floor(StoreCase):
             "SELECT alternatives_json FROM matches WHERE match_id=?",
             (out["match_id"],)).fetchone()[0]), [doc_a])
         import matches
-        self.assertEqual(matches.holders(self.conn, doc_a), [])     # rev 18.4 §R18.4
+        self.assertEqual(matches.holders(self.conn, doc_a), [])
         self.assertTrue(self.write("pair", self.p2, doc_a)["applied"])
 
     def test_the_kept_alternative_counts_against_the_cap(self):

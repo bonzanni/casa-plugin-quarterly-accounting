@@ -1,4 +1,4 @@
-"""#66 (operator ruling 2026-10-09): a list longer than one message is posted in full, as
+"""#66: a list longer than one message is posted in full, as
 plain pages before one separate action card (Casa v0.344.67 `pages`); no More. The card's
 "All good" covers every page's items, at the revisions each page recorded. The next-step
 buttons say what they show, with their counts, only when non-empty. The card carries Close
@@ -172,7 +172,7 @@ class LongList(_Q3):
 
 class OtherCards(_Q3):
     def test_a_vendor_cards_own_pages_are_not_list_pages(self):
-        """#66 r1 (Astra S2): a vendor card's scope `pages` (pid groups) is its own; only a
+        """#66: a vendor card's scope `pages` (pid groups) is its own; only a
         list card's `list_pages` are delivered with it."""
         import db, views
         with db.tx(self.conn):
@@ -195,7 +195,7 @@ class ShortList(_Q3):
         out, prop = self.post(view="status", quarter="2026-Q3")
         self.assertEqual(self.labels(prop), ["Show matches to confirm (3)", "Close"])
         call = prop["buttons"][0]["call"]
-        # #93 r2: a keyed tap, decided when tapped
+        # #93: a keyed tap, decided when tapped
         self.assertEqual((call["tool"], call["arguments"]["action"]), ("verdict", "show-check"))
         for b in prop["buttons"]:
             self.assertLessEqual(len(b["label"]), 32)
@@ -206,7 +206,7 @@ class ShortList(_Q3):
         self.seed_payments([{"counterparty": "Adobe"}, {"counterparty": "Zapier"}])
         out, prop = self.post(view="status", quarter="2026-Q3")
         self.assertEqual(self.labels(prop), ["Show missing invoices (2)", "Close"])
-        # #93 (d1, Astra S2): the missing list has nothing to act on — the button is a tap
+        # #93: the missing list has nothing to act on — the button is a tap
         # whose answer is the list itself, plain
         call = prop["buttons"][0]["call"]
         self.assertEqual((call["tool"], call["arguments"]["action"]), ("verdict", "show-missing"))

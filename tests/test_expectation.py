@@ -1,5 +1,4 @@
-"""The decision table of spec §"Document expectation" as an executable
-oracle. Every row is exercised; the round-25/26/27 cases are named."""
+"""The document-expectation decision table as an executable oracle. Every row is exercised."""
 import unittest
 
 from tests._base import TempEnv
@@ -27,7 +26,7 @@ ORACLE = [
     (C, {"income", "consulting", "internal-transfer"}, {}, ("none", None, 6, False)),
     (D, {"cash-withdrawal"}, {}, ("none", None, 6, False)),
     (D, {"refund"}, {}, ("credit-note", REQ, 7, False)),
-    (D, {"income", "refund"}, {}, ("credit-note", REQ, 7, False)),      # D9
+    (D, {"income", "refund"}, {}, ("credit-note", REQ, 7, False)),
     (D, {"transport", "fuel", "refund"}, {}, ("credit-note", REQ, 7, False)),
     (C, {"refund"}, {}, ("credit-note", REQ, 7, False)),
     (C, {"income", "refund"}, {}, ("credit-note", REQ, 7, False)),
@@ -44,9 +43,9 @@ ORACLE = [
     (C, {"income", "dividend"}, {}, ("none", None, 12, False)),
     (C, {"income", "consulting"}, {}, ("sales-invoice", REQ, 13, False)),
     (C, {"income", "salary"}, {}, ("sales-invoice", REQ, 13, False)),
-    # S1 (Astra round on 61bcbaa): `interest`/`dividend` without the `income`
+    # `interest`/`dividend` without the `income`
     # root is row 13's "unknown chain", not row 12 — row 12 is specifically
-    # the chain `income, interest` / `income, dividend` (spec lines ~907-908).
+    # the chain `income, interest` / `income, dividend`.
     (C, {"interest"}, {}, ("sales-invoice", REQ, 13, False)),
     (C, {"dividend"}, {}, ("sales-invoice", REQ, 13, False)),
 ]
@@ -98,7 +97,7 @@ class TestDecisionTable(unittest.TestCase):
                                    chain_overrides=ov).row, 1)
 
     def test_chain_override_for_income_interest_still_lands_on_row_12(self):
-        # D6 coherence (S1 fix): the row-12 key is the marker alone
+        # Coherence: the row-12 key is the marker alone
         # ({"interest"}/{"dividend"}), matching how rows 7/9/10 key on their
         # marker rather than the full chain — so an override scoped
         # `income, interest` normalizes to key {interest} and still governs

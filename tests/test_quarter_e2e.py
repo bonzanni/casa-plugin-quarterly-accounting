@@ -1,5 +1,5 @@
 # tests/test_quarter_e2e.py
-"""Simple loop §6 as code: a whole quarter through the real tools (qa_server.TOOLS) and the
+"""As code: a whole quarter through the real tools (qa_server.TOOLS) and the
 real bank-feed (tests/bankfeed.py, vendored component v0.21.0)."""
 import collections
 import datetime
@@ -13,7 +13,7 @@ TODAY = datetime.datetime(2026, 10, 6, 9, 0, tzinfo=datetime.timezone.utc)
 
 
 def pin_clock(test, at=TODAY):
-    """Ruling P8: the store's clock (db._clock, dates._today) starts at `at` and ticks with
+    """The store's clock (db._clock, dates._today) starts at `at` and ticks with
     real time, so a run's coverage (`bank_through`: the day its sync succeeded), the
     quarter's end and the sync-age alerts never depend on the day the suite runs."""
     import dates
@@ -104,7 +104,7 @@ class Quarter(StoreCase):
                                   " pid=?", (pid,)).fetchone()
             owned = [t for t in self.drv.bf.tags(p[0]) if t.startswith("acct::")]
             notes = [n for n in self.drv.bf.notes(p[0]) if n.startswith("Accounting")]
-            if bucket == "pending":                       # D18: nothing mirrored while PDNG
+            if bucket == "pending":                       # Nothing mirrored while PDNG
                 self.assertEqual((owned, notes), ([], []))
                 continue
             self.assertEqual(sorted(owned), sorted(json.loads(p[1])))
@@ -163,7 +163,7 @@ class Quarter(StoreCase):
         self.assertNotIn("pending", self.end_text("eeeeeeee-6"))
 
     def test_a_stale_hint_falls_back_to_the_plain_search(self):
-        """§2.2 rev 17: the hint's sender changed; the hinted search finds nothing, the plain
+        """The hint's sender changed; the hinted search finds nothing, the plain
         search finds the invoice; the hint is replaced by what found it."""
         import kb
         kb.upsert_counterparty(self.conn, "Linear", hint_sender="old@linear.app",
@@ -210,7 +210,7 @@ class Quarter(StoreCase):
                                            (tw,)).fetchone()[0], "proposed")
 
     def test_a_later_mail_document_never_reopens_a_machine_match(self):
-        """Rev 18.4 §R18.3: a document of Adobe's amount filed after run 1 by mail (no
+        """A document of Adobe's amount filed after run 1 by mail (no
         handover) stays filed and unmatched; both machine matches stand, nothing moves."""
         adobe, adobe_aug = self.rows[1], self.rows[2]
         revs = (self.rev(adobe), self.rev(adobe_aug))
@@ -224,7 +224,7 @@ class Quarter(StoreCase):
         self.assertEqual(matches.holders(self.conn, doc), [])
 
     def test_a_handover_onto_a_machine_match_asks_and_use_new_swaps(self):
-        """Rev 18.4 §R18.3: the operator hands over July's real invoice; the job judges it
+        """The operator hands over July's real invoice; the job judges it
         July's (a replace), never Aug's (keep); ONE card asks; [Use new] pairs it as the
         operator's and leaves the old one filed, unmatched."""
         import matches
@@ -277,7 +277,7 @@ class Quarter(StoreCase):
 
 
 class CheckQ2(StoreCase):
-    """Ruling Q2 (live acceptance on Q2, watermark 2026-04-01): an operator check that names
+    """A named quarter (watermark 2026-04-01): an operator check that names
     Q2, with Q3 rows present, is headed Q2 and its [Get package] builds Q2; Q2's completion
     notice is reachable because a Q3 row booked after 30 Jun covers Q2."""
 
@@ -311,7 +311,7 @@ class CheckQ2(StoreCase):
 
 
     def test_a_pending_row_keeps_q2_open_until_it_is_booked(self):
-        """D18 + §1: a pending Q2 row is counted pending, carries nothing on the bank, and
+        """A pending Q2 row is counted pending, carries nothing on the bank, and
         Q2 stays incomplete — no completion notice — until a later fetch books it."""
         import asks, loop
         late = self.drv._add_rows([("Figma", 1200, "2026-06-29", "software", "PDNG")])[0]
@@ -335,11 +335,11 @@ class CheckQ2(StoreCase):
 
 
 class RealisticQuarter(StoreCase):
-    """§5, §6.1 as code (plan round 6, Terra S2): a Q3-shaped quarter of 60 payments over 18
+    """A Q3-shaped quarter of 60 payments over 18
     vendors — recurring monthly charges, FX rows with USD invoices, tax and fee rows, one
     0.00 authorisation, one PDNG row — driven through sim_job with every tool call counted
     against Casa's cut. Completion, no partial, at most 7 batches, every payment exactly once. The
-    dollar cost is not measurable offline (no model): PLAY measures it (§6.7)."""
+    dollar cost is not measurable offline (no model)."""
 
     def test_sixty_payments_finish_within_seven_batches(self):
         import cards
@@ -364,7 +364,7 @@ class RealisticQuarter(StoreCase):
         self.assertEqual(collections.Counter(seen.values()),
                          {"matched": 42, "proposed": 5, "missing": 5, "not_needed": 7,
                           "pending": 1})
-        # rev 18.4: per payment, and a recurring vendor's first search (its quarter) files
+        # Per payment, and a recurring vendor's first search (its quarter) files
         # what its later payments need — so a vendor is searched at most once per payment
         # (no call budget: a payment Casa cut between a search and its record repeats that
         # one search when redone), and the hinted vendors only hinted
@@ -375,6 +375,6 @@ class RealisticQuarter(StoreCase):
         self.assertLessEqual(len(drv.search_log), 40 + drv.cuts)
         self.assertEqual({k for (v, k) in kinds if v == "Notion"}, {"hinted"})
         self.assertFalse(drv.searches_of("IKEA Business") + drv.searches_of("Conrad"))
-        # every turn stays inside Casa's 80-call turn (§2.2), counted honestly
+        # every turn stays inside Casa's 80-call turn, counted honestly
         self.assertLessEqual(max(drv.batch_calls), 80, drv.batch_calls)
         self.assertEqual(sum(drv.batch_calls), drv.calls_total)

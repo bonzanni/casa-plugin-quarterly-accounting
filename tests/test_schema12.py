@@ -1,4 +1,4 @@
-"""Simple loop §3: schema 12 — the run's work list and mirror calls, the quarter's
+"""Schema 12 — the run's work list and mirror calls, the quarter's
 ready notice, mirror_note, the filing vendor, alternatives, keyed documents, item states,
 the Gmail streak, batch progress, the learned hint."""
 import sqlite3
@@ -36,7 +36,7 @@ class Schema12(StoreCase):
             self.assertIn(col, self.cols(table), f"{table}.{col}")
 
     def test_sqlite_can_drop_columns(self):
-        self.assertGreaterEqual(sqlite3.sqlite_version_info, (3, 35, 0))   # Task 11's drops
+        self.assertGreaterEqual(sqlite3.sqlite_version_info, (3, 35, 0))   # The drops
 
     def test_run_work_outcomes_are_closed(self):
         import db
@@ -115,7 +115,7 @@ class Schema12(StoreCase):
             self.assertIsNone(importlib.util.find_spec(mod), mod)
 
     def test_an_unsaid_package_request_notice_is_said_as_not_sent_after_the_upgrade(self):
-        """Task 11: the stopped / bank-unread notices lose their wording with their raisers;
+        """The stopped / bank-unread notices lose their wording with their raisers;
         one still unsaid at 11 -> 12 is said as the not-sent notice, with its reason."""
         import alerts, db, json
         from tests.schema_history import build_v11_store
@@ -145,7 +145,7 @@ class Schema12(StoreCase):
                                     .fetchone()[0])["alerts"], [1, 2])
 
     def test_an_open_package_request_is_told_once_when_its_table_goes(self):
-        """Task 11 review: 11 -> 12 drops the package asks; each one still open (queued,
+        """11 -> 12 drops the package asks; each one still open (queued,
         being checked, buildable or built) is told once as not sent, a settled one not."""
         import alerts, db, sqlite3
         from tests.schema_history import build_v11_store

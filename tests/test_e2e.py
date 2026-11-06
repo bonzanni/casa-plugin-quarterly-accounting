@@ -1,5 +1,5 @@
 # tests/test_e2e.py
-"""Whole runs against the REAL bank-feed (simple loop, design rev 17 §2): each run is a job
+"""Whole runs against the REAL bank-feed: each run is a job
 run driven by tests/sim_job.py's JobDriver — the cursor hands out the units, the driver
 does them as the job skill says (the vendor unit pairs a filed document that fits exactly
 or by amount); every bank-feed interaction is the real one."""
@@ -178,7 +178,7 @@ class TestEndsE2E(Base):
     def test_a_data_only_erasure_waits_for_the_operator_then_rebinds(self):
         # bank-feed 0.18.0 (component 0.19.0): delete_data_keep_signins erases the data,
         # keeps the account bindings and mints a NEW ledger instance id. From outside that
-        # is another ledger, so the store waits for "the bank ledger was reset" (plan §D4).
+        # is another ledger, so the store waits for "the bank ledger was reset".
         # Drive the tool as upstream tests/test_data_only_erasure.py does if it needs more.
         bf = self.bf
         bf.fetch([bf.row("2026-07-05", ref="R1", amount=1000)])
@@ -303,7 +303,7 @@ class TestRestoreAndReset(Base):
         self.assertFalse(out["gate"]["allowed"])
 
     def test_restoring_purges_pre_erasure_backup_stops_the_pass_for_reset_store(self):
-        # spec §Testing / "Undoing a purge is a restore": the REAL purge tool takes the
+        # "Undoing a purge is a restore": the REAL purge tool takes the
         # pre-erasure backup its reply names; restoring it advances the generation and
         # the pass stops for reset_store.
         bf = self.bf
@@ -358,7 +358,7 @@ class TestRestoreAndReset(Base):
 
 
 class TestTheImportAloneSeesTheClassification(Base):
-    """Round E1 (Astra S1): a package must never ship on a classification older than
+    """A package must never ship on a classification older than
     its import. Since issue #1 the export carries each row's tags (bank-feed 0.20.0),
     so the import alone refreshes the classification the expectation uses."""
     def matched_then_reclassified(self):
@@ -375,10 +375,10 @@ class TestTheImportAloneSeesTheClassification(Base):
         self.classify(rid, "refund")
 
     def test_the_import_alone_sees_the_new_classification(self):
-        # the reproduction (round E1): a package without a read of the row shipped a stale
+        # the reproduction: a package without a read of the row shipped a stale
         # picture (MATCHED, invoices/). Since issue #1 the import reads the refund tag from
         # the export: the live expectation is the credit note (the pairing itself stays
-        # since simple loop §2 deleted the kind gate).
+        # since deleted the kind gate).
         self.matched_then_reclassified()
         self.run_once()                         # the import
         _, files, rows, _ = self.zip_of()
@@ -388,7 +388,7 @@ class TestTheImportAloneSeesTheClassification(Base):
 
 
 class TestADeliveredQuarterChanged(Base):
-    """Fix wave F, end to end against the real bank-feed."""
+    """End to end against the real bank-feed."""
     def test_a_delivered_row_reclassified_is_alerted_by_the_import_alone(self):
         # the kind half of "a delivered quarter changed underneath" runs at the import
         # (issue #1): no read of the row is needed to report it
@@ -405,7 +405,7 @@ class TestADeliveredQuarterChanged(Base):
         self.assertEqual(len(self.auto_matched()), 2)
         from tests.fakebroker import FakeBroker
         with FakeBroker():
-            posting.get_package(self.conn, "2026-Q3")         # delivered (D15)
+            posting.get_package(self.conn, "2026-Q3")         # delivered
         self.assertEqual(self.conn.execute("SELECT count(*) FROM alerts WHERE"
                                            " kind='delivered-changed'").fetchone()[0], 0)
         rid = self.active()[0]["row_id"]

@@ -1,7 +1,6 @@
 # tests/test_judgment_and_dates.py
 """Issue #19: a machine pairing states the date printed on the document, and the package
-names the file by it (design docs/superpowers/specs/2026-09-30-issues-17-18-19-design.md,
-Part C)."""
+names the file by it."""
 import unittest
 
 from tests.test_ledger import RealLedger

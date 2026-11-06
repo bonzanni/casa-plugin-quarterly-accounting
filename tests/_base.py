@@ -63,14 +63,14 @@ class StoreCase(TempEnv):
 
     @staticmethod
     def grant():
-        """S7 §8.1: the operator's authority, as a keyed tap holds it. Tests are the one
+        """The operator's authority, as a keyed tap holds it. Tests are the one
         place outside taps.py that construct one (the grep pin reads server/ only)."""
         import authority
         return authority.OperatorGrant("verdict", "test")
 
     def granted(self, fn, *args, **kw):
         """An operator write (an *_in_tx form) in its own transaction, under a test grant —
-        what the public wrappers did before S7 §8.1 removed them."""
+        what the public wrappers did before they were removed."""
         import db
         with db.tx(self.conn):
             return fn(self.conn, *args, grant=self.grant(), **kw)
@@ -115,7 +115,7 @@ class StoreCase(TempEnv):
         """A package built from the store as it is (a bare import first, when none was made)
         and its first send staged, nothing posted; `lapsed`: its lease older than
         passes.LEASE_S, as a turn that died between staging and its record leaves it (the
-        stalled send any claim recovers, S7 §6.1). Returns the delivery_id."""
+        stalled send any claim recovers). Returns the delivery_id."""
         import delivery
         import package
         import passes
@@ -157,7 +157,7 @@ class StoreCase(TempEnv):
 
     def import_again(self):
         """A newer import lands (a bare snapshots row): a package built before it is no
-        longer the bank's latest (fix E4)."""
+        longer the bank's latest."""
         import db
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO snapshots(pass_id, imported_at, rows, max_row_id)"
@@ -186,7 +186,7 @@ class StoreCase(TempEnv):
 
     def operator_pair(self, *, pid, doc_id, expected_revision, render_id):
         """The operator pairs a document with a payment they were shown (what
-        record_match(author="operator") did before S7 §8.1: in the server only a tap's
+        record_match(author="operator") did before in the server only a tap's
         confirm_in_tx reaches matches._operator_pair; tests drive it directly)."""
         import authorship
         import db
@@ -201,7 +201,7 @@ class StoreCase(TempEnv):
     def sheet_fixture(self, payee="Zapier", amount=9900, day="2026-09-17", guesses=1):
         """A bound store with `guesses` payments each holding one guessed machine pairing
         (the first to `payee`, the rest to EXTRA_PAYEES), and a delivered check view that
-        shows them (S7 sheet tests, under a Q3 clock — Ruling F3). Returns {render_id, pid,
+        shows them. Returns {render_id, pid,
         match_id, doc_id, revision, match_revision, payee} for the first payment, and
         `pids`: every guessed payment, in printed order."""
         import datetime as dt
@@ -308,7 +308,7 @@ class StoreCase(TempEnv):
         token = job.claim(self.conn, job_id, started_by=f"Started by: {started_by}")
         run = self.conn.execute("SELECT * FROM runs WHERE job_id=?", (job_id,)).fetchone()
         m = self.conn.execute("SELECT * FROM pass_marker WHERE id=1").fetchone()
-        # job.claim makes the run and starts its one pass (simple loop §2)
+        # job.claim makes the run and starts its one pass
         assert run is not None and m["live"] and run["pass_id"] == m["pass_id"], (run, m)
         b = self.conn.execute("SELECT account_id FROM binding").fetchone()
         accts = accounts if accounts is not None else (
@@ -325,7 +325,7 @@ class StoreCase(TempEnv):
         return token
 
     def work_rows(self, pids, vendor="Adobe", why="open"):
-        """The run's work-list entries for `pids`, bound to self.job_id (before Task 6's
+        """The run's work-list entries for `pids`, bound to self.job_id (before the
         loop.build_work exists; later tests call build_work)."""
         with db.tx(self.conn):
             for pid in pids:
@@ -422,7 +422,7 @@ class StoreCase(TempEnv):
         import db
         import json
         with db.tx(self.conn):
-            # an observation made now: after the latest import, so fresh (fix E2)
+            # an observation made now: after the latest import, so fresh
             self.conn.execute("UPDATE projections SET class_tags_json=?, class_observed_at=?,"
                               " class_observed_snapshot=(SELECT coalesce(max(snapshot_id), 0)"
                               " FROM snapshots) WHERE pid=?",
@@ -488,7 +488,7 @@ class StoreCase(TempEnv):
 
     def machine_entry(self, pid, doc_id, kind="pair", labels=("clean",), runners_up=()):
         """A machine pairing laid down in the log directly, bypassing the floor: what a
-        store from before the floor (design rev 17 §2) or a merge of two lineages that each
+        store from before the floor or a merge of two lineages that each
         paired the document holds — a joint machine set, or a document held twice. The floor
         refuses both at the write. Returns the match id."""
         import lineage
@@ -508,7 +508,7 @@ class StoreCase(TempEnv):
 
     def show(self, *pids):
         """What build_review + a successful send + mark_rendering_delivered
-        leave behind (Task 16 builds the real path; this fixture writes the
+        leave behind (this fixture writes the
         same rows so the match tools can be tested before it exists)."""
         import db
         import json
@@ -544,8 +544,8 @@ class StoreCase(TempEnv):
         return lineage.live_row(self.conn, lineage.projection(self.conn, pid))
 
 
-# what an S7 rendering stores for its grammar-read fields when it prints nothing that fills
-# them (reply r5: a view that LACKS one was composed by an earlier version)
+# what a rendering stores for its grammar-read fields when it prints nothing that fills
+# them (reply a view that LACKS one was composed by an earlier version)
 S7_EMPTY_SCOPE = ('{"names": {}, "next": null, "offers": [], "pid": null, "proposed": [],'
                   ' "quarter": null, "refs": {}, "walk": null}')
 
@@ -575,7 +575,7 @@ def pid_of(conn, payee, amount_minor=None) -> int:
 
 
 def apply_now(conn, ops, quoted=None) -> dict:
-    """S7 §8, #121: the desk's operations proposed (propose_reading) and, when a reading was
+    """#121: the desk's operations proposed (propose_reading) and, when a reading was
     posted, its Apply tapped. `ops` is the list propose_reading takes, or one (op, pid-or-arg)
     tuple-like shorthand list: [("reject", pid), ("zip_name", "acme")]. The result: `receipt`
     is the Apply receipt, or `say` when nothing was proposed; `applied` is the reading's plan
@@ -630,7 +630,7 @@ def as_ops(ops) -> list:
 
 
 class LoopCase(StoreCase):
-    """A simple-loop store (design rev 17 §1): bound, a run claimed (self.token,
+    """A simple-loop store: bound, a run claimed (self.token,
     self.job_id), and one classified, settled payment per pay(). The one fixture the cards
     and taps tests share (P12: no copied pay/propose helpers)."""
 
@@ -654,7 +654,7 @@ class LoopCase(StoreCase):
                                  (doc_id,)).fetchone()[0]
 
     def propose(self, pid, alternatives=(), **doc):
-        """The document's own stored date is the date read (plan round 3, Astra S1: a fixed
+        """The document's own stored date is the date read (a fixed
         date rewrote INV-88's 2 Aug, and a retry under another date is changed evidence)."""
         import matches
         d = self.doc(**doc)

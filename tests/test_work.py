@@ -60,7 +60,7 @@ class TestSearchBookkeeping(Base):
         before = lineage.projection(self.conn, self.pid)["search_json"]
         clock.advance(1)                                  # a later moment: a stamped
         work.record_search(self.conn, pid=self.pid, token=None, revive=True)
-        # search would show here (round p9: same-second times hid the p8 regression)
+        # search would show here (same-second times hid the p8 regression)
         p = lineage.projection(self.conn, self.pid)
         self.assertEqual(p["search_state"], "active")
         self.assertEqual(p["search_json"], before)            # no search is claimed
@@ -78,7 +78,7 @@ class TestSearchBookkeeping(Base):
         self.assertEqual(self.rev(self.pid), before + 1)
 
     def test_identity_only_calls_spend_no_age_out_budget(self):
-        # fix round 1, finding 2: an identity-only call (no query, no found_candidate, no
+        # An identity-only call (no query, no found_candidate, no
         # exhausted/incomplete) ran no search at all, so three of them across three passes
         # must not age the item out or move its search streak.
         for _ in range(work.AGE_OUT_PASSES):
@@ -88,7 +88,7 @@ class TestSearchBookkeeping(Base):
         self.assertEqual((p["search_state"], p["passes_without_candidate"]), ("active", 0))
 
     def test_incomplete_only_calls_spend_no_age_out_budget(self):
-        # round C1 (Astra S2): incomplete=True with no queries ran no search at all -- the
+        # Incomplete=True with no queries ran no search at all -- the
         # pass ran out of room before ever reaching this item -- so it must not stamp
         # last_searched_at nor spend age-out budget any more than an identity-only call does.
         for _ in range(work.AGE_OUT_PASSES + 2):
@@ -100,7 +100,7 @@ class TestSearchBookkeeping(Base):
         self.assertEqual([i["pid"] for i in work.triage(self.conn)], [self.pid])
 
     def test_incomplete_with_queries_ages_out_like_a_completed_search(self):
-        # round C2 (Astra + Terra): the other half of the same finding, ruled the other
+        # The other half of the same finding the other
         # way -- queries DID run this pass, so effort WAS spent; a query-bearing
         # incomplete pass counts toward age-out exactly like a completed fruitless
         # search (unless it found a candidate), or a payment could sit "incomplete"
@@ -119,7 +119,7 @@ class TestSearchBookkeeping(Base):
         self.assertEqual([i["pid"] for i in work.triage(self.conn)], [])
 
     def test_refuses_without_a_pass_token_unless_a_quiet_revive(self):
-        # fix round 1, finding 4 (D10): search bookkeeping is machine-authored and needs the
+        # Search bookkeeping is machine-authored and needs the
         # pass token like any other machine write, except a quiet revive (no search effort),
         # which is how an operator's reply re-arms an item outside a pass.
         with self.assertRaises(db.Refusal):
@@ -133,7 +133,7 @@ class TestSearchBookkeeping(Base):
 
 class TestDescribeMergeSafety(Base):
     def test_describe_resolves_a_merged_pid_and_carries_its_candidates(self):
-        # fix round 1, finding 1: ledger.merge re-points log/aliases/match_state/residue to
+        # Ledger.merge re-points log/aliases/match_state/residue to
         # the survivor but leaves the loser's own projection row (merged_into) frozen.
         # describe(loser) must resolve to the survivor, not read that frozen snapshot.
         self.row(2, booking_date="2026-07-04", value_date="2026-07-04",
@@ -212,7 +212,7 @@ class TestTriage(Base):
         self.assertEqual(work.triage(self.conn), [])
         self.classify(self.pid, {"income", "salary"})
         self.settle(self.pid)
-        self.assertEqual(work.triage(self.conn), [])      # §2: no kind gate; the pairing stands
+        self.assertEqual(work.triage(self.conn), [])      # No kind gate; the pairing stands
 
     def test_describe_carries_what_a_line_prints(self):
         d = work.describe(self.conn, self.pid)

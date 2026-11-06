@@ -1,4 +1,4 @@
-"""0.11.8: issue #72 — the casa-test live check of 0.11.7 (PLAY session 65): a 15 Sep invoice
+"""0.11.8: issue #72 — a 15 Sep invoice
 for a monthly EUR 57.84 charge was proposed for the 15 Apr payment (oldest first) and then
 blocked the 15 Sep one; a pending payment of the invoice's amount was called "no payment";
 a card with nothing to tap was refused by Casa; the Keep/Use new card showed two identical
@@ -39,7 +39,7 @@ class Monthly(StoreCase):
         u = [u for u in units if u["unit"] == "payment"][0]
         self.assertEqual(sorted(f["pid"] for f in u["handed_fits"][str(doc)]), offered)
         sep = self.drv.pid_of(self.nos[-1])
-        # operator ruling 2026-10-09: the model is sure — matched, and the card says so
+        # The model is sure — matched, and the card says so
         self.assertEqual(self.conn.execute("SELECT pid FROM match_state WHERE doc_id=? AND"
                                            " state='matched'", (doc,)).fetchall()[0][0], sep)
         text = untag(self.drv.posted_end("bbbbbbbb-2")["text"])
@@ -69,7 +69,7 @@ class Monthly(StoreCase):
 
 class CorrectedDate(StoreCase):
     def test_a_date_read_at_the_decision_is_the_one_judged(self):
-        """0118-r1 (Terra S1): filed as 15 Apr, read as 15 Sep at the decision — refused for
+        """Filed as 15 Apr, read as 15 Sep at the decision — refused for
         the April payment."""
         from tests.sim_job import JobDriver
         import documents, matches
@@ -92,7 +92,7 @@ class CorrectedDate(StoreCase):
 
 class Alternatives(Monthly):
     def test_an_out_of_window_alternative_is_refused_too(self):
-        """0118-r2 (Astra S1): the April invoice with the September one as its alternative."""
+        """The April invoice with the September one as its alternative."""
         import documents, matches
         apr_doc = self.drv.file_unread("APR-1", "LinkedIn", 5784, document_date="2026-04-15")
         sep_doc = self.drv.file_unread("SEP-1", "LinkedIn", 5784, document_date="2026-09-15")
@@ -110,7 +110,7 @@ class Alternatives(Monthly):
 
 class PreUpgradeProposal(Monthly):
     def test_a_cross_period_proposal_made_before_is_released_not_kept(self):
-        """0118-r3 (Terra S1): 0.11.7 proposed the September invoice for April; the correct
+        """0.11.7 proposed the September invoice for April; the correct
         April proposal releases it instead of keeping it as an alternative."""
         import documents, loop, matches
         apr_doc = self.drv.file_unread("APR-1", "LinkedIn", 5784, document_date="2026-04-15")
@@ -144,7 +144,7 @@ class PreUpgradeProposal(Monthly):
 
 class ReplaceOfAnotherPeriod(StoreCase):
     def test_a_replace_with_an_out_of_window_document_is_refused(self):
-        """0118-r3 (Astra S1): April holds its invoice; the job answers replace with the
+        """April holds its invoice; the job answers replace with the
         September invoice — refused, no question asked."""
         import asks
         from tests.sim_job import JobDriver

@@ -1,5 +1,5 @@
-"""#126: a view asked for a named quarter showed another one (PLAY s91: "how's Q3?" got the
-Q2 sheet). A show_view that names no quarter shows the store's default (ruling Q2b: the
+"""#126: a view asked for a named quarter showed another one ("how's Q3?" got the
+Q2 sheet). A show_view that names no quarter shows the store's default (the
 quarter the newest check named), and its answer did not say which quarter that was. Now
 the answer names the quarter shown, a defaulted one with a note the desk can judge by, and
 the desk skill and the tool say a named quarter is passed as `quarter`."""

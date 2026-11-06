@@ -1,5 +1,5 @@
 # tests/sim_job.py
-"""The job's worker side, done mechanically (simple loop, design rev 17 §2): claim, then
+"""The job's worker side, done mechanically: claim, then
 job_next, carrying out each unit it hands out the way the job skill describes it —
 against a REAL bank-feed (tests/bankfeed.py) and a Gmail fake. The cursor decides
 everything; the driver never chooses a unit or a token of its own. Every tool call the
@@ -15,7 +15,7 @@ Casa's cut.
             record_probe(gmail, ok, data.refs) — failed when Gmail.down; then each of the
             unit's (or the probe's) `files` (download, Read, ingest_document with the reading:
             amount, currency, date, issuer, number; no vendor)
-  payment   one payment (rev 18.4): `files` first (each filed with ingest_document(vendor=…));
+  payment   one payment: `files` first (each filed with ingest_document(vendor=…));
             the candidates judged from their stored reading — the exact fit, else the
             nearest-dated same-currency, same-amount unheld one → match; nothing fits: its
             searches left (hinted with a learned hint, plain, wider), each recorded at once
@@ -30,7 +30,7 @@ Casa's cut.
             mark_rendering_delivered
   post      post_results(render_ids); on the receipt, mark_rendering_delivered
 
-No call budget (operator ruling 2026-10-07): the driver works until `complete`.
+No call budget: the driver works until `complete`.
 `casa_cut` (an int): Casa's batch bound — a call past it ends the batch without job_next
 (the driver re-claims; what the unit still owed comes again), three batches in a row
 without a reported progress (`report` with `progressed`) fail the run, and so does a run
@@ -57,7 +57,7 @@ from tests import bankfeed
 
 
 def ledger_state(listing: str) -> dict:
-    """The ledger probe's data from ONE list_backups answer (spec: generation,
+    """The ledger probe's data from ONE list_backups answer (generation,
     registrations and instance are captured together, under bank-feed's locks),
     each value read by its label — bank-feed may prepend sentences."""
     gen = re.search(r"^Restore generation: (\d+)$", listing, re.M)
@@ -249,7 +249,7 @@ class JobDriver:
         self.ingested = []              # the source_ref of every ingest_document call
         # how the payment unit searches: "reference" (the skill: a hint, the remittance's
         # reference with no dates, vendor-and-dates, wider; a message naming the payment
-        # has its attachments listed) or "dated" (Q2 R7's model: vendor searches only)
+        # has its attachments listed) or "dated" (vendor searches only)
         self.search_mode = "reference"
         self.posted = {}                # render_id -> the deposit a view unit posted
         self.fx_rates = {}              # provider_ref -> (exchange_rate, unit): see _export
@@ -261,13 +261,13 @@ class JobDriver:
         self.batch_reported = []        # per batch: a progress report was handed (progressed)
         self.tool_calls = {}            # plugin tool name -> calls made, every run
         self.replace_days = 3           # a handed document this near an exact fit replaces
-        self.skip_attached_reports = False   # Q2 run 1: the model ignores report:true beside
+        self.skip_attached_reports = False   # The model ignores report:true beside
         #                                      a work unit (only `report`, complete count)
         self._at_next = 0               # calls at the previous job_next
-        # a stray call count the model sends (ignored since the no-budget ruling): "delta"
+        # a stray call count the model sends (ignored): "delta"
         # (run 1), "total", None
         self.calls_mode = None
-        self.cut_reports = 0            # g1: report calls Casa cuts (a model that stops there)
+        self.cut_reports = 0            # Report calls Casa cuts (a model that stops there)
         self.broker = None              # a FakeBroker the whole run deposits to (else one a unit)
         self.read_mode = "store"        # how a found attachment is read (see _file_one)
         self.reads = []                 # every Read path
@@ -297,7 +297,7 @@ class JobDriver:
             self.bf.call("tag_transaction", row_ids=new, tags=["software"])
         return new
 
-    # --- a quarter, as the operator's bank and mailbox have it (Task 16) ---------------
+    # --- a quarter, as the operator's bank and mailbox have it ---------------
     def _bank_rows(self) -> list:
         """Every row to fetch: the active rows no fixture row owns, then the fixture's."""
         mine = {r["ref"] for r in self._spec.values()}
@@ -327,7 +327,7 @@ class JobDriver:
 
     def _add_rows(self, rows) -> list:
         """Fixture rows (vendor, amount, day, tags[, status, direction]) appended to the
-        spec under the next numbers, fetched and tagged. Their numbers."""
+        under the next numbers, fetched and tagged. Their numbers."""
         nos = []
         for r in rows:
             vendor, amount, day, tags = r[:4]
@@ -449,7 +449,7 @@ class JobDriver:
         return qa_server.TOOLS[b["call"]["tool"]]["fn"](dict(b["call"]["arguments"]))
 
     def quarter_fixture(self) -> _Pids:
-        """Task 16's nine-row quarter (§6): Adobe ×2 with exact invoices, OpenRouter with a
+        """The nine-row quarter: Adobe ×2 with exact invoices, OpenRouter with a
         USD invoice, Twilio with nothing, Zapier with a receipt, a 0.00 card authorisation,
         a pending Figma row, a tax payment, and AWS whose exact invoice is already filed.
         Returns {row number 1-9: pid}."""
@@ -473,7 +473,7 @@ class JobDriver:
         return _Pids(self, nos)
 
     def quarter_fixture_60(self) -> _Pids:
-        """A Q3-shaped quarter of 60 payments (§5, §6.1; plan round 6): 12 recurring vendors
+        """A Q3-shaped quarter of 60 payments: 12 recurring vendors
         × 3 months (nine with exact invoices, six of those with learned hints; Zapier's
         receipts; Twilio and Mailchimp each one month missing), 4 FX vendors × 2 months, 6
         tax / fee / salary / interest rows, 4 revenue rows with sales invoices in Sent, 2
@@ -563,7 +563,7 @@ class JobDriver:
 
     def next(self):
         """job_next as the model calls it, through the tool (#43), with `calls_mode`'s stray
-        count (Q2 run 1 sent the calls since the previous job_next). The caller counts the
+        count. The caller counts the
         job_next call itself."""
         import db
         import qa_server
@@ -642,7 +642,7 @@ class JobDriver:
                 self.last = u
                 assert u.get("pass_token") == self.token, u
                 said = reported
-                # g1 (Terra S1): a `report` reaches Casa only when its report_job_progress
+                # A `report` reaches Casa only when its report_job_progress
                 # call is made (_report) — a cut before it delivers nothing
                 if u["report"] and u["unit"] != "report" and (
                         not self.skip_attached_reports or u["unit"] == "complete"):
@@ -810,9 +810,9 @@ class JobDriver:
         return path.startswith(self.SESSION)
 
     def _file_one(self, token, m, base) -> dict | None:
-        """One found attachment filed as the skill says. read_mode "store" (#Q2-R7): download,
+        """One found attachment filed as the skill says. read_mode "store": download,
         ingest with only what the mail states, read_document, Read the session copy, then
-        update_document_metadata with what is printed. "handoff" (the R7 skill): Read the
+        update_document_metadata with what is printed. "handoff": Read the
         download first — denied by path_scope, so the attachment is set aside."""
         self._spend(1)                                    # download_attachment
         args = {"source_path": m["path"], "extraction_author": "specialist",
@@ -849,7 +849,7 @@ class JobDriver:
         return filed
 
     def _payment(self, u, token):
-        """The skill's payment unit (rev 18.4 §R18.1): `files` first; the candidates judged
+        """The skill's payment unit: `files` first; the candidates judged
         from their stored reading (the exact fit, else the nearest-dated same-currency,
         same-amount unheld one → match); nothing fits: the searches left — hinted (a
         learned hint), plain, wider — each recorded at once with its refs, then every found
@@ -862,7 +862,7 @@ class JobDriver:
         vendor, pid = u["vendor"], u["pid"]
         filed = self._file_vendor(token, vendor, u["files"])
         for c in u.get("candidates", []):    # a files-only hand-out carries none
-            if c.get("unread"):                 # Q2 R7: filed, its reading cut — read it now
+            if c.get("unread"):                 # Filed, its reading cut — read it now
                 ref = self.conn.execute("SELECT source_ref FROM documents WHERE doc_id=?",
                                         (c["doc_id"],)).fetchone()[0]
                 m = self._mail(ref)
@@ -936,7 +936,7 @@ class JobDriver:
         base = {"pid": pid, "expected_revision": u["revision"]}
         held = (u["holds"] or {}).get("doc_id")
         if held is not None and u["why"] == "handover":
-            # the skill (rev 18.4 §R18.3): the handed document, the first candidate, belongs
+            # the skill: the handed document, the first candidate, belongs
             # to this payment when it fits exactly → replace (the operator is asked); else keep
             c = next((x for x in u["candidates"] if x["doc_id"] in u["handed_over"]), None)
             fits = (c is not None and c["doc_id"] != held and c["currency"] == u["currency"]
@@ -955,7 +955,7 @@ class JobDriver:
                      if other else keep)
         elif exact():
             c = exact()[0]
-            # operator ruling 2026-10-09: a handed document the model is sure of is matched;
+            # A handed document the model is sure of is matched;
             # one that a nearer payment in handed_fits fits better is that payment's
             fits = (u.get("handed_fits") or {}).get(str(c["doc_id"]), [])
             if fits and fits[0]["pid"] != pid:

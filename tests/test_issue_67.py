@@ -71,7 +71,7 @@ class OneUnreadInvoice(Case):
         self.assertNotIn("Get package", text)          # #94
 
     def test_an_automatic_match_is_undone_from_its_payments_card(self):
-        """Operator ruling 2026-10-09: an automatic match can be undone the usual way."""
+        """An automatic match can be undone the usual way."""
         doc = self.drv.file_unread("INV-71", "Zapier", 2000, document_date="2026-08-04")
         self.give(doc)
         self.go()
@@ -190,7 +190,7 @@ class SeveralInvoices(Case):
 
 class Reissue(Case):
     def test_a_reissue_of_a_held_invoice_asks_to_replace_it(self):
-        """BRAIN 2026-10-09 (OpenAI reissued its invoices to the company): same number, the
+        """A vendor reissued its invoices to the company: same number, the
         recipient read differently — no copy; on the payment holding the first the operator is asked."""
         a = self.drv.file_unread("OR-1", "Zapier", 2000, document_date="2026-08-05")
         self.drv.printed[a]["recipient"] = "N. Bonzanni"
@@ -217,7 +217,7 @@ class Reissue(Case):
 
 class DeskFiling(Case):
     def test_a_caption_reading_at_the_desk_still_gets_the_checks_reading(self):
-        """r3 (Astra S2): the desk filed a caption's currency — still read by the check."""
+        """The desk filed a caption's currency — still read by the check."""
         import documents
         path = self.publish("cap.pdf", b"%PDF-1.4 caption invoice\n", producer="telegram")
         doc = documents.ingest_document(self.conn, source_path=path, kind="invoice",
@@ -255,7 +255,7 @@ class Scope(Case):
         self.assertEqual(listed, set(self.pids))         # the full list after the widening
 
     def test_a_reissue_handed_with_a_check_mid_run_is_still_offered(self):
-        """r1 (Astra S2): a late reissue and a check taken together — the widening rebuild
+        """A late reissue and a check taken together — the widening rebuild
         must not mark the reissue fitted without handing its payment out again."""
         import asks
         a = self.drv.file_unread("R1-1", "Zapier", 2000, document_date="2026-08-04")
@@ -273,7 +273,7 @@ class Scope(Case):
         self.assertEqual(len(offered), 1)
 
     def test_a_widened_run_hands_out_a_payment_the_new_import_changed(self):
-        """r2 (Astra S2): proposed in the narrow list, then the bank corrects the amount and
+        """Proposed in the narrow list, then the bank corrects the amount and
         a check joins — the full check hands the changed payment out again."""
         import asks
         no = self.drv.pay_once("Acme", 4000, "2026-08-04")

@@ -1,5 +1,4 @@
-"""The fold, pinned on every trace the spec states with explicit sequence
-numbers (rounds 14-20). A merge is simulated exactly as the store does it:
+"""The fold, pinned on every trace stated with explicit sequence numbers. A merge is simulated exactly as the store does it:
 fold the union, append the retirements it newly produced as `retire`
 entries with fresh sequence numbers, then fold again."""
 import itertools
@@ -102,7 +101,7 @@ class TestTransitions(unittest.TestCase):
         self.assertEqual(states(st), {10: "conflicted", 11: "conflicted"})
 
     def test_lone_conflicted_candidate_stays_conflicted(self):
-        # round 18: A/B collide, operator confirms B, then unpairs B -> A stays conflicted
+        # A/B collide, operator confirms B, then unpairs B -> A stays conflicted
         st = F.fold([auto_pair(1, 10), auto_pair(2, 11), pair(3, 11), unpair(4, 11)])
         self.assertEqual(states(st), {10: "conflicted", 11: "rejected"})
         self.assertEqual(st.machine_set()[0].match_id, 10)
@@ -234,7 +233,7 @@ class TestInvariants(unittest.TestCase):
         pairing; never an active pairing under a standing exemption; the
         merged log holds exactly the one lift appended. The two merge
         directions are NOT asserted equal: they are different committed
-        histories, and spec §Match records says merge order is history."""
+        histories, and merge order is history."""
         names = ["A", "B", "E", "L"]
         for seqs in itertools.permutations([1, 2, 3, 4]):
             seq = dict(zip(names, seqs))

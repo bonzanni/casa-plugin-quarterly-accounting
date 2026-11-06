@@ -83,23 +83,23 @@ class TestSchema(TempEnv):
         self.assertEqual(c.execute("SELECT count(*) FROM snapshots").fetchone()[0], 1)
         self.assertEqual(c.execute("SELECT count(*) FROM packages").fetchone()[0], 1)
         self.assertEqual(c.execute("SELECT count(*) FROM deliveries").fetchone()[0], deliveries)
-        # fix wave D: the delivery sequence — the old delivery orders below any later one
+        # The delivery sequence — the old delivery orders below any later one
         self.assertEqual(c.execute("SELECT delivered_seq FROM renders WHERE render_id='r-old'")
                          .fetchone()[0], old_seq)
         self.assertEqual(db.last_delivered(c)["render_id"], "r-old")
         import views
         views.mark_rendering_delivered(c, "r-new")
         self.assertEqual(db.last_delivered(c)["render_id"], "r-new")
-        # fix E2: every migrated lineage is non-fresh until the next import observes it
+        # Every migrated lineage is non-fresh until the next import observes it
         import lineage
         p = lineage.projection(c, 1)
         self.assertEqual(p["class_tags_json"], '["software"]')
         self.assertEqual((p["class_observed_snapshot"], p["export_tag_revision"]), (None, None))
-        # simple loop §4: the sweep's note epoch went with the sweep
+        # The sweep's note epoch went with the sweep
         self.assertIsNone(c.execute("SELECT value FROM meta WHERE key='store_epoch_at'")  # removed-name: asserted absent
                           .fetchone())
         self.assertFalse(lineage.is_fresh(c, p))
-        # fix E4/E5: a package built before the migration names no import, so its
+        # A package built before the migration names no import, so its
         # first send is refused (build it again); the unsent send is not revoked yet
         pk = c.execute("SELECT snapshot_id, digest FROM packages WHERE package_id=1").fetchone()
         self.assertEqual((pk[0], pk[1]), (None, "dg"))
@@ -125,7 +125,7 @@ class TestSchema(TempEnv):
                          .fetchone()[0], str(db.SCHEMA_VERSION))
 
     def test_a_fix_d_schema_2_store_migrates_to_current_keeping_its_sequence(self):
-        # schema 2 as fix wave D shipped it (b055022): delivered_seq, no freshness
+        # schema 2 as b055022 shipped it: delivered_seq, no freshness
         from tests.schema_history import DDL_V2
         self.assertIn("delivered_seq", DDL_V2)
         self.assertNotIn("class_observed_snapshot", DDL_V2)
@@ -161,7 +161,7 @@ class TestSchema(TempEnv):
         c = db.open_store()
         self.addCleanup(c.close)
         self._assert_current_behaviour(c, old_seq=0, deliveries=2, first_sent=True)
-        # Task 1 (S2, schema 10): the migration closes this live delegation pass — its
+        # The migration closes this live delegation pass — its
         # marker goes dead, and its own row is ended `interrupted`; its reply still defaults
         m = c.execute("SELECT * FROM pass_marker").fetchone()
         self.assertEqual((m["generation"], m["live"], m["lease_at"]), (5, 0, None))
@@ -194,7 +194,7 @@ class TestSchema(TempEnv):
 
     def test_a_v0_3_5_schema_5_store_migrates_to_current_keeping_its_data(self):
         # schema 5 as v0.3.5 shipped it (7cd8eda), with package requests in every state:
-        # simple loop §4 drops the requests (12), and the package built for one is a
+        # drops the requests (12), and the package built for one is a
         # package like any other, whose first send needs the latest import (checked by
         # _assert_current_behaviour)
         from tests.schema_history import DDL_V5
@@ -222,8 +222,7 @@ class TestSchema(TempEnv):
 
     def test_a_v0_5_0_schema_6_store_migrates_with_every_document_date_unread(self):
         # schema 6 as v0.5.0 shipped it (02c02c2). Issue #22: no earlier version marked a
-        # date read on the document, so every filed document starts unread. Task 1 (S2,
-        # schema 10): every migration to schema 10 is an epoch (spec §4: a read confirms a
+        # date read on the document, so every filed document starts unread. every migration to schema 10 is an epoch (a read confirms a
         # note only Z seconds after the migration under the job protocol), regardless of
         # whether the source schema already recorded note issues by revision
         from tests.schema_history import DDL_V6
@@ -247,9 +246,8 @@ class TestSchema(TempEnv):
                                .fetchone()), ("2026-05-20", None))
 
     def test_a_v0_6_0_schema_7_store_migrates_with_no_operator_refs(self):
-        # schema 7 as v0.6.0 shipped it (847cee7). Issue #24 (D5): no earlier version kept
-        # the operator's files by their own ref, so the table starts empty. Task 1 (S2,
-        # schema 10): the upgrade to schema 10 is an epoch regardless (see the schema-6 test)
+        # schema 7 as v0.6.0 shipped it (847cee7). Issue #24: no earlier version kept
+        # the operator's files by their own ref, so the table starts empty. the upgrade to schema 10 is an epoch regardless (see the schema-6 test)
         from tests.schema_history import DDL_V7
         self.assertNotIn("operator_refs", DDL_V7)
         old = self._released_store(DDL_V7, 7)
@@ -407,7 +405,7 @@ class _CommitFails:
 
 
 class TestTransactionFailure(TempEnv):
-    """Fix wave F (6): a failed COMMIT must not leave the transaction open (every
+    """A failed COMMIT must not leave the transaction open (every
     later call on the persistent connection answered "tx() does not nest" until a
     restart), and a ROLLBACK after SQLite already rolled back must not mask the
     original error."""

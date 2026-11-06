@@ -1,4 +1,4 @@
-"""T16 phase 1 (live test of S7): #43 — the job's deliver unit, carried out the way the
+"""#43 — the job's deliver unit, carried out the way the
 quarterly-job skill says, through the real tools; #44 — "send it again" on the package
 note and on the file. (#121: the polite-form and partial-name tests pinned the phrase
 grammar, gone.)"""
@@ -20,7 +20,7 @@ class SendItAgainOnThePackage(StoreCase):
 
     def _send_last(self, outcome):
         """A send-last of the delivered package, posted, settled `outcome`. Returns the
-        file's caption (simple loop §1: no package note follows the file)."""
+        file's caption (no package note follows the file)."""
         import delivery, posting
         st = delivery.stage_for_delivery(self.conn, last_built=True)
         with FakeBroker() as b:
@@ -71,14 +71,14 @@ class SendItAgainOnThePackage(StoreCase):
         # #53: the tag is the composition time (" · 8 Oct 21:04:37")
         self.assertRegex(r["text"], r" \u00b7 \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d$")
         self.assertIsNotNone(r["posted_seq"])
-        # simple loop §1: the caption is the whole message — no package note follows
+        # The caption is the whole message — no package note follows
         self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE"
                                            " kind='package-note'").fetchone()[0], 0)  # removed-name: asserted absent
 
 
 class DeskRouting(StoreCase):
     def test_the_desk_routes_send_it_again_to_stage_for_delivery(self):
-        """Ruling A3 / UX: the desk sends "send it again" through the resend rule — never
+        """The desk sends "send it again" through the resend rule — never
         from memory. #121: no longer via propose_reading's `resend` instruction; a reply to
         one post binds it with reading_context's render_id."""
         import pathlib
@@ -91,7 +91,7 @@ class DeskRouting(StoreCase):
 
 
 class RefusedFileBindsNothing(StoreCase):
-    """Terra r1 S2 (9b317ef): a post_package deposit Casa refuses leaves no bindable
+    """A post_package deposit Casa refuses leaves no bindable
     `package-file` rendering — the operator never saw that caption."""
 
     def test_a_refused_deposit_leaves_no_caption_to_bind_and_a_good_post_still_binds(self):

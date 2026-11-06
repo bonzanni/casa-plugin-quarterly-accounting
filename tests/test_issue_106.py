@@ -19,7 +19,7 @@ class Wording(LoopCase):
         # #111: the line asks what it is; the title is not said twice
         self.assertTrue(lines[at + 1].endswith(" — what is it?"), lines)
         self.assertEqual(r["text"].count("Not classified yet"), 1)
-        # r1 (Astra, Terra): the named payment is bound to the view, so a reply about it binds
+        # The named payment is bound to the view, so a reply about it binds
         self.assertIn(p, views.render_items(self.conn, r["render_id"]))
 
     def test_the_ledger_says_nice_to_have(self):

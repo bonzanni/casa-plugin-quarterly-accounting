@@ -1,8 +1,8 @@
-"""Simple loop §1 "The package" (#1303): get_package always sends, open items or not,
+""""The package" (#1303): get_package always sends, open items or not,
 built from the store's latest state; ONE message: the file with ONE caption line naming the
 latest check's date; the details live in the zip; a tap after a confirmation rebuilds;
 nothing is sent unrequested (only this tool and the desk's typed asks send).
-Ruling P8: every call runs under a fixed clock (CLOCK), so "Q3" names 2026-Q3 whatever
+Every call runs under a fixed clock (CLOCK), so "Q3" names 2026-Q3 whatever
 day the suite runs."""
 import datetime
 import zipfile
@@ -27,7 +27,7 @@ class Case(StoreCase):
         return doc_id
 
     def assert_tally(self, path, caption):
-        """The property (Task 9 review ruling): the caption's tally is the ledger's status
+        """The property: the caption's tally is the ledger's status
         tally — in scope = every line not UNTRACKED, open = the OPEN statuses."""
         import csv, io, re, package
         with zipfile.ZipFile(path) as z:
@@ -85,7 +85,7 @@ class GetPackage(Case):
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM delivered_rows WHERE package_id=(SELECT package_id FROM"
             " deliveries WHERE delivery_id=?)", (out["delivery_id"],)).fetchone()[0], 3)
-        # the package-note follow-up is removed (§4): no such rendering is ever made
+        # the package-note follow-up is removed: no such rendering is ever made
         self.assertEqual(self.conn.execute("SELECT count(*) FROM renders WHERE kind="
                                            "'package-note'").fetchone()[0], 0)  # removed-name: asserted absent
         # the stored caption IS the one line (no rest, so nothing else to post)
@@ -126,7 +126,7 @@ class GetPackage(Case):
                          ["failed"])
 
     def test_a_failure_after_the_file_landed_leaves_the_send_for_recovery(self):
-        """Review fix 2: once the deposit succeeded nothing may raise. A failure recording
+        """Once the deposit succeeded nothing may raise. A failure recording
         the send delivered leaves it staged and posted; the next claim's recovery
         (posted_unrecorded) settles it uncertain."""
         import delivery
@@ -146,7 +146,7 @@ class GetPackage(Case):
         self.assertEqual([r["delivery_id"] for r in delivery.posted_unrecorded(self.conn)],
                          [out["delivery_id"]])
 
-    def test_other_capability_tools_keep_their_s7_refusal_shape(self):
+    def test_other_capability_tools_keep_their_refusal_shape(self):
         import qa_server, tools  # noqa: F401
         out = qa_server.TOOLS["post_package"]["fn"]({"delivery_id": 424242})
         self.assertEqual(set(out), {"package", "refused"})
@@ -169,13 +169,13 @@ class GetPackage(Case):
         self.assertIn("Figma", pending)
         missing = notes.split("## Missing required documents", 1)[1].split("\n## ", 1)[0]
         self.assertNotIn("Figma", missing)
-        # a pending row is not documented: it counts open in the one line (D18)
+        # a pending row is not documented: it counts open in the one line
         self.assertTrue(built["caption"].endswith("0 of 4 documented · 4 open"),
                         built["caption"])
         self.assert_tally(built["path"], built["caption"])
 
     def test_every_pending_row_is_pending_whatever_its_status_as_the_cards_say(self):
-        """Task 9 review ruling (spec §2.1, D18): a tracked row the bank has not booked is
+        """A tracked row the bank has not booked is
         PENDING in the zip and open in the caption whatever its status — a 0.00 row, an
         exempt row and a matched row included — exactly the rows cards puts in its
         pending bucket (one predicate: work.is_pending, describe's `pending`)."""
@@ -259,7 +259,7 @@ class GetPackage(Case):
 
 
 class GetPackageQ2(Case):
-    """Ruling Q2 (live acceptance on Q2, watermark 2026-04-01): with Q3 rows present,
+    """A named quarter (watermark 2026-04-01): with Q3 rows present,
     get_package(quarter="2026-Q2") builds Q2 and its caption counts Q2 only."""
 
     def test_q2_builds_q2_with_its_own_caption(self):

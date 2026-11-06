@@ -53,7 +53,7 @@ class ProposalLineCountsPurchases(LoopCase):
         self.assertIn("2 documents fit; chose invoice", self.proposal_line())
 
     def test_a_joint_set_of_one_purchase_names_it(self):
-        """A legacy joint set (no chosen one, D3) holding one purchase's two documents."""
+        """A legacy joint set (no chosen one) holding one purchase's two documents."""
         p = self.pay("Adobe", 10000, "2026-09-01")
         self.machine_entry(p, self.doc(document_number="N-1"))
         self.machine_entry(p, self.doc(kind="receipt", document_number="N-1"))

@@ -44,7 +44,7 @@ class Context(Base):
         self.assertEqual(second["state"], "missing a document")
 
     def test_twin_payments_carry_the_ref_the_post_printed(self):
-        # r1 (Astra S2): two payments alike in payee, amount and date are told apart by the
+        # Two payments alike in payee, amount and date are told apart by the
         # ref the post printed, as the operator reads them
         a = self.item("Adobe", 5445, "2026-09-14")
         b = self.item("Adobe", 5445, "2026-09-14")
@@ -56,7 +56,7 @@ class Context(Base):
         self.assertIn("ref " + refs[b], text)
 
     def test_every_payment_on_the_post_is_listed_past_the_cap(self):
-        # r2 (Astra S2): the cap holds only payments off the post
+        # The cap holds only payments off the post
         pids = [self.item("V%03d" % i, 1000 + i, "2026-09-10") for i in range(reply.CONTEXT_MAX + 5)]
         off = self.item("Offpost", 999, "2026-09-11")
         self.show(*pids)
@@ -67,7 +67,7 @@ class Context(Base):
         self.assertEqual(ctx["more_open"], 1)
 
     def test_more_on_a_card_is_the_quarters_open_items_card(self):
-        # r2 (Terra S2): 0.11.27 recovered "more" on a card with the open-items card
+        # 0.11.27 recovered "more" on a card with the open-items card
         import cards
         self.item("Zapier", 9900, "2026-09-17")
         with db.tx(self.conn):
@@ -154,7 +154,7 @@ class Ops(Base):
         self.assertEqual(self.author(z)[0], "auto")
 
     def test_a_payment_changed_since_the_post_is_reshown_beside_the_reading(self):
-        # d1 (Astra S2): `reshow` rides with a posted reading too
+        # `reshow` rides with a posted reading too
         z = self.item("Zapier", 9900, "2026-09-17")
         n = self.item("Notion", 10900, "2026-09-17")
         self.deliver("check")
@@ -171,7 +171,7 @@ class Ops(Base):
         matches.relabel_match(self.conn, match_id=mid, labels=("no-ref",), token=self.token)
 
     def test_a_broad_change_lists_every_payment_it_moves(self):
-        # d1 (Astra S1, Terra S1): never "and N more" — the card shows every payment
+        # Never "and N more" — the card shows every payment
         first = self.item("Adobe", 1000, "2026-09-17")
         self.deliver("check")
         for i in range(1, 9):                                   # never shown to the operator

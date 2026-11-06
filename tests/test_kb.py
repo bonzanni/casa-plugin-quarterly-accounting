@@ -31,7 +31,7 @@ class TestKB(StoreCase):
             kb.upsert_counterparty(self.conn, "Other", patterns=["bck*zapier"])
 
     def test_a_canonical_name_that_is_another_entrys_bank_text_is_refused(self):
-        # fix wave B (Astra S1): "BCK*ZAPIER" as a second entry's NAME hid its
+        # "BCK*ZAPIER" as a second entry's NAME hid its
         # `none` ruling behind Zapier's pattern — the payment still derived invoice
         kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
         with self.assertRaises(db.Refusal) as cm:
@@ -61,7 +61,7 @@ class TestKB(StoreCase):
         self.assertEqual(kb.get_counterparty(self.conn, "Stripe")["patterns"], [])
 
     def test_every_upsert_validates_the_entrys_own_name_and_held_patterns(self):
-        # round B2 (Terra S1, controller ruling): ALL of an upsert's names and
+        # ALL of an upsert's names and
         # patterns are checked against every other entry, on create AND update.
         # No API path reaches a collided store any more (a 3000-sequence fuzz of
         # upsert/set_expectation found none), so the state is built directly: an
@@ -98,7 +98,7 @@ class TestKB(StoreCase):
 
     def test_operator_author_needs_a_delivered_render(self):
         import authority
-        with self.assertRaises(db.Refusal) as cm:     # S7 §8.1: never through the tool
+        with self.assertRaises(db.Refusal) as cm:     # Never through the tool
             kb.set_expectation(self.conn, scope_type="chain", scope="salary", kind="none",
                                author="operator", render_id="r1")
         self.assertEqual(str(cm.exception), authority.TAP_ONLY)
@@ -114,7 +114,7 @@ class TestKB(StoreCase):
             self.granted(kb.set_expectation_in_tx, scope_type="chain", scope="salary, tax",
                          kind="none", author="operator",
                          render_id="r1")                     # a conflicting scope
-        with self.assertRaises(db.Refusal):     # tier required (validated at the tool, S7)
+        with self.assertRaises(db.Refusal):     # tier required (validated at the tool)
             kb.set_expectation(self.conn, scope_type="counterparty", scope="Adobe",
                                kind="invoice", tier=None, author="specialist")
         self.granted(kb.set_expectation_in_tx, scope_type="chain", scope="software", kind="receipt",
@@ -123,7 +123,7 @@ class TestKB(StoreCase):
         self.assertEqual((p["exp_kind"], p["exp_tier"]), ("receipt", "optional"))
 
     def test_renaming_the_payee_moves_the_payment_and_its_pairings(self):
-        # rounds p6/p7: a rename changes what a line shows, so both revisions move
+        # A rename changes what a line shows, so both revisions move
         import db as _db
         import reducer as R
         d = self.doc()
@@ -149,7 +149,7 @@ class TestKB(StoreCase):
         self.assertEqual(lineage.projection(self.conn, self.pid)["exp_kind"], "receipt")
 
     def test_a_specialist_never_overwrites_the_operators_ruling(self):
-        # fix wave F: "no invoices ever for Zapier" is the operator's; a specialist's
+        # "no invoices ever for Zapier" is the operator's; a specialist's
         # later set_expectation (or its removal) is refused, and the ruling stands
         kb.upsert_counterparty(self.conn, "Zapier", patterns=["BCK*ZAPIER"])
         self.granted(kb.set_expectation_in_tx, scope_type="counterparty", scope="Zapier",
@@ -167,7 +167,7 @@ class TestKB(StoreCase):
         self.assertEqual(lineage.projection(self.conn, self.pid)["exp_kind"], "receipt")
 
     def test_chain_override_replaces_the_previous_normalized_scope(self):
-        # carried ruling (Task 4 review): "refund" and "income, refund" both
+        # "refund" and "income, refund" both
         # normalize to ({7}, {refund}); the later ruling wins and derive
         # never raises for anything set through kb.
         self.row(2, counterparty="BCK*OTHER", direction="DBIT")

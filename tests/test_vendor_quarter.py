@@ -1,4 +1,4 @@
-"""0.11.2 §B (operator rulings 2026-10-08): a quarter's vendor card lists only that quarter's
+"""A quarter's vendor card lists only that quarter's
 payments; the vendor's payments in other quarters are a frozen, plainly stated count; one
 switch, [Apply to all quarters], makes the card's next answer cover the other quarters'
 missing ones too (a tap like [Next page]: a short receipt and the same card switched on); the
@@ -31,7 +31,7 @@ class VendorCardQuarter(_Tapping):
         q4 = self.pay("Twilio", 2100, "2026-10-14")
         dep = self.card()
         lines = untag(dep["text"]).split("\n")
-        self.assertIn("EUR 20.00 · 14 Aug", lines)          # PLAY 0.11.2: no payee
+        self.assertIn("EUR 20.00 · 14 Aug", lines)          # No payee
         self.assertNotIn("21.00", dep["text"])
         self.assertIn("Also missing in other quarters: 1 (Q4)", lines)
         self.assertEqual(self.labels(dep), ["No invoice needed for these", "Never for Twilio",
@@ -100,7 +100,7 @@ class VendorCardQuarter(_Tapping):
         self.assertNotEqual(self.state(q3), "accepted-missing")
 
     def test_never_states_and_binds_the_other_quarters_it_changes(self):
-        """d2 (Astra + Terra S1): a matched Q4 payment Never would change is stated."""
+        """A matched Q4 payment Never would change is stated."""
         self.pay("Twilio", 2000, "2026-08-14")
         q4 = self.pay("Twilio", 2100, "2026-10-14")
         self.machine_entry(q4, self.doc(issuer="Twilio", document_number="TW-9",
@@ -124,14 +124,14 @@ class VendorCardQuarter(_Tapping):
             self.pay("Twilio", amount, "2026-08-14")
         self.pay("Twilio", 2200, "2026-10-14")
         end = self.end()
-        # PLAY 0.11.2: the counts line carries the number; the legend names no count
+        # The counts line carries the number; the legend names no count
         self.assertEqual(untag(end["text"]).split("\n")[1], "2 missing")
         self.assertNotIn("Review: go through", end["text"])             # #99: no legend
 
 
 class OfferedDropsSetAside(_Tapping):
     def test_an_irrelevant_alternative_is_not_offered(self):
-        """d2 (Terra S2): a stored alternative later set aside leaves the card."""
+        """A stored alternative later set aside leaves the card."""
         import cards, documents
         p = self.pay()
         alt = self.doc(document_number="INV-91")
@@ -145,7 +145,7 @@ class OfferedDropsSetAside(_Tapping):
 
 class R5Fixes(VendorCardQuarter):
     def test_a_full_vendor_walk_with_other_quarters_shows_every_payment(self):
-        """r5 Astra S2: the count line is sized into the pages, so none drops off."""
+        """The count line is sized into the pages, so none drops off."""
         name = "V*_[](){}-!|#<>~" * 4                     # escapes double its width
         pids = [self.pay(name, 100000 + i, "2026-08-14") for i in range(48)]
         self.pay(name, 500000, "2026-10-14")
@@ -169,7 +169,7 @@ class R5Fixes(VendorCardQuarter):
                 if str(p) not in (sc.get("others") or {})]
 
     def test_the_legend_counts_what_the_vendor_card_answers(self):
-        """r5 Astra S2: a left-missing payment is on the card and answered, so it counts."""
+        """A left-missing payment is on the card and answered, so it counts."""
         import work
         a = self.pay("Twilio", 2000, "2026-08-14")
         self.pay("Twilio", 2100, "2026-08-15")

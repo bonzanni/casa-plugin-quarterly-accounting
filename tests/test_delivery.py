@@ -12,8 +12,8 @@ import delivery  # noqa: E402
 
 
 def posted_first(conn, delivery_id) -> None:
-    """r3 #2: record_delivery(delivered) is refused for a package send never posted. These
-    tests stage and record directly; in S7 the one way out is post_package, whose
+    """record_delivery(delivered) is refused for a package send never posted. These
+    tests stage and record directly; the one way out is post_package, whose
     transaction marks the send posted before its deposit — written here, exactly."""
     with db.tx(conn):
         conn.execute("UPDATE deliveries SET posted_at=coalesce(posted_at, ?) WHERE"
@@ -21,7 +21,7 @@ def posted_first(conn, delivery_id) -> None:
 
 
 def _record(conn, **kw):
-    """record_delivery, after the post a delivered outcome needs (r3 #2)."""
+    """record_delivery, after the post a delivered outcome needs."""
     did = kw.get("delivery_id")
     if kw.get("outcome") == "delivered" and isinstance(did, int) and not isinstance(did, bool):
         posted_first(conn, did)
@@ -47,7 +47,7 @@ class Base(StoreCase):
 class TestTelegram(Base):
     def test_staged_atomically_into_the_outbox_under_a_name_of_its_own(self):
         # issue #2: the staged file's name is random and never reused; the operator sees
-        # the package's name through post_package's deposit `filename` (S7a)
+        # the package's name through post_package's deposit `filename`
         out = delivery.stage_for_delivery(self.conn, channel="telegram",
                                           package_id=self.pkg["package_id"])
         self.assertEqual(os.path.dirname(out["path"]), str(self.outbox))
@@ -211,7 +211,7 @@ class TestCustody(Base):
 
 
 class TestNoEmail(Base):
-    """S7 §6.2: packages come as a file on Telegram; the email staging path is deleted."""
+    """Packages come as a file on Telegram; the email staging path is deleted."""
 
     def test_email_is_refused_and_nothing_is_staged(self):
         with self.assertRaises(db.Refusal) as cm:
@@ -262,9 +262,9 @@ class TestResendTarget(Base):
         self.assertEqual(delivery.resendable(self.conn), a["package_id"])
 
     def test_the_offer_binds_to_the_rendering_delivered_last_within_one_second(self):
-        # fix wave D: sheet A offers package a, sheet B offers a and b; B then A delivered
+        # Sheet A offers package a, sheet B offers a and b; B then A delivered
         # in one second — "send it again" answers A (a), never B by creation order (which
-        # would ask "which one"). Final fix wave I-2 (§6.3): a rendering that offers
+        # would ask "which one"). A rendering that offers
         # nothing no longer hides an earlier offer, so both sheets here offer something.
         a = self.pkg
         self.send(a["package_id"], "uncertain")
@@ -279,7 +279,7 @@ class TestResendTarget(Base):
         self.assertEqual(delivery.resend_target(self.conn), a["package_id"])
 
     def test_a_later_rendering_without_offers_keeps_the_earlier_offer(self):
-        # final fix wave I-2 (§6.3): "last saw" is the latest delivered rendering that
+        # "last saw" is the latest delivered rendering that
         # offers a package; a sheet delivered after it that offers nothing hides nothing
         self.send(self.pkg["package_id"], "uncertain")
         self.shown()
@@ -516,7 +516,7 @@ if __name__ == "__main__":
 
 
 class TestKeptDeliveryGuards(StoreCase):
-    """Ported request-free from test_package_requests (Task 11 review): the delivery guards
+    """Ported request-free from test_package_requests: the delivery guards
     the package requests' tests used to pin."""
     def setUp(self):
         super().setUp()

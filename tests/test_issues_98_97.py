@@ -149,7 +149,7 @@ class Skills(StoreCase):
 
 
 class JudgementBasis(_Loop):
-    """d2 (Astra + Terra S1): the judgement is bound to every handed fact, and a later
+    """The judgement is bound to every handed fact, and a later
     decision supersedes it for good."""
 
     def test_a_changed_remittance_brings_the_default_back(self):
@@ -180,7 +180,7 @@ class JudgementBasis(_Loop):
 
 
 class UnclassifiedEverywhere(_Loop):
-    """r1 (Astra S2): an unclassified payment of another quarter is counted wherever its
+    """An unclassified payment of another quarter is counted wherever its
     quarter is summed up, never dropped."""
 
     def test_an_older_unclassified_payment_is_counted_on_the_card_and_in_views(self):

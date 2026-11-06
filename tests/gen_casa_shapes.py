@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""S7 §7.6/§12 (Task 14): write every deposit body this plugin composes, over hostile store
+"""Write every deposit body this plugin composes, over hostile store
 text in every dynamic source, as JSONL for scripts/check_casa_shapes.py — which judges each
 with Casa's REAL validators and renderer under Casa's interpreter. Stdlib only.
 
@@ -11,11 +11,10 @@ truncated file fails. Then one line per deposit: {"case", "tool", "body", and ex
 "display_expect" | "display_skip"}. `body` is the deposit request exactly as the plugin sent
 it (FakeBroker records it). `display_expect` is the composition with every field unescaped —
 what Casa's renderer must display; `display_skip` names why no display is promised (a legacy
-rendering, stored before S7: spec §7.6 leaves it un-re-escaped; a file caption is plain
+rendering, stored by older versions, is left un-re-escaped; a file caption is plain
 text). Every button of every proposal adds a {"case": "stored_call", "tool",
 "arguments"} line, and every WRITING button (one whose arguments carry a key) is tapped here
-through qa_server.TOOLS on the generator's own store: its receipt must not be keys.NO_LONGER
-(§7.6's successful keyed tap per shape, asserted in stdlib; the store is restored after).
+through qa_server.TOOLS on the generator's own store: its receipt must not be keys.NO_LONGER.
 
 Each shape is one generator function over a fresh store (`SHAPES`), one per brief item:
 show_view (items 1–2), propose_reading (3), propose_account (4), post_results (5; its package
@@ -42,9 +41,9 @@ if str(ROOT) not in sys.path:
 
 from tests._base import LoopCase, StoreCase            # noqa: E402  (puts server/ on the path)
 from tests.fakebroker import FakeBroker                # noqa: E402
-from tests.test_s7_escape import HOSTILE               # noqa: E402  (Task 3's hostile set)
+from tests.test_escape import HOSTILE               # noqa: E402
 
-CLOCK = dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc)    # Ruling F3: 2026-Q3
+CLOCK = dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc)    # 2026-Q3
 QUARTER = "2026-Q3"
 STARS = "*" * 2100                    # the brief's oversized payee
 FULL = 40                             # a full page: 40 payments per section
@@ -68,7 +67,7 @@ class _Store(LoopCase):
         pass
 
 
-# each posting tool's delivered slot and its kind (§3)
+# each posting tool's delivered slot and its kind
 SLOTS = {"show_view": "view", "propose_reading": "reading", "propose_account": "accounts",
          "post_results": "results", "post_package": "package", "get_package": "package",
          "get_document": "document", "rename_vendor": "view",
@@ -153,7 +152,7 @@ class Shapes:
             return body
         prop = json.loads(body["value"])
         if tool in ("show_view", "rename_vendor", "merge_vendors"):
-            # binding r7: the checker builds Casa's real quote of this post (label, render,
+            # binding the checker builds Casa's real quote of this post (label, render,
             # clip) and the plugin must bind it back to this rendering, on the store copy
             rec["bind"] = {"render_id": out["render_id"], "store": self.shape}
             if tool == "show_view" and prop.get("pages"):
@@ -355,7 +354,7 @@ def _item_states(sh, st, b, tag, pids):
     check = sh.call(st, b, f"{tag}:check-walk", "show_view", {"view": "check",
                                                                "quarter": QUARTER})
     one = next(x for x in check if x["label"] == "One by one")
-    # #93 r2: [One by one] is a tap whose answer carries the payment's card
+    # #93: [One by one] is a tap whose answer carries the payment's card
     item = sh.tap(st, f"{tag}:item:proposed", one, keep=True)["next"]["buttons"]
     if labels(item)[:3] != ["Right", "Wrong", "No invoice needed"]:
         raise AssertionError(f"{tag}: a proposed item offers {labels(item)}")
@@ -404,8 +403,8 @@ def gen_show_view_setup_stop(sh, st, b):
 
 
 LEGACY = [
-    # (case, stored text, display): a rendering stored before S7 — raw control characters,
-    # never escaped for the dialect (§7.6: deposit_safe is its only step). `display` is True
+    # (case, stored text, display): a rendering stored by older versions — raw control characters,
+    # never escaped for the dialect (deposit_safe is its only step). `display` is True
     # (checked) or the reason no display is promised
     ("legacy:ctrl", "Accounting · Q3 2026\nACME\x01Corp owes 12.00\x7f and\x1bmore", True),
     ("legacy:hostile", "Accounting · Q3 2026\n" + "\n".join(
@@ -465,7 +464,7 @@ def gen_propose_reading(sh, st, b):
 
 
 ACCOUNT_SETS = [
-    # (tag, labels, id of account i): Task 7's LABELS with ids carrying `<`, then the
+    # (tag, labels, id of account i): the LABELS with ids carrying `<`, then the
     # hostile set itself (every marker, a link, a control character, 2,100+ characters)
     # with ids whose last four characters — the ones printed — are hostile too
     ("task7", ["Zakelijk <B.V.>", "www.bank.example", "x\x01y", "L" * 4050, "Ops", "Tax",
@@ -508,7 +507,7 @@ def _units(text: str, n: int) -> str:
 
 LEGACY_4096 = [
     # (case, two stored texts of 4,096 UTF-16 units each — Telegram's limit, what a
-    # rendering stored before S7 could reach — display: True or the skip reason)
+    # rendering stored by older versions could reach — display: True or the skip reason)
     ("results:legacy-plain",
      [_units("Accounting · Q3 2026 ACME\x01Corp owes 12.00\x7f and\x1bmore café 𝔘\n", 4096),
       _units("Older · ACME\x1fLtd\x7f paid 3.50\n", 4096)], True),
@@ -571,8 +570,8 @@ CAPTION_FIRST = ("Accounting Q3 2026 · *Acme* _x_ `y` a<b>c www.evil.example AC
 
 
 def gen_post_package(sh, st, b):
-    """Item 6: the package as a file. get_package's send (simple loop §1, Task 9: built now,
-    posted, the file the receipt — its own shape comes with Task 17), then a first send
+    """Item 6: the package as a file. get_package's send (built now,
+    posted, the file the receipt — its own shape comes later), then a first send
     whose receipt was withheld (uncertain), its offer posted, its resend ("send it again")
     and a send-last ("send me the last package you built"), each posted with a hostile
     caption line."""
@@ -613,9 +612,8 @@ def gen_post_package(sh, st, b):
     post("package:last", s["delivery_id"])
 
 
-# -- the simple loop's shapes (Task 17: §1, #1301–#1303) ----------------------------------
-# Every card is posted as the loop posts it: a show_view re-post of its stored rendering
-# (Task 7's path), so Casa's real deposit judges its text and every button — [Get package]
+# -- the simple loop's shapes ----------------------------------
+# Every card is posted as the loop posts it: a show_view re-post of its stored rendering, so Casa's real deposit judges its text and every button — [Get package]
 # (#1303) included; every writing button is tapped, and each tap's next card (#1302) is
 # recorded and judged as specialist_desk._post_next_card judges it.
 Q3_DAY = "2026-09-14"
@@ -732,7 +730,7 @@ def gen_end_message_nothing_to_ask(sh, st, b):
 
 
 def gen_end_message_handover(sh, st, b):
-    """A handover's end message (§2.5): one "Filed." line per handed document, and the
+    """A handover's end message: one "Filed." line per handed document, and the
     proposals among them."""
     import cards
     loop_store(st)
@@ -767,7 +765,7 @@ def gen_end_message_handover_close(sh, st, b):
 
 
 def gen_end_message_with_completion(sh, st, b):
-    """D19: an owed completion notice as a line of an end message with items, and as the
+    """An owed completion notice as a line of an end message with items, and as the
     message itself when nothing is left to ask."""
     import cards, work
     loop_store(st)
@@ -813,7 +811,7 @@ def gen_all_answered(sh, st, b):
 
 
 def gen_ready_notice(sh, st, b):
-    """The "package ready" notice (D19), first and updated, with an earlier quarter's line."""
+    """The "package ready" notice, first and updated, with an earlier quarter's line."""
     import cards, views
     loop_store(st)
     for n, day in enumerate((Q2_DAY, Q3_DAY), start=1):
@@ -855,7 +853,7 @@ def gen_review_cards(sh, st, b):
 
 
 def gen_replace_cards(sh, st, b):
-    """Rev 18.4 §R18.3: a handed-over document for a payment that already has one — the end
+    """A handed-over document for a payment that already has one — the end
     message's "to check" line, the replace card (a machine match, and an operator-confirmed
     one), and both taps."""
     import cards

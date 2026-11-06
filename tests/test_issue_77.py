@@ -1,4 +1,4 @@
-"""0.11.10: issue #77 (casa-test PLAY of 0.11.9): the reading stored no recipient, so a
+"""0.11.10: issue #77: the reading stored no recipient, so a
 company-addressed reissue was called "already filed"; a "To check · Q4" list held Q2/Q3
 items; one vendor read under two names on one card."""
 import pathlib

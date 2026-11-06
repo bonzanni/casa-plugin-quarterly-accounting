@@ -108,7 +108,7 @@ class TestBankWriteGate(StoreCase):
         self.end_live_pass()
         # same generation, same ledger instance (self.LEDGER, unchanged) — only the
         # registered workflows cleared, which is not what a restore or an erasure
-        # (delete_all_data mints a NEW instance, D4) would leave behind
+        # (delete_all_data mints a NEW instance) would leave behind
         self.pass_(generation=2, registered={})
         self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
 
@@ -149,7 +149,7 @@ class TestBankWriteGate(StoreCase):
         self.assertFalse(passes.bank_write_gate(self.conn)["allowed"])
 
     def test_a_stale_ledger_probe_from_an_earlier_pass_does_not_decide_the_gate(self):
-        # fix round 1, M1: a probe row survives (PK on kind) after its pass ends;
+        # A probe row survives (PK on kind) after its pass ends;
         # the gate must require it to belong to THIS pass, not merely be ok.
         self.pass_(generation=0, registered={})
         self.claim_without_probes()                     # a new pass, no probes recorded yet
@@ -158,7 +158,7 @@ class TestBankWriteGate(StoreCase):
         self.assertIn("list_backups", g["reason"])
 
     def test_a_different_ledger_instance_after_an_import_is_refused_until_acked(self):
-        # fix round 1, M2+M3: the other-ledger branch and its "not ack" sticky guard.
+        # The other-ledger branch and its "not ack" sticky guard.
         self.pass_(generation=0, registered={})
         passes.bank_write_gate(self.conn)
         with db.tx(self.conn):
@@ -181,7 +181,7 @@ class TestBankWriteGate(StoreCase):
         self.assertTrue(passes.bank_write_gate(self.conn)["allowed"])
 
     def test_a_restored_refusal_stays_sticky_even_when_a_later_pass_reports_the_old_generation(self):
-        # fix round 1, M4: the cross-pass meta.gate_refusal cache, not a fresh recompute
+        # The cross-pass meta.gate_refusal cache, not a fresh recompute
         # (a fresh recompute in the third pass below would NOT itself refuse, because
         # the reported generation happens to match the remembered one again).
         self.pass_(generation=0, registered={})
@@ -203,7 +203,7 @@ class TestBankWriteGate(StoreCase):
         self.assertEqual(g2["reason"], g["reason"])
 
     def test_older_workflows_filters_out_non_acct_prefixed_registrations(self):
-        # fix round 1, M7: the "acct@" prefix filter on older_workflows.
+        # The "acct@" prefix filter on older_workflows.
         self.pass_(generation=0, registered={"acct@0.0.9": "b0", "someother-plugin@1.0": "b1"})
         g = passes.bank_write_gate(self.conn)
         self.assertTrue(g["allowed"], g)
@@ -212,7 +212,7 @@ class TestBankWriteGate(StoreCase):
 
 class TestGateConcurrency(StoreCase):
     def test_a_poison_committed_while_another_process_decides_is_never_overwritten(self):
-        # fix wave B (Astra S1): A decided "allowed" and paused before persisting;
+        # A decided "allowed" and paused before persisting;
         # B committed poison; A resumed and persisted its allow over the refusal.
         self.bind()
         self.pass_(generation=0, registered={})
@@ -297,7 +297,7 @@ class TestReset(StoreCase):
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO counterparties(name, patterns_json, updated_at)"
                               " VALUES ('SENTINEL-NAME', '[]', 'x')")
-        # fix wave B (Astra S2): the pass marker row outlived the wipe of the passes table
+        # The pass marker row outlived the wipe of the passes table
         t0 = self.pass_()
         reader = sqlite3.connect(str(self.data / db.DB_NAME), isolation_level=None)
         reader.execute("BEGIN")
@@ -343,7 +343,7 @@ class TestReset(StoreCase):
                              0, table)
 
     def test_reset_store_clears_a_restored_gate_refusal_but_keeps_a_dirty_ledger_one(self):
-        # fix round 1, M5: reset_store's DELETE keeps the dirty-ledger row (the ledger's
+        # reset_store's DELETE keeps the dirty-ledger row (the ledger's
         # own condition is not this store's to clear) but drops every other kind.
         self.bind()
         self.pass_(generation=0, registered={})
@@ -378,7 +378,7 @@ class TestReset(StoreCase):
 
 class TestPoison(StoreCase):
     def test_poison_rolls_back_the_callers_partial_write_but_persists_the_verdict(self):
-        # fix round 2: poison must ROLLBACK the caller's in-flight writes (they are
+        # Poison must ROLLBACK the caller's in-flight writes (they are
         # about to be discarded by the Refusal anyway), commit the verdict on its
         # own, and leave a transaction open so the caller's `with db.tx` unwinds
         # cleanly instead of masking the real error with a bad ROLLBACK.

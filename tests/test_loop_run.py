@@ -1,7 +1,7 @@
-"""Simple loop §2 (rev 17): one Casa job run is one pass; the units in order; no call
+"""One Casa job run is one pass; the units in order; no call
 budget (2026-10-07): work is handed until Casa cuts the batch, progress rides the `report`
 unit alone; an operator-started run ends with ONE end message; a scheduled run is silent unless an
-item is in a new state, and then lists only those (rev 17); the mirror leaves a rerun with
+item is in a new state, and then lists only those; the mirror leaves a rerun with
 nothing to write."""
 from tests._base import StoreCase
 import db                     # server/ is on sys.path once tests._base is imported
@@ -16,7 +16,7 @@ class Run(StoreCase):
 
     def test_an_operator_run_unit_by_unit(self):
         units = [u["unit"] for u in self.drv.run_job("aaaaaaaa-1", started_by="operator")]
-        # Q2 run 1: the import persisted work, so the `report` unit comes alone before filing
+        # The import persisted work, so the `report` unit comes alone before filing
         self.assertEqual(units[:4], ["probes", "snapshot", "report", "filing"])
         self.assertIn("payment", units)
         self.assertLess(units.index("payment"), units.index("mirror"))
@@ -27,7 +27,7 @@ class Run(StoreCase):
                                                      " render_id=?", (end,)).fetchone()[0])
 
     def test_a_report_rides_alone_once_per_claim_and_the_next_claim_reports_the_rest(self):
-        """Q2 run 1 and the no-budget ruling: a report never rides beside a work unit; a
+        """A report never rides beside a work unit; a
         claim reports once (Casa keeps a batch's LAST report); the work after it is reported
         by the next claim, first thing."""
         import job
@@ -97,7 +97,7 @@ class Carries(StoreCase):
         return rid, (self.render_text(rid) if rid else None)
 
     def test_a_refused_bank_gate_skips_the_mirror_and_says_so_once(self):
-        """Carry 1: mirror calls are handed out only while the gate allows writes."""
+        """Mirror calls are handed out only while the gate allows writes."""
         import passes
         drv = JobDriver(self, payments=2)
         drv.claim("dddddddd-1")
@@ -118,7 +118,7 @@ class Carries(StoreCase):
                                     " since this store last ran."), 1, text)
 
     def test_a_cut_run_is_partial_counting_only_undecided_entries(self):
-        """Carry 2: the partial rule counts outcome IS NULL only; 'settled' is decided."""
+        """The partial rule counts outcome IS NULL only; 'settled' is decided."""
         import work
         drv = JobDriver(self, payments=3)
         seen = []
@@ -130,8 +130,8 @@ class Carries(StoreCase):
                     c, [u["pid"]], grant=grant))
         drv._payment = cut
         units = drv.run_job("dddddddd-2")
-        # one payment per hand-out (rev 18.4): the first, left missing by the operator
-        # meanwhile, is settled; each other one is handed twice (D8)
+        # one payment per hand-out: the first, left missing by the operator
+        # meanwhile, is settled; each other one is handed twice
         self.assertEqual(len(seen), 5)
         self.assertEqual(seen[1], seen[2])
         self.assertEqual(seen[3], seen[4])
@@ -145,7 +145,7 @@ class Carries(StoreCase):
         self.assertEqual(units[-1]["text"], "Accounting check interrupted before it finished.")
 
     def test_a_payment_absent_from_the_latest_read_is_never_counted_missing(self):
-        """Carry 3: not fresh (decide refuses it) → counted pending, in exactly one bucket."""
+        """Not fresh (decide refuses it) → counted pending, in exactly one bucket."""
         import cards
         self.run_claim()
         self.row(9001, booking_date="2026-09-02", value_date="2026-09-02")
@@ -165,7 +165,7 @@ class Carries(StoreCase):
         self.assertNotIn("missing", self.render_text(rid))
 
     def test_a_handover_taken_mid_run_reopens_its_payment_once(self):
-        """Carry 4: take_handovers gets only NEWLY taken handover documents."""
+        """take_handovers gets only NEWLY taken handover documents."""
         import asks, job
         drv = self._job_driver = JobDriver(self, payments=1)
         units = self.drive("dddddddd-3", stop_before="mirror")
@@ -183,7 +183,7 @@ class Carries(StoreCase):
                 drv.do(rest[-1], drv.token)
         self.assertEqual([u["unit"] for u in rest].count("payment"), 1)
         (row,) = self.conn.execute("SELECT why, outcome, attempts FROM run_work").fetchall()
-        self.assertEqual(tuple(row), ("handover", "match", 0))     # operator ruling 2026-10-09
+        self.assertEqual(tuple(row), ("handover", "match", 0))
 
     def test_an_alert_raised_between_runs_is_in_the_run_message_and_sent_on_delivery(self):
         """Carries 5 and 10: compose_end binds the alert ids it prints (scope['alerts']); a
@@ -205,7 +205,7 @@ class Carries(StoreCase):
                                            " sent_at IS NOT NULL", (aid,)).fetchone()[0], rid)
 
     def test_a_quiet_run_with_only_an_alert_posts_the_alert_alone(self):
-        """§1: the failure line "is otherwise the run's one message"."""
+        """The failure line "is otherwise the run's one message"."""
         import alerts
         drv = JobDriver(self, payments=1)
         drv.run_job("dddddddd-5")                                   # the item shown once
@@ -222,7 +222,7 @@ class Carries(StoreCase):
         self.assertEqual(self.end_text("dddddddd-6")[0], "")
 
     def test_a_check_naming_q2_heads_the_run_and_its_package(self):
-        """Carry 7 (ruling Q2): watermark 2026-04-01, Q3 rows present, "check Q2"."""
+        """Watermark 2026-04-01, Q3 rows present, "check Q2"."""
         import asks, cards, json
         self.bind(watermark="2026-04-01")
         drv = JobDriver(self, payments=0)
@@ -330,8 +330,8 @@ class Surface(StoreCase):
             self.assertEqual(self.conn.execute("SELECT count(*) FROM alerts").fetchone()[0], 1)
 
 
-class ReviewRound1(StoreCase):
-    """Task 10 review, fix round 1."""
+class RunEndEdgeCases(StoreCase):
+    """Run-end edge cases."""
 
     def setUp(self):
         super().setUp()
@@ -357,7 +357,7 @@ class ReviewRound1(StoreCase):
                                            ).fetchone()[0], 2)
 
     def test_an_operator_run_that_stopped_always_says_so_never_checked(self):
-        """1b: the reviewer's sequence — no tools, tools, no tools again (same streak's
+        """No tools, tools, no tools again (same streak's
         alert already sent or not): the operator's message heads with its stop line."""
         drv = JobDriver(self, payments=1)
         drv.no_bank_tools()
@@ -378,7 +378,7 @@ class ReviewRound1(StoreCase):
                                            "'run-stopped' AND sent_at IS NULL").fetchone()[0], 0)
 
     def test_weekly_runs_age_a_missing_payment_out_and_rearm_it(self):
-        """3, D7: a missing payment is searched on three weekly runs, then aged out and left
+        """A missing payment is searched on three weekly runs, then aged out and left
         off the list until AGE_OUT_REARM_S after its last counted search."""
         import datetime as dt
         drv = JobDriver(self, payments=1)
@@ -428,7 +428,7 @@ class ReviewRound1(StoreCase):
 
 
 class TaskElevenCarries(StoreCase):
-    """Task 11: what the deleted delegation end_pass did at a pass's end, the run's end does."""
+    """What the deleted delegation end_pass did at a pass's end, the run's end does."""
 
     def test_a_completed_run_reaps_an_orphaned_document_file(self):
         import os, time

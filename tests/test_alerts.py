@@ -9,8 +9,8 @@ import views  # noqa: E402
 
 
 def gmail_failed(case, token, detail=""):
-    """Gmail's probe failed, on its third run in a row (D10: the line is said once the
-    streak reaches alerts.GMAIL_RUNS runs; simple loop Task 10)."""
+    """Gmail's probe failed, on its third run in a row (the line is said once the
+    streak reaches alerts.GMAIL_RUNS runs)."""
     import alerts
     passes.record_probe(case.conn, token, "gmail", False, detail)
     with db.tx(case.conn):
@@ -30,7 +30,7 @@ class TestAlerts(StoreCase):
         self.assertIsNone(self.finish(self.pass_()))
 
     def test_gmail_failure_speaks_once_per_occurrence(self):
-        """D10: said once the probe failed on GMAIL_RUNS runs in a row, once per streak."""
+        """Said once the probe failed on GMAIL_RUNS runs in a row, once per streak."""
         for _ in range(2):
             t = self.pass_()
             passes.record_probe(self.conn, t, "gmail", False, "invalid_grant")
@@ -101,7 +101,7 @@ class TestAlerts(StoreCase):
 
 
 class TestAlertBatching(StoreCase):
-    """fix wave D (Astra S2): a changed-package alert over Telegram's 4096
+    """A changed-package alert over Telegram's 4096
     UTF-16 units was undeliverable forever. Renderings are batched within the
     limit; each rendering binds only the occurrences it prints."""
     N = 80
@@ -171,7 +171,7 @@ class TestAlertBatching(StoreCase):
 
 
 class TestUnboundedDetail(StoreCase):
-    """fix wave D round 2 (Astra + Terra S2): a probe's diagnostic has no bound;
+    """A probe's diagnostic has no bound;
     the first occurrence of a batch was taken unchecked and rendered 4363/5097
     units, offered again unchanged forever."""
     def setUp(self):
@@ -202,7 +202,7 @@ class TestUnboundedDetail(StoreCase):
 
 
 class TestOversizedParkedRendering(StoreCase):
-    """fix wave D round 3 (Astra S2): an undelivered alert rendering saved
+    """An undelivered alert rendering saved
     oversized by earlier code is never reused; it is re-composed through the fit."""
     def setUp(self):
         super().setUp()
@@ -230,7 +230,7 @@ class TestAlertRace(StoreCase):
     """end_pass commits pass_marker.live=0 before calling pending_rendering, so
     a second pass can begin, re-observe the same still-failing occurrence and
     reach pending_rendering while the first pass's own call is still in
-    flight (fix round 1). Both must see the SAME render for that occurrence —
+    flight. Both must see the SAME render for that occurrence —
     never two."""
     def setUp(self):
         super().setUp()

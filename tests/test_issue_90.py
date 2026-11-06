@@ -89,7 +89,7 @@ class Merge(_Merge):
         self.assertEqual(list(self.vendors()), ["Claude.ai Subscription"])
 
     def test_x_matched_invoice_never_names_the_merged_vendor(self):
-        # d1 (Astra S2): Y's name is pinned, so X's matched invoice's issuer does not show
+        # Y's name is pinned, so X's matched invoice's issuer does not show
         x = self.pay("Megekko via Mollie", 1300, "2026-07-05")
         self.matched_to(x, "Megekko B.V.", amount_minor=1300, document_date="2026-07-05")
         self.pay("Megekko", 4000, "2026-08-05")
@@ -169,7 +169,7 @@ class Refusals(_Merge):
         self.assertIn("already one vendor", self.refused("Ryanair H2n0", "ryanair dac"))
 
     def test_x_own_invoice_name_is_no_target_to_guess_from(self):
-        # r1 (Astra S1): "into" = X's invoice name, borne by no other vendor: refused, never a
+        # "into" = X's invoice name, borne by no other vendor: refused, never a
         # containment match on "Megekko B.V. Hardware"
         x = self.pay("Megekko via Mollie", 1300, "2026-07-05")
         self.matched_to(x, "Megekko B.V.", amount_minor=1300, document_date="2026-07-05")

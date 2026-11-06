@@ -3,7 +3,7 @@ verbatim so the migration tests open a store exactly as a released plugin left
 it (not one derived from today's DDL, which moves with every migration).
 
 - DDL_V1: schema 1, server/db.py at 6509806 (the first release).
-- DDL_V2: schema 2, server/db.py at b055022 (fix wave D: renders.delivered_seq).
+- DDL_V2: schema 2, server/db.py at b055022 (renders.delivered_seq).
 - DDL_V3: schema 3, server/db.py at e9b4eff (v0.1.0: classification freshness,
   package snapshots, revoked deliveries).
 - DDL_V4: schema 4, server/db.py at e79f77d (v0.2.0: pass steps, package requests,
@@ -15,10 +15,10 @@ it (not one derived from today's DDL, which moves with every migration).
 - DDL_V7: schema 7, server/db.py at 847cee7 (v0.6.0; issue #22: documents.date_read_at).
 - DDL_V8: schema 8, server/db.py at 7406c98 (v0.7.0; issue #24: operator_refs).
 - DDL_V9: schema 9, server/db.py at 86656ac (v0.8.0; issue #35: bank_rows.fx_rate/fx_unit).
-  Used by build_v9_store (Task 1, S2) to open a schema-9 store exactly as released,
+  Used by build_v9_store to open a schema-9 store exactly as released,
   including an optional live delegation-protocol pass, for the 9 -> 10 migration test.
-- DDL_V10: schema 10, server/db.py at 2d8a802 (v0.9.0; S2: the job protocol).
-- DDL_V11: schema 11, server/db.py at 26b68ee (S7, v0.10.0 never tagged).
+- DDL_V10: schema 10, server/db.py at 2d8a802 (v0.9.0: the job protocol).
+- DDL_V11: schema 11, server/db.py at 26b68ee.
 """
 
 DDL_V1 = """
@@ -2009,7 +2009,7 @@ CREATE TABLE IF NOT EXISTS runs (
 
 def build_v9_store(path, live_pass=False):
     """A schema-9 store exactly as v0.8.0 released it (DDL_V9, server/db.py at
-    86656ac), for the 9 -> 10 migration test (Task 1, S2). With `live_pass`, a live
+    86656ac), for the 9 -> 10 migration test. With `live_pass`, a live
     delegation-protocol pass is also on the marker (generation 1, pass_id 'p1',
     trigger 'cron') with its own `passes` row, so the migration's
     close_delegation_pass_on_upgrade has something live to close."""
@@ -2035,7 +2035,7 @@ def build_v9_store(path, live_pass=False):
 
 
 def build_v10_store(path, drain=None, cancelled=None, email_request=False, staged_email=False):
-    """A schema-10 store exactly as v0.9.0 left it, with optional S2-era state the 10 -> 11
+    """A schema-10 store exactly as v0.9.0 left it, with optional state the 10 -> 11
     migration must clear or convert."""
     import sqlite3
     conn = sqlite3.connect(path)

@@ -1,4 +1,4 @@
-"""#84 (the ruling on #77 item 3, A + C): the operator renames a vendor through the desk — a
+"""#84: the operator renames a vendor through the desk — a
 literal name, the name on its invoice, or the invoice names for all vendors. A vendor whose
 knowledge-base entry already exists is renamed in place (upsert_counterparty's new_name), and
 list_vendors shows the model every vendor with its current name and its matched invoice's
@@ -60,7 +60,7 @@ class Rename(_Q3):
         self.assertEqual(kb.counterparty_for(self.conn, "LINKEDIN")["cp_id"], e["cp_id"])
 
     def test_a_name_differing_only_in_case_wins_over_the_invoice_issuer(self):
-        # the ruled phrasing "call LINKEDIN 'LinkedIn'": a case-blind comparison took the
+        # the phrasing "call LINKEDIN 'LinkedIn'": a case-blind comparison took the
         # given name for the bank's own text and the matched invoice's issuer won
         done = self.pay("LINKEDIN", 5784, "2026-07-15")
         self.matched_to(done, "LinkedIn Ireland Unlimited Company", amount_minor=5784,
@@ -71,7 +71,7 @@ class Rename(_Q3):
         self.assertTrue(untag(self.card()["text"]).split("\n")[0].endswith("· LinkedIn"))
 
     def test_renaming_back_to_an_earlier_name_shows_it(self):
-        # d1 (Astra S2): the earlier given name stayed a pattern, so it read as a bank text
+        # The earlier given name stayed a pattern, so it read as a bank text
         # and the matched invoice's issuer took over on the other payments
         a = self.pay("GOOGLE*PAY", 1200, "2026-07-03")
         self.matched_to(a, "Google Cloud EMEA", amount_minor=1200, document_date="2026-07-03")
@@ -125,7 +125,7 @@ class Rename(_Q3):
         self.assertEqual(lineage.projection(self.conn, p)["status"], "exempt")
 
     def test_a_rename_with_no_entry_onto_another_vendors_name_is_refused(self):
-        # r1 (Astra + Terra S1): with no entry for the bank text, the new name found the
+        # With no entry for the bank text, the new name found the
         # other vendor's entry and merged the two (its ruling then covered both)
         kb.upsert_counterparty(self.conn, "Vendor A", patterns=["BANK A"])
         self.pay("BANK B", 2200, "2026-08-03")
@@ -135,7 +135,7 @@ class Rename(_Q3):
         self.assertEqual([(r[0], json.loads(r[1])) for r in rows], [("Vendor A", ["BANK A"])])
 
     def test_an_entry_nobody_renamed_reads_as_before_in_other_capitals(self):
-        # r1 (Astra + Terra S2): the bank's "Linkedin" for an entry named "LINKEDIN" is the
+        # The bank's "Linkedin" for an entry named "LINKEDIN" is the
         # bank's text, not a given name: the matched invoice's issuer names it
         self.kb("LINKEDIN")
         done = self.pay("LINKEDIN", 5784, "2026-07-15")
@@ -147,7 +147,7 @@ class Rename(_Q3):
                              "LinkedIn Ireland Unlimited Company")
 
     def test_a_rename_onto_an_unlearned_vendors_bank_text_is_refused(self):
-        # r2 (Astra S1): "BANK B" has no entry; renaming Vendor A to it made A take B's
+        # "BANK B" has no entry; renaming Vendor A to it made A take B's
         # payments (A's ruling then covered both)
         kb.upsert_counterparty(self.conn, "Vendor A", patterns=["BANK A"])
         self.pay("BANK A", 2100, "2026-08-02")
@@ -158,7 +158,7 @@ class Rename(_Q3):
         self.assertIsNone(kb.counterparty_for(self.conn, "BANK B"))
 
     def test_entries_nobody_renamed_read_as_in_0_11_12(self):
-        # r2 (Astra + Terra S2): whatever capitals an entry's name and patterns carry, only a
+        # Whatever capitals an entry's name and patterns carry, only a
         # rename makes its name win over the matched invoice's issuer
         for name, pats, text in (("LinkedIn", ["LINKEDIN"], "LINKEDIN"),
                                  ("LINKEDIN", ["Linkedin"], "Linkedin")):
@@ -211,7 +211,7 @@ class ListVendors(_Q3):
         self.assertEqual(len(set(seen)), 60)
 
     def test_a_long_name_is_listed_whole_and_renames(self):
-        # r1 (Astra S2): a clipped name passed back made a second entry
+        # A clipped name passed back made a second entry
         long = "A vendor whose bank text runs on " + "and on " * 15 + "until it ends"
         self.pay(long, 1300, "2026-08-03")
         self.kb(long)

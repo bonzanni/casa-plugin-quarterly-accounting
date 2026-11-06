@@ -154,7 +154,7 @@ class Skill(StoreCase):
 
 
 class ShowMissing(StoreCase):
-    """r1 (Astra S2 ×3): [Show missing invoices] decides when tapped — a card when the list
+    """[Show missing invoices] decides when tapped — a card when the list
     has something to act on, else the list's first page as the plain answer, binding only
     what it shows."""
 
@@ -222,7 +222,7 @@ class ShowMissing(StoreCase):
 
 
 class EveryShowButtonDecidesWhenTapped(StoreCase):
-    """r2 (Astra S2): the same shape as show-missing — every button that shows another view
+    """The same shape as show-missing — every button that shows another view
     is a keyed tap; none is a stored show_view call that could answer `post`."""
 
     def test_a_stale_show_matches_tap_answers_plain(self):
@@ -258,7 +258,7 @@ class EveryShowButtonDecidesWhenTapped(StoreCase):
 
 
 class PackageAfterAWalk(LoopCase):
-    """r3 (Terra, upheld by Astra's defence): Review clears the package card's keyboard, so
+    """Review clears the package card's keyboard, so
     a walk started from a card answering a package request ends on the quarter's card with
     [Get package]; any other walk ends on its receipt (#80)."""
 

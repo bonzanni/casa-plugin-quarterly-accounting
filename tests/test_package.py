@@ -100,7 +100,7 @@ class TestContents(Base):
         self.assertIn("superseded", z.read("notes.md").decode())
 
     def test_notes_name_rows_by_date_and_amount_never_by_machine_id(self):
-        # fix wave F: "#12 → #13 (absent)" and "#1 superseded" are machine row ids
+        # "#12 → #13 (absent)" and "#1 superseded" are machine row ids
         import re
         self.row(1, state="superseded", superseded_by=4, status="PDNG", amount_minor=9900,
                  booking_date=None, value_date="2026-07-02")
@@ -140,13 +140,13 @@ class TestContents(Base):
         self.assertLess(notes.index("## Not yet classified"), notes.index("## Nice to have"))
         self.assertIn("https://adobe.example/invoices", notes)
         self.assertTrue(notes.rstrip().splitlines()[-1].startswith("built "))
-        # simple loop §1: ONE line, as of the latest check; OPTIONAL-MISSING and
+        # ONE line, as of the latest check; OPTIONAL-MISSING and
         # NO-DOCUMENT count as documented
         self.assertEqual(out["caption"], "Q3 · as of 20 Sep · 2 of 4 documented · 2 open")
         del kbline
 
     def test_a_retained_pairing_on_an_unknown_expectation_is_matched(self):
-        # simple loop §2 table: no classification gate. A pairing kept while the
+        # Table: no classification gate. A pairing kept while the
         # classification is removed is MATCHED and ships its document in its folder;
         # nothing is "not yet classified" any more.
         pid = self.line()
@@ -195,7 +195,7 @@ class TestContents(Base):
         self.assertIn("Line\rbreak  odd", cells[1])
 
     def test_names_differing_only_by_case_are_distinct_after_casefold(self):
-        # fix round 1: Adobe_… and ADOBE_… are one file on Windows/macOS
+        # Adobe_… and ADOBE_… are one file on Windows/macOS
         a, b = self.line(), self.line()
         self.pair(a, self.file_doc(issuer="Adobe", body=b"1"))
         self.pair(b, self.file_doc(issuer="ADOBE", body=b"2"))
@@ -212,7 +212,7 @@ class TestContents(Base):
         self.assertEqual(len({n.casefold() for n in names}), 4)
 
     def test_one_document_on_several_lines_gets_one_name_per_folder(self):
-        # fix round 1: a candidate on two lines shipped twice in unresolved/ (X, X_h8)
+        # A candidate on two lines shipped twice in unresolved/ (X, X_h8)
         a, b = self.line(), self.line()
         doc = self.file_doc()
         with db.tx(self.conn):

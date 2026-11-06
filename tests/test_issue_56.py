@@ -1,4 +1,4 @@
-"""0.11.4: issue #56 — [See PDF] on a to-confirm card (operator ruling 2026-10-08: the card
+"""0.11.4: issue #56 — [See PDF] on a to-confirm card (the card
 keeps its buttons; tapping it sends the PDF and [Confirm] and the rest stay live). The button
 stores get_document(doc_id), a file-delivering capability, and is deposited with
 "keep_card": true (Casa #1362, v0.344.58)."""
