@@ -180,11 +180,11 @@ class SeveralInvoices(Case):
         import documents
         a = self.drv.file_unread("OA-1", "Zapier", 1000, document_date="2026-07-04")
         b = self.drv.file_unread("OA-1", "Zapier", 1000, document_date="2026-07-04")
-        for d, who in ((a, "N. Bonzanni"), (b, "Lesina BV")):
+        for d, who in ((a, "J. de Vries"), (b, "Voorbeeld BV")):
             documents.update_document_metadata(self.conn, d, recipient=who,
                                                **self.drv.printed[d])
         self.assertIsNone(documents.duplicate_of(self.conn, b))
-        documents.update_document_metadata(self.conn, b, recipient="N. Bonzanni")
+        documents.update_document_metadata(self.conn, b, recipient="J. de Vries")
         self.assertEqual(documents.duplicate_of(self.conn, b), a)
 
 
@@ -193,12 +193,12 @@ class Reissue(Case):
         """A vendor reissued its invoices to the company: same number, the
         recipient read differently — no copy; on the payment holding the first the operator is asked."""
         a = self.drv.file_unread("OR-1", "Zapier", 2000, document_date="2026-08-05")
-        self.drv.printed[a]["recipient"] = "N. Bonzanni"
+        self.drv.printed[a]["recipient"] = "J. de Vries"
         self.give(a)
         self.go("bbbbbbbb-2")
         pid = self.pids[1]            # it holds OR-1 (proposed): a held document
         b = self.drv.file_unread("OR-1", "Zapier", 2000, document_date="2026-08-05")
-        self.drv.printed[b]["recipient"] = "Lesina BV"
+        self.drv.printed[b]["recipient"] = "Voorbeeld BV"
         self.give(b)
         units = self.go("bbbbbbbb-3")
         self.no_sweep(units)

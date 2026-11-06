@@ -168,11 +168,11 @@ class OneVendor(_Case):
 class InvoiceName(_Case):
     def test_a_sales_invoice_names_its_recipient_and_a_payslip_names_nobody(self):
         sale = self.pay("Klant BV", 50000, "2026-08-03")
-        self.machine_entry(sale, self.doc(kind="sales-invoice", issuer="Lesina Holding B.V.",
+        self.machine_entry(sale, self.doc(kind="sales-invoice", issuer="Voorbeeld Holding B.V.",
                                           recipient="Klant Holding B.V.", amount_minor=50000,
                                           document_date="2026-08-03"))
         slip = self.pay("Jan Jansen", 300000, "2026-08-25")
-        self.machine_entry(slip, self.doc(kind="payslip", issuer="Lesina Holding B.V.",
+        self.machine_entry(slip, self.doc(kind="payslip", issuer="Voorbeeld Holding B.V.",
                                           amount_minor=300000, document_date="2026-08-25"))
         with db.tx(self.conn):
             got = {v["name"]: v["invoice_name"] for v in work.vendors(self.conn)}

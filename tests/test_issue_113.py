@@ -13,7 +13,7 @@ import kb
 import package
 import views
 
-SEPA = "SEPA Overboeking Naam: Loonadministratie NL Omschrijving: LH 2026-09 LESINA"
+SEPA = "SEPA Overboeking Naam: Loonadministratie NL Omschrijving: LH 2026-09 VOORBEELD"
 
 
 class BankName(unittest.TestCase):

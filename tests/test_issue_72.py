@@ -234,6 +234,6 @@ class Cards(LoopCase):
 
     def test_the_replace_card_says_what_differs(self):
         import cards
-        out = self.c(cards._differs, self.doc(recipient="Nicola Bonzanni", document_number="X1"),
-                     self.doc(recipient="Lesina BV", document_number="X1"))
-        self.assertEqual(out, "Differs: recipient Nicola Bonzanni → Lesina BV.")
+        out = self.c(cards._differs, self.doc(recipient="Jan de Vries", document_number="X1"),
+                     self.doc(recipient="Voorbeeld BV", document_number="X1"))
+        self.assertEqual(out, "Differs: recipient Jan de Vries → Voorbeeld BV.")
