@@ -1,14 +1,13 @@
-"""The operator surface (design rev 17 §1): the run's one end message, the open-items card,
+"""The operator surface: the run's one end message, the open-items card,
 the Review cards (one per proposal, then one per vendor with missing invoices, paged), the
 "package ready" notice, and the scheduled run's new-state rule.
 
 Every composer runs inside the caller's write transaction (db.next_seq asserts it): a tap
 composes its `next` in the tap's own transaction. A rendering binds EXACTLY the payments,
-and the candidate documents, whose lines appear whole in its final deposited text (plan
-rounds 7–8): each composer sizes its lines on their final form plus the worst-case tag,
+and the candidate documents, whose lines appear whole in its final deposited text: each composer sizes its lines on their final form plus the worst-case tag,
 and `_store` refuses (Undisplayed) a binding whose line the fit would cut. Every state a
 rendering reports — displayed or only counted — is recorded in `render_states`, which the
-§1 new-state rule reads."""
+new-state rule reads."""
 from __future__ import annotations
 
 import collections
@@ -28,10 +27,10 @@ import work
 
 KINDS = ("end", "open-items", "review", "vendor-page", "ready", "replace")
 # cards posted with no delivery callback — a tap's `next` (#1302) or show_view(view="open"):
-# seen once posted (review round 1 ruling: the closing open-items card included)
+# seen once posted (the closing open-items card included)
 TAP_CARDS = ("review", "vendor-page", "open-items")
-CONFIRM_ALL_MAX = 24          # §1: with 25 or more proposals it is left out
-CANDIDATE_BUTTONS = 4         # §1: up to four named candidates
+CONFIRM_ALL_MAX = 24          # With 25 or more proposals it is left out
+CANDIDATE_BUTTONS = 4         # Up to four named candidates
 PAGE_LINES = 25               # a vendor page's payments, then fitted to BODY_LIMIT
 LABEL_MAX = 32                # casa:result_broker.py, a button label
 BUCKETS = ("matched", "proposed", "missing", "not_needed", "pending", "unclassified")
@@ -47,7 +46,7 @@ class Undisplayed(RuntimeError):
 # ---- the state the surface is composed from -----------------------------------------------
 
 def named_quarter(conn):
-    """Ruling Q2b: the quarter the newest run's operator check named (runs.quarter), or
+    """The quarter the newest run's operator check named (runs.quarter), or
     None when the newest run named none. Runs are only ever inserted (job.claim's INSERT OR
     IGNORE), so the highest rowid is the newest."""
     r = conn.execute("SELECT quarter FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
@@ -55,9 +54,8 @@ def named_quarter(conn):
 
 
 def main_quarter(conn, job_id=None) -> str:
-    """The run's quarter when an operator check named one (ruling Q2: runs.quarter); with
-    no run given (a desk view, a desk get_package), the newest run's named quarter (ruling
-    Q2b); else D11: the quarter of the latest in-scope payment (today's when none)."""
+    """The run's quarter when an operator check named one (runs.quarter); with
+    no run given (a desk view, a desk get_package), the newest run's named quarter; else the quarter of the latest in-scope payment (today's when none)."""
     if job_id is not None:
         r = conn.execute("SELECT quarter FROM runs WHERE job_id=?", (job_id,)).fetchone()
         if r is not None and r[0]:
@@ -72,7 +70,7 @@ def main_quarter(conn, job_id=None) -> str:
 
 def _backed(conn, doc_id) -> list:
     """The payments a handed document backs now: a pairing or proposal holding it, or the
-    open question asking to swap it in (rev 18.4 §R18.3)."""
+    open question asking to swap it in."""
     out = [p for p, _how in matches.holders(conn, doc_id)]
     out += [r[0] for r in conn.execute("SELECT pid FROM replace_questions WHERE new_doc_id=?"
                                        " AND state='open'", (doc_id,))]
@@ -83,7 +81,7 @@ def handover_quarter(conn, job_id, docs=None) -> tuple:
     """#67: the quarter of a run that took only handovers, and whether it came from the
     handed documents themselves — (the earliest quarter of a payment a handed document
     backs, True); else (the quarter in play: the newest run that named one, False); else
-    (D11's newest-payment quarter, False), a label only: the card then offers no package."""
+    (the newest-payment quarter, False), a label only: the card then offers no package."""
     qs = sorted({work.describe(conn, p)["quarter"]
                  for d in (loop.run_handover_docs(conn, job_id) if docs is None else docs)
                  for p in _backed(conn, d)})
@@ -141,7 +139,7 @@ def checked_line(conn, q) -> str:
 
 
 def _line_key(d):
-    """Proposal line order (§1): vendor (kb.norm), then date, then pid."""
+    """Proposal line order: vendor (kb.norm), then date, then pid."""
     return (kb.norm(d["vendor"]), d["date"] or "", d["pid"])
 
 
@@ -153,9 +151,9 @@ def unclassified(d) -> bool:
 
 
 def _bucket(d) -> str:
-    """§6.1's partition: pending first, then status. An open payment absent from the latest
+    """The partition: pending first, then status. An open payment absent from the latest
     bank read (not fresh: decide refuses it until a later import observes it) is counted
-    pending, never missing (Task 6/7 carry): each payment in exactly one bucket (§6.1)."""
+    pending, never missing: each payment in exactly one bucket."""
     if views.waiting(d):
         return "pending"
     if unclassified(d):
@@ -189,7 +187,7 @@ def state(conn) -> dict:
 
 
 def _answered(d) -> bool:
-    return d["search_state"] == "accepted-missing"     # [Leave missing] (§1 "complete")
+    return d["search_state"] == "accepted-missing"     # [Leave missing]
 
 
 def item_state(d) -> str:
@@ -202,12 +200,12 @@ def item_state(d) -> str:
 
 
 def seen_state(conn, pid, st) -> bool:
-    """§1: shown by a delivered message. A run's own messages (`end`, `open-items`, `ready`)
-    count only once delivered (plan round 2, Astra S2: show_view stamps posted_seq BEFORE the
+    """Shown by a delivered message. A run's own messages (`end`, `open-items`, `ready`)
+    count only once delivered (show_view stamps posted_seq BEFORE the
     deposit, so a cut before the receipt left an end message "seen" that never arrived). A
     tap's card has no delivery callback (#1302 posts it after the tap's receipt), so a posted
     one counts — and so does an open-items card, which is only ever posted that way (a
-    tap's `next`, or show_view(view="open")): review round 1 ruling."""
+    tap's `next`, or show_view(view="open"))."""
     return conn.execute(
         "SELECT 1 FROM render_states i JOIN renders r ON r.render_id=i.render_id WHERE"
         " i.pid=? AND i.item_state=? AND (r.delivered_at IS NOT NULL OR (r.kind IN"
@@ -216,7 +214,7 @@ def seen_state(conn, pid, st) -> bool:
 
 
 def _missing_of(conn, vendor) -> list:
-    """The vendor's missing invoices (§1): its in-scope open payments that expect a
+    """The vendor's missing invoices: its in-scope open payments that expect a
     document, booked, all quarters (left-missing included). What a vendor card's
     [No invoice needed for these] and [Leave missing] act on — never Never's set."""
     return sorted(pid for pid, p, row in loop.in_scope(conn)
@@ -235,7 +233,7 @@ def _outcomes(conn) -> dict:
 
 
 def never_set(conn, vendor) -> list:
-    """§1 (r10) and d1 (Terra S1, ruled: generalize): every in-scope payment [Never for X]
+    """Every in-scope payment [Never for X]
     changes now, learned by REHEARSAL, never by a filter — the counterparty rule
     (kb.set_expectation_in_tx, kind none) applied under a rehearsal grant inside a savepoint
     that is always rolled back; the set is every payment whose status or expectation it
@@ -295,14 +293,14 @@ def _doc_summary(conn, doc_id) -> dict:
 
 
 def _offered(conn, d) -> list:
-    """The candidates a proposal offers (D3): the chosen document and its alternatives, or
+    """The candidates a proposal offers: the chosen document and its alternatives, or
     a legacy joint set's members — each {"doc", "match_id"} (None for an alternative).
-    An alternative or set member another payment holds (matches.holders, R5) is not
-    offered: a pick of it would only be refused (Task 8 review round 1)."""
+    An alternative or set member another payment holds (matches.holders) is not
+    offered: a pick of it would only be refused."""
     cur = d["current"]
 
     def free(doc_id):
-        # d2 (Terra S2): a document set aside (irrelevant) since it was stored is not offered
+        # A document set aside (irrelevant) since it was stored is not offered
         gone = conn.execute("SELECT irrelevant FROM documents WHERE doc_id=?",
                             (doc_id,)).fetchone()
         return not (gone and gone[0]) and not matches.taken_elsewhere(conn, doc_id, d["pid"])
@@ -350,12 +348,12 @@ def _one_per_purchase(conn, offered) -> list:
 
 
 def _proposal_line(conn, i, d) -> str:
-    """§1: "{i}. {vendor} · {day} · {amount} ↔ {doc}" — counting purchases, so an invoice
+    """Line form: "{i}. {vendor} · {day} · {amount} ↔ {doc}" — counting purchases, so an invoice
     and its own receipt read as the one document they are (#52)."""
     offered = _offered(conn, d)
     n = _purchases(conn, offered)
     if d["current"] is None and n != 1:
-        doc = f"{n} documents fit"                                   # D3: no chosen one
+        doc = f"{n} documents fit"                                   # No chosen one
     elif n > 1:
         chosen = offered[0]["doc"]
         doc = f"{n} documents fit; chose {_doc_word(chosen)} ({_day(chosen['date'])})"
@@ -384,8 +382,7 @@ def _ready_line(q, ref) -> str:
 # ---- fitting and storing ---------------------------------------------------------------------
 
 def _fits(lines) -> bool:
-    """The COMPLETE final text with the worst-case rendering tag fits a card (plan round 7:
-    measured on the real lines, never on an estimate)."""
+    """The COMPLETE final text with the worst-case rendering tag fits a card (measured on the real lines, never on an estimate)."""
     if not lines:
         return True
     text = "\n".join([views.title(lines[0]) + TAG_WORST] + list(lines[1:]))
@@ -404,7 +401,7 @@ def _fit_count(before, items, closing, after=(), total=None) -> int:
 
 
 def _grammar(ds) -> dict:
-    """The S7 grammar fields for the payments a rendering binds (views.FACT_FIELDS): the
+    """The grammar fields for the payments a rendering binds (views.FACT_FIELDS): the
     payee each was shown as, and the generated refs printed on them."""
     names = {str(d["pid"]): views.field_raw(views.shown(d)) for d in ds}
     refs: dict = {}
@@ -416,13 +413,11 @@ def _grammar(ds) -> dict:
 
 
 def _store(conn, kind, lines, scope, bound, states, docs=None) -> str:
-    """One rendering (plan rounds 7–8: a rendering binds exactly the payments, and the
+    """One rendering (a rendering binds exactly the payments, and the
     candidate documents, whose lines appear in its final deposited text). `lines` are the
-    FINAL lines (escaped fields, suffixes such as "· left missing"); the tag ends line 1
-    (binding V2). `bound` maps each payment the rendering binds to the index of its line;
+    FINAL lines (escaped fields, suffixes such as "· left missing"); the tag ends line 1. `bound` maps each payment the rendering binds to the index of its line;
     `docs` maps a bound payment to {match_id or ("alt", doc_id): line index} for the
-    pairings it displays — explicitly: a payment it does not name binds no pairing (review
-    round 1: no fallback to the current pairing); `states` maps every payment it reports (displayed or counted) to its
+    pairings it displays — explicitly: a payment it does not name binds no pairing (no fallback to the current pairing); `states` maps every payment it reports (displayed or counted) to its
     item_state. If the fit (views.fit_lines) would print a bound line less than whole,
     nothing is stored: Undisplayed."""
     rid = f"r{db.next_seq(conn)}"
@@ -468,7 +463,7 @@ def _row(conn, rid):
 # ---- the end message and the open-items card -------------------------------------------------
 
 def _vendor_items(ds) -> list:
-    """One Review item per vendor (§1), sorted by vendor: {"v": vendor, "pids": [...]}."""
+    """One Review item per vendor, sorted by vendor: {"v": vendor, "pids": [...]}."""
     groups: dict = {}
     for d in sorted(ds, key=_line_key):
         groups.setdefault(kb.norm(d["vendor"]), {"v": d["vendor"], "pids": []})["pids"].append(
@@ -477,7 +472,7 @@ def _vendor_items(ds) -> list:
 
 
 def _questions_line(qs) -> list:
-    """Rev 18.4 §R18.3: the handed-over documents whose payment already has one."""
+    """The handed-over documents whose payment already has one."""
     if not qs:
         return []
     return [f"{_s(len(qs), 'handed-over document')} to check — Review shows "
@@ -489,10 +484,10 @@ UNCL_SHOWN = 3      # #111: the not-classified payments a status card names, the
 
 def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, scheduled,
              extra_scope=None, questions=(), unclassified=()) -> str:
-    """The end-message composer (§1), shared by the end message and the open-items card:
+    """The end-message composer, shared by the end message and the open-items card:
     `head` lines, then "To confirm:" and the numbered proposal lines that fit whole (the
     rest behind one closing line: Review shows them, Confirm all is left out), then `tail`.
-    The Review order is every replace question (rev 18.4 §R18.3), every proposal in line
+    The Review order is every replace question, every proposal in line
     order, then `vendors`."""
     with views.named(list(proposals) + list(unclassified), quarter):
         plines = [_proposal_line(conn, i, d) for i, d in enumerate(proposals, 1)]
@@ -519,10 +514,10 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
             + after
         listed = proposals[:k]
         bound = {d["pid"]: len(before) + j for j, d in enumerate(listed)}
-        # r1 (Astra S2): a not-classified line is bound, so a reply about it binds as on the
+        # A not-classified line is bound, so a reply about it binds as on the
         # views; its lines follow the blank line and the title that open `after`
         at = len(lines) - len(after) + 2
-        # r2 (Astra S2): only those the card prints whole (as _store will fit it) — a card
+        # Only those the card prints whole (as _store will fit it) — a card
         # crowded by receipts cuts its tail, and a cut bound line would lose the card
         whole = views.fit_lines([views.title(lines[0]), *lines[1:]],
                                 tag=views.tag_now())[1] if lines else 0
@@ -552,7 +547,7 @@ def _nonzero(*parts) -> str:
 
 
 def _walk_missing(conn, vendors, quarter, scheduled) -> int:
-    """r5 (Astra S2): the missing payments the walk's vendor cards show and answer — a
+    """The missing payments the walk's vendor cards show and answer — a
     scheduled walk its items' own; an operator walk each vendor's missing payments of the
     quarter, left-missing ones included (cards._vendor_page acts on exactly those)."""
     if scheduled:
@@ -598,7 +593,7 @@ def _pending_of(conn, doc):
 
 
 def _receipts(conn, docs, job_id=None) -> tuple:
-    """§2.5, what the handed documents changed (#67: one line per document, naming it as
+    """What the handed documents changed (#67: one line per document, naming it as
     read, with what the run computed for it — never a result it did not compute): matched
     to a payment, a copy of an earlier document, not read,
     or the payments it was checked against; a proposed one is only its "To confirm" line
@@ -613,7 +608,7 @@ def _receipts(conn, docs, job_id=None) -> tuple:
             head.append(f"{name}: already filed as {views.esc(f'#{dup}')}.")
             continue
         hs = matches.holders(conn, doc)
-        # f2 (Astra S2): "Paired" only while the payment reduces to matched — a machine match
+        # "Paired" only while the payment reduces to matched — a machine match
         # whose document's readings then disagree is a proposal (reducer `amount-unknown`)
         status = {p: conn.execute("SELECT status FROM projections WHERE pid=?",
                                   (p,)).fetchone()[0] for p, _ in hs}
@@ -621,7 +616,7 @@ def _receipts(conn, docs, job_id=None) -> tuple:
         held = [p for p, how in hs if p not in paired]
         if paired:
             d = work.describe(conn, paired[0])
-            # operator ruling 2026-10-09: an automatic choice is unmistakable on the card
+            # An automatic choice is unmistakable on the card
             auto = conn.execute("SELECT 1 FROM match_state WHERE pid=? AND doc_id=? AND"
                                 " state='matched' AND author<>'operator'",
                                 (paired[0], doc)).fetchone() is not None
@@ -631,7 +626,7 @@ def _receipts(conn, docs, job_id=None) -> tuple:
             continue
         if conn.execute("SELECT 1 FROM replace_questions WHERE new_doc_id=? AND state='open'",
                         (doc,)).fetchone():
-            # rev 18.4 §R18.3: its question is the "to check" line + card (e2: retired
+            # Its question is the "to check" line + card (retired
             # questions are closed first — compose_end)
             head.append(f"{name}: its payment already has a document — Review asks which "
                         "to keep.")
@@ -661,7 +656,7 @@ def _receipts(conn, docs, job_id=None) -> tuple:
         elif n == 0:
             waiting = _pending_of(conn, row)
             if waiting is not None:
-                # #72 (d2, Astra S2): a payment of that amount the bank has not booked yet —
+                # #72: a payment of that amount the bank has not booked yet —
                 # named as a possibility, never as the document's own
                 head.append(f"{name}: not matched yet — a payment of {money} to "
                             f"{views.field(loop.vendor_of(conn, waiting))} on "
@@ -676,7 +671,7 @@ def _receipts(conn, docs, job_id=None) -> tuple:
 
 
 def _fit_receipts(lines, before, after) -> list:
-    """Every handed document accounted for (review round 1): the "Filed." lines that fit
+    """Every handed document accounted for: the "Filed." lines that fit
     whole between `before` and `after`, then one count of the rest."""
     def more(left):
         return f"… and {left} more filed."
@@ -692,7 +687,7 @@ def _confirm_room(props) -> list:
 
 
 def _handover(conn, job_id, docs, quarter, tail, ready, sent=None, scheduled=False) -> str:
-    """§1 "A missing invoice the operator has" (§2.5), a standalone continuation (d2: a run
+    """"A missing invoice the operator has", a standalone continuation (a run
     whose only request is the handover): one line per handed document — what the
     continuation changed — and the proposals among them to confirm."""
     head, props = _receipts(conn, docs, job_id)
@@ -704,27 +699,27 @@ def _handover(conn, job_id, docs, quarter, tail, ready, sent=None, scheduled=Fal
                     # #94: a job's end card never offers the package
                     extra_scope={"job_id": job_id, **(sent or {}),
                                  **(_ready_scope(conn, ready) if ready else {})},
-                    # e5 (Astra S2): a scheduled run offers only its own run's questions
+                    # A scheduled run offers only its own run's questions
                     questions=[q for q in replace.open_ones(conn)
                                if not scheduled or q["job_id"] == job_id])
 
 
 def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), ready=(),
                 alerts=(), stopped=None, standalone=True):
-    """The run's one end message (kind 'end', §1), or None when a scheduled run has nothing
-    new and no extra line (rev 17: "only if it holds an item in a state no delivered
+    """The run's one end message (kind 'end'), or None when a scheduled run has nothing
+    new and no extra line ("only if it holds an item in a state no delivered
     message showed"). `extra`: failure lines, mirror failures, the partial line — on a
-    scheduled run they never make a message alone (§1: the failure line "is otherwise the
+    scheduled run they never make a message alone (the failure line "is otherwise the
     run's one message", the alerts post). `ready`: the quarters whose completion notice is
-    owed (D19) — lines of the message when it has items to list, else the message IS the
+    owed — lines of the message when it has items to list, else the message IS the
     completion (compose_ready). `alerts`: the ids of the alerts `extra` prints, marked sent
-    when the message is delivered (scope["alerts"], D10). `stopped`: an operator run whose
+    when the message is delivered (scope["alerts"]). `stopped`: an operator run whose
     pass stopped — its stop line heads the message in place of "checked" (the bank was not
-    worked), whatever its alert's state (review round 1). `standalone` (d2, Astra S1): the
+    worked), whatever its alert's state. `standalone`: the
     run's only request was the handover — its message shows only what the handed documents
     changed; otherwise (a check, scheduled or the operator's, that a handover joined) the
     full message, the handover's "Filed." receipt lines added after its head."""
-    replace.open_ones(conn)        # e2 (Astra S2): stale questions retired before the receipts
+    replace.open_ones(conn)        # Stale questions retired before the receipts
     st = state(conn)
     q = main_quarter(conn, job_id)
     open_missing = [d for ds in st["missing"].values() for d in ds if not _answered(d)]
@@ -767,15 +762,15 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
         head += _fit_receipts(receipts, head, _confirm_room(new_props) + tail)
         return _summary(conn, "end", q, head, new_props, _vendor_items(new_miss), tail,
                         reported, scheduled=True, extra_scope=extra_scope,
-                        questions=new_qs,       # e1 (Astra S2): only this run's new ones
-                        unclassified=new_uncl)  # r1 (Terra S2): named, as on the other cards
+                        questions=new_qs,       # Only this run's new ones
+                        unclassified=new_uncl)  # Named, as on the other cards
     c = st["counts"].get(q, collections.Counter())
     n = sum(c.values())
     all_qs = replace.open_ones(conn)
-    # r3 (Astra S2): the card's questions are its quarter's, on every branch
+    # The card's questions are its quarter's, on every branch
     qs = [x for x in all_qs if work.describe(conn, x["pid"])["quarter"] == q]
-    # r4 (Astra S1): the operator's card reports only its quarter's items — another
-    # quarter's are one count line, never shown, so never marked seen (the §1 new-state rule
+    # The operator's card reports only its quarter's items — another
+    # quarter's are one count line, never shown, so never marked seen (the new-state rule
     # still owes them their own card)
     reported = {p: v for p, v in reported.items()
                 if work.describe(conn, p)["quarter"] == q}
@@ -791,7 +786,7 @@ def compose_end(conn, job_id, *, scheduled: bool, handover_docs=(), extra=(), re
             first += _fit_receipts(receipts, first, rest)
             return _summary(conn, "end", q, first, [], [], rest, reported,
                             scheduled=False, extra_scope=extra_scope, questions=qs)
-    # d1 (Astra S2): the approved script's 2a card is the 1a card — the run's quarter's own
+    # The approved script's 2a card is the 1a card — the run's quarter's own
     # items, every other quarter one line
     props = [d for d in st["proposals"] if d["quarter"] == q]
     mine = [d for d in open_missing if d["quarter"] == q]
@@ -818,7 +813,7 @@ def _other_quarters(st, open_missing, q) -> list:
             continue
         a = sum(1 for d in st["proposals"] if d["quarter"] == eq)
         b = sum(1 for d in open_missing if d["quarter"] == eq)
-        u = sum(1 for d in st["unclassified"] if d["quarter"] == eq)        # r1 (Astra)
+        u = sum(1 for d in st["unclassified"] if d["quarter"] == eq)
         if a or b or u:
             out.append(f"{_qn(eq, q)} {'still open' if eq < q else 'so far'}: "
                        + _nonzero((a, "to confirm"), (b, "missing"),
@@ -856,8 +851,7 @@ def _links_lines(conn, mine, before, after, quarter) -> list:
 
 
 def compose_open(conn, quarter, *, scheduled=False, links=False, package=False) -> str:
-    """The quarter status card (#55, the approved script 1a/1b; the open-items card of §1
-    r11): where `quarter` stands — its payments and non-zero counts, ITS proposals and
+    """The quarter status card (#55, the approved script 1a/1b; the open-items card): where `quarter` stands — its payments and non-zero counts, ITS proposals and
     missing invoices (Review walks only those), one line per other quarter with open items,
     and [Get package] only with `package` (#94: the desk asked for it, the operator's intent to
     get the package being clear) and a payment in the books. `b` counts the
@@ -896,8 +890,8 @@ def compose_open(conn, quarter, *, scheduled=False, links=False, package=False) 
 
 
 def compose_ready(conn, quarters: list, extra=(), alerts=(), receipts=()) -> str:
-    """The "package ready" notice (§1, D19): the latest owed quarter heads it (no button:
-    #94); `receipts` (d2: the "Filed." lines of a handover the completing check took);
+    """The "package ready" notice: the latest owed quarter heads it (no button:
+    #94); `receipts` (the "Filed." lines of a handover the completing check took);
     each earlier quarter is a line; then `extra`. Delivery records each completion
     (`ready_sigs`, views.mark_rendering_delivered)."""
     qs = sorted(set(quarters))
@@ -911,7 +905,7 @@ def compose_ready(conn, quarters: list, extra=(), alerts=(), receipts=()) -> str
         head = f"{_qn(latest)} complete · {k} of {k} accounted for · package ready"
     after = [_ready_line(q, latest) for q in qs[:-1]] + list(extra)
     lines = [head] + _fit_receipts(list(receipts), [head], after) + after
-    # d1 (Astra, Terra): a job's completion notice is no package request (#94): no button,
+    # A job's completion notice is no package request (#94): no button,
     # so it goes as a plain message; "send the Qn package" in words gets it
     return _store(conn, "ready", lines, {"quarter": latest, "order": [],
                                          **({"alerts": sorted(alerts)} if alerts else {}),
@@ -932,11 +926,11 @@ def _label(text) -> str:
 
 
 def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
-    """§1: "Card i of n · to confirm", the headline, one line per offered candidate (at most
+    """Card form: "Card i of n · to confirm", the headline, one line per offered candidate (at most
     CANDIDATE_BUTTONS, each bound only when its line is displayed whole; the rest counted),
     then the rest of the evidence. None when the payment is no longer to confirm."""
     d = work.describe(conn, pid)
-    if _bucket(d) != "proposed":       # #117 r4: one waiting on the bank is not to confirm
+    if _bucket(d) != "proposed":       # #117: one waiting on the bank is not to confirm
         return None
     offered = _one_per_purchase(conn, _offered(conn, d))
     with views.named([{**d, "candidates": [{"document": c["doc"]} for c in offered]}],
@@ -966,7 +960,7 @@ def _proposal_card(conn, review_of, pos, n, quarter, scheduled, pid):
                  "proposed": [pid] if d["current"] is not None and shown else [],
                  # #56: [See PDF] for the one document a Confirm card proposes
                  **_see(conn, d, picks, shown),
-                 # PLAY 0.11.2: the Confirm legend names the document's own kind
+                 # The Confirm legend names the document's own kind
                  "doc_word": views.KIND_WORD.get(
                      (d["current"]["document"] if d["current"] is not None
                       else shown[0]["doc"] if shown else {}).get("kind"), "document"),
@@ -988,7 +982,7 @@ def _see(conn, d, picks, shown) -> dict:
 
 
 def live_question_card(conn, review_of, pos, pid):
-    """e2 (Astra S2): the payment's live question's card, in place of a superseded one —
+    """The payment's live question's card, in place of a superseded one —
     None when it has none."""
     live = [q for q in replace.open_ones(conn) if q["pid"] == pid]
     if not live:
@@ -1025,7 +1019,7 @@ def _differs(conn, old, new) -> str:
 
 
 def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):
-    """Rev 18.4 §R18.3: "<payment> already has an invoice. Current: … (matched by the job |
+    """"<payment> already has an invoice. Current: … (matched by the job |
     confirmed by you | suggested by the job). New: … (from you)." [Keep current] [Use new].
     Bound to the payment and the displayed pairing (render_items: 18.4). None when the
     question is answered, superseded, or its payment holds another pairing now."""
@@ -1040,7 +1034,7 @@ def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):
                        (cur[0],)).fetchone()[0]
     how = ("confirmed by you" if cur[2] == "operator" else
            "matched by the job" if cur[1] == "matched" and d["status"] == "matched"
-           else "suggested by the job")           # f2: a demoted match is a suggestion
+           else "suggested by the job")           # A demoted match is a suggestion
 
     def doc_line(doc_id):
         x = _doc_summary(conn, doc_id)
@@ -1060,7 +1054,7 @@ def _replace_card(conn, review_of, pos, n, quarter, scheduled, qid):
 
 
 def _mark(d) -> str:
-    """A vendor page line's state (d1 ruling: the card lists every payment Never changes,
+    """A vendor page line's state (the card lists every payment Never changes,
     and says which of them are not missing invoices)."""
     b = _bucket(d)
     if b == "missing":
@@ -1071,10 +1065,10 @@ def _mark(d) -> str:
 
 
 def _payee_free(d, quarter) -> str:
-    """PLAY 0.11.2: a vendor card's line without the bank's payee text — the card's head
+    """A vendor card's line without the bank's payee text — the card's head
     names the vendor once (the bank writes it in several forms: "Belastingdienst",
     "BELASTINGDIENST"). Composed under views.named(..., payee=False), so a generated ref
-    tells apart two payments that read the same without it (r8 Astra S2)."""
+    tells apart two payments that read the same without it."""
     return views.headline(d, quarter, payee=False)
 
 
@@ -1101,14 +1095,12 @@ def _page_lines(vendor, ds, i, n, p, pages, link, quarter, noun="invoice") -> li
 def _pages(vendor, ds, i, n, link, quarter, extra=(), noun="invoice") -> list:
     """Greedy pages of ≤ PAGE_LINES payments, each measured on its COMPLETE final text: the
     page's real lines (_page_lines: escaped vendor name, "· left missing" suffixes, the
-    link) with the worst-case page numbers and the worst-case rendering tag (plan round 7,
-    Astra S1: a 60-character punctuated vendor name and 24 suffixes overflowed a page
+    link) with the worst-case page numbers and the worst-case rendering tag (a 60-character punctuated vendor name and 24 suffixes overflowed a page
     measured without them, and its 25th payment was bound but cut)."""
     worst = max(len(ds), 2)
 
     def fits(trial):
-        # r5 (Astra S2): with the lines a page carries after its payments (§B's count line,
-        # in its longest, switched-on form), so the fit never drops a frozen page's payment
+        # With the lines a page carries after its payments, so the fit never drops a frozen page's payment
         return _fits(_page_lines(vendor, trial, i, n, worst, worst, link, quarter, noun)
                      + list(extra))
     pages, cur = [], []
@@ -1147,8 +1139,7 @@ def _vendor_pages_of(conn, review_of, pos, page):
 
 
 def _others_line(others, others_missing, quarter, on, vendor="") -> list:
-    """§B: the vendor's payments of OTHER quarters a quarter's card counts (operator ruling
-    2026-10-08), stated plainly — every one [Never] would change (d2 Astra + Terra S1), and
+    """The vendor's payments of OTHER quarters a quarter's card counts, stated plainly — every one [Never] would change, and
     how many are missing; with the switch on, that the answers cover the missing ones.
     Issue #59 (4): when they are not all missing, the line says why it is there."""
     if not others:
@@ -1166,7 +1157,7 @@ def _others_line(others, others_missing, quarter, on, vendor="") -> list:
 
 
 def _also_line(vendor, also) -> list:
-    """PLAY 0.11.2: the quarter's other payments [Never] would change, as one line."""
+    """The quarter's other payments [Never] would change, as one line."""
     if not also:
         return []
     n = len(also)
@@ -1175,15 +1166,15 @@ def _also_line(vendor, also) -> list:
 
 
 def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page, frozen=None):
-    """§1 (r11), 0.11.2 §B: one vendor's missing invoices, paged. An operator walk lists the
-    vendor's never_set (the rehearsed set Never changes, d1 ruling) OF THE WALK'S QUARTER,
+    """One vendor's missing invoices, paged. An operator walk lists the
+    vendor's never_set (the rehearsed set Never changes) OF THE WALK'S QUARTER,
     each marked; its payments of other quarters are frozen on page 1 as `others` (pid ->
     quarter) with `others_rev` (their projection revisions) and `others_missing` (the
     unanswered missing ones), and stated in one line. [Never for X] binds the pages' union
     plus `others`; with the switch on (`all_quarters`, the [Apply to all quarters] tap) [No
     invoice needed for these] and [Leave missing] act on the page's missing lines plus
     `others_missing`. A scheduled walk lists the item's new missing payments only, with no
-    Never and no switch (rev 17). Page 1 freezes the pages; later pages and a switched
+    Never and no switch. Page 1 freezes the pages; later pages and a switched
     card (`frozen`, the tapped card's scope) copy them. None when the vendor has no missing
     invoice left to list."""
     vendor = item["v"]
@@ -1195,7 +1186,7 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page, frozen
                  else never_set(conn, vendor))
     quarter_of = {p: work.describe(conn, p)["quarter"] for p in allset}
     here = {p for p in allset if scheduled or quarter_of[p] == quarter}
-    # PLAY 0.11.2: the card's subject is its missing payments; the quarter's other payments
+    # The card's subject is its missing payments; the quarter's other payments
     # Never would change are one summary line (`also`, bound by membership like `others`)
     now = {p for p in here if p in missing}
     src = frozen or (json.loads(first["scope_json"]) if first is not None else None)
@@ -1230,7 +1221,7 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page, frozen
     noun = src["noun"] if src is not None and src.get("noun") else wanted(order)
     extra = [] if scheduled else (_also_line(name, also)
                                   + _others_line(others, others_missing, quarter, on, name))
-    with views.named(order, quarter, payee=False):      # r8: the lines it prints
+    with views.named(order, quarter, payee=False):      # The lines it prints
         if pages is None:
             worst = [] if scheduled else (_also_line(name, also)
                                           + _others_line(others, others_missing, quarter, True,
@@ -1259,12 +1250,12 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page, frozen
         bound = {d["pid"]: 1 + j for j, d in enumerate(shown)}
         also_line = _also_line(name, also)
         if also_line and also_line[0] in lines:
-            # PLAY 0.11.2: the quarter's other payments Never would change are stated on one
+            # The quarter's other payments Never would change are stated on one
             # line and bound to it at their revision now, so Never refuses one that changed
             # (as when it was a listed line)
             bound.update({p: lines.index(also_line[0]) for p in also})
         if others_missing and not scheduled:
-            # §B: the stated other-quarter missing payments are bound to their count line
+            # The stated other-quarter missing payments are bound to their count line
             # (displayed whole), at their revisions now; one that moved since page 1 froze
             # them is refused at the tap (taps._vendor_answer)
             bound.update({p: len(lines) - 1 for p in others_missing})
@@ -1273,7 +1264,7 @@ def _vendor_page(conn, review_of, pos, n, quarter, scheduled, item, page, frozen
 
 
 def switched(conn, rid, on: bool):
-    """§B: the vendor card `rid` again, its switch set to `on` — the same page, the same
+    """The vendor card `rid` again, its switch set to `on` — the same page, the same
     frozen pages and others (the [Apply to all quarters] / [✓ All quarters] tap)."""
     r = _row(conn, rid)
     sc = json.loads(r["scope_json"])
@@ -1302,10 +1293,10 @@ def card(conn, review_of, pos, page=1):
 
 
 def next_after(conn, review_of, pos):
-    """§1: every answer posts its successor — the next item of the stored Review order
+    """Every answer posts its successor — the next item of the stored Review order
     still unanswered, else None: after the walk's last card the receipt alone answers
     (#80: no quarter card the operator did not ask for) — unless the walk started from a
-    card answering the operator's package request (#99 r3): then its quarter's card, with
+    card answering the operator's package request (#99): then its quarter's card, with
     [Get package]."""
     scope = json.loads(_row(conn, review_of)["scope_json"])
     order = scope.get("order") or []
@@ -1327,7 +1318,7 @@ def next_after(conn, review_of, pos):
             if rid is not None:
                 return rid
     if scope.get("package") and scope.get("quarter"):
-        # #99 r3 (Terra, defended): the walk started from a card that answered the operator's
+        # #99: the walk started from a card that answered the operator's
         # package request; a tap cleared that card's keyboard, so the walk ends on the
         # quarter's card with [Get package] — asked for, so no card unasked (#80)
         return compose_open(conn, scope["quarter"], package=True)
@@ -1338,7 +1329,7 @@ def next_after(conn, review_of, pos):
 
 def buttons(conn, r) -> list:
     """The stored calls of a cards rendering, in order, as (label, tool, args, key_spec);
-    key_spec is (action, pid, doc_id) (D16: every tap is a keyed `verdict`); [Get package]
+    key_spec is (action, pid, doc_id) (every tap is a keyed `verdict`); [Get package]
     — the one unkeyed call (#1303) — is the last action, then Close."""
     out = _buttons(r["render_id"], r["kind"], json.loads(r["scope_json"]))
     # #93: Close beside the actions (room allowing: Casa takes six), so a card can be
@@ -1396,8 +1387,8 @@ def _buttons(rid, kind, scope) -> list:
         if not last:
             out.append(v("Next page", "next-page"))
         elif acts and scope.get("others_missing") and not scope.get("scheduled"):
-            # §B: the one switch (operator ruling 2026-10-08)
-            # PLAY 0.11.2: no label starts with a mark (Casa adds "☑ <label>" to a tapped card)
+            # The one switch
+            # no label starts with a mark (Casa adds "☑ <label>" to a tapped card)
             out.append(v("Only this quarter", "this-quarter") if scope.get("all_quarters")
                        else v("Apply to all quarters", "all-quarters"))
         return out + [v("Leave for now", "leave-vendor")]
@@ -1417,8 +1408,8 @@ def exempt_label(scope) -> str:
 
 
 def walk_words(scope, sep=" and ") -> str:
-    """BRAIN/operator 2026-10-08: a count on a button must be a number the card shows, so
-    [Review] carries none; PLAY 0.11.2: one thing, one number — the legend and the Review
+    """A count on a button must be a number the card shows, so
+    [Review] carries none; one thing, one number — the legend and the Review
     receipt print only the counts line's own number ("the 8 to confirm") and name the
     missing invoices without one (the walk's vendor cards may cover fewer or more payments
     than the counts line's "missing")."""

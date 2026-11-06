@@ -1,8 +1,6 @@
-"""The reducer — spec §Match records, "The reducer, as one total function".
-PURE. Given a lineage's folded state, its live row facts and its derived
+"""The reducer, as one total function. PURE. Given a lineage's folded state, its live row facts and its derived
 expectation, return the ONE desired owned-tag set, a machinery status and
-the residue reasons. The desired-set table in §"The projection" is derived
-from this order; where they could differ, this order wins."""
+the residue reasons. The desired-set table is derived from this order; where they could differ, this order wins."""
 from __future__ import annotations
 
 import json
@@ -14,7 +12,7 @@ import fold as F
 OWNED = ("acct::matched", "acct::proposed", "acct::portal",
          "acct::no-document-expected", "acct::open")
 
-# Material facts of a row (spec §Match records: account, direction, currency,
+# Material facts of a row (account, direction, currency,
 # amount_minor, status, booking date, counterparty, remittance, and
 # bank-feed's review flags).
 FACT_KEYS = ("account_id", "direction", "currency", "amount_minor", "status",
@@ -52,7 +50,7 @@ class Inputs:
     last_known_kind: str | None
     doc_kinds: dict
     portal: bool
-    unknown_docs: frozenset = frozenset()   # Q2 run 1: documents of unknown amount
+    unknown_docs: frozenset = frozenset()   # Documents of unknown amount
 
 
 @dataclass(frozen=True)
@@ -109,7 +107,7 @@ def reduce(inp: Inputs) -> Reduction:
         row_ok = _row_ok(m, inp)
         if not row_ok:
             reasons.append("facts-changed")
-        # f1 (Terra/Astra S1): the document's readings disagreed after the job matched it —
+        # The document's readings disagreed after the job matched it —
         # the job never matches an unknown amount, so its match shows as a proposal
         amount_ok = m.doc_id not in inp.unknown_docs
         if not amount_ok:
@@ -119,7 +117,7 @@ def reduce(inp: Inputs) -> Reduction:
         return Reduction(_with_portal({tag}, inp), "matched" if ok else "proposed",
                          m.match_id, tuple(reasons))
     if len(ms) > 1:
-        # D3: a set of machine candidates (fold._normalize made them all conflicted) is one
+        # A set of machine candidates (fold._normalize made them all conflicted) is one
         # proposal awaiting the operator's pick — "to confirm", never "missing"
         return Reduction(_with_portal({"acct::proposed"}, inp), "proposed", None,
                          tuple(reasons))
@@ -134,5 +132,5 @@ def reduce(inp: Inputs) -> Reduction:
 
 
 def apply_fixed_point(actual: set, desired: frozenset) -> set:
-    """actual := (actual − owned_tags) ∪ desired (spec §The sweep step 4)."""
+    """actual := (actual − owned_tags) ∪ desired."""
     return (set(actual) - set(OWNED)) | set(desired)

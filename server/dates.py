@@ -1,6 +1,5 @@
-"""Quarters and dates. The quarter identifier is YYYY-Qn everywhere (spec
-§Data model). A row's effective date is its booking_date, or its value_date
-while it is pending and has none (spec §"The projection", admission)."""
+"""Quarters and dates. The quarter identifier is YYYY-Qn everywhere. A row's effective date is its booking_date, or its value_date
+while it is pending and has none."""
 from __future__ import annotations
 
 import datetime as _dt
@@ -43,7 +42,7 @@ def normalize_quarter(text, today: str) -> str | None:
     when they name none. Accepted: "2026-Q3", "Q3 2026" and a bare "Q3" (case
     and surrounding spaces ignored). A bare quarter later than today's is last
     year's: "Q4" said in September means the Q4 that has happened (the reply
-    grammar's rule, now shared with the tool layer; fix wave F)."""
+    grammar's rule, now shared with the tool layer)."""
     if not isinstance(text, str):
         return None
     m = _Q_WORDS.match(text.strip().lower())
@@ -73,7 +72,7 @@ def quarter_start(day: str) -> str:
 
 def add_months(day: str, n: int) -> str:
     """`day` plus `n` calendar months, clamped to the target month's last day
-    (2026-01-31 + 1 → 2026-02-28): the vendor search's "plus a month after" (§2.2)."""
+    (2026-01-31 + 1 → 2026-02-28): the vendor search's "plus a month after"."""
     import calendar
     d = parse_day(day)
     m = d.month - 1 + n
@@ -95,7 +94,7 @@ def short_day(day: str) -> str:
 
 
 def long_day(day: str) -> str:
-    """The note's date (simple loop §2.4): "2 Sep 2026"."""
+    """The note's date: "2 Sep 2026"."""
     d = parse_day(day)
     return f"{d.day} {_MONTHS[d.month - 1]} {d.year}"
 

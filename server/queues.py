@@ -1,10 +1,9 @@
-"""Server-owned per-run work queues (operator ruling A; docs specs/rounds-2026-10-06-simple-
-loop-diff/queues-design.md, q6). Every piece of work a unit owes is a server row from the
+"""Server-owned per-run work queues. Every piece of work a unit owes is a server row from the
 moment it is known, and a unit is finished only when it owes nothing:
 
 - `run_items`: an erase candidate (unit `erasures`), the own-mail search and the attachments
   it found (unit `filing`), the attachments a payment's searches found (unit
-  `payment:<pid>`, rev 18.4 §R18.2);
+  `payment:<pid>`);
 - `run_work`: the payments to decide, one at a time (loop.py builds it); `run_mirror`: the
   mirror's calls (mirror.py hands them out).
 
@@ -17,7 +16,7 @@ from __future__ import annotations
 
 import db
 
-ATTEMPTS_MAX = 2         # D8: an item is handed again at most once without progress
+ATTEMPTS_MAX = 2         # An item is handed again at most once without progress
 UPSTREAM = ("erase", "search", "ref")        # every kind a decision depends on (rule 5)
 # issue #50: an email a payment's own reference search returned, its attachments not yet
 # listed — owed by that payment alone. Never a give-up of its own: a payment that owes one
@@ -25,7 +24,7 @@ UPSTREAM = ("erase", "search", "ref")        # every kind a decision depends on 
 
 
 def unit_of_payment(pid) -> str:
-    """Rev 18.4 §R18.2: the unit owing a payment's found attachments."""
+    """The unit owing a payment's found attachments."""
     return f"payment:{int(pid)}"
 
 
@@ -61,7 +60,7 @@ def enqueue(conn, job_id, unit, kind, keys) -> list:
 
 
 def require_handed(conn, job_id, unit, what) -> None:
-    """A model's write enqueues only into the unit currently handed out (q2)."""
+    """A model's write enqueues only into the unit currently handed out."""
     if handed_unit(conn, job_id) != unit:
         raise db.Refusal(f"{what} goes with the unit that is handed out now: call job_next")
 
@@ -91,13 +90,13 @@ def queued(conn, job_id, unit, kind=None) -> list:
     return conn.execute(sql + " ORDER BY seq", args).fetchall()
 
 
-CHARS_MAX = 12_000       # d4: a hand-out's exact refs, at most this many characters (≥ 1 item)
+CHARS_MAX = 12_000       # A hand-out's exact refs, at most this many characters (≥ 1 item)
 KEY_MAX = 4_000          # one ref's length: refused beyond it, never clipped
 
 
 def take_fitting(rows) -> list:
     """The queued items whose keys fit CHARS_MAX (the answer's size; at least one), oldest
-    first: a hand-out. No call budget (operator ruling 2026-10-07): an item persists as it
+    first: a hand-out. No call budget: an item persists as it
     is done, and one a cut interrupted comes again."""
     out, chars = [], 0
     for r in rows:
@@ -123,7 +122,7 @@ def stamp(conn, job_id, rows, hand_seq) -> None:
 
 
 def blocks_decide(conn, job_id, unit) -> bool:
-    """Rev 18.4 §R18.2: a payment with a found attachment still queued decides nothing."""
+    """A payment with a found attachment still queued decides nothing."""
     return conn.execute("SELECT 1 FROM run_items WHERE job_id=? AND unit=? AND kind='ref'"
                         " AND state='queued'", (job_id, unit)).fetchone() is not None
 
@@ -160,15 +159,14 @@ def check_emails(emails) -> list:
 
 def unlisted(conn, job_id, unit) -> list:
     """Issue #50: the emails `unit` owes a listing — queued, or given up with a payment a
-    handover reopened since (d1 Astra S1) — oldest first."""
+    handover reopened since — oldest first."""
     return [r[0] for r in conn.execute(
         "SELECT key FROM run_items WHERE job_id=? AND unit=? AND kind='email' AND state<>'done'"
         " ORDER BY seq", (job_id, unit))]
 
 
 def list_email(conn, job_id, unit, key) -> int:
-    """Issue #50: a listing reported closes the email whether queued or given up (d2 Terra
-    S2: a reopened payment clears it). Returns how many closed."""
+    """Issue #50: a listing reported closes the email whether queued or given up (a reopened payment clears it). Returns how many closed."""
     assert conn.in_transaction
     return conn.execute("UPDATE run_items SET state='done', closed_seq=?, reason='listed'"
                         " WHERE job_id=? AND unit=? AND kind='email' AND key=? AND"
@@ -186,8 +184,8 @@ def settle(conn, job_id) -> None:
     unit, h = run["hand_unit"], run["hand_seq"]
     conn.execute("UPDATE runs SET hand_unit=NULL WHERE job_id=?", (job_id,))
     import progress
-    if progress.made(conn, job_id, h, unit):      # rev 18.4 §R18.5: the ONE definition
-        # e3 (Astra S2): attempts count CONSECUTIVE unproductive hand-outs — a hand-out that
+    if progress.made(conn, job_id, h, unit):      # The ONE definition
+        # Attempts count CONSECUTIVE unproductive hand-outs — a hand-out that
         # progressed clears its unit's count
         conn.execute("UPDATE run_items SET attempts=0 WHERE job_id=? AND unit=? AND"
                      " state='queued'", (job_id, unit))
@@ -225,7 +223,7 @@ REASON_MAX = 200
 
 
 def set_aside(conn, token, items, reason) -> dict:
-    """The one closing write for an item no other write closes (q1): a found attachment that
+    """The one closing write for an item no other write closes: a found attachment that
     is no invoice or no file this plugin takes ({"ref": …}), an erase candidate bank-feed
     still has ({"pid": …}). `reason` is kept on the item. Inside its own transaction."""
     import decide

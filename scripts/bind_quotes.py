@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The plugin's side of the Casa gate's quote check (binding r7): for each {"store",
+"""The plugin's side of the Casa gate's quote check: for each {"store",
 "quote"} read from stdin (JSON list), views.bound_rendering on that store copy; prints a
 JSON list of {"render_id"} or {"refused": <line>}. Stdlib only, run in a process of its own
 with only the plugin's server/ on the path (Casa's modules would shadow the plugin's)."""

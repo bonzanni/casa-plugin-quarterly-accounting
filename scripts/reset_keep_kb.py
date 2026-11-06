@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A fresh store that keeps the KB, the binding and the watermark (simple loop §6.8), for the
+"""A fresh store that keeps the KB, the binding and the watermark, for the
 live acceptance's second run.
 
     python3 scripts/reset_keep_kb.py        # store at $CLAUDE_PLUGIN_DATA
@@ -19,8 +19,7 @@ and re-inserts the kept rows in ONE transaction. Table by table, at schema 16:
             operator_refs, claims, runs, readings, render_keys, account_choices, post_offers,
             run_work, run_mirror, run_docs, quarter_notices, pass_marker, work_requests.
 
-Refuses a store whose schema version is not 16. It never touches bank-feed's ledger: PLAY
-restores bank-feed's install backup first, as its reset recipe does. Before erasing, `main`
+Refuses a store whose schema version is not 16. It never touches bank-feed's ledger: a test run restores bank-feed's install backup first, as its reset recipe does. Before erasing, `main`
 copies the store beside itself (accounting.sqlite.pre-reset-<time>); the copy is never deleted.
 """
 from __future__ import annotations

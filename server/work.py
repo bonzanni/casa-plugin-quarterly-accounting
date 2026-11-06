@@ -1,6 +1,5 @@
 # server/work.py
-"""Search bookkeeping, the watermark, and the one read of lineage state
-(spec §Weekly pass steps 2-3; §"What a pass works on"). Effort is rationed,
+"""Search bookkeeping, the watermark, and the one read of lineage state. Effort is rationed,
 facts are not: an item whose search aged out is still open, still listed,
 still shipped as MISSING — it just is not searched again until something
 revives it."""
@@ -20,7 +19,7 @@ AGE_OUT_PASSES = 3
 # issue #26: the count moves at most once per this many seconds (the weekly cron's cadence,
 # with slack), so back-to-back checks — honest or replayed — never age a payment out
 AGE_OUT_SPACING_S = 6 * 24 * 3600
-# issue #26 (D1, Terra S1): age-out is a back-off, never terminal — an aged-out payment is
+# issue #26: age-out is a back-off, never terminal — an aged-out payment is
 # searched again this long after its last counted search, so no record (replayed or not)
 # can take it out of the search for good
 AGE_OUT_REARM_S = 28 * 24 * 3600
@@ -38,7 +37,7 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
     search) or payment (a wider search). Returns {"recorded": [one record_search_in_tx
     result per payment]}.
 
-    The job (rev 18.4 §R18.1–§R18.2): once the run's work list exists, a search is the
+    The job: once the run's work list exists, a search is the
     handed payment's — `pids` is exactly that payment — at most SEARCHES_MAX a run, and it
     is recorded with `refs`, every attachment it found ([] when none): each one no ingest
     filed yet is the payment's owed item from this same commit; the answer's `files` are
@@ -76,7 +75,7 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
             job_id = None
         if job_id is not None:
             unit = _search_unit(conn, job_id, pids, refs, effort)
-        # r1 Astra S2: a listing is not a search — it spends no age-out budget either
+        # A listing is not a search — it spends no age-out budget either
         out = [record_search_in_tx(conn, pid=p, token=token, queries=queries,
                                    found_candidate=found_candidate,
                                    exhausted=exhausted and not listing,
@@ -91,7 +90,7 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
                              (db.next_seq(conn), job_id, pids[0]))
             queues.enqueue(conn, job_id, unit, "ref", [r for r in refs if not filed(conn, r)])
             # issue #50: an email is listed once its listing is reported or a ref of it is
-            # found; a listing is remembered (r1 Astra S2: a later search returning the same
+            # found; a listing is remembered (a later search returning the same
             # email unlisted owes nothing), an unlisted one is owed
             listed = {r.split(":", 1)[0] for r in refs} | {m for m, ok in emails or () if ok}
             queues.enqueue(conn, job_id, unit, "email", [m for m, _ok in emails or ()])
@@ -101,12 +100,12 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
             answer.update(files=[r["key"] for r in queues.take_fitting(rows)],
                           files_total=len(rows))
         if token is not None and (effort or listing):
-            decide.note_progress(conn, token)       # §2.2 `progressed`: a search recorded
+            decide.note_progress(conn, token)       # A search recorded
     return answer
 
 
 def _search_unit(conn, job_id, pids, refs, effort) -> str:
-    """The job's checks of a search record (rev 18.4): `refs` given; the payment handed out
+    """The job's checks of a search record: `refs` given; the payment handed out
     now, alone; SEARCHES_MAX not yet reached. Returns the payment's unit."""
     import loop
     import queues
@@ -134,21 +133,21 @@ def record_search_in_tx(conn, *, pid, token, queries=(), found_candidate=False,
                         exhausted=False, incomplete=False, identity_unknown=None,
                         revive=False) -> dict:
     """record_search inside the caller's transaction (a reading's "have another look",
-    S7 §8: it runs in a savepoint of its clause)."""
+    it runs in a savepoint of its clause)."""
     import passes
     # Only actual search effort — a query run, a candidate found, or the idea-space
     # exhausted — is "searched". A bare `incomplete` (no queries: the pass ran out of
     # room before ever reaching this item) is bookkeeping, not effort, and spends no
-    # age-out budget, exactly like an identity-only call (round C1, Astra S2: this was
+    # age-out budget, exactly like an identity-only call (this was
     # silently stamping last_searched_at and counting toward AGE_OUT_PASSES with no
     # query ever run). An incomplete call WITH queries is different: effort WAS spent,
     # so it counts toward age-out exactly like a completed fruitless search, unless it
-    # found a candidate (round C2 ruling, Astra + Terra: a query-bearing incomplete
+    # found a candidate (a query-bearing incomplete
     # pass must not bypass age-out indefinitely — only the no-query case is free).
     effort = bool(queries) or found_candidate or exhausted
-    # D10: search bookkeeping is machine-authored, so it needs the pass token like any
+    # Search bookkeeping is machine-authored, so it needs the pass token like any
     # other machine write — except a quiet revive ("have another look", no search effort),
-    # which is how an operator's reply re-arms an item outside a pass (fix round 1, finding 4).
+    # which is how an operator's reply re-arms an item outside a pass.
     if token is None and not (revive and not effort):
         raise db.Refusal("search bookkeeping is a pass's work: pass the pass_token")
     passes.check_token(conn, token)
@@ -194,7 +193,7 @@ def record_search_in_tx(conn, *, pid, token, queries=(), found_candidate=False,
     search["searched_seq"] = db.next_seq(conn)
     live = lineage.live_row(conn, p)
     search["facts_fp"] = db.canonical(R.facts_of(live)) if live is not None else None
-    # issue #24 (D4, Terra S1): a check searches what it owes though a judgment paired
+    # issue #24: a check searches what it owes though a judgment paired
     # the item first; that search counts for the report, but an item that needs no
     # search now never moves its age-out count (0.6.0 never searched it at all)
     owed_only = not revive and not _needs_search(describe(conn, pid))
@@ -203,7 +202,7 @@ def record_search_in_tx(conn, *, pid, token, queries=(), found_candidate=False,
     elif found_candidate:
         streak = 0
         if state == "aged-out":
-            state = "active"            # B4: a re-armed search that found something
+            state = "active"            # A re-armed search that found something
     elif not revive and pass_id and may_count:
         streak += 1
         search["last_counted_pass"] = pass_id
@@ -239,7 +238,7 @@ def _may_count(search: dict) -> bool:
 
 
 def rearmed(search: dict) -> bool:
-    """Issue #26 (B4): an aged-out payment is due a search again AGE_OUT_REARM_S after its
+    """Issue #26: an aged-out payment is due a search again AGE_OUT_REARM_S after its
     last counted search."""
     age = _counted_age(search)
     return age is None or age >= AGE_OUT_REARM_S
@@ -260,7 +259,7 @@ def quarter_pids(conn, quarter: str) -> list:
 
 
 def stop_chasing_in_tx(conn, quarter: str, *, grant) -> dict:
-    """'Stop chasing Q2', inside the caller's transaction, under a tap's grant (S7 §8.1)."""
+    """'Stop chasing Q2', inside the caller's transaction, under a tap's grant."""
     authority.require(conn, grant)
     dates.parse_quarter(quarter)
     done = []
@@ -275,7 +274,7 @@ def stop_chasing_in_tx(conn, quarter: str, *, grant) -> dict:
 
 
 def leave_missing_in_tx(conn, pids, *, grant) -> list:
-    """[Leave missing] (simple loop §1, D7): each payment's missing invoice is the
+    """[Leave missing]: each payment's missing invoice is the
     operator's explicit answer — `search_state='accepted-missing'`, settled — inside the
     caller's transaction, under a tap's grant. Returns the pids it answered."""
     authority.require(conn, grant)
@@ -289,7 +288,7 @@ def leave_missing_in_tx(conn, pids, *, grant) -> list:
 
 
 def start_from_in_tx(conn, quarter: str) -> str:
-    """#55 (operator ruling 2026-10-08): an operator's request to get `quarter` done, when it
+    """#55: an operator's request to get `quarter` done, when it
     lies before the books' start, moves the start to its first day — inside the caller's
     transaction, from asks.request_work only (trigger "operator", a named quarter). The
     start only ever moves earlier. Returns the new start."""
@@ -321,7 +320,7 @@ def _match_summary(conn, match_id) -> dict:
 
 
 def is_pending(row) -> bool:
-    """THE pending predicate of the operator's surface (D18): the bank has not booked the
+    """THE pending predicate of the operator's surface: the bank has not booked the
     row. describe's `pending` — which cards._bucket and the package both read."""
     return row.get("status") == "PDNG"
 
@@ -396,7 +395,7 @@ def triage(conn) -> list:
 
 
 TRIAGE_LIMIT = 50
-# d4/d5 (Astra S1, generalized): which of the attachments a search found — own mail or a
+# Which of the attachments a search found — own mail or a
 # vendor's — are already filed by ANY earlier ingest, of any run: decided here, on the
 # EXACT refs (operator_refs and documents.source_ref keep each whole), never on a list the
 # model compares. The rest join the run's queues (queues.py).
@@ -411,12 +410,12 @@ def filed(conn, ref) -> bool:
     unknowable (no attachment order is stored) — counting only a "first" one could offer
     the filed invoice again and skip the other."""
     bare = ref.split(":", 1)[0]
-    # h1: filed AND its reading recorded (documents.read_at) — filed and unread, it is owed
+    # Filed AND its reading recorded (documents.read_at) — filed and unread, it is owed
     return conn.execute(
         "SELECT 1 FROM operator_refs o JOIN documents d ON d.doc_id=o.doc_id WHERE o.ref=?"
         " AND d.read_at IS NOT NULL UNION ALL SELECT 1 FROM documents WHERE source_ref=?"
         " AND read_at IS NOT NULL UNION ALL SELECT 1 FROM documents WHERE source='gmail' AND"
-        " source_ref=? AND ? AND read_at IS NOT NULL LIMIT 1",     # h2: the bare id too
+        " source_ref=? AND ? AND read_at IS NOT NULL LIMIT 1",     # The bare id too
         (ref, ref, bare, ":" in ref)).fetchone() is not None
 
 
@@ -451,7 +450,7 @@ def listed(d: dict) -> dict:
     out["candidate_ids"] = [m["match_id"] for m in d["candidates"]]
     out["candidates"] = [_match_view(m) for m in d["candidates"][:CANDIDATES_SHOWN]]
     # what record_match / propose_match compare: pass it back as row_digest. The
-    # payment reference stays readable (C2, Astra): it is the tie-break between
+    # payment reference stays readable: it is the tie-break between
     # otherwise identical payments.
     snap = d["row_snapshot"]
     out["row_digest"] = R.digest(snap) if snap is not None else None
@@ -495,12 +494,12 @@ def list_quarter_state(conn, quarter=None, triage_only=False, fresh_only=True,
         d = describe(conn, rpid)
         if d["ended"]:
             return {"item": None, "notice": NOTICE_TRIAGE}
-        # the same guard as every page (C3, Astra): never an answer no agent can read
+        # the same guard as every page: never an answer no agent can read
         item = budget.page([listed(d)], 1, ident=lambda v: f"payment #{v['pid']}")[0][0]
         return {"item": item, "notice": NOTICE_TRIAGE}
     after = _after(after)
     if triage_only:
-        # fix wave F (throughput): not every open payment of every quarter at once —
+        # Not every open payment of every quarter at once —
         # by default only the ones read since the latest import (the only ones a
         # machine match accepts), a page at a time, with what was left out counted
         items = triage(conn)
@@ -570,7 +569,7 @@ def vendors(conn) -> list:
 
 
 def list_vendors(conn, after=None) -> dict:
-    """#84 (ruling on #77 item 3): every vendor of the store's payments, one entry each: its
+    """#84: every vendor of the store's payments, one entry each: its
     current name, the name its cards show, its bank texts, whether the name is one someone
     gave, and the name printed for it on the latest document matched to one of its payments
     (#89: invoice_name; null when none is). Sorted by name; one page fits one answer, `next`
@@ -580,7 +579,7 @@ def list_vendors(conn, after=None) -> dict:
         if after is not None and v["key"] <= kb.norm(after):
             continue
         texts, cp = v["texts"], v["cp"]
-        # r1 (Astra S2): name and invoice_name are values to pass back and copy: whole
+        # Name and invoice_name are values to pass back and copy: whole
         out.append({
             "name": v["name"],
             "invoice_name": v["invoice_name"],

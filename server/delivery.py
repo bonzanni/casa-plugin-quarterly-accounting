@@ -1,20 +1,19 @@
 # server/delivery.py
-"""Delivery staging and the delivery log (spec §Packaging). A package or one
+"""Delivery staging and the delivery log. A package or one
 invoice is staged, never rebuilt: through Casa's plugin outbox (atomic .part ->
 rename; consumed on send, reaped at 2 h), posted to Telegram by post_package as an
-operator_file (S7 §6.1). No email (S7 §6.2). An ambiguous outcome is
+operator_file. No email. An ambiguous outcome is
 `uncertain`, never retried automatically; a resend is the exact retained file.
 
 Staging reads bytes out of packages/ or documents/, so it holds the custody
 lock (db.custody_lock) from the read through the delivery-log row, taken
 BEFORE any transaction (lock order: custody, then SQLite). Every write into
-the delivery log checks the pass token: a stale pass is refused there too
-(spec §"Running the pass on demand").
+the delivery log checks the pass token: a stale pass is refused there too.
 
 Every delivery gets a staged path of its own, never reused: a Telegram copy is
 `qa-<16 hex>.<ext>`, drawn again on a collision and guarded by the UNIQUE
 staged_path, so a holder that was superseded never holds the path of a later
-copy. The operator-facing name travels as the deposit's `filename` (S7a)."""
+copy. The operator-facing name travels as the deposit's `filename`."""
 from __future__ import annotations
 
 import json
@@ -95,7 +94,7 @@ def stage_for_delivery(conn, *, channel="telegram", package_id=None, doc_id=None
                        pass_token=None, resend=False, last_built=False, quarter=None) -> dict:
     """Stage one package or one document: a package's first send (it must carry the latest
     import), a resend ("send it again"), the last build asked for by name (`last_built`,
-    issue #15) or a single document. Telegram only (S7 §6.2): email is refused with
+    issue #15) or a single document. Telegram only: email is refused with
     EMAIL_GONE."""
     if channel == "email":
         raise db.Refusal(EMAIL_GONE)
@@ -198,11 +197,10 @@ def _stage(conn, package_id, doc_id, pass_token, resend=False, as_built=False) -
 
 
 def _require_current_snapshot(conn, package_id) -> None:
-    """A package's FIRST send carries what the bank looked like at its build
-    (round E4, Terra + Astra): once a newer import has landed, the rows it judged
+    """A package's FIRST send carries what the bank looked like at its build: once a newer import has landed, the rows it judged
     may have been reclassified, so it is refused — checked inside the write that
     logs the delivery. A resend of a file already sent (delivered or uncertain)
-    is that exact file, as the spec offers; a delivered quarter that changed
+    is that exact file; a delivered quarter that changed
     underneath is alerted separately."""
     sent = conn.execute("SELECT 1 FROM deliveries WHERE package_id=? AND status IN"
                         " ('delivered', 'uncertain')", (package_id,)).fetchone()
@@ -216,8 +214,7 @@ def _require_current_snapshot(conn, package_id) -> None:
 
 
 def revoke_superseded_first_sends(conn, snapshot_id) -> list:
-    """Inside an import's transaction, after its snapshot is recorded (round E5,
-    Terra S1): every delivery still `staged` that is a package's FIRST send
+    """Inside an import's transaction, after its snapshot is recorded: every delivery still `staged` that is a package's FIRST send
     (no delivered or uncertain send of it) and was built under another snapshot
     is revoked — marked failed with revoked_at, so record_delivery refuses it.
     (A send that already failed is not revoked: resend_refusal simply offers no
@@ -231,7 +228,7 @@ def revoke_superseded_first_sends(conn, snapshot_id) -> list:
         "SELECT d.delivery_id, d.channel, d.staged_path, d.package_id, p.quarter"
         " FROM deliveries d JOIN packages p"
         " ON p.package_id=d.package_id WHERE d.status='staged' AND d.revoked_at IS NULL"
-        " AND d.as_built=0 AND d.posted_at IS NULL"     # r3 #1: a posted send has left
+        " AND d.as_built=0 AND d.posted_at IS NULL"     # A posted send has left
         " AND (p.snapshot_id IS NULL OR p.snapshot_id<>?)"
         " AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.package_id=d.package_id"
         "  AND e.status IN ('delivered', 'uncertain'))", (snapshot_id,)).fetchall()
@@ -274,7 +271,7 @@ def withdraw(conn, rows, *, refusal: str) -> None:
 
 
 def withdraw_revoked(conn) -> None:
-    """Inside the import's transaction, under the custody lock (rounds E6, E7):
+    """Inside the import's transaction, under the custody lock:
     withdraw every revoked delivery's staged bytes. A removal that fails refuses
     the WHOLE import: it rolls back (snapshot unchanged, nothing revoked), so a
     superseded package is never left sendable under a committed newer snapshot;
@@ -299,7 +296,7 @@ NEVER_POSTED = ("this package was never posted, so it cannot have arrived — no
 
 
 def posted_unrecorded(conn) -> list:
-    """r3 #1: staged package sends post_package deposited (posted_at) whose outcome nobody
+    """Staged package sends post_package deposited (posted_at) whose outcome nobody
     recorded — they have left the plugin, whatever their lease."""
     return conn.execute(
         "SELECT d.*, p.quarter FROM deliveries d JOIN packages p ON p.package_id=d.package_id"
@@ -360,7 +357,7 @@ def recover_staged(conn, d):
 def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=None) -> dict:
     """Settle a send. A package send recorded uncertain or failed raises its package notice
     here and returns the rendering that says it as `speak` — always including that notice,
-    and the package in its scope's `offers`, so "send it again" binds to it (D3)."""
+    and the package in its scope's `offers`, so "send it again" binds to it."""
     import alerts
     if outcome not in ("delivered", "uncertain", "failed"):
         raise db.Refusal("outcome is 'delivered', 'uncertain' or 'failed'")
@@ -375,7 +372,7 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
             return {"delivery_id": delivery_id, "status": "delivered", "already": True}
         if (outcome == "delivered" and d["package_id"] is not None
                 and d["channel"] == "telegram" and d["posted_at"] is None):
-            # r3 #2 (Terra S1): a package never posted did not arrive
+            # A package never posted did not arrive
             raise db.Refusal(NEVER_POSTED)
         # Evidence wins over the recovery's guess: a send recovery settled `uncertain`
         # (withdrawn) that is reported delivered was delivered — Casa had taken the
@@ -406,7 +403,7 @@ def record_delivery(conn, *, delivery_id, outcome, message_id=None, pass_token=N
 
 def settle_delivered(conn, d) -> list:
     """A package send has arrived (record_delivery's delivered outcome, and get_package
-    right after its deposit, D15): inside the caller's transaction, the rows exactly as the
+    right after its deposit): inside the caller's transaction, the rows exactly as the
     package froze them become the accountant's copy, the package name counts as announced,
     no offer of the package stays open, and the copy is compared with the bank now (a late
     report may follow a newer import). Returns the new alerts' ids."""
@@ -414,7 +411,7 @@ def settle_delivered(conn, d) -> list:
     assert conn.in_transaction
     # facts_fp is db.canonical(reducer.facts_of(row)), what ledger's delivered checks
     # compare; kind is the one the accountant's copy stands for — shipped under, else the
-    # last known (a row shipped unclassified or not re-read; fix wave F)
+    # last known (a row shipped unclassified or not re-read)
     pk = conn.execute("SELECT manifest_json FROM packages WHERE package_id=?",
                       (d["package_id"],)).fetchone()
     for r in json.loads(pk[0])["rows"]:
@@ -443,8 +440,7 @@ _LATEST = ("SELECT d.package_id, d.status, d.revoked_at, p.filename, p.quarter F
 
 
 def resend_refusal(conn, package_id):
-    """THE predicate for "send it again" (escalated after the same shape of finding
-    in three rounds): None when a resend of this package can be staged, else the
+    """THE predicate for "send it again": None when a resend of this package can be staged, else the
     operator's sentence saying why not. Staging a resend refuses with exactly this
     sentence, and a package is OFFERED exactly when this is None (offerable, every
     composer of an offer, resend_target) — so nothing can be offered that staging
@@ -519,15 +515,14 @@ NO_OFFER = "that message offers no package to send again"
 
 
 def resend_target(conn, render_id=None) -> int:
-    """What "send it again" resends (S7 §6.3, binding R4): typed words quoting a rendering
+    """What "send it again" resends: typed words quoting a rendering
     bind `render_id`, that rendering's own `offers` (none: NO_OFFER); unquoted words bind
-    the package the most recent DELIVERED rendering that offers a package offered (D3: an
+    the package the most recent DELIVERED rendering that offers a package offered (an
     operator's words bind to what they were shown — a view, a post or a status sheet
     delivered after it offers nothing and hides nothing).
     An offered package that is no longer eligible (resend_refusal) is answered
     with its own reason. None waiting, or several, is a refusal in the operator's words —
-    several are told apart by the date in their filenames (spec §"What the
-    operator never has to learn")."""
+    several are told apart by the date in their filenames."""
     if render_id is not None:
         r = conn.execute("SELECT scope_json, delivered_at, posted_seq FROM renders WHERE"
                          " render_id=?", (render_id,)).fetchone() \

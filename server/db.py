@@ -1,7 +1,6 @@
 """The plugin's store: ONE SQLite file in $CLAUDE_PLUGIN_DATA, written by
 several server processes — Casa spawns this MCP server per agent session,
-so Ellen's and each specialist's are separate processes on one file (spec
-§Match records, rounds 20-21). The one serialization: every write runs
+so Ellen's and each specialist's are separate processes on one file. The one serialization: every write runs
 inside tx(), which takes the write lock with BEGIN IMMEDIATE, retried until
 acquired or LOCK_BOUND_S expires; the store-wide sequence is allocated
 inside that transaction, so the later-serialized write always has the
@@ -28,7 +27,7 @@ LOCK_BOUND_S = 30.0
 
 class Refusal(Exception):
     """An expected, explained refusal. The dispatcher renders it as
-    `refused: <message>` (spec §Error handling: explicit, loud, never silent)."""
+    `refused: <message>` (explicit, loud, never silent)."""
 
 
 class Busy(Refusal):
@@ -55,7 +54,7 @@ def data_dir() -> pathlib.Path:
     return pathlib.Path(d)
 
 
-# The job protocol's own tables (spec §4, §5, §6), module constants so a fresh store's
+# The job protocol's own tables, module constants so a fresh store's
 # DDL and MIGRATIONS[9] create byte-identical tables.
 CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   gen INTEGER PRIMARY KEY, job_id TEXT NOT NULL, at TEXT NOT NULL,
@@ -69,12 +68,12 @@ CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   said_seq INTEGER,              -- Q2 run 1: the store sequence of its last DELIVERED report
   report_seq INTEGER);           -- g1: a `report` handed, not yet acknowledged by a job_next             -- Q2 run 1: the store sequence when it last reported progress"""
 
-# Schema 10's credits (INV-J8), frozen for MIGRATIONS[9]; MIGRATIONS[11] drops it.
+# Schema 10's credits, frozen for MIGRATIONS[9]; MIGRATIONS[11] drops it.
 CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (
   pass_id TEXT NOT NULL, key TEXT NOT NULL, gen INTEGER NOT NULL,
   PRIMARY KEY (pass_id, key));"""
 CREDITS_GEN_DDL = "CREATE INDEX IF NOT EXISTS ix_credits_gen ON credits(gen);"
-# Each Casa job run (simple loop §3 "Run").
+# Each Casa job run.
 RUNS_DDL = """CREATE TABLE IF NOT EXISTS runs (
   job_id TEXT PRIMARY KEY,
   completed_at TEXT,             -- the run answered `complete` (S7 §10)
@@ -114,7 +113,7 @@ WORK_REQUESTS_DDL_V10 = """CREATE TABLE IF NOT EXISTS work_requests (
 # removed-name: schema history end
 
 # Schema 10's own claims and runs tables, frozen: MIGRATIONS[9] creates these and
-# MIGRATIONS[10] adds the S7 columns, so a store migrated from 9 does not add them twice.
+# MIGRATIONS[10] adds these columns, so a store migrated from 9 does not add them twice.
 CLAIMS_DDL_V10 = """CREATE TABLE IF NOT EXISTS claims (
   gen INTEGER PRIMARY KEY, job_id TEXT NOT NULL, at TEXT NOT NULL,
   spent INTEGER NOT NULL DEFAULT 0, reported INTEGER NOT NULL DEFAULT 0,
@@ -123,7 +122,7 @@ CLAIMS_DDL_V10 = """CREATE TABLE IF NOT EXISTS claims (
 RUNS_DDL_V10 = """CREATE TABLE IF NOT EXISTS runs (
   job_id TEXT PRIMARY KEY, passes INTEGER NOT NULL DEFAULT 0);"""
 
-# S7 (spec §7.5, §8, §11, §5): what a tap may spend, a typed reading awaiting its tap, an
+# What a tap may spend, a typed reading awaiting its tap, an
 # account page's frozen choices, and how often this run handed out each rendering
 READINGS_DDL = """CREATE TABLE IF NOT EXISTS readings (
   reading_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,8 +154,8 @@ POST_OFFERS_DDL = """CREATE TABLE IF NOT EXISTS post_offers (
   render_id TEXT NOT NULL, job_id TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (render_id, job_id));"""
 
-# Simple loop (design rev 17 §3), schema 12.
-# §3 "Run": the run's work list, each entry with its vendor group and outcome (§2.1, §2.2)
+# Simple loop, schema 12.
+# the run's work list, each entry with its vendor group and outcome
 RUN_WORK_DDL = """CREATE TABLE IF NOT EXISTS run_work (
   job_id TEXT NOT NULL, pid INTEGER NOT NULL,
   vendor TEXT NOT NULL,          -- loop.vendor_of: the group it is handed out in (D1)
@@ -172,8 +171,8 @@ RUN_WORK_DDL = """CREATE TABLE IF NOT EXISTS run_work (
   closed_seq INTEGER,            -- queues: when it took its outcome
   searched_seq INTEGER,          -- the latest search recorded for it (a hand-out's progress)
   PRIMARY KEY (job_id, pid));"""
-# §2.4: the mirror calls a run handed out, numbered, and what became of them (D9);
-# args_json holds the call's canonical [tool, args]. Nothing is planned ahead (round 7)
+# The mirror calls a run handed out, numbered, and what became of them;
+# args_json holds the call's canonical [tool, args]. Nothing is planned ahead
 RUN_MIRROR_DDL = """CREATE TABLE IF NOT EXISTS run_mirror (
   job_id TEXT NOT NULL, n INTEGER NOT NULL,
   tool TEXT NOT NULL CHECK (tool IN ('untag_transaction', 'tag_transaction', 'add_note')),
@@ -182,7 +181,7 @@ RUN_MIRROR_DDL = """CREATE TABLE IF NOT EXISTS run_mirror (
   error TEXT,
   attempts INTEGER NOT NULL DEFAULT 0, hand_seq INTEGER, closed_seq INTEGER,   -- queues
   PRIMARY KEY (job_id, n));"""
-# Rev 18.4 §R18.3: a handed-over document the job judged belongs to a payment that already
+# A handed-over document the job judged belongs to a payment that already
 # has one — the question its one card asks, bound to the pairing it displayed
 REPLACE_QUESTIONS_DDL = """CREATE TABLE IF NOT EXISTS replace_questions (
   question_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -191,8 +190,8 @@ REPLACE_QUESTIONS_DDL = """CREATE TABLE IF NOT EXISTS replace_questions (
   new_doc_id INTEGER NOT NULL,   -- the handed-over document
   state TEXT NOT NULL CHECK (state IN ('open', 'kept', 'used', 'superseded')),
   created_seq INTEGER NOT NULL, answered_at TEXT);"""
-# Queues (operator ruling A): every other item a unit owes, from the moment it is known —
-# an erase candidate, the own-mail search, a found attachment (docs queues-design.md); an
+# Queues: every other item a unit owes, from the moment it is known —
+# an erase candidate, the own-mail search, a found attachment; an
 # email a payment's own reference search returned, its attachments not yet listed (#50)
 RUN_ITEMS_DDL = """CREATE TABLE IF NOT EXISTS run_items (
   job_id TEXT NOT NULL,
@@ -211,13 +210,13 @@ RUN_DOCS_DDL = """CREATE TABLE IF NOT EXISTS run_docs (
   fitted_seq INTEGER,                     -- its fits joined the run's work list
   fits INTEGER,                           -- how many payments it could fit then
   PRIMARY KEY (job_id, doc_id));"""
-# §1 "new state" (rounds 1-2): every state a rendering REPORTS — a payment it displays,
+# Every state a rendering REPORTS — a payment it displays,
 # or one it only counts (an end message's "4 missing") — read by cards.seen_state. Binding
 # stays in render_items, which holds only the payments whose lines the text displays
 RENDER_STATES_DDL = """CREATE TABLE IF NOT EXISTS render_states (
   render_id TEXT NOT NULL, pid INTEGER NOT NULL, item_state TEXT NOT NULL,
   PRIMARY KEY (render_id, pid));"""
-# §3 "Per quarter": the completion a "package ready" notice was delivered for (§1) — by
+# The completion a "package ready" notice was delivered for — by
 # its signature, so a reopening and a re-completion within one run is still a new one
 QUARTER_NOTICES_DDL = """CREATE TABLE IF NOT EXISTS quarter_notices (
   quarter TEXT PRIMARY KEY,
@@ -426,14 +425,14 @@ CREATE INDEX IF NOT EXISTS ix_operator_refs_filed ON operator_refs(filed_at);
 # Migrations from version N to N+1, appended when the schema changes. Each is
 # a list of statements applied inside the migrating transaction.
 MIGRATIONS: dict[int, list[str]] = {
-    # 1 -> 2 (fix wave D, Astra S1): delivered_at has one-second resolution, so two
+    # 1 -> 2: delivered_at has one-second resolution, so two
     # deliveries in one second tied and "the most recent delivered rendering" fell
     # back to creation order. A rendering delivered before this migration gets 0:
     # every later delivery (a fresh next_seq, >= 1) orders after it; among the old
     # ones the previous delivered_at order is kept as the tie-break.
     1: ["ALTER TABLE renders ADD COLUMN delivered_seq INTEGER",
         "UPDATE renders SET delivered_seq = 0 WHERE delivered_at IS NOT NULL"],
-    # 2 -> 3 (fix E2; its 1 -> 2 renumbered when merged after fix D): classification
+    # 2 -> 3: classification
     # freshness. A migrated lineage has no stamp, so it is non-fresh until the next
     # sweep reads it: the conservative start.
     2: ["ALTER TABLE projections ADD COLUMN class_observed_snapshot INTEGER",
@@ -489,7 +488,7 @@ MIGRATIONS: dict[int, list[str]] = {
     5: ["ALTER TABLE projections ADD COLUMN note_issued_seq INTEGER",
         "ALTER TABLE projections ADD COLUMN note_other_issued_at TEXT",
         "UPDATE projections SET note_other_issued_at = note_issued_at",
-        # issue #15 (D3): a package remembers the request it was built for, so a build
+        # issue #15: a package remembers the request it was built for, so a build
         # whose request no longer owns it is never sent as a first send
         "ALTER TABLE packages ADD COLUMN request_id INTEGER",
         "UPDATE packages SET request_id = (SELECT max(r.request_id) FROM package_requests r"
@@ -497,7 +496,7 @@ MIGRATIONS: dict[int, list[str]] = {
         # issue #15: a package request is worked in rounds (state `queued`, pass_id
         # nullable; SQLite cannot alter a CHECK, so the table is rebuilt). A request an
         # older version left buildable without its quarter's Gmail round and judging
-        # goes back to `queued` with its token, lease and package cleared (design D1):
+        # goes back to `queued` with its token, lease and package cleared:
         # the new flow checks it before anything is built or sent.
         """CREATE TABLE package_requests_v6 (
   request_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -532,7 +531,7 @@ MIGRATIONS: dict[int, list[str]] = {
     # pairing, a confirmation). Nothing earlier kept that mark, so every filed document
     # starts unread and the next package round's judge confirms its date.
     6: ["ALTER TABLE documents ADD COLUMN date_read_at TEXT"],
-    # issue #24 (D5): the files the operator supplied, by their own ref, once filed. None
+    # issue #24: the files the operator supplied, by their own ref, once filed. None
     # was kept before, so the next pass's filing tries each once more (ingest is
     # idempotent) and records it.
     7: ["""CREATE TABLE IF NOT EXISTS operator_refs (
@@ -542,8 +541,8 @@ MIGRATIONS: dict[int, list[str]] = {
     # imported before it carry none until the next import.
     8: ["ALTER TABLE bank_rows ADD COLUMN fx_rate TEXT",
         "ALTER TABLE bank_rows ADD COLUMN fx_unit TEXT"],
-    # 9 -> 10 (S2): the job protocol. Job passes, claims, requests, acquisitions,
-    # the sweep's read-back debt and claim-ordered note issues (spec §4, §5, §6).
+    # 9 -> 10: the job protocol. Job passes, claims, requests, acquisitions,
+    # the sweep's read-back debt and claim-ordered note issues.
     9: ["ALTER TABLE passes ADD COLUMN protocol TEXT NOT NULL DEFAULT 'delegation'",
         "ALTER TABLE passes ADD COLUMN holder_job TEXT",
         "ALTER TABLE passes ADD COLUMN orphaned_by TEXT",
@@ -574,7 +573,7 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE projections ADD COLUMN note_seen_gen INTEGER",
         "ALTER TABLE probes ADD COLUMN gen INTEGER",
         CLAIMS_DDL_V10, WORK_REQUESTS_DDL_V10, CREDITS_DDL, CREDITS_GEN_DDL, RUNS_DDL_V10],
-    # 10 -> 11 (S7): tap keys, readings, account choices, post offers; the run's stamps;
+    # 10 -> 11: tap keys, readings, account choices, post offers; the run's stamps;
     # the request's latest ask; a send's and a view's post marks. Data steps follow in migrate (after_10_to_11)
     10: ["ALTER TABLE claims ADD COLUMN seq INTEGER",
          "ALTER TABLE runs ADD COLUMN completed_at TEXT",
@@ -584,24 +583,24 @@ MIGRATIONS: dict[int, list[str]] = {
          " ('queued', 'snapshot', 'snapshot-done', 'built')",
          "DELETE FROM meta WHERE key='drain' OR key LIKE 'cancelled:%'",
          "ALTER TABLE deliveries ADD COLUMN posted_at TEXT",
-         # R5 + the d3 amendment: a v0.9.0 telegram package send, staged or recovered
+         # A v0.9.0 telegram package send, staged or recovered
          # uncertain, may already have gone out (send_media) — its late receipt is accepted
          # (an email send is settled uncertain at the upgrade instead)
          "UPDATE deliveries SET posted_at = created_at WHERE status IN ('staged', 'uncertain')"
          " AND channel = 'telegram' AND package_id IS NOT NULL AND posted_at IS NULL",
          "ALTER TABLE renders ADD COLUMN posted_seq INTEGER",
          READINGS_DDL, RENDER_KEYS_DDL_V11, ACCOUNT_CHOICES_DDL, POST_OFFERS_DDL],
-    # 11 -> 12 (simple loop, design rev 17 §3): the run's work list, mirror calls and end
+    # 11 -> 12: the run's work list, mirror calls and end
     # message; a quarter's ready notice; mirror_note; the filing vendor; alternatives;
     # keyed documents; item states; the Gmail streak; batch progress; the learned hint.
-    # Task 11 of the plan appends the drops of the deleted machinery to this same list.
-    # 12 → 13 (Q2 run 1, round f1 Astra S1: schema 12 stores exist live since run 1)
-    # 13 -> 14 (round h1, design d1): a found document's reading is owed until recorded. A row
+    # The drops of the deleted machinery follow in this same list.
+    # 12 → 13 (schema 12 stores exist live since run 1)
+    # 13 -> 14: a found document's reading is owed until recorded. A row
     # carrying a reading (an amount, or readings that disagreed) was read; one without may be
-    # a document a cut left unread (Terra d1 S1): it stays owed, never backfilled as read.
+    # a document a cut left unread: it stays owed, never backfilled as read.
     13: ["ALTER TABLE documents ADD COLUMN read_at TEXT",
          "ALTER TABLE runs ADD COLUMN end_text TEXT",
-         # h4 (Astra S2): a run completed before kept its words as said — the build before
+         # A run completed before kept its words as said — the build before
          # schema 14 completed every run with "Accounting work finished." (job.RUN_FINISHED)
          "UPDATE runs SET end_text='Accounting work finished.' WHERE completed_at IS NOT NULL",
          "UPDATE documents SET read_at=ingested_at WHERE amount_minor IS NOT NULL OR"
@@ -646,7 +645,7 @@ MIGRATIONS: dict[int, list[str]] = {
          "ALTER TABLE runs ADD COLUMN hand_seq INTEGER",
          "ALTER TABLE work_requests ADD COLUMN quarter TEXT",
          RUN_WORK_DDL, RUN_MIRROR_DDL, RUN_ITEMS_DDL, REPLACE_QUESTIONS_DDL, QUARTER_NOTICES_DDL, RENDER_STATES_DDL,
-         # ... then the machinery §4 deletes: the sweep, the chunk carry, the judge,
+         # ... then the deleted machinery: the sweep, the chunk carry, the judge,
          # credits, nested passes, package requests and the delegation protocol
          # a package asked for and not yet sent is told, once, before its request goes
          "INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
@@ -678,7 +677,7 @@ MIGRATIONS: dict[int, list[str]] = {
          # with their raisers: one still unsaid is said as the request's not-sent notice
          "UPDATE alerts SET kind='package-not-sent' WHERE sent_at IS NULL AND kind IN"
          " ('package-stopped', 'package-failed')",
-         # e1 (Astra S1): a pass live at the upgrade is the old machinery's — it ends
+         # A pass live at the upgrade is the old machinery's — it ends
          # interrupted, and the requests it had taken (a handover among them) are queued
          # again for the first run of the new loop, which takes them (asks.requeue_taken)
          "UPDATE passes SET ended_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),"
@@ -689,10 +688,10 @@ MIGRATIONS: dict[int, list[str]] = {
 
 
 def _close_delegation_pass(conn: sqlite3.Connection) -> None:
-    """The 9 -> 10 data step (spec §8): a live delegation-protocol pass is ended
+    """The 9 -> 10 data step: a live delegation-protocol pass is ended
     `interrupted` and the marker goes dead, so every old token is refused by check_token.
     (Its package request goes with the 11 -> 12 drops; a 9 -> 10 store has no work request
-    yet.) The store epoch it also set went with the sweep (simple loop §4)."""
+    yet.) The store epoch it also set went with the sweep."""
     m = conn.execute("SELECT live, pass_id FROM pass_marker WHERE id=1").fetchone()
     if m is None or not m[0]:
         return
@@ -702,7 +701,7 @@ def _close_delegation_pass(conn: sqlite3.Connection) -> None:
 
 
 def _settle_staged_email_on_upgrade(conn) -> None:
-    """S7 §14: no email after S7 (G3). A send staged for email at the upgrade can no longer
+    """No email any more. A send staged for email at the upgrade can no longer
     be sent by anyone (finance's Gmail is read-only): it is settled `uncertain`, withdrawn,
     with its package notice — "send it again" then sends it here, as a file. Its handoff
     copy is left to the handoff folder's own retention (the custody lock is not taken
@@ -722,10 +721,10 @@ def _settle_staged_email_on_upgrade(conn) -> None:
 
 # A version's data step runs right after MIGRATIONS[version], inside the loop, so a later
 # version's drop can never break an earlier step (MIGRATIONS[11] drops a table the step reads).
-# The 4 -> 5 store epoch (issue #14) went with the sweep that read it (simple loop §4): no
+# The 4 -> 5 store epoch (issue #14) went with the sweep that read it: no
 # step at 5, and 9 -> 10 only closes a live delegation pass.
 def _backfill_render_states(conn) -> None:
-    """The 11 -> 12 data step (d3, Astra S2): schema 11 kept what a rendering showed only in
+    """The 11 -> 12 data step: schema 11 kept what a rendering showed only in
     render_items. A delivered one's item whose projection still has the revision it was
     shown at is provably unchanged since: its current item state is recorded as shown
     (render_states), so the first scheduled run after the upgrade does not announce it
@@ -795,8 +794,7 @@ def _retry_locked(stmt, bound_s: float):
     another process holds the file (a WAL-mode conversion, or BEGIN IMMEDIATE),
     retrying with backoff until bound_s elapses. Past the bound: Busy, not a
     raw sqlite3.OperationalError — every open-time or write-time statement that
-    can contend for the file's lock shares this one bounded retry (spec
-    §Match records: "contention past the bound surfaces as an error")."""
+    can contend for the file's lock shares this one bounded retry ("contention past the bound surfaces as an error")."""
     deadline = time.monotonic() + bound_s
     while True:
         try:
@@ -812,7 +810,7 @@ def _retry_locked(stmt, bound_s: float):
 
 
 def purchase_key(text) -> str:
-    """Issue #48 (r1 Astra + Terra S1): one normalisation of a purchase's number and issuer,
+    """Issue #48: one normalisation of a purchase's number and issuer,
     the same on both sides of every comparison (SQLite's lower() folds ASCII only)."""
     return (text or "").strip().lower() if isinstance(text, str) else ""
 
@@ -845,7 +843,7 @@ def open_store(path=None, bound_s: float = LOCK_BOUND_S) -> sqlite3.Connection:
 def _rollback_if_open(conn) -> None:
     """ROLLBACK only while a transaction is still open: SQLite may already have
     rolled it back itself (an I/O error, a full disk), and a ROLLBACK then raises
-    "no transaction is active", masking the error that caused it (fix wave F)."""
+    "no transaction is active", masking the error that caused it."""
     if conn.in_transaction:
         conn.execute("ROLLBACK")
 
@@ -871,7 +869,7 @@ def tx(conn: sqlite3.Connection, bound_s: float = LOCK_BOUND_S):
 
 
 def store_id(conn: sqlite3.Connection) -> str:
-    """This store's identity (g2, Terra S1): random, made on first use and dropped by
+    """This store's identity: random, made on first use and dropped by
     binding.reset_store, so a key built on it (posting.delivery_key) never names a
     rendering of a store since wiped — render ids restart at r1 after a reset."""
     assert conn.in_transaction, "the store id is read inside the write transaction"
@@ -886,10 +884,10 @@ def next_seq(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT value FROM counters WHERE name='seq'").fetchone()[0]
 
 
-# Renderings that offer nothing to answer (S2 §6.4): a handover's case lines, a stop line
-# and the package file's caption (S7 §6.1); an upgraded store's package notes and
+# Renderings that offer nothing to answer: a handover's case lines, a stop line
+# and the package file's caption; an upgraded store's package notes and
 # asks-waiting lines (no longer made since schema 12) stay classed as they were. Delivered after a view or an offer, they never take the operator's
-# reply from it (diff round 1, R3; Astra S2: a handover page delivered after `speak`'s
+# reply from it (a handover page delivered after `speak`'s
 # resend offer made "send it again" refuse).
 INFORMATIONAL_KINDS = ("handover", "job-stop", "package-file",
                        "package-note", "job-left")     # removed-name: schema history (legacy kinds, before 12)
@@ -900,23 +898,23 @@ UNQUOTABLE_KINDS = ("handover", "job-stop", "job-left")    # removed-name: schem
 
 
 def seen_render(row) -> bool:
-    """§1 of the binding design: the ONE "seen" predicate — a rendering marked delivered, or
+    """The ONE "seen" predicate — a rendering marked delivered, or
     one show_view posted (posted_seq: a deposit was attempted). It makes a rendering a quote
     candidate (views.bound_rendering) and an operator rule's provenance (kb); it is never
-    continuation evidence (V1: a continued page merges only its explicit predecessor)."""
+    continuation evidence (a continued page merges only its explicit predecessor)."""
     return row is not None and (row["delivered_at"] is not None
                                 or row["posted_seq"] is not None)
 
 
 def last_delivered(conn: sqlite3.Connection):
-    """THE most recent DELIVERED rendering an operator's reply is about (D2/D3: their
+    """THE most recent DELIVERED rendering an operator's reply is about (their
     words bind to what they were shown last) — the one place it is resolved. Ordered by
     the store sequence mark_rendering_delivered allocates inside its transaction, so a
-    later delivery always wins, even within one second (fix wave D). Informational
+    later delivery always wins, even within one second. Informational
     renderings (INFORMATIONAL_KINDS) are skipped: they offer nothing to answer, so the
     reply is still about what came before them.
 
-    S7 §9: it binds a reading's words that carry no quote (views.bound_rendering), and
+    it binds a reading's words that carry no quote (views.bound_rendering), and
     "send it again" to the offer last seen."""
     return conn.execute("SELECT * FROM renders WHERE delivered_at IS NOT NULL AND kind NOT IN"
                         " (%s) ORDER BY delivered_seq DESC, delivered_at DESC, rowid DESC"
@@ -926,7 +924,7 @@ def last_delivered(conn: sqlite3.Connection):
 
 @contextlib.contextmanager
 def savepoint(conn: sqlite3.Connection, name: str):
-    """A nested unit inside the caller's write transaction (S7 §8: one reading's clauses run
+    """A nested unit inside the caller's write transaction (one reading's clauses run
     in ONE transaction, each clause in a savepoint of its own). Any exception rolls the
     savepoint back and re-raises; the outer transaction stays open."""
     assert conn.in_transaction, "a savepoint lives inside the write transaction"
@@ -945,8 +943,7 @@ def savepoint(conn: sqlite3.Connection, name: str):
 @contextlib.contextmanager
 def custody_lock(bound_s: float = LOCK_BOUND_S):
     """The interprocess lock over the files this store holds custody of
-    (documents/, packages/) together with the rows that claim them (fix wave B,
-    Astra + Terra S1). An ingest holds it from installing the bytes through
+    (documents/, packages/) together with the rows that claim them. An ingest holds it from installing the bytes through
     committing the index row; reset_store holds it across its row wipe AND the
     file erasure; reap_orphans across its scan. So no index row can name bytes a
     concurrent reset or reap removed, under any interleaving. An flock on a lock

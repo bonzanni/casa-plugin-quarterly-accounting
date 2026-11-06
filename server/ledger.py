@@ -7,11 +7,10 @@ erase candidates and the delivered-row bank check all work from it.
 An end is judged here on positive evidence only: `vanished` from the row's
 own state; an absent destination is only a CANDIDATE, confirmed per row by
 the specialist's get_transaction ("no transaction #N") through
-record_not_found in the same pass (spec §Match records, "An ended lineage
-is judged ended only on positive evidence"). A surviving row whose
+record_not_found in the same pass. A surviving row whose
 superseded_by names an absent id is a broken floor, never an end.
 
-Instance continuity (plan §D4): a held alias's first_seen never changes;
+Instance continuity: a held alias's first_seen never changes;
 otherwise nothing is imported."""
 from __future__ import annotations
 
@@ -129,8 +128,7 @@ def _facts_fp(row: dict) -> str:
 def check_delivered_bank_half(conn, by_id: dict) -> int:
     """For the latest DELIVERED package of each quarter, compare every
     delivered row's bank facts with the snapshot; a change raises one
-    `delivered-changed` alert per occurrence (spec §"When the plugin may
-    speak first"). Returns the number of new alerts."""
+    `delivered-changed` alert per occurrence. Returns the number of new alerts."""
     latest = conn.execute(
         "SELECT p.package_id, p.quarter, p.filename FROM packages p"
         " JOIN deliveries d ON d.package_id=p.package_id AND d.status='delivered'"
@@ -184,7 +182,7 @@ def _delivered_changes(conn, by_id: dict, packages) -> list:
 
 
 def _require_same_ledger(conn, b, ledger_instance: str) -> None:
-    """Ledger identity is bank-feed's ledger instance id (#69; plan §D4). The
+    """Ledger identity is bank-feed's ledger instance id (#69). The
     export names the instance its rows were read from, in the same snapshot;
     the store is bound to one instance. A fresh store binds at its first import
     (remember_ledger). A different instance — another file, or this one erased
@@ -192,7 +190,7 @@ def _require_same_ledger(conn, b, ledger_instance: str) -> None:
     be told apart — imports nothing and ends nothing, unless the operator said
     "the bank ledger was reset": then the store RE-BINDS (every held lineage
     closed, the old aliases dropped). The acknowledgement is consumed by the
-    next successful import whatever it met (round p3), and rolls back with a
+    next successful import whatever it met, and rolls back with a
     refused one."""
     import passes
     ack = b["ledger_reset_ack"]
@@ -242,14 +240,13 @@ def import_ledger_export(conn, *, path: str, token, ledger_instance: str, acq=No
     except casa_handoff.HandoffError as exc:
         raise db.Refusal(f"that is not a handoff file ({exc.kind}): {exc}")
     # capture proved the layout <root>/<producer>/<id>/<filename>: the parent is the
-    # handoff id, the export's identity (S2 §5.2: an export is importable once)
+    # handoff id, the export's identity (an export is importable once)
     export_ref = pathlib.Path(os.path.realpath(path)).parent.name
     rows = parse(name, data)
     # The custody lock is taken BEFORE any transaction (lock order: custody, then the
     # SQLite write lock — as ingest, reset_store, reap_orphans, the package build and
     # delivery staging take it): the import withdraws the staged bytes of every first
-    # send it revokes, and commits the revocation, while no staging can put bytes back
-    # (round E6, Terra + Astra S1). Held past the bound: Busy, and nothing imported.
+    # send it revokes, and commits the revocation, while no staging can put bytes back. Held past the bound: Busy, and nothing imported.
     if conn.in_transaction:
         raise RuntimeError("import_ledger_export takes the custody lock before its transaction")
     with db.custody_lock(bound_s=db.LOCK_BOUND_S):
@@ -262,7 +259,7 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
     import passes
     # The gate is decided and PERSISTED before the import's transaction opens: a
     # refusal (gate_json, meta.gate_refusal) recorded inside it would roll back
-    # with the Refusal below and stop sticking (plan §D11; Task 8 review).
+    # with the Refusal below and stop sticking.
     passes.check_token(conn, token)
     gate = passes.bank_write_gate(conn)
     if not gate["allowed"]:
@@ -272,9 +269,9 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         cur_pass = passes.current_pass(conn)
         job_pass = cur_pass is not None and cur_pass["protocol"] == "job"
         if job_pass:
-            # INV-J14 (S2 §5.2): the import is bound to the pass's latest acquisition, by
+            # The import is bound to the pass's latest acquisition, by
             # identity — its bank_sync recorded under this same claim — and once per export.
-            # The sync may have failed (PLAY T7, as v0.8.0): the export is bank-feed's
+            # The sync may have failed: the export is bank-feed's
             # cached ledger, imported with bank_through not advanced (below)
             if acq is None or cur_pass["acq"] != acq:
                 raise db.Refusal("this import is not for the pass's current bank read: call "
@@ -327,7 +324,7 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
                                      "than the one this store holds — nothing was imported")
         _require_same_ledger(conn, b, ledger_instance)          # may re-bind (drops aliases)
         if job_pass:
-            # final review FW-I2: a job pass reads the bank more than once (W refreshes,
+            # A job pass reads the bank more than once (W refreshes,
             # a late ask, an adoption), but its gate was decided once, from its first
             # ledger probe. A later read whose ledger is not that one — restored (a new
             # restore generation) or another instance — stops the pass here, before
@@ -422,7 +419,7 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         for pid in lineage.live_pids(conn):
             p = lineage.projection(conn, pid)
             if p["ended"]:
-                continue          # an ended lineage's row id may name another ledger's row (round p4)
+                continue          # an ended lineage's row id may name another ledger's row
             groups.setdefault(p["dest_row_id"], []).append(pid)
         for dest, pids in sorted(groups.items()):
             if len(pids) > 1:
@@ -465,16 +462,16 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         out["delivered_changes"] = check_delivered_bank_half(conn, by_id)
         out["delivered_changes"] += len(_kind_changes(conn, _latest_delivered(conn)))
         # 6. an unsent first send staged under an earlier snapshot is revoked in this
-        # same commit (round E5, Terra S1): the plugin cannot hold a lock across the
+        # same commit: the plugin cannot hold a lock across the
         # external send, so the import takes the send away instead. Its bytes are
-        # withdrawn BEFORE the commit, under the custody lock (round E6): no moment has
+        # withdrawn BEFORE the commit, under the custody lock: no moment has
         # the revocation committed and the bytes still sendable. A commit that then
         # fails leaves a send that fails visibly, never one recorded delivered; a
-        # withdrawal that fails refuses the import whole (round E7).
+        # withdrawal that fails refuses the import whole.
         revoked = delivery.revoke_superseded_first_sends(conn, sid)
         out["revoked_deliveries"] = [r["delivery_id"] for r in revoked]
         # every revoked delivery whose bytes are still there is withdrawn now; one that
-        # cannot be refuses the whole import, which rolls back (round E7)
+        # cannot be refuses the whole import, which rolls back
         delivery.withdraw_revoked(conn)
         if job_pass:
             import decide
@@ -482,12 +479,12 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
             # queues: every erase candidate is the erasures unit's item from this commit on
             queues.enqueue(conn, cur_pass["holder_job"], "erasures", "erase",
                            [c["pid"] for c in out["erase_candidates"]])
-            decide.note_progress(conn, token)       # simple loop §2.2: the import persisted
+            decide.note_progress(conn, token)       # The import persisted
         return out
 
 
 def confirm_erased(conn, pid: int) -> dict:
-    """§2.4 "Erased rows" (rev 14): an erase candidate of the run's import that bank-feed no
+    """An erase candidate of the run's import that bank-feed no
     longer has ("no transaction #N" from get_transaction) ends `erased`. Inside the caller's
     transaction, under the live pass's own import of the bound account. A row still in that
     import is refused; a lineage already ended stays as it is (a vanished row that later
@@ -517,14 +514,11 @@ def confirm_erased(conn, pid: int) -> dict:
 def check_delivered_kind_half(conn, pid: int) -> int:
     """The classification half of "a delivered quarter changed underneath":
     the expectation kind a delivered row shipped under, against the one the
-    lineage's latest classification observation derives (spec §"What a pass
-    works on"; round 26; since issue #1 the import observes it too, from the
-    export's tags). Unknown is not a
+    lineage's latest classification observation derives (since issue #1 the import observes it too, from the export's tags). Unknown is not a
     change (the last known kind stands). A row shipped unclassified — its
     expectation unknown, or not observed at the import — is compared against
     the last kind known when it shipped (delivered_rows.kind); one shipped with
-    no kind ever known is skipped: there is nothing to have changed from (fix
-    wave F: a row read again unchanged raised "now categorised differently").
+    no kind ever known is skipped: there is nothing to have changed from (a row read again unchanged raised "now categorised differently").
 
     delivered_rows.pid is not re-pointed by a merge, so a delivered row
     belongs to this lineage when its pid RESOLVES to it (as in

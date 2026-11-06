@@ -1,6 +1,6 @@
 """The pass marker, probes and the bank-write gate.
 
-One Casa job run is one pass (simple loop, design rev 17 §2): job.claim starts it under
+One Casa job run is one pass: job.claim starts it under
 the claim's token (start_pass) and every later claim of the run moves the marker's
 generation to its own token. The token is one integer drawn from one monotonic counter
 (rotate), so no two holders ever share it. check_token refuses any write carrying a
@@ -9,7 +9,7 @@ record. It fences this store only; bank-feed's own writes are fenced by bank-fee
 workflow/expected_generation (the gate below says which).
 
 Health is observed, never inferred: each probe is what the specialist actually saw this
-pass, stored with its time (spec §Setup)."""
+pass, stored with its time."""
 from __future__ import annotations
 
 import datetime as _dt
@@ -58,7 +58,7 @@ def rotate(conn) -> int:
 
 def start_pass(conn, trigger: str, reply: str, *, token) -> tuple:
     """The run's live pass (the caller checked none is live), started under its claim's
-    token (no rotation, S2 §3): its marker, with the lease cleared, and its row. Returns
+    token (no rotation): its marker, with the lease cleared, and its row. Returns
     (token, pass_id). Inside the caller's write transaction (job.claim, through
     loop.start_pass)."""
     if token is None:
@@ -96,10 +96,10 @@ def check_token(conn, token) -> None:
 
 def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None, *,
                  acq=None, absent=False) -> dict:
-    """What the specialist saw, stored under the claim that saw it (`gen`, S2 §5.2). A
+    """What the specialist saw, stored under the claim that saw it (`gen`). A
     `bank_sync` carries the acquisition it belongs to (`acq`); a `gmail` probe that
-    failed because finance has no Gmail tools at all says `absent` (S2 §6.4); a `ledger`
-    probe may carry `missing`, the workflows list_backups marks FILE MISSING (S2 §4)."""
+    failed because finance has no Gmail tools at all says `absent`; a `ledger`
+    probe may carry `missing`, the workflows list_backups marks FILE MISSING."""
     if kind not in PROBE_KINDS:
         raise db.Refusal(f"probe kind must be one of {', '.join(PROBE_KINDS)}")
     if absent:
@@ -116,7 +116,7 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None, 
         data = {**(data or {}), "acq": acq}
     refs = None
     if kind == "gmail" and data is not None and "refs" in data:
-        # d4, queues: the own-mail search's found attachments, exact: the filing unit's items
+        # Queues: the own-mail search's found attachments, exact: the filing unit's items
         import queues
         refs = queues.check_refs(data["refs"], "the gmail probe's refs")
         data = {**{k: v for k, v in data.items() if k != "refs"}, "refs_n": len(refs)}
@@ -134,11 +134,11 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None, 
         failing_since = None
         if not ok:
             # an occurrence id, not only a time: two failures starting within one second
-            # are still two occurrences (spec: "a condition that clears and recurs is new")
+            # are still two occurrences ("a condition that clears and recurs is new")
             failing_since = prev["failing_since"] if (prev and not prev["ok"]
                                                       and prev["failing_since"]) \
                 else f"{now}#{db.next_seq(conn)}"
-        # D10: the Gmail streak counts RUNS (one pass each), not probes — a failure in a run
+        # The Gmail streak counts RUNS (one pass each), not probes — a failure in a run
         # whose pass already recorded one does not count again; a success ends the streak
         fail_runs = 0
         if not ok:
@@ -180,8 +180,7 @@ def record_probe(conn, token, kind: str, ok: bool, detail: str = "", data=None, 
 
 def _filing_search(conn, token, refs) -> dict:
     """Queues: the filing unit's gmail probe closes its own-mail search item (whatever the
-    search's outcome) and enqueues every found attachment no ingest filed yet (work.filed,
-    d5) as the unit's items, in the same commit. Refs go only with the filing unit's
+    search's outcome) and enqueues every found attachment no ingest filed yet (work.filed) as the unit's items, in the same commit. Refs go only with the filing unit's
     probe. Answers the unit's queued attachments to file now (`files`, exact)."""
     import queues
     import work
@@ -202,7 +201,7 @@ def _filing_search(conn, token, refs) -> dict:
 
 def store_populated(conn) -> bool:
     """Lineage state only. Filed documents say nothing about which ledger this
-    store runs against, so they never change the gate's verdict (round p2)."""
+    store runs against, so they never change the gate's verdict."""
     return bool(conn.execute("SELECT EXISTS (SELECT 1 FROM projections)"
                              " OR EXISTS (SELECT 1 FROM log)").fetchone()[0])
 
@@ -219,10 +218,10 @@ def _write(conn, sql, args=()) -> None:
 
 def bank_write_gate(conn) -> dict:
     """May this pass write to bank-feed, and with which expected_generation?
-    Computed here so the skill obeys one answer (plan §D11).
+    Computed here so the skill obeys one answer.
 
     The verdict is decided ONCE per pass, from that pass's own ledger probe,
-    and a refusal is sticky for the rest of the pass (round p1, Astra S1: a
+    and a refusal is sticky for the rest of the pass (a
     refused fresh store that then imported a snapshot became "populated" and
     the next call allowed the writes the first had refused). The import is
     refused while the gate refuses, so the condition cannot erase itself
@@ -233,7 +232,7 @@ def bank_write_gate(conn) -> dict:
     else a transaction of its own (check_setup, or ledger.py before it opens
     its import transaction). Otherwise a decision computed before a concurrent
     poison() committed was persisted after it, overwriting the pass's refusal
-    with an allow (fix wave B, Astra S1, reproduced across processes)."""
+    with an allow."""
     if conn.in_transaction:
         return _gate_in_tx(conn)
     with db.tx(conn):
@@ -263,7 +262,7 @@ def poison(conn, reason: str) -> None:
     BEGIN IMMEDIATE — through the bounded db._retry_locked, so contention
     surfaces as Busy rather than hanging — so the caller's enclosing
     `with db.tx(conn):` still finds a transaction open when it unwinds and its
-    own ROLLBACK does not itself raise (fix round 1 finding: a raw re-BEGIN
+    own ROLLBACK does not itself raise (a raw re-BEGIN
     whose failure left no transaction open made that ROLLBACK error with
     "cannot rollback - no transaction is active", masking the real one)."""
     cur = current_pass(conn)
@@ -291,9 +290,9 @@ def poison(conn, reason: str) -> None:
 def remember_ledger(conn, pass_id) -> None:
     """Called ONLY by an import whose export named the bound ledger instance
     (or bound a fresh store to it), inside its transaction — never at gate
-    time, where an unproven ledger could make itself remembered (round p2).
+    time, where an unproven ledger could make itself remembered.
     Records the ledger instance and the restore generation this store now runs
-    against (plan §D4)."""
+    against."""
     probe = conn.execute("SELECT data_json FROM probes WHERE kind='ledger'").fetchone()
     data = json.loads(probe["data_json"] or "{}")
     conn.execute("UPDATE binding SET ledger_generation=?, ledger_instance=? WHERE id=1",
@@ -330,7 +329,7 @@ def _decide_gate(conn) -> dict:
     out["older_workflows"] = sorted(w for w in registered
                                     if w.startswith("acct@") and w != version.WORKFLOW)
     # A refusal persists ACROSS passes until the ledger condition that caused it
-    # clears (round p2, Astra S1: filing a document between passes had flipped
+    # clears (filing a document between passes had flipped
     # "fresh" to "populated" and lifted a dirty-ledger refusal without a restore).
     prior = conn.execute("SELECT value FROM meta WHERE key='gate_refusal'").fetchone()
     ack = bool(b["ledger_reset_ack"])
@@ -350,7 +349,7 @@ def _decide_gate(conn) -> dict:
     if bound is not None and instance != bound:
         # A different ledger instance: another file, or this one erased and
         # re-minted (delete_all_data, delete_data_keep_signins). The two cannot be
-        # told apart from outside, so only the operator's sentence re-binds (D4).
+        # told apart from outside, so only the operator's sentence re-binds.
         if not ack:
             refusal = {"kind": "other-ledger", "instance": instance,
                        "reason": ("the bank ledger is not the one this store was built on "

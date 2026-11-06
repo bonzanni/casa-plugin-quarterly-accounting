@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Three-way tool-list agreement (spec §Tool surface, house disciplines): the
+"""Three-way tool-list agreement: the
 server's registry, plugin.json casa.provides_tools and casa.resultContract.tools
 name exactly the same tools. Role allow-lists are not a third list here:
-Casa grants plugin tools by assignment (spec §Setup step 1).
-Result contract (S7 §3): six tools deliver a slot through Casa's broker — show_view (view),
+Casa grants plugin tools by assignment.
+Result contract: six tools deliver a slot through Casa's broker — show_view (view),
 post_results (results), propose_reading (reading), propose_account (accounts), post_package
-and get_package (package, simple loop §1) — and every other entry stays `{"result": "safe"}`."""
+and get_package (package) — and every other entry stays `{"result": "safe"}`."""
 from __future__ import annotations
 
 import json
@@ -15,7 +15,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PREFIX = "mcp__plugin_quarterly-accounting_quarterly-accounting__"
 
-# S7 §3: the delivered slots; every other tool is `safe`.
+# The delivered slots; every other tool is `safe`.
 CAPABILITY_ENTRIES = {
     "show_view": {"result": "capability", "provides": ["view"],
                   "delivers": {"view": "operator_proposal"}},
@@ -27,7 +27,7 @@ CAPABILITY_ENTRIES = {
                         "delivers": {"accounts": "operator_proposal"}},
     "post_package": {"result": "capability", "provides": ["package"],
                      "delivers": {"package": "operator_file"}, "filename": True},
-    # simple loop §1 (#1303): a [Get package] button's stored call
+    # (#1303): a [Get package] button's stored call
     "get_package": {"result": "capability", "provides": ["package"],
                     "delivers": {"package": "operator_file"}, "filename": True},
     # #56: a [See PDF] button's stored call (Casa #1362 keep_card)

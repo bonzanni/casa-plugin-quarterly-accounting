@@ -1,4 +1,4 @@
-"""S7 §7.5: tap keys. 128 random bits minted when a proposal is rendered, stored with the
+"""Tap keys. 128 random bits minted when a proposal is rendered, stored with the
 rendering (render_keys) or the reading (readings.key) or the account page
 (account_choices.key), carried ONLY inside the deposit Casa takes out of band, never in a
 tool's result. A writing tool refuses a call whose key does not match; the first accepted
@@ -19,7 +19,7 @@ def mint() -> str:
 
 
 def store_render(conn, render_id, action, pid, key, doc_id=None) -> None:
-    """`doc_id`: a named candidate's document (simple loop §1: the key binds it too)."""
+    """`doc_id`: a named candidate's document (the key binds it too)."""
     assert conn.in_transaction
     conn.execute("INSERT INTO render_keys(key, render_id, action, pid, created_at, doc_id)"
                  " VALUES (?,?,?,?,?,?)", (key, render_id, action, pid, db.now(), doc_id))

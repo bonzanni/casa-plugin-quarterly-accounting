@@ -1,4 +1,4 @@
-"""Deposit an operator-facing value with Casa's broker (S7 §2/§3).
+"""Deposit an operator-facing value with Casa's broker.
 
 A posting tool does not return its operator-facing text, proposal or file path.
 During the call it DEPOSITS the value in one of its declared slots with Casa's
@@ -67,8 +67,7 @@ class _UnixHTTP(http.client.HTTPConnection):
 def deposit(slot: str, value: str, *, caption=None, label=None, kind=None,
             filename=None, key=None) -> str:
     """Deposit `value` in `slot` and return Casa's reference (casa:result_broker.py
-    `build_broker_deposit_handler`; S3 `kind`, S5 proposals as a JSON string, S7a
-    `filename`). Only the members given are sent. Raises DepositFailed with:
+    `build_broker_deposit_handler`; `kind`, proposals as a JSON string, `filename`). Only the members given are sent. Raises DepositFailed with:
     `broker_env_missing`, `broker_unreachable:<Class>`, `broker_bad_response`, Casa's own
     code, or `unrecognized_error` — never text Casa or the transport wrote."""
     path = os.environ.get(ENV_SOCKET, "")

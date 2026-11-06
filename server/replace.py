@@ -1,4 +1,4 @@
-"""Rev 18.4 §R18.3: a document the OPERATOR handed over that the job judges belongs to a
+"""A document the OPERATOR handed over that the job judges belongs to a
 payment which already has one (machine-matched, operator-confirmed, or a machine
 proposal). Nothing is replaced by the job: it records ONE question, and the run's one
 message carries ONE card — "<payment> already has an invoice. Current: … New: …"
@@ -40,12 +40,12 @@ def ask_in_tx(conn, job_id, pid, doc_id) -> int:
     if any(h != pid for h, _ in matches.holders(conn, doc_id)):
         raise db.Refusal("that document is another payment's")
     import lineage
-    # #72 (0118-r3, Astra S1): every job write that puts a document on a payment passes the
+    # #72: every job write that puts a document on a payment passes the
     # one books guard — a replacement of another period is never asked
     matches.in_window_or_refuse(conn, lineage.live_row(conn, lineage.projection(conn, pid)),
                                 doc_id, None)
     if matches.taken_elsewhere(conn, doc_id, pid):
-        # issue #48 (d1 Astra S1): its purchase backs another payment through a twin
+        # issue #48: its purchase backs another payment through a twin
         raise db.Refusal(matches.taken_refusal(conn, doc_id, pid))
     if conn.execute("SELECT doc_id FROM match_state WHERE match_id=?",
                     (cur[0],)).fetchone()[0] == doc_id:
@@ -64,9 +64,9 @@ def get(conn, qid):
 
 
 def open_ones(conn) -> list:
-    """Every live question, oldest first. e1 (Astra S1): a question whose payment left
+    """Every live question, oldest first. A question whose payment left
     scope, or no longer holds the pairing it asked about, is retired here — superseded, never
-    offered — so no message advertises a card nothing can show. Issue #48 (d2 Astra S1): so
+    offered — so no message advertises a card nothing can show. Issue #48: so
     is one whose new document's purchase another payment has taken since (the job's offer).
     Inside a transaction."""
     assert conn.in_transaction
@@ -86,7 +86,7 @@ def open_ones(conn) -> list:
 
 
 def new_doc_fp(conn, doc_id) -> str:
-    """e1 (Astra S1): what the card showed of the handed document — its fingerprint."""
+    """What the card showed of the handed document — its fingerprint."""
     import documents
     return documents.fingerprint(conn.execute("SELECT * FROM documents WHERE doc_id=?",
                                               (doc_id,)).fetchone())
@@ -96,7 +96,7 @@ def answer_in_tx(conn, grant, q, action, render_id, shown_fp=None) -> str:
     """[Keep current] / [Use new] on the question's card, under the tap's grant, the
     card's binding already checked (taps._card_tap: the payment and the displayed pairing
     as the card recorded them); `shown_fp` is the handed document's fingerprint as the card
-    showed it (e1, Astra S1): a corrected document commits nothing. Returns the receipt."""
+    showed it: a corrected document commits nothing. Returns the receipt."""
     if shown_fp is not None and new_doc_fp(conn, q["new_doc_id"]) != shown_fp:
         raise db.Refusal("the new document's details changed since this was shown")
     if q["state"] != "open":

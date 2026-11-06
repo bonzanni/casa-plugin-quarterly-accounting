@@ -1,10 +1,8 @@
 # server/alerts.py
-"""The only things this plugin ever says unprompted (spec §"When the plugin
-may speak first"): collection stopped working, a delivered quarter changed
+"""The only things this plugin ever says unprompted: collection stopped working, a delivered quarter changed
 underneath, what became of a package send when no turn was there to say it
 (package notices: it could not be sent, it was taken back or revoked, it may
-not have arrived or did not go out), and a bank-ledger write bank-feed refused (d1:
-keyed by the payment and the write's payload). Once per occurrence, never repeated while the condition
+not have arrived or did not go out), and a bank-ledger write bank-feed refused (keyed by the payment and the write's payload). Once per occurrence, never repeated while the condition
 persists, never escalated, no "all better". An occurrence is keyed by the
 moment the condition began (a package notice: by its delivery),
 so a condition that clears and recurs is new. An alert counts as said only
@@ -27,19 +25,19 @@ COLLECTION = {
     "bound_account": "The bound account is gone from bank-feed — nothing is being checked "
                      "until it is linked again.",
 }
-# S2 §6.4: a gmail probe recorded `absent` — finance has no Gmail tools at all. Nothing to
+# A gmail probe recorded `absent` — finance has no Gmail tools at all. Nothing to
 # re-authorise: Gmail is not connected for the finance specialist.
 GMAIL_ABSENT = "Gmail isn't connected for the finance specialist — invoices aren't being searched."
 
 
-GMAIL_RUNS = 3              # D10: Gmail's probe failed on this many runs in a row
-SYNC_STALE_DAYS = 7         # D10: the last successful bank sync is older than this
+GMAIL_RUNS = 3              # Gmail's probe failed on this many runs in a row
+SYNC_STALE_DAYS = 7         # The last successful bank sync is older than this
 STALE_SYNC = "Bank not synced since {day} · bank-feed needs attention"
 STOPPED = "Accounting check stopped: {reason}."
 
 
 def evaluate(conn) -> None:
-    """The failures that need the operator (simple loop §1, D10), each said once per
+    """The failures that need the operator, each said once per
     streak — its occurrence key names the streak, so it repeats only after a success ended
     it and a new one passed the threshold:
     - bank_sync: the store's last successful sync (max snapshots.bank_through) is more than
@@ -71,8 +69,8 @@ def evaluate(conn) -> None:
 
 
 def raise_stop(conn, reason: str) -> int:
-    """A run's pass stopped (simple loop §2 step 1: no bank-feed tools, setup or the bank
-    gate refuses): said once per streak of its reason (D10) — the streak is keyed by the
+    """A run's pass stopped (no bank-feed tools, setup or the bank
+    gate refuses): said once per streak of its reason — the streak is keyed by the
     latest pass that imported, so a pass that reads the bank again ends it and the next
     stop is said again. Inside the caller's tx."""
     last = conn.execute("SELECT pass_id FROM snapshots ORDER BY snapshot_id DESC LIMIT 1"
@@ -90,8 +88,7 @@ MIRROR_FAILED = ("{n} bank-ledger update{s} did not go through — tried again a
 
 
 def raise_incomplete(conn, streak_start, lines) -> None:
-    """Rule 5 on scheduled runs that keep leaving work incomplete (e2, Astra S2; BRAIN's
-    R2 ruling): the current "search incomplete" lines, said ONCE per streak — keyed by the
+    """Rule 5 on scheduled runs that keep leaving work incomplete: the current "search incomplete" lines, said ONCE per streak — keyed by the
     streak's first run. Inside the caller's tx."""
     conn.execute("INSERT OR IGNORE INTO alerts(kind, occurrence_key, detail, raised_at)"
                  " VALUES ('run-incomplete', ?, ?, ?)",
@@ -109,10 +106,10 @@ LINES_BUDGET = 1500         # UTF-16 units of alert lines one run message carrie
 
 def pending_lines(conn, budget=LINES_BUDGET, said=()) -> tuple:
     """(lines, alert ids): the undelivered alerts as the lines the run's one message
-    carries (simple loop §1: "the line joins the end message when there is one") — whole
+    carries ("the line joins the end message when there is one") — whole
     occurrences in print order while they fit `budget` (the first always), so the message
     stays within its limit; the rest wait for the next run's message. The ids go into that
-    message's scope["alerts"], so its delivery marks exactly them sent (D10). Inside the
+    message's scope["alerts"], so its delivery marks exactly them sent. Inside the
     caller's transaction; evaluate() first. `said`: alert ids the message already says in
     its own words (an operator run's stop line): bound, with no line of their own."""
     assert conn.in_transaction
@@ -133,7 +130,7 @@ def pending_lines(conn, budget=LINES_BUDGET, said=()) -> tuple:
 
 
 # The package notices (issue #2): what the operator is owed about a package send. `package-uncertain` and `package-send-failed` offer the
-# package, so "send it again" binds to the rendering that printed them (D3).
+# package, so "send it again" binds to the rendering that printed them.
 PACKAGE = {
     # raised only by MIGRATIONS[11] since the simple loop (schema 12): a package an older
     # version was asked for and had not sent, and an unsaid stopped / bank-unread notice
@@ -177,7 +174,7 @@ CHANGE_WORD = {"corrected": "corrected by the bank", "superseded": "replaced by 
                "vanished": "withdrawn by the bank", "erased": "erased from the ledger",
                "reclassified": "now categorised differently"}
 MORE_CLOSING = "More changed than fits in one message — the rest comes with the next check."
-# Only free-text FIELDS are clipped (fix wave D round 3): a probe's diagnostic
+# Only free-text FIELDS are clipped: a probe's diagnostic
 # here, and in views.headline the payee text. The payment's amount and date,
 # the package's name (a 32-character slug) and the change are never clipped,
 # so every occurrence prints what identifies it and fits a message on its own.
@@ -186,7 +183,7 @@ DETAIL_MAX = 300
 
 def _units(conn, rows) -> list:
     """One unit per occurrence, in the order a rendering prints them: the
-    collection alerts, then the refused mirror writes (ONE unit for all of them, d1), then
+    collection alerts, then the refused mirror writes (ONE unit for all of them), then
     the package notices, then each package's changes. A unit is (alert_id — a tuple of
     them for the mirror's —, (package, quarter) or None, its wrapped lines)."""
     import delivery
@@ -209,7 +206,7 @@ def _units(conn, rows) -> list:
             out.append((a["alert_id"], None, [views.clip(line, 300) for line
                                               in json.loads(a["detail"])["lines"]]))
     failed = tuple(a["alert_id"] for a in rows if a["kind"] == "mirror-failed")
-    if failed:                  # d1: every refused mirror write pending, said as one line
+    if failed:                  # Every refused mirror write pending, said as one line
         out.append((failed, None, [MIRROR_FAILED.format(
             n=len(failed), s="" if len(failed) == 1 else "s")]))
     for a in rows:
@@ -315,11 +312,11 @@ def pending_in_tx(conn, must=None, skip=()):
     INSERT all run under ONE db.tx: end_pass frees the pass marker before
     calling here, so a fresh pass can begin, re-observe the same still-failing
     condition and reach this function while an earlier pass's own call is
-    still in flight (fix round 1: two db.tx blocks with composition outside
+    still in flight (two db.tx blocks with composition outside
     either left a window where both could SELECT the same undelivered alert
     and each INSERT a different render for it). One lock closes that window.
 
-    A rendering never exceeds Telegram's limit (fix wave D): it prints the
+    A rendering never exceeds Telegram's limit: it prints the
     first batch of undelivered occurrences that fits, closes with a line saying
     more follows, and binds ONLY the occurrences it prints (scope "alerts"), so
     once-per-occurrence holds and the rest are offered by the next rendering.
@@ -331,9 +328,9 @@ def pending_in_tx(conn, must=None, skip=()):
     Runs inside the caller's write transaction: record_delivery raises its
     package notice and composes the rendering that says it in one commit. A
     rendering that prints a notice offering a package names that package in its
-    scope's `offers`, so "send it again" binds to it (D3).
+    scope's `offers`, so "send it again" binds to it.
 
-    `skip` (S7 §5): alert ids left out — the job's cursor passes the occurrences whose
+    `skip`: alert ids left out — the job's cursor passes the occurrences whose
     rendering this run already handed out job.OFFER_MAX times, so the next rendering
     composes the following ones."""
     assert conn.in_transaction
@@ -359,8 +356,8 @@ def pending_in_tx(conn, must=None, skip=()):
         r = conn.execute("SELECT text, scope_json FROM renders WHERE render_id=? AND"
                          " delivered_at IS NULL", (rid,)).fetchone()
         # reused only if it is still deliverable: a rendering saved oversized by
-        # earlier code is re-composed through the fit instead (round 3) — measured
-        # against the deposit body's budget (S7 §7.6), so a pre-S7 one up to Telegram's
+        # earlier code is re-composed through the fit instead — measured
+        # against the deposit body's budget, so a older one up to Telegram's
         # limit is re-fitted and three always join within job.POST_CHARS
         if r is not None and json.loads(r["scope_json"]) == scope \
                 and views.utf16_len(r["text"]) <= views.BODY_LIMIT:

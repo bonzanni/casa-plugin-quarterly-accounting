@@ -1,12 +1,12 @@
-"""The bank mirror (design rev 17 §2.4, R3): every in-scope row whose acct:: tags differ
+"""The bank mirror: every in-scope row whose acct:: tags differ
 from what its import carried, or whose desired note differs from the note last written
 (`mirror_note`), is owed a write — whatever changed it (a decision, a tap between runs).
 Tags group by identical add/remove lists, notes by identical text, ≤ 100 rows a call. No
-read-backs: a write the model reports done is taken as written (D9).
+read-backs: a write the model reports done is taken as written.
 
-Nothing is planned ahead (plan round 7): every hand-out re-hands the calls in flight, then
+Nothing is planned ahead: every hand-out re-hands the calls in flight, then
 diffs the store afresh. A row's write is held — never handed again in this run — while a
-call carrying it is in flight or after bank-feed refused it (§2.4: retried at the next
+call carrying it is in flight or after bank-feed refused it (retried at the next
 run). Held is per row and per write, not per call, so a row that joins a group later gets
 a call of its own instead of repeating an append-only note on the rows already in flight."""
 from __future__ import annotations
@@ -31,7 +31,7 @@ NICE_TO_HAVE = f"Accounting: nice to have{SUFFIX}"
 
 
 def _doc_words(conn, match_id) -> str:
-    """§2.4: kind, issuer, number (when it has one), date and the document's own amount."""
+    """Kind, issuer, number (when it has one), date and the document's own amount."""
     d = conn.execute("SELECT d.* FROM matches m JOIN documents d ON d.doc_id=m.doc_id"
                      " WHERE m.match_id=?", (match_id,)).fetchone()
     parts = [views.KIND_WORD.get(d["kind"], "document")]
@@ -47,13 +47,13 @@ def _doc_words(conn, match_id) -> str:
 
 
 def _pending(row) -> bool:
-    """D18: a pending (non-BOOK) row carries no accounting tag and no accounting note; its
+    """A pending (non-BOOK) row carries no accounting tag and no accounting note; its
     stored desired tags stay as they are — only the mirror treats it specially."""
     return row is not None and row["status"] != "BOOK"
 
 
 def note_text(conn, pid):
-    """§2.4's plain words for `pid`'s outcome; None when no note is owed."""
+    """The plain words for `pid`'s outcome; None when no note is owed."""
     p = lineage.projection(conn, pid)
     status = p["status"]
     if status in (None, "ended", "ineligible") or _pending(lineage.live_row(conn, p)):
@@ -67,7 +67,7 @@ def note_text(conn, pid):
                 if alts else "")
         text = (f"Accounting: proposed — {_doc_words(conn, p['current_match'])}{more}, "
                 f"awaiting confirmation{SUFFIX}")
-    elif status == "proposed":            # D3: a joint machine set, the operator picks
+    elif status == "proposed":            # A joint machine set, the operator picks
         n = len(lineage.fold_of(conn, pid).machine_set())
         text = f"Accounting: proposed — {n} invoices fit, awaiting confirmation{SUFFIX}"
     elif status == "open" and p["exp_kind"] is None:
@@ -84,9 +84,9 @@ def note_text(conn, pid):
 
 def _rows(conn) -> list:
     """Every row the latest import carried (its export tags are known), as (pid, p, row,
-    in_scope): §2.4 "a diff over every in-scope row". A row the export still carries that
+    in_scope): a diff over every in-scope row. A row the export still carries that
     left scope (ended, or ineligible: before a moved watermark) is included out of scope:
-    it owes the removal of its acct:: tags, as 26b68ee's sweep untagged it (fix round 1).
+    it owes the removal of its acct:: tags, as the old sweep untagged it.
     A row the import did not carry (or an erased one) is left alone."""
     latest = lineage.latest_import(conn)
     out = []
@@ -165,14 +165,14 @@ def _held(conn, job_id) -> set:
 
 
 def _fresh(conn, job_id) -> list:
-    """THE mirror's owed calls, computed now (plan round 7, Astra S2 — no frozen plan): the
+    """THE mirror's owed calls, computed now: the
     store's writes against the export tags and mirror_note, minus the writes this run holds."""
     held = _held(conn, job_id)
     return _calls(conn, [w for w in _writes(conn) if (w[0], w[2], w[1]) not in held])
 
 
 def start(conn, job_id) -> None:
-    """§2.4: one log line when the run's mirror phase starts, so a restart inside it can be
+    """One log line when the run's mirror phase starts, so a restart inside it can be
     placed; runs.mirror_at stamped. Once per run."""
     with db.tx(conn):
         line = start_in_tx(conn, job_id)
@@ -196,7 +196,7 @@ def start_in_tx(conn, job_id):
 
 def hand_calls(conn, job_id, budget: int) -> list:
     """The next calls, each {"n", "tool", "args"}: the in-flight ones first (a restart
-    between the bank writes and record_mirror re-hands them, D9), then a fresh diff, up to
+    between the bank writes and record_mirror re-hands them), then a fresh diff, up to
     `budget`."""
     with db.tx(conn):
         return hand_calls_in_tx(conn, job_id, budget)
@@ -251,7 +251,7 @@ def _numbers(items) -> list:
 def _superseded(conn, job_id, n, pid, tool) -> bool:
     """A later call of the same kind (the note; or the tags, tag and untag alike) for `pid`
     was already recorded done in this run: this older one's acknowledgement must not
-    overwrite it, across record_mirror calls too (fix round 1)."""
+    overwrite it, across record_mirror calls too."""
     kinds = ("add_note",) if tool == "add_note" else ("tag_transaction", "untag_transaction")
     return conn.execute(
         "SELECT 1 FROM run_mirror m, json_each(m.pids_json) j WHERE m.job_id=? AND m.n>?"
@@ -260,7 +260,7 @@ def _superseded(conn, job_id, n, pid, tool) -> bool:
 
 
 def record(conn, token, done, failed) -> dict:
-    """The model's report of a mirror unit (D9): the calls bank-feed accepted are taken as
+    """The model's report of a mirror unit: the calls bank-feed accepted are taken as
     written (the export tags and mirror_note move, no read-back); a refused call is kept
     for the end message and not handed again in this run. Unknown or already recorded
     numbers are ignored."""
@@ -326,7 +326,7 @@ def owed(conn, job_id) -> int:
 
 
 def _raise_failed(conn, call, pids, err) -> None:
-    """§2.4 last bullet and d1 (Astra S2, ruled): a failed write is said in the run's one
+    """A failed write is said in the run's one
     message — as an alert, once per occurrence, keyed by the payment and the write's
     payload (the note text, or the tool and its tags), so the same refused write in a later
     run is never said again, and a scheduled run with no new item still posts it (the

@@ -1,6 +1,5 @@
-"""Counterparty knowledge base and the expectation mapping's overrides
-(spec §"Document expectation", "Counterparty KB"). Read side here; the
-write side (upsert_counterparty, set_expectation) is Task 10.
+"""Counterparty knowledge base and the expectation mapping's overrides. Read side here; the
+write side is upsert_counterparty and set_expectation.
 
 A pattern is the counterparty text exactly as bank-feed shows it
 (`BCK*ZAPIER`); matching is exact after case and whitespace normalisation —
@@ -80,7 +79,7 @@ def display_name(conn, bank_counterparty) -> str:
 
 def given_name(cp, bank_texts=()) -> bool:
     """The entry's name is one someone gave, not a bank text it stands for: the operator
-    renamed it (#84, named_at, r2: recorded, never inferred from its capitals), or no text it
+    renamed it (#84, named_at, recorded, never inferred from its capitals), or no text it
     stands for reads the same, case aside (0.11.12's rule, for every other entry)."""
     if cp is None:
         return False
@@ -132,7 +131,7 @@ def get_counterparty(conn, text):
 
 
 LINK_MAX = 500              # issue #3: every stored field a listing carries is bounded
-HINT_MAX = 200             # the learned search hint, each of its two values (§2.2 step 5)
+HINT_MAX = 200             # the learned search hint, each of its two values
 
 
 def upsert_counterparty(conn, name, *, patterns=(), source=None, document_link=None,
@@ -153,8 +152,8 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
                  hint_subject=None, new_name=None) -> dict:
     """The upsert inside the caller's transaction (a reading's identity clause
     checks the shown revision in the same transaction as this write). hint_sender and
-    hint_subject are the vendor's learned search hint (design rev 17 §2.2 step 5, §3).
-    new_name (#84, ruling on #77 item 3): the operator renames the vendor `name` (its current
+    hint_subject are the vendor's learned search hint.
+    new_name (#84): the operator renames the vendor `name` (its current
     name or one of its bank texts). The same entry keeps everything it holds and its old name
     stays one of its bank texts, so every text that found it still finds it; with no entry,
     one is made under new_name for the bank text `name`."""
@@ -166,7 +165,7 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
             raise db.Refusal("new_name is the name to show for this vendor")
         current = _entry(conn, name) or counterparty_for(conn, name)
         patterns = [*patterns, current["name"] if current is not None else name]
-        # r1 (Astra + Terra S1): checked before the entry is looked up by its new name, also
+        # Checked before the entry is looked up by its new name, also
         # when there is no entry yet — a rename never lands on another vendor's entry
         _refuse_shared_bank_text(conn, current, [new_name.strip(), *patterns, *(
             json.loads(current["patterns_json"]) if current is not None else [])])
@@ -193,11 +192,10 @@ def upsert_in_tx(conn, name, *, patterns=(), source=None, document_link=None, li
     held = json.loads(existing["patterns_json"]) if existing is not None else []
     merged = sorted(set(held) | {p.strip() for p in patterns})
     if new_name is not None:
-        # d1 (Astra S2): a pattern equal to the new name (a name given earlier, renamed back
+        # A pattern equal to the new name (a name given earlier, renamed back
         # to) would make the name read as a bank text; the name itself still resolves it
         merged = [p for p in merged if _spaced(p) != _spaced(name)]
-    # Every bank text resolves to at most one entry (fix wave B, Astra S1; round
-    # B2, Terra S1): ALL of this upsert's names and patterns — the ones it adds and
+    # Every bank text resolves to at most one entry: ALL of this upsert's names and patterns — the ones it adds and
     # the ones the entry already holds — are checked against every OTHER entry's,
     # on create and on update. A collision would leave a ruling stored on one
     # entry that lookup never reaches. Refused, not merged: the operator names the
@@ -254,7 +252,7 @@ def merge_in_tx(conn, x, y) -> None:
     patterns = sorted(held.values())
     _refuse_shared_bank_text(conn, ey, [ey["name"], *patterns])
     sets = {"patterns_json": json.dumps(patterns), "updated_at": db.now()}
-    # d1 (Astra S2): y's name is the merged vendor's from now on — pinned, so its cards never
+    # Y's name is the merged vendor's from now on — pinned, so its cards never
     # show an invoice name of x's instead (readable_name)
     sets["named_at"] = ey["named_at"] or sets["updated_at"]
     if ex is not None:
@@ -283,7 +281,7 @@ def _texts(name, patterns) -> set:
 
 
 def _refuse_unlearned_vendor(conn, entry, name, new_name) -> None:
-    """r2 (Astra S1): a new name that is the bank text of another vendor no entry knows yet
+    """A new name that is the bank text of another vendor no entry knows yet
     would make this entry take that vendor's payments — refused like a shared bank text."""
     import lineage
     import views
@@ -308,7 +306,7 @@ def _refuse_shared_bank_text(conn, entry, texts) -> None:
             continue
         shared = set(mine) & _texts(r["name"], json.loads(r["patterns_json"]))
         if shared:
-            # the names are printed escaped (S7 INV-S7-7): this refusal reaches the
+            # the names are printed escaped: this refusal reaches the
             # operator's receipt through reply._say
             import views
             owner = views.field(r["name"])
@@ -320,7 +318,7 @@ def _refuse_shared_bank_text(conn, entry, texts) -> None:
 
 def _require_seen_render(conn, render_id) -> None:
     """An operator rule's provenance is a SEEN rendering — delivered, or posted by show_view
-    (db.seen_render; binding §2 #11: the reading's one bound rendering R)."""
+    (db.seen_render; the reading's one bound rendering R)."""
     r = conn.execute("SELECT delivered_at, posted_seq FROM renders WHERE render_id=?",
                      (render_id,)).fetchone() if render_id else None
     if not db.seen_render(r):
@@ -332,7 +330,7 @@ def set_expectation(conn, *, scope_type, scope, kind, tier=None, author, render_
                     token=None) -> dict:
     import passes
     if author == "operator":
-        # S7 §8.1: the operator's expectation is set by a tap (set_expectation_in_tx under
+        # The operator's expectation is set by a tap (set_expectation_in_tx under
         # a grant), never by a tool call
         raise db.Refusal(authority.TAP_ONLY)
     if author != "specialist":
@@ -356,7 +354,7 @@ def set_expectation_in_tx(conn, *, scope_type, scope, kind, tier=None, author,
                           render_id=None, grant=None) -> dict:
     """The override inside the caller's transaction, so a reading can check, in that same
     transaction, that every payment it changes was shown. An operator author needs a tap's
-    grant (S7 §8.1)."""
+    grant."""
     import lineage
     if kind == "none":
         tier = None
@@ -375,8 +373,7 @@ def set_expectation_in_tx(conn, *, scope_type, scope, kind, tier=None, author,
         rows, okey = norm
         key = ", ".join(sorted(tags))
         # A chain override replaces any existing one whose normalized (rows, key)
-        # is the same, regardless of the literal scope text it was set under
-        # (carried ruling, Task 4 review): "refund" and "income, refund" both
+        # is the same, regardless of the literal scope text it was set under: "refund" and "income, refund" both
         # normalize to the same (rows, key), and derive() refuses to guess
         # between two overrides that collide there — so the store never lets
         # two such overrides coexist; the operator's later ruling wins.
@@ -397,7 +394,7 @@ def set_expectation_in_tx(conn, *, scope_type, scope, kind, tier=None, author,
             e = _entry(conn, scope)
         if author == "specialist" and e["exp_author"] == "operator":
             # the operator's ruling on this payee ("no invoices ever for X") is theirs
-            # to change; a specialist's write never silently replaces it (fix wave F)
+            # to change; a specialist's write never silently replaces it
             import views
             raise db.Refusal(f"the operator set what {views.field(e['name'])} needs; only "
                              "the operator changes it — nothing was changed")

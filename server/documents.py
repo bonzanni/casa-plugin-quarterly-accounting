@@ -1,4 +1,4 @@
-"""Document custody (spec §Document store). The ONLY way bytes enter custody
+"""Document custody. The ONLY way bytes enter custody
 is ingest_document, which takes them through casa_handoff.capture, copies
 them into the store, hashes them and indexes them, in that order: a crash
 may leave an unindexed file to reap, never a row claiming custody of a
@@ -21,7 +21,7 @@ import expectation as ex
 
 ALLOWED_EXT = {".pdf", ".png", ".jpg", ".webp", ".heic", ".gif", ".tif", ".tiff", ".xml"}
 SOURCES = ("gmail", "manual-telegram", "manual-email")
-EXTRACTION_AUTHORS = ("desk", "specialist")   # S7 §4: a stored "resident" stays readable
+EXTRACTION_AUTHORS = ("desk", "specialist")   # A stored "resident" stays readable
 EDITABLE = ("kind", "counterparty", "issuer", "document_date", "document_number",
             "amount_minor", "currency", "recipient")
 # What read_document sends each held kind as (issue #6). Claude Code 2.1.273 shows a
@@ -34,7 +34,7 @@ MIME = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg",
         "tif": "image/tiff", "tiff": "image/tiff", "xml": "text/plain"}
 # How far into a held PDF read_document looks for the %PDF- header (issue #8).
 PDF_HEADER_WINDOW = 1024
-VENDOR_MAX = 2000         # e2/e6: the payment unit hands the vendor exactly (an identity)
+VENDOR_MAX = 2000         # The payment unit hands the vendor exactly (an identity)
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _CCY = re.compile(r"^[A-Z]{3}$")
 
@@ -114,8 +114,7 @@ def duplicate_of(conn, doc_id: int):
     irrelevant, whose reading is the same in every field a judgment reads (`fingerprint`:
     kind, amount, currency, date, issuer, counterparty, number, recipient) — or None. A
     reissue (same number, a field read differently, e.g. a corrected recipient) is no copy:
-    it is worked, and onto a paired payment the operator is asked to replace (BRAIN
-    2026-10-09). A mechanical fact of the two readings, never of their wording."""
+    it is worked, and onto a paired payment the operator is asked to replace. A mechanical fact of the two readings, never of their wording."""
     d = conn.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
     if d is None or d["read_at"] is None:
         return None
@@ -146,8 +145,8 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                     currency=None, recipient=None, source_ref=None, acquisition=None,
                     vendor=None, token=None) -> dict:
     """`vendor` is the KB counterparty of the vendor group being worked when the job files
-    it (design rev 17 §2.2, D1); a document filed otherwise (own mail, a handover) carries
-    none. `filed_seq` is the store sequence at filing: "newly filed" (§2.1)."""
+    it; a document filed otherwise (own mail, a handover) carries
+    none. `filed_seq` is the store sequence at filing: "newly filed"."""
     import decide
     import passes
     if source not in SOURCES:
@@ -175,7 +174,7 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
     sha = hashlib.sha256(data).hexdigest()
     # Under the custody lock, so a concurrent reset_store or reap_orphans cannot
     # remove the bytes between install and index. Every refusal fires BEFORE the
-    # install (round B2, Astra S2: a pass fenced by a reset while this ingest
+    # install (a pass fenced by a reset while this ingest
     # waited for the lock must not put bytes back after the reset reported
     # complete). Bytes are still installed before the row commits: a crash
     # leaves an orphan to reap, never a row over missing bytes.
@@ -187,12 +186,12 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
             if existing is not None:
                 # the same bytes filed under another extension are the held file: it is
                 # (re)installed under the held name, never beside it as a second copy no
-                # row names (fix wave F)
+                # row names
                 _install(data, sha, "." + existing["ext"])
-                _reread(conn, existing[0],                      # h1: before the ref
+                _reread(conn, existing[0],                      # Before the ref
                         *_amount_said(amount_minor, currency, filing=True))
                 if _operator_ref(conn, source, source_ref, existing[0]) and token is not None:
-                    decide.note_progress(conn, token)   # d2: a newly filed ref is progress
+                    decide.note_progress(conn, token)   # A newly filed ref is progress
                 if vendor is not None:
                     # a vendor group that found it again names it, where none was recorded
                     conn.execute("UPDATE documents SET vendor=? WHERE doc_id=? AND vendor IS"
@@ -211,12 +210,12 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                  db.canonical(acquisition) if acquisition is not None else None,
                  extraction_author, name, db.now(), dates.quarter_of(db.now()[:10]), vendor,
                  db.next_seq(conn),
-                 # h1: a reading given at filing (an amount) is recorded; none → owed
+                 # A reading given at filing (an amount) is recorded; none → owed
                  db.now() if amount_minor is not None or currency else None))
             doc_id = cur.lastrowid
             _operator_ref(conn, source, source_ref, doc_id)
             if token is not None:
-                decide.note_progress(conn, token)      # §2.2 `progressed`: a document filed
+                decide.note_progress(conn, token)      # A document filed
             return {"doc_id": doc_id, "sha256": sha, "created": True,
                     "collisions": collisions(conn, doc_id)}
 
@@ -228,10 +227,10 @@ def amount_unknown(doc) -> bool:
 
 
 def _amount_said(amount_minor, currency, cleared=False, filing=False) -> tuple:
-    """h5: THE reader of what one call says about a document's amount, for every entry
+    """THE reader of what one call says about a document's amount, for every entry
     point — (amount, currency, withdrawn). In a reading (update_document_metadata) a blank
     currency ("", spaces) or `cleared` (an explicit null amount or currency) withdraws.
-    The ingest contract (BRAIN, h6): a `filing` (ingest_document) files the document — a
+    The ingest contract: a `filing` (ingest_document) files the document — a
     blank or null there is "not read here" and says nothing; only its concrete values are a
     reading (a disagreeing one conflicts, Q2 run 1). None is always "nothing said"."""
     blank = currency is not None and not str(currency).strip()
@@ -240,15 +239,15 @@ def _amount_said(amount_minor, currency, cleared=False, filing=False) -> tuple:
 
 
 def _reread(conn, doc_id, amount_minor, currency, withdrawn=False) -> None:
-    """Q2 run 1 (PLAY, BRAIN: a reading that copies the payment): a reading of the document's
+    """Q2 run 1 (a reading that copies the payment): a reading of the document's
     amount — the same bytes filed again with one, or the job's update_document_metadata. The
-    one rule for both (h1, Astra S1), field by field (d1, Astra S1: a partial reading too):
+    one rule for both, field by field (a partial reading too):
     a field none held is taken; a field held that the reading DISAGREES with → the readings
-    conflict for good (f1, Terra/Astra S1: a third reading never restores it): the amount is
+    conflict for good (a third reading never restores it): the amount is
     unknown, the document can only be proposed, never matched by the job
     (matches._floor_doc), and a machine match holding it shows as a proposal (reducer). The
     same reading changes nothing. A reading given is recorded (read_at), conflicting or not.
-    `withdrawn` (h3, Astra S1): the reading explicitly clears the amount or the currency — it
+    `withdrawn`: the reading explicitly clears the amount or the currency — it
     disagrees with any held value, so a held one makes the readings conflict."""
     if amount_minor is None and not currency and not withdrawn:
         return
@@ -277,10 +276,10 @@ def _reread(conn, doc_id, amount_minor, currency, withdrawn=False) -> None:
 
 
 def _operator_ref(conn, source, source_ref, doc_id) -> bool:
-    """Issue #24 (D5), d5: a filed file's own ref (an attachment of a self-addressed mail,
+    """Issue #24: a filed file's own ref (an attachment of a self-addressed mail,
     a Telegram file, a vendor's message), also when its bytes were already held — what
     work.filed answers a search's refs against, across runs. True when the ref is new
-    (d2: filing it persisted work)."""
+    (filing it persisted work)."""
     if source_ref:
         import queues
         new = conn.execute("SELECT 1 FROM operator_refs WHERE ref=?",
@@ -288,8 +287,7 @@ def _operator_ref(conn, source, source_ref, doc_id) -> bool:
         conn.execute("INSERT OR REPLACE INTO operator_refs(ref, source, doc_id, filed_at)"
                      " VALUES (?,?,?,?)", (source_ref, source, doc_id, db.now()))
         # queues: the ref's closing write — every queued item of it, in every unit and run
-        # (a given-up one stays given up) — once its document's reading is recorded (h1:
-        # filed and unread, it is handed again; update_document_metadata closes it)
+        # (a given-up one stays given up) — once its document's reading is recorded (filed and unread, it is handed again; update_document_metadata closes it)
         if _read(conn, doc_id):
             return queues.close(conn, None, "ref", source_ref) > 0 or new
         return new
@@ -302,7 +300,7 @@ def _read(conn, doc_id) -> bool:
 
 
 def _close_read_refs(conn, doc_id) -> int:
-    """h1: the document's reading is recorded — every queued item of a ref it was filed
+    """The document's reading is recorded — every queued item of a ref it was filed
     under is done."""
     import queues
     refs = {r[0] for r in conn.execute(
@@ -382,7 +380,7 @@ FP_FIELDS = ("kind", "amount_minor", "currency", "document_date", "issuer", "cou
 
 
 def fingerprint(doc) -> str:
-    """Issue #34 (G1): the document facts a judgment reads, as one canonical string — what
+    """Issue #34: the document facts a judgment reads, as one canonical string — what
     an operator's rejection is bound to on the document's side (not date_read_at)."""
     return db.canonical({k: doc[k] for k in FP_FIELDS})
 
@@ -399,12 +397,12 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         _doc(conn, doc_id)
         mark = conn.execute("SELECT coalesce(max(seq), 0) FROM log").fetchone()[0]
         if "document_date" in fields:
-            # #73 (r1, Terra S2): the date goes in before the amount's reading settles the
+            # #73: the date goes in before the amount's reading settles the
             # holders, so the fit window is judged on the date this reading leaves
             conn.execute("UPDATE documents SET document_date=? WHERE doc_id=?",
                          (fields["document_date"], doc_id))
-        # h1/h2: every write of a document's amount goes through the one sticky conflict
-        # rule (_reread), with the pass_token or without (h2, Astra S1: a job reading sent
+        # Every write of a document's amount goes through the one sticky conflict
+        # rule (_reread), with the pass_token or without (a job reading sent
         # without it matched a disagreeing amount; no other caller writes an amount)
         cleared = any(k in fields and fields[k] is None for k in ("amount_minor", "currency"))
         _reread(conn, doc_id, *_amount_said(fields.pop("amount_minor", None),
@@ -427,7 +425,7 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
         if "document_date" in fields:
             # issue #22: a date written here was read on the document (the specialist
             # after opening it, or the operator's own words): the file is named by it. A
-            # date cleared is no date read (D2, Astra S2): the file falls back to the
+            # date cleared is no date read: the file falls back to the
             # payment's date, and the package says so
             conn.execute("UPDATE documents SET date_read_at=? WHERE doc_id=?",
                          (db.now() if fields["document_date"] else None, doc_id))
@@ -459,7 +457,7 @@ def _released(conn, doc_id, mark) -> str | None:
 
 
 def _one_purchase_one_payment(conn, doc_id) -> None:
-    """Issue #48 (d1 Terra S1): the job's reading never makes one purchase back two payments
+    """Issue #48: the job's reading never makes one purchase back two payments
     — an issuer or number that moves a HELD document into a purchase another payment's
     document backs is refused (the caller's transaction rolls back), naming that payment.
     Called only when the reading changed the document's purchase: a purchase that already

@@ -1,4 +1,4 @@
-"""Every tool the server exposes (plan §D1). Each wrapper validates its
+"""Every tool the server exposes. Each wrapper validates its
 arguments, opens this process's store connection and calls ONE logic
 function; nothing here decides anything. Descriptions carry the rules a
 caller must follow — they are what the model reads."""
@@ -70,7 +70,7 @@ class Undeliverable(RuntimeError):
 
 
 def _deliverable(tool: str, out):
-    """The final invariant (fix wave D round 2): every text a tool returns — a view's
+    """The final invariant: every text a tool returns — a view's
     `text`, a `speak.text`, a `receipt` and each of its `receipt_pages` — is at most
     TELEGRAM_LIMIT UTF-16 units; otherwise the call fails loudly (isError)."""
     if not isinstance(out, dict):
@@ -93,7 +93,7 @@ NOT_POSTED = ("this could not be posted ({code}) — nothing was sent. Ask again
 
 
 def capability(slot, receipt=False):
-    """A posting tool (S7 §3): Casa's result contract for a delivering tool. The result is
+    """A posting tool: Casa's result contract for a delivering tool. The result is
     `{slot: <reference>, ...}` after a deposit, or the explicit no-post shape — every slot
     present as null and nothing deposited (INV-PLUG-028) — for a refusal or a deposit Casa
     refused, so the words reach the model instead of a withheld result. The function
@@ -119,7 +119,7 @@ def capability(slot, receipt=False):
 
 
 def keyed(fn):
-    """A tap's handler (S7 §7.3, §8, §11): its answer is the tap's receipt, which Casa posts
+    """A tap's handler: its answer is the tap's receipt, which Casa posts
     from a JSON object's `receipt` (INV-PROP-002) — a refusal included, in the same shape."""
     def inner(args):
         try:
@@ -133,7 +133,7 @@ QUARTER_WORDS = "a quarter is written like 2026-Q3 (Q3 and Q3 2026 are fine too)
 
 
 def _quarter(args, name="quarter"):
-    """A quarter argument in the canonical YYYY-Qn (fix wave F): the model passes the
+    """A quarter argument in the canonical YYYY-Qn: the model passes the
     operator's words ("give me Q3"), so "Q3", "Q3 2026" and "2026-Q3" are taken, by
     the reply grammar's rule; anything else is a refusal in words, never an error."""
     v = args.get(name)
@@ -202,7 +202,7 @@ def t_update_doc(args):
     fields = _pick(args, documents.EDITABLE)
     for k in ("amount_minor", "currency"):
         if k in args and args[k] is None:
-            fields[k] = None                # h4 (Astra/Terra S1): an explicit clear is a reading
+            fields[k] = None                # An explicit clear is a reading
     return documents.update_document_metadata(conn(), _int(args, "doc_id"),
                                               token=_int(args, "pass_token"), **fields)
 
@@ -484,7 +484,7 @@ def t_import(args):
                                        acq=_int(args, "acq"))
 
 
-# --- the job (S2 §3, §5, §6.4, §13) -------------------------------------------------
+# --- the job -------------------------------------------------
 @register("job_next",
           "The job's next step. First call of every job turn: job_next(job_id=<your brief's "
           "`Job id:` line>, started_by=<the line right after your brief's first `Job id:` "
@@ -925,7 +925,7 @@ def t_get_package(args):
                "quarter": Q, "pass_token": TOKEN}))
 def t_stage(args):
     if args.get("doc_id") is not None:
-        # final fix wave T11-a: post_package posts packages only, so a staged document
+        # post_package posts packages only, so a staged document
         # could never go out (and nothing would recover it); the server path stays
         raise db.Refusal("a single document is not sent from here — nothing was staged")
     resend = _bool(args, "resend", False)

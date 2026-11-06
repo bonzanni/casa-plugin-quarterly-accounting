@@ -1,5 +1,4 @@
-"""#89 (OPERATOR DECISION): naming a vendor posts its own outcome. Three rounds of skill
-wording did not make the desk's rename replies short, so the rename itself posts what the
+"""#89: naming a vendor posts its own outcome. Skill wording alone did not make the desk's rename replies short, so the rename itself posts what the
 operator sees and the model adds nothing:
 - rename_vendor: one vendor, found from the operator's words for it, gets a given name or
   the name on its invoice; Casa posts "<old> is now called <new>." before the vendor's card;
@@ -34,7 +33,7 @@ def _texts(v) -> set:
 
 def resolve(conn, words, pool=None, done="renamed", named_first=False) -> dict:
     """The one vendor the operator's words name: the same text as its name, one of its bank
-    texts or the name on its invoice (case and spacing aside; r1 Terra S1: one level, since a
+    texts or the name on its invoice (one level, since a
     card shows an unrenamed vendor under its invoice's name), else the one vendor whose name,
     bank texts or invoice name contain the words. Several at the first level that finds any,
     or none: a refusal in words (no fuzzy matching). Payments with no payee text are nobody's
@@ -85,7 +84,7 @@ def rename_vendor(conn, vendor, new_name=None) -> dict:
         if target.strip() == v["name"].strip():
             lead = f"{views.field(v['name'].strip())} already has that name."
             if v["cp"] is None or v["cp"]["named_at"] is None:
-                # #92 r1 (Astra): asked for, the name is kept from now on (named_at), also
+                # #92: asked for, the name is kept from now on (named_at), also
                 # when it is already the one shown
                 kb.upsert_in_tx(conn, v["name"], new_name=target)
         else:
@@ -150,7 +149,7 @@ def merge_vendors(conn, vendor, into) -> dict:
         pool = [v for v in vs if v["key"] != x["key"]] + _entries_without_payments(conn, vs)
         if kb.norm(into) == kb.norm(x["invoice_name"]) and not any(
                 kb.norm(into) in _texts(v) for v in pool):
-            # r1 (Astra S1): the words are X's own invoice name and no other vendor bears it —
+            # The words are X's own invoice name and no other vendor bears it —
             # never a containment guess at a third vendor
             raise db.Refusal(f"no other vendor is called '{views.field(into.strip())}'; "
                              "nothing was merged")

@@ -1,6 +1,5 @@
 # server/package.py
-"""The quarterly package — built only when the operator asks (spec
-§Packaging). The build freezes its inputs in ONE read transaction and renders
+"""The quarterly package — built only when the operator asks. The build freezes its inputs in ONE read transaction and renders
 from them deterministically, so the same frozen inputs give the same bytes
 and "identical to the package from 14 Oct" is a computed fact. Membership is
 the transaction's effective-date quarter, never where a file is stored. Only
@@ -32,7 +31,7 @@ COLUMNS = ("date", "amount", "currency", "direction", "counterparty", "vendor", 
 STATUS = {"matched": "MATCHED", "proposed": "UNCONFIRMED", "open": "MISSING",
           "optional": "OPTIONAL-MISSING", "no-document": "NO-DOCUMENT", "exempt": "NO-DOCUMENT",
           "ineligible": "UNTRACKED"}
-# simple loop D18: a line not documented yet — the caption's "open" count (a pending row
+# A line not documented yet — the caption's "open" count (a pending row
 # is not documented)
 OPEN = ("UNCONFIRMED", "MISSING", "UNCLASSIFIED", "PENDING")
 xml_safe = xlsx.xml_safe
@@ -114,7 +113,7 @@ def _freeze(conn, quarter: str) -> dict:
                                        (c["document"]["doc_id"],)).fetchone()
                     docs[c["match_id"]] = dict(row)
                 if d["status"] == "proposed" and d["current"]:
-                    # D3 (shape c): a proposal's alternatives ship set aside with its
+                    # A proposal's alternatives ship set aside with its
                     # chosen document, keyed -doc_id (ints: the render's sort still sorts)
                     held = {doc["doc_id"] for doc in docs.values()}
                     for alt in matches.alternatives(conn, d["current"]["match_id"]):
@@ -124,7 +123,7 @@ def _freeze(conn, quarter: str) -> dict:
                             docs[-alt] = dict(row)
             lines.append({"row": r, "d": d, "docs": docs})
         history = [r for r in in_q if r["state"] != "active"]
-        # e4 (Astra S2, rev 18.4 §R18.3): a document is listed under the quarter of its own
+        # A document is listed under the quarter of its own
         # date — a Q3 invoice filed in October is Q3's unmatched one — else its filing's
         unmatched = [dict(x) for x in conn.execute(
             "SELECT d.* FROM documents d JOIN document_status s ON s.doc_id=d.doc_id"
@@ -133,14 +132,14 @@ def _freeze(conn, quarter: str) -> dict:
                 else x["ingest_quarter"]) == quarter]
         snap = conn.execute("SELECT bank_through, imported_at FROM snapshots ORDER BY"
                             " snapshot_id DESC LIMIT 1").fetchone()
-        # the import every line's freshness was judged against (round E3, Terra S1)
+        # the import every line's freshness was judged against
         # every row's date and amount: notes.md names a successor by them, never by id
         facts = {r["row_id"]: {"date": dates.effective_date(r), "amount_minor": r["amount_minor"],
                                "currency": r["currency"]} for r in rows}
         return {"snapshot_id": lineage.latest_import(conn), "facts": facts,
                 "binding": dict(b), "lines": lines, "history": history, "unmatched": unmatched,
                 "bank_through": snap["bank_through"] if snap else None,
-                # simple loop §1: the package is as of the latest check, and says so
+                # The package is as of the latest check, and says so
                 "as_of": snap["imported_at"] if snap else None}
     finally:
         conn.execute("COMMIT")
@@ -157,20 +156,19 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         status = "UNTRACKED" if d is None else STATUS.get(d["status"], "UNTRACKED")
         exp = d["expectation"] if d else {"kind": None, "tier": None}
         if status == "MISSING" and exp["kind"] is None:
-            status = "UNCLASSIFIED"     # #105 d1 (Terra): unsettled, as the cards say
-        # the kind the accountant's copy stands for (fix wave F): the one it ships under,
+            status = "UNCLASSIFIED"     # #105: unsettled, as the cards say
+        # the kind the accountant's copy stands for: the one it ships under,
         # else — shipped unclassified — the last one known. The delivered kind check
         # compares against this, so a row shipped unread is not "categorised differently"
         # when its next read finds the kind it already had.
         known_kind = exp["kind"] or (d["last_known_kind"] if d else None)
-        # fix E2: a row not observed at the latest import ships no classification and
-        # no document as its own — its kind may have changed (spec §Error handling:
-        # packaging ships rather than blocking; the caption says how many)
+        # A row not observed at the latest import ships no classification and
+        # no document as its own — its kind may have changed (packaging ships rather than blocking; the caption says how many)
         stale = d is not None and not d["fresh"] and d["status"] not in ("ineligible", "exempt")
         if stale:
             status, exp = "UNCLASSIFIED", {"kind": None, "tier": None}
         if d is not None and d["pending"] and status != "UNTRACKED":
-            # D18 (plan round 1, Terra S2; Task 9 review ruling): a tracked row the bank has
+            # A tracked row the bank has
             # not booked is PENDING whatever its status — the end message's partition
             # (cards._bucket, the same describe flag), so the zip, the caption and the
             # cards agree; set before the MISSING test below
@@ -195,7 +193,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
                 files[name] = documents_bytes(doc)
                 set_aside.append(name)
                 # a row not observed ships its documents set aside, named in its own
-                # section: they are not candidates that failed to match (fix wave F)
+                # section: they are not candidates that failed to match
                 if not stale:
                     unresolved_lines.append((d, name))
         if d is not None:
@@ -269,7 +267,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
     notes += [f"- {a}" for a in anomalies] or ["- none"]
     if frozen["history"]:
         notes += ["", "## Bank rows kept as history (not summed)", ""]
-        # rows named by date and amount, never by bank-feed's row id (fix wave F)
+        # rows named by date and amount, never by bank-feed's row id
         notes += [f"- {_row_words(h)} — {h['state']}"
                   + (_successor(frozen["facts"].get(h["superseded_by"]))
                      if h["superseded_by"] else "")
@@ -282,7 +280,7 @@ def _render(frozen: dict, quarter: str, today: str, oversize_note=None) -> tuple
         notes += [f"- {name} — named by the date it was filed with" for name in undated]
     if oversize_note:
         notes += ["", "## Too large to send", ""] + [f"- {x}" for x in oversize_note]
-    # The digest covers every file INCLUDING notes.md (round p6, Astra S2: a change
+    # The digest covers every file INCLUDING notes.md (a change
     # visible only in notes.md was captioned "identical"); only the closing line,
     # which carries the build date and the digest itself, is left out.
     # The opening "Partial quarter" line carries the build date too, so it is
@@ -352,7 +350,7 @@ def _reserve(stem: str, stamp: str) -> tuple:
 
 
 def caption_line(quarter, as_of, counts) -> str:
-    """§1 (option A, BRAIN 2026-10-06): the package is as of the latest check, and the
+    """The package is as of the latest check, and the
     caption says so; the details live inside the zip. ONE line: "Q3 · as of 6 Oct · 57 of
     60 documented · 3 open" — `as_of` is the latest import's time, `counts` the render's
     (`in_scope`: every line not UNTRACKED; `open`: the OPEN statuses)."""
@@ -363,7 +361,7 @@ def caption_line(quarter, as_of, counts) -> str:
 
 
 def build_quarterly_package(conn, quarter: str) -> dict:
-    """Build the quarter's zip from the store as it is (get_package; simple loop §1). The
+    """Build the quarter's zip from the store as it is (get_package; ). The
     custody lock over documents/ and packages/ (db.custody_lock): a build reads held
     documents' bytes and writes into packages/, which reset_store erases under that lock.
     Taken BEFORE the freeze transaction, never inside one (lock order: custody, then
@@ -399,7 +397,7 @@ def _build(conn, quarter: str) -> dict:
     try:
         with db.tx(conn):
             if lineage.latest_import(conn) != frozen["snapshot_id"]:
-                # round E3 (Terra S1): an import landed between the freeze and this
+                # An import landed between the freeze and this
                 # commit, so rows judged fresh may no longer be; never register or hand
                 # out a zip built from a superseded snapshot
                 raise db.Refusal("the bank was re-read while building — build again")
