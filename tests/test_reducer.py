@@ -118,13 +118,13 @@ class TestValidity(unittest.TestCase):
                          frozenset({"acct::matched"}))
 
     def test_conflicted_only_is_a_proposal(self):
-        # D3: a joint machine set is one proposal awaiting the operator's pick
+        # A joint machine set is one proposal awaiting the operator's pick
         r = R.reduce(inputs([auto(1, 1), auto(2, 2)]))
         self.assertEqual((r.desired, r.status), (frozenset({"acct::proposed"}), "proposed"))
         self.assertIn("conflicted", r.reasons)
 
     def test_machine_proposal_stays_proposed_when_unconfirmed(self):
-        # S2 (Astra round on 61bcbaa): step 5's `ok` requires `m.state ==
+        # Step 5's `ok` requires `m.state ==
         # "matched"`. An auto `propose` entry (never confirmed to a `pair`)
         # is state "proposed" even with unchanged facts; dropping this guard would
         # emit acct::matched for it.
@@ -133,7 +133,7 @@ class TestValidity(unittest.TestCase):
         self.assertNotIn("facts-changed", r.reasons)
 
     def test_machine_pair_invalidated_by_facts_changing_after_pairing(self):
-        # S2: step 5's `ok` also requires `row_ok`. A machine `pair`
+        # Step 5's `ok` also requires `row_ok`. A machine `pair`
         # (state "matched") whose material facts changed post-pairing
         # (amount 10000 -> 9000) must fall back to acct::proposed; dropping
         # `row_ok` from `ok` would emit acct::matched with stale facts.

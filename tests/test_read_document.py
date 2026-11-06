@@ -63,7 +63,7 @@ class TestReadDocument(StoreCase):
 
     def test_held_bytes_that_no_longer_match_their_hash_are_an_error_never_served(self):
         doc = ingest(self.conn, self.publish("a.pdf", PDF))
-        # the same length: a size check would serve it (round C1, Astra)
+        # the same length: a size check would serve it
         altered = PDF.replace(b"1.4", b"1.7")
         self.assertEqual(len(altered), len(PDF))
         documents.path_of(self.conn, doc["doc_id"]).write_bytes(altered)
@@ -85,7 +85,7 @@ class TestReadDocument(StoreCase):
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), doc["sha256"])
 
     def test_a_prefixed_pdf_whose_held_bytes_changed_is_an_error_never_served(self):
-        # the hash is checked before the slice, whatever the prefix (round R1, Astra)
+        # the hash is checked before the slice, whatever the prefix
         held = b"\xef\xbb\xbf" + PDF
         doc = ingest(self.conn, self.publish("rail.pdf", held))
         documents.path_of(self.conn, doc["doc_id"]).write_bytes(held.replace(b"1.4", b"1.7"))
@@ -143,7 +143,7 @@ class TestReadDocumentOverMcp(StoreCase):
         self.assertLess(len(out["content"][0]["text"]), budget.RESULT_LIMIT)
 
     def test_a_plain_list_answer_is_still_rendered_as_one_json_text_block(self):
-        # only a Blocks answer is sent as content blocks (round C1, Astra)
+        # only a Blocks answer is sent as content blocks
         import tools  # noqa: F401
         qa_server.TOOLS["_probe_list"] = {"description": "", "schema": {},
                                           "fn": lambda args: [{"invoice": 42}]}

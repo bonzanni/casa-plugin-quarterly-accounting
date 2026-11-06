@@ -1,4 +1,4 @@
-"""Rev 18.4 §R18.3: the replace card — bound to the pairing it displayed (r4 Terra S1), one
+"""The replace card — bound to the pairing it displayed, one
 live question per payment, [Keep current] / [Use new] — through the real taps."""
 import json
 
@@ -74,7 +74,7 @@ class ReplaceCard(StoreCase):
                                            " question_id=?", (qid,)).fetchone()[0], "kept")
 
     def test_a_superseded_card_commits_nothing(self):
-        """r4 Terra S1: card A→B, then a newer question A→C; [Use new] on the A→B card
+        """Card A→B, then a newer question A→C; [Use new] on the A→B card
         commits nothing; the newer card still swaps to C."""
         self.ask("B2")
         older = self.card()

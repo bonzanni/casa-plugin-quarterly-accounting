@@ -1,4 +1,4 @@
-"""S7: the posting tools' logic. Each composes and stores what it posts (and its tap keys)
+"""The posting tools' logic. Each composes and stores what it posts (and its tap keys)
 in ONE committed transaction, then deposits the body with Casa as the LAST step, and
 returns the reference. Nothing here ever returns a key."""
 from __future__ import annotations
@@ -43,7 +43,7 @@ def _proposal(text, buttons, revision, pages=None) -> str:
 def _keyed(conn, render_id, specs) -> list:
     """The buttons of `specs` (views.buttons_for, cards.buttons), each writing one with a
     fresh key stored under the rendering. A key_spec is (action, pid, doc_id): the key binds
-    all three (simple loop §1: a named candidate's document). Inside the caller's
+    all three (a named candidate's document). Inside the caller's
     transaction."""
     out = []
     for label, tool, args, key_spec in specs:
@@ -60,12 +60,12 @@ def _keyed(conn, render_id, specs) -> list:
 
 def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
               render_id=None, prev=None, package=False) -> dict:
-    """§7.1: render exactly as build_review does (or, with render_id, re-post that stored
-    rendering — the job's `view` unit, §5) and deposit it as a proposal: text = the page,
-    buttons = §7.2, revision = view:<view>:<quarter>. `prev` is the predecessor page the
-    More button (or a typed "more") names (binding V1). Simple loop §1: a cards rendering
+    """Render exactly as build_review does (or, with render_id, re-post that stored
+    rendering — the job's `view` unit) and deposit it as a proposal: text = the page,
+    buttons = the view's, revision = view:<view>:<quarter>. `prev` is the predecessor page the
+    More button (or a typed "more") names. A cards rendering
     (cards.KINDS) re-posts with its own keyboard (cards.buttons) and the revision of its
-    walk; view="open" composes and posts a fresh open-items card (§1 Recovery), with
+    walk; view="open" composes and posts a fresh open-items card, with
     [Get package] when `package` (#94). #93: a rendering with nothing to act on is not
     deposited — `post` names it for post_results."""
     import cards
@@ -102,7 +102,7 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
             return {"view": None, **out, **shown,
                     "note": " ".join(filter(None, [out["note"], shown.get("note")]))}
         value, scope = _view_value(conn, r)
-        # g1 (Astra S1), Casa #1312: re-posting the same rendering after a cut that lost its
+        # Casa #1312: re-posting the same rendering after a cut that lost its
         # mark_rendering_delivered sends nothing — Casa answers the original receipt
         key = delivery_key(conn, "view", [r["render_id"]])
     ref = casa_broker.deposit("view", value, key=key)
@@ -116,7 +116,7 @@ def show_view(conn, *, view=None, quarter=None, pid=None, page=None, after=None,
 
 def _shown_quarter(r, defaulted) -> dict:
     """#126: the quarter a view shows, in show_view's answer, so the desk sees which one it
-    posted. A call that named none got the store's default (ruling Q2b: the quarter the
+    posted. A call that named none got the store's default (the quarter the
     newest check named), which need not be the one the operator is talking about: the note
     says so, for the desk to judge."""
     if r["kind"] == "item":
@@ -151,7 +151,7 @@ def plain_post(conn, r, lead_rid=None) -> dict:
     scope = json.loads(r["scope_json"])
     ids = ([lead_rid] if lead_rid else []) + list(scope.get("list_pages") or []) \
         + [r["render_id"]]
-    # r1 (Astra S2): one rendering per post — Casa pages a joined message at its own
+    # One rendering per post — Casa pages a joined message at its own
     # boundaries, and a quote of its second message would match no stored rendering
     groups = [[rid] for rid in ids]
     for rid in ids:
@@ -183,12 +183,11 @@ def _view_value(conn, r, lead=None):
             # a page is posted with its card: a quote of it binds it (db.seen_render)
             conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
                          (db.next_seq(conn), p))
-        # r3 #3: stamped posted before the deposit (which stays last) — a view posted by
+        # Stamped posted before the deposit (which stays last) — a view posted by
         # a tap's stored call is never marked delivered, and a quote of it binds it. The
         # stamp means "a deposit was attempted at seq n": monotone, never restored on a
-        # refusal, so a late refusal cannot erase a later post's stamp (binding §3, r4
-        # Terra S1). It only makes the row a quote candidate, and recency never picks
-        # among those (R1)
+        # refusal, so a late refusal cannot erase a later post's stamp. It only makes the row a quote candidate, and recency never picks
+        # among those
         conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?",
                      (db.next_seq(conn), r["render_id"]))
     if lead is not None:
@@ -236,7 +235,7 @@ def delivery_key(conn, slot, render_ids) -> str | None:
 
 
 def post_results(conn, render_ids) -> dict:
-    """§5: post stored renderings as ONE operator_message (joined by a blank line) —
+    """Post stored renderings as ONE operator_message (joined by a blank line) —
     the job's `post` unit, or a desk turn's notice to post. Already delivered ones are
     skipped; with none left, nothing is deposited (the no-post shape)."""
     import job
@@ -264,14 +263,14 @@ def post_results(conn, render_ids) -> dict:
     return {"results": ref, "render_ids": ids}
 
 
-CAPTION_MAX = 900          # 1024 − views.LABEL_ALLOWANCE − 1, rounded down (§6.1)
+CAPTION_MAX = 900          # 1024 − views.LABEL_ALLOWANCE − 1, rounded down
 PKG_REFUSED = "the package could not be sent under its name — ask again"
 ALREADY_POSTED = "That package was already sent once — nothing was posted again."
 
 
 def post_package(conn, delivery_id) -> dict:
-    """§6.1: deposit a staged package as an operator_file — the staged path (Casa claims and
-    consumes it), kind zip, the package's filename as the delivered name (S7a), and one
+    """Deposit a staged package as an operator_file — the staged path (Casa claims and
+    consumes it), kind zip, the package's filename as the delivered name, and one
     caption line. A deposit Casa refuses settles the send `failed` (the staged copy taken
     back) — never a send under the storage name."""
     with db.tx(conn):
@@ -284,7 +283,7 @@ def post_package(conn, delivery_id) -> dict:
             raise db.Refusal("that send is no longer waiting to go out — nothing was posted")
         if d["posted_at"] is not None:
             # at most one deposit per send: Casa consumes the staged copy, so a second
-            # deposit's claim fails after a send that went out (Codex r2 S2)
+            # deposit's claim fails after a send that went out
             raise db.Refusal(ALREADY_POSTED)
         pk = conn.execute("SELECT * FROM packages WHERE package_id=?",
                           (d["package_id"],)).fetchone()
@@ -304,7 +303,7 @@ def _deposit_package(conn, d, pk, line) -> str:
     import delivery
     delivery_id = d["delivery_id"]
     with db.tx(conn):
-        # #44: the caption is a rendering of its own (`package-file`), tagged (binding V2)
+        # #44: the caption is a rendering of its own (`package-file`), tagged
         # and offering its package, so a swipe-reply on the file binds it; its text is the
         # caption in the dialect (a plain caption's backslashes doubled: unesc gives back
         # exactly what Telegram shows), seen once deposited (posted_seq)
@@ -332,7 +331,7 @@ def _deposit_package(conn, d, pk, line) -> str:
                 now = db.now()
                 conn.execute("UPDATE deliveries SET status='failed', settled_at=?,"
                              " withdrawn_at=? WHERE delivery_id=?", (now, now, delivery_id))
-                # Terra r1 S2: the operator never saw this caption — its rendering goes,
+                # The operator never saw this caption — its rendering goes,
                 # so no quote can bind a file that did not arrive
                 conn.execute("DELETE FROM renders WHERE render_id=? AND kind='package-file'",
                              (rid,))
@@ -418,7 +417,7 @@ def get_package(conn, quarter) -> dict:
     """#1303: a [Get package] tap's stored call, and the desk's typed "send the package".
     Pure code: builds the zip synchronously from the store's latest state (no bank read, no
     model), stages it, deposits it as post_package does — the landed file IS the receipt —
-    and records the send delivered (D15). Never called by the job (R6)."""
+    and records the send delivered. Never called by the job."""
     import dates, delivery, package
     dates.parse_quarter(quarter)
     if conn.in_transaction:
@@ -439,7 +438,7 @@ def get_package(conn, quarter) -> dict:
     ref = _deposit_package(conn, d, pk, pk["caption"])    # raises Refusal on a refusal
     # Nothing may raise past this point: the file has landed. Any failure to record the
     # send delivered rolls its transaction back and leaves the send staged and posted, and
-    # the next claim's recovery (delivery.posted_unrecorded) settles it `uncertain` (D15).
+    # the next claim's recovery (delivery.posted_unrecorded) settles it `uncertain`.
     alerts_ = []
     try:
         with db.tx(conn):
@@ -474,7 +473,7 @@ def reading_context(conn, quoted=None) -> dict:
 
 
 def propose_reading(conn, ops, quoted=None) -> dict:
-    """§8, #121: the operations the desk read in the operator's words, run under a rehearsal;
+    """#121: the operations the desk read in the operator's words, run under a rehearsal;
     with a write, posted as a reading to Apply. `reshow`: payments changed since the post
     (each re-shown by the desk, beside the reading or alone)."""
     import reply
@@ -497,7 +496,7 @@ def propose_reading(conn, ops, quoted=None) -> dict:
         if not views.fits_proposal(text_):
             raise db.Refusal(READING_TOO_LONG)
         now = db.now()
-        # a newer reading supersedes an unanswered older one (§8: `↻ replaced`)
+        # a newer reading supersedes an unanswered older one (`↻ replaced`)
         conn.execute("UPDATE readings SET state='stale', settled_at=? WHERE state='open'", (now,))
         key = keys.mint()
         # #121: `text` holds the operations (canonical JSON), replayed at Apply
@@ -511,7 +510,7 @@ def propose_reading(conn, ops, quoted=None) -> dict:
     try:
         ref = casa_broker.deposit("reading", value)
     except casa_broker.DepositFailed:
-        # no tap can carry a key Casa never took: the reading can never be applied (§7.5)
+        # no tap can carry a key Casa never took: the reading can never be applied
         with db.tx(conn):
             conn.execute("UPDATE readings SET state='stale', settled_at=? WHERE reading_id=?"
                          " AND state='open'", (db.now(), rid))
@@ -531,9 +530,9 @@ def _company_accounts(conn) -> list:
 
 
 def propose_account(conn, after=0) -> dict:
-    """§11: ask which company account is the business account — at most five choices a
+    """Ask which company account is the business account — at most five choices a
     page, listed in the body; each button carries only (choice, key), and the account id
-    and label are frozen under the key (§7.6). `after` is the page number already shown
+    and label are frozen under the key. `after` is the page number already shown
     (an int: the More button's only argument)."""
     if isinstance(after, bool) or not isinstance(after, int) or after < 0:
         raise db.Refusal("after is the page number the More button carried")

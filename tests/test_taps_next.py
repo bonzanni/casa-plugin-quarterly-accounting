@@ -1,4 +1,4 @@
-"""Simple loop §1 / #1302: every answer commits its keyed decision and returns the next
+"""/ #1302: every answer commits its keyed decision and returns the next
 card; single-use keyboards (nothing relies on an earlier message); Confirm all skips what
 was answered, refuses only what changed otherwise, commits the rest; [Never for X] binds the
 union of the vendor's pages and refuses a changed set with a fresh first page."""
@@ -99,7 +99,7 @@ class Taps(_Tapping):
         page2 = self.tap(page1, "Next page")["next"]       # page 2 posted before page 1's answer
         # plugin keys are per button: page 1's other button is still its own (Casa clears
         # the keyboard; the test calls the stored call directly)
-        # PLAY 0.11.2: the receipt names the payments acted on
+        # the receipt names the payments acted on
         self.assertTrue(self.tap(page1, "No invoice needed for these")["receipt"]
                         .startswith("No invoice needed (Adobe): EUR "))
         out = self.tap(page2, "No invoice needed for these")
@@ -109,7 +109,7 @@ class Taps(_Tapping):
         self.assertEqual(open_, 0)
 
     def test_wrong_on_a_legacy_set_rejects_only_the_candidates_the_card_showed(self):
-        """Plan round 8 (Astra S1): a legacy set of five machine candidates; the card shows
+        """A legacy set of five machine candidates; the card shows
         four; Wrong rejects those four, and the fifth stays proposable."""
         import lineage, matches
         import reducer as R
@@ -205,8 +205,8 @@ class Taps(_Tapping):
 
 
 class TapsMore(_Tapping):
-    """Task 8 additions: #1302's shapes, the displayed-only rules, Confirm all's split and
-    Never's union binding, each pinned so a mutant of it fails."""
+    """#1302's shapes, the displayed-only rules, Confirm all's split and
+    Never's union binding, each pinned."""
 
     def test_a_refused_key_answers_a_receipt_and_no_card(self):
         import keys, qa_server, tools  # noqa: F401
@@ -266,7 +266,7 @@ class TapsMore(_Tapping):
         self.assertNotIn("INV-91", out["next"]["text"])         # held elsewhere: not offered
 
     def test_a_pick_rejects_only_the_displayed_candidates(self):
-        """Plan round 8: a legacy set of five, four displayed; picking one rejects the other
+        """A legacy set of five, four displayed; picking one rejects the other
         three displayed members and never the fifth."""
         import lineage
         import reducer as R
@@ -334,7 +334,7 @@ class TapsMore(_Tapping):
         return pids, page1, page2
 
     def test_never_applies_when_an_earlier_page_changed_though_the_set_did_not(self):
-        """Review round 1 ruling: Never binds by membership — a page-1 payment whose amount
+        """Never binds by membership — a page-1 payment whose amount
         the bank corrected is still one of the payments the walk displayed."""
         pids, page1, page2 = self._two_pages()
         first = self.scope_of(page1)["pages"][0][0]
@@ -349,8 +349,8 @@ class TapsMore(_Tapping):
                                            " name='Adobe'").fetchone()[0], "none")
 
     def test_page_one_leave_missing_then_never_applies(self):
-        """§1 "one tap per vendor": the operator's own [Leave missing] on page 1 never
-        blocks [Never for X] on the last page (review round 1, reproduced)."""
+        """The operator's own [Leave missing] on page 1 never
+        blocks [Never for X] on the last page."""
         pids, page1, page2 = self._two_pages()
         self.assertIn("Left missing", self.tap(page1, "Leave missing")["receipt"])
         out = self.tap(page2, "Never for Adobe")
@@ -370,7 +370,7 @@ class TapsMore(_Tapping):
             "SELECT count(*) FROM projections WHERE status='open'").fetchone()[0], 0)
 
     def test_a_later_page_whose_payments_were_matched_still_offers_never(self):
-        """Task 7 carry, ported for d1 (Never's set is the rehearsed rule): page 2's
+        """Ported (Never's set is the rehearsed rule): page 2's
         payments matched meanwhile are still payments Never changes (their expectation),
         so page 2 lists them marked, offers no exemption, and Never there binds all 30."""
         import matches
@@ -384,11 +384,11 @@ class TapsMore(_Tapping):
                                      " p ON p.dest_row_id=b.row_id WHERE p.pid=?",
                                      (p,)).fetchone()[0]),
                                  expected_revision=self.rev(p), token=self.token)
-        # PLAY 0.11.2: a vendor page lists only missing payments, so a later page whose
-        # payments were all matched meanwhile has nothing left to list (Task 7 carry)
+        # A vendor page lists only missing payments, so a later page whose
+        # payments were all matched meanwhile has nothing left to list
         out = self.tap(page1, "Next page")
         self.assertEqual(out["receipt"], "Nothing is left on the later pages: answered meanwhile.")
-        # r1 Terra S1: page 1 still holds 25 missing payments, so the vendor's card follows
+        # Page 1 still holds 25 missing payments, so the vendor's card follows
         self.assertIn("Adobe", out["next"]["text"])
         self.assertEqual(len(self.scope_of(out["next"])["pages"][0]), 25)
         # the vendor's card as it is now states the matched ones in `also`, and Never there
@@ -404,7 +404,7 @@ class TapsMore(_Tapping):
         self.assertEqual(len(pids), 30)
 
     def test_a_vendor_with_no_missing_payment_left_has_no_card(self):
-        """Task 7 carry: cards.card is None when nothing of the vendor is missing any more;
+        """Cards.card is None when nothing of the vendor is missing any more;
         the walk goes on (next_after), never a None card."""
         import matches
         a = self.pay("Adobe", 100)
@@ -432,7 +432,7 @@ class TapsMore(_Tapping):
     def test_confirm_all_commits_the_rest_when_one_confirm_is_refused(self):
         """Each proposal in its own savepoint: a confirm refused AFTER it wrote (the floor
         at the write) commits nothing for it and leaves the other's confirmation standing.
-        (Rev 18.4 §R18.4: an alternative no longer holds, so the refusal is injected.)"""
+        (an alternative no longer holds, so the refusal is injected.)"""
         import taps
         a, b = self.pay("A", 1000), self.pay("B", 1001)
         self.propose(a, amount_minor=1000)

@@ -1,6 +1,6 @@
 # server/xlsx.py
 """A minimal SpreadsheetML workbook, hand-written with zipfile (the server is
-stdlib-only; spec §Packaging). Inline strings only, one sheet, a header row.
+stdlib-only). Inline strings only, one sheet, a header row.
 ledger.csv is authoritative: if the two ever disagree, the CSV is right."""
 from __future__ import annotations
 

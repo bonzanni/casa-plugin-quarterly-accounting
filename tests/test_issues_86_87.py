@@ -28,7 +28,7 @@ class RenameLine(_Q3):
         self.assertEqual(out["line"], "LINKEDIN is now called LinkedIn.")
 
     def test_the_line_keeps_the_stored_name_whole(self):
-        # r1 (Terra S2): a trailing period of the name itself is kept
+        # A trailing period of the name itself is kept
         self.pay("RAW", 100, "2026-08-03")
         out = kb.upsert_counterparty(self.conn, "RAW", new_name="Acme B.V..")
         self.assertEqual(out["name"], "Acme B.V..")

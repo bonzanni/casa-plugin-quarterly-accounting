@@ -1,11 +1,10 @@
-"""The server-owned per-run work queues (operator ruling A; docs queues-design.md q6), each
-design round's finding pinned through the real surface (qa_server.TOOLS, a real bank-feed):
-- q1 Astra: a model's write enqueues only into the handed unit; the server's producers (a
+"""The server-owned per-run work queues, each case pinned through the real surface (qa_server.TOOLS, a real bank-feed):
+- a model's write enqueues only into the handed unit; the server's producers (a
   taken handover) are exempt — a payment reopened during the mirror is worked before the post;
-- q1/q2/q3 (rule 5): a run that gave up any upstream item (an attachment, the own-mail
+- rule 5: a run that gave up any upstream item (an attachment, the own-mail
   search, an erase check) counts every payment it decided missing as "search incomplete";
-- q4 (rule 5's latch): given_up is terminal — a re-found ref filed later never clears it;
-- q5: a job's record_search carries refs; a zero-result search is progress;
+- rule 5's latch: given_up is terminal — a re-found ref filed later never clears it;
+- a job's record_search carries refs; a zero-result search is progress;
 - rule 3: decide waits for the vendor's found attachments; rule 2: a mirror call never
   reported is given up as failed; set_aside closes an erase candidate bank-feed still has."""
 from tests._base import StoreCase
@@ -40,7 +39,7 @@ class Queues(StoreCase):
         with self.assertRaises(db.Refusal):           # refs never go with a vendor's probe
             drv._tool("record_probe", {"pass_token": drv.token, "kind": "gmail", "ok": True,
                                        "data": {"refs": ["m2:a1"]}})
-        with self.assertRaises(db.Refusal):           # a job search carries its refs (q5)
+        with self.assertRaises(db.Refusal):           # a job search carries its refs
             drv._tool("record_search", {"pass_token": drv.token, "pids": [pid],
                                         "search": "payment", "queries": ["x"]})
 
@@ -62,7 +61,7 @@ class Queues(StoreCase):
         self.assertEqual(out["applied"], 1)
 
     def test_a_zero_result_search_is_progress(self):
-        """q5 (Terra): a vendor hand-out that records a search finding nothing, then is cut,
+        """A vendor hand-out that records a search finding nothing, then is cut,
         progressed — the payment is handed again, not given up after two such cuts."""
         drv = JobDriver(self, payments=1)
         real, n = drv._payment, [0]
@@ -85,7 +84,7 @@ class Queues(StoreCase):
                          "missing")
 
     def test_a_given_up_own_mail_attachment_makes_every_missing_search_incomplete(self):
-        """q2 (Astra), rule 5: an own-mail attachment never filed (twice handed, never
+        """Rule 5: an own-mail attachment never filed (twice handed, never
         reached) — the payment decided missing later reads "missing · search incomplete"."""
         drv = JobDriver(self, payments=1)
         drv.gmail.own(55500, day=drv.DATES[0], number="OWN-X")    # fits no payment
@@ -108,7 +107,7 @@ class Queues(StoreCase):
                                            " job_id='aaaa0004-1'").fetchone()[0], 1)
 
     def test_a_given_up_own_mail_search_makes_every_missing_search_incomplete(self):
-        """q2 (Terra), rule 5: the own-mail search never recorded (two cut hand-outs)."""
+        """Rule 5: the own-mail search never recorded (two cut hand-outs)."""
         drv = JobDriver(self, payments=1)
         drv._filing = lambda u, token: None
         drv.run_job("aaaa0005-1")
@@ -119,7 +118,7 @@ class Queues(StoreCase):
         self.assertIn("Your own mail was not read", text)
 
     def test_given_up_is_terminal_a_refound_ref_filed_later_keeps_the_latch(self):
-        """q3 (Astra), q4: rA given up in filing; vendor B's search re-finds it and files it;
+        """rA given up in filing; vendor B's search re-finds it and files it;
         the given-up item stays given up, so A's missing still reads search incomplete."""
         drv = JobDriver(self, payments=0)
         drv._add_rows([("Adobe", 1000, "2026-07-05", "software"),
@@ -138,7 +137,7 @@ class Queues(StoreCase):
         self.assertIn("missing · search incomplete", drv.posted_end("aaaa0006-1")["text"])
 
     def test_a_handover_taken_during_the_mirror_is_worked_before_the_post(self):
-        """q1 (Astra): the taken handover reopens a decided payment of an earlier vendor
+        """The taken handover reopens a decided payment of an earlier vendor
         (a server producer: exempt from the handed-unit rule); the cursor walks back to
         the vendors before the post."""
         import asks, job
@@ -159,7 +158,7 @@ class Queues(StoreCase):
         self.assertLess(kinds.index("payment"),
                         next(i for i, k in enumerate(kinds) if k in ("view", "post")))
         self.assertEqual(self.conn.execute("SELECT status FROM projections").fetchone()[0],
-                         "matched")                       # operator ruling 2026-10-09: sure
+                         "matched")                       # Sure
 
     def test_a_mirror_call_never_reported_is_given_up_failed(self):
         drv = JobDriver(self, payments=1)
@@ -195,7 +194,7 @@ class Queues(StoreCase):
 
 
 class RewalkMissing(StoreCase):
-    """Rev 18.3 (r3 Astra S2 = Terra S1): a later payment's search files an earlier missing
+    """A later payment's search files an earlier missing
     payment's invoice; that payment is walked again before the post and decided again."""
 
     def setUp(self):

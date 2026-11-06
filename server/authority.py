@@ -1,4 +1,4 @@
-"""S7 §8.1: operator authority — an operator-authored lineage entry (pair, unpair, lift,
+"""Operator authority — an operator-authored lineage entry (pair, unpair, lift,
 exempt), an operator expectation, the business-account binding, and the store-wide operator
 settings (watermark, stop chasing, package name, the ledger-reset word) — is written only
 under a grant. An OperatorGrant is constructed only by a keyed handler (taps.verdict,

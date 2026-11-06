@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.31
+
+Same store schema (17) and behaviour. Now needs Casa v0.347.0 or newer through current finance.
+
+- Each version now gets a published GitHub release, marked latest.
+- The README states one Casa minimum and how to install by asking in chat.
+- Internal planning documents and notes are gone from the repository.
+
 ## 0.11.30
 
 Same store schema (17) and Casa floor (v0.344.67).
@@ -160,7 +168,7 @@ Same store schema (17) and Casa floor (v0.344.67).
 Same store schema (17) and Casa floor (v0.344.67).
 
 - **"Check Q3" answers with the quarter's status (#103).** It is a question about where the
-  quarter stands, as ruled on 8 October, also when the assistant passes it on as "run the
+  quarter stands, also when the assistant passes it on as "run the
   check". Finance posts the status card and runs nothing. The accounting check starts when
   you ask for the work, for instance "do the Q3 accounting".
 
@@ -285,7 +293,7 @@ Same store schema (16) and Casa floor (v0.344.67).
 
 Same store schema (16) and Casa floor (v0.344.67).
 
-- **A handed-over invoice the check is sure of is matched for you (operator ruling).** Before,
+- **A handed-over invoice the check is sure of is matched for you.** Before,
   every handed-over invoice waited for your confirmation. Now the check reads it, looks at every
   payment it could fit, with the nearest date first, and matches it when it is sure. It still
   proposes it when it isn't sure, for example with several monthly charges of the same amount.
@@ -428,9 +436,7 @@ on an older Casa.
 
 ## 0.11.2
 
-The card the operator reads, from the first prod "check Q3" on 0.11.1 (2026-10-08), and
-the operator-approved conversation script (`docs/superpowers/specs/
-2026-10-08-conversation-script.md`). Same Casa floor (v0.344.39) and store schema 15.
+The card the operator reads, and an agreed conversation script. Same Casa floor (v0.344.39) and store schema 15.
 
 - **Two intents about a quarter (#55).** Where a quarter stands: `show_view(view="open",
   quarter=…)` posts one status card for that quarter: its payments, non-zero counts, its
@@ -450,14 +456,13 @@ the operator-approved conversation script (`docs/superpowers/specs/
   add." (Casa ha-casa-app#1332 owns the resident's restatement).
 - **The render tag is a day and time (#53).** Every card's first line ends with
   " · 8 Oct 21:04:37", the moment it was composed, in CASA_TZ, then TZ, then UTC; it
-  replaces the bare render number. Residual (operator ruling): the same card shown twice in
+  replaces the bare render number. Residual: the same card shown twice in
   the same second (within a year) is refused visibly when replied to, never bound wrongly.
 - **One purchase is one line (#52).** The proposal line counts purchases (issuer +
   number, #48's unit), so an invoice and a receipt with the same number read as one
   document, and the Review card shows one line and one button per purchase. When one email
   carries an invoice and its own receipt, the job uses the invoice and never offers the
-  receipt; when unsure which is the invoice it proposes, so the operator confirms (a skill
-  judgment, operator ruling — no server rule; the #48 floor is 0.11.1's). A stored
+  receipt; when unsure which is the invoice it proposes, so the operator confirms (a skill judgment — no server rule; the #48 floor is 0.11.1's). A stored
   alternative set aside since it was stored is no longer offered.
 - **A quarter's vendor card lists only that quarter.** The vendor's payments of other
   quarters are a frozen count on the card ("Also missing in other quarters: 2 (Q2, Q4)"),
@@ -466,7 +471,7 @@ the operator-approved conversation script (`docs/superpowers/specs/
   cover the other quarters' missing ones too: a short receipt ("All quarters on.") and the
   same card switched on (⟦✓ All quarters⟧, "· answers will cover them"). An answer refuses
   when a counted payment moved.
-- **Reading fixes from PLAY's live check.**
+- **Reading fixes.**
   - One number per thing: the legend and the "Reviewing …" receipt print only the counts
     line's numbers.
   - A vendor card lists its missing payments, without the bank's payee text on each line,
@@ -488,7 +493,7 @@ the operator-approved conversation script (`docs/superpowers/specs/
 
 ## 0.11.1
 
-Two floors at the job's decide, from Q2 re-run #3 on 0.11.0. Same Casa floor: v0.344.39.
+Two floors at the job's decide. Same Casa floor: v0.344.39.
 Store schema 15 (the run's work queue admits an `email` item; the upgrade copies a live
 run's rows).
 
@@ -503,10 +508,8 @@ run's rows).
   (`update_document_metadata` with the pass token) is refused when its issuer or number would
   move a held document into a purchase another payment backs. The operator's taps and edits
   are not limited by it. No date window: Google's month shift and a March invoice paid in
-  April stay legitimate. Re-run #3: refuses exactly the two wrong ElevenLabs proposals (July
-  with May's receipt, September with August's); refuses nothing in run 1 or the bookkeeping
-  key.
-  *Accepted cost (operator ruling):* first claim wins within a run. If a later payment
+  April stay legitimate. It refuses a wrong proposal such as July with May's receipt or September with August's.
+  *Accepted cost:* first claim wins within a run. If a later payment
   wrongly takes an earlier `missing` payment's purchase, the earlier payment stays missing
   until the next check; the operator rejects the wrong proposal, as with 0.11.0.
 - **`missing` waits for the emails a payment's own reference search returned (#50).**
@@ -531,7 +534,7 @@ quietWhenScheduled`) and the plugin does not load.
 
 Requires Casa v0.344.39 or newer (the release carrying #1301, #1302 and #1303, and #1312).
 
-0.10.0 was released separately as the S7 work (quarterly accounting off Ellen); this release
+0.10.0 was released separately (quarterly accounting off Ellen); this release
 builds on it.
 
 - **The loop.** One pass per run: probes, a snapshot, the erase checks, filing, the payments
@@ -543,7 +546,7 @@ builds on it.
   Progress is one definition, read by Casa's batch report and by the hand-outs alike. There
   is no call budget: work is handed until Casa ends the batch at its turn limit, and a
   standalone `report` step reports the work since the last report (a batch Casa cut is
-  reported by the next one). Live Q2 run 1 showed a budget the model must count for is
+  reported by the next one). A live run showed that a budget the model must count for is
   fragile.
 - **Owed work survives a cut.** Everything a unit owes is a server row from the moment it is
   known: each erase candidate, the own-mail search and every attachment it found, every
@@ -592,10 +595,10 @@ builds on it.
 
 Upgrade notes:
 - Schema 12 migrates the store on first start; open package requests are told at the upgrade.
-- The first run writes one plain note per ledger row (D14).
-- The S7 renderings' buttons go stale once; ask for the view again.
+- The first run writes one plain note per ledger row.
+- Buttons on messages posted before this version go stale once; ask for the view again.
 
 ## 0.10.0
 
-The S7 release: the quarterly accounting moved off Ellen onto the finance specialist, with the
+The quarterly accounting moved off Ellen onto the finance specialist, with the
 typed reading and its bound rendering, the job's starter line and the desk/job split.

@@ -1,4 +1,4 @@
-"""0.11.10: issue #77 (casa-test PLAY of 0.11.9): the reading stored no recipient, so a
+"""0.11.10: issue #77: the reading stored no recipient, so a
 company-addressed reissue was called "already filed"; a "To check · Q4" list held Q2/Q3
 items; one vendor read under two names on one card."""
 import pathlib
@@ -20,13 +20,13 @@ class Reading(LoopCase):
 
     def test_a_reissue_differing_only_in_recipient_is_no_copy(self):
         import documents
-        a = self.doc(recipient="Nicola Bonzanni", document_number="FG-2", issuer="OpenAI")
-        b = self.doc(recipient="Lesina Holding B.V.", document_number="FG-2", issuer="OpenAI")
+        a = self.doc(recipient="Jan de Vries", document_number="FG-2", issuer="OpenAI")
+        b = self.doc(recipient="Voorbeeld Holding B.V.", document_number="FG-2", issuer="OpenAI")
         self.assertIsNone(documents.duplicate_of(self.conn, b))
         with db.tx(self.conn):
             import cards
             self.assertEqual(cards._differs(self.conn, a, b),
-                             "Differs: recipient Nicola Bonzanni → Lesina Holding B.V.")
+                             "Differs: recipient Jan de Vries → Voorbeeld Holding B.V.")
 
 
 class Heading(LoopCase):

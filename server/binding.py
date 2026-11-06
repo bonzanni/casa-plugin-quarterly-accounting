@@ -1,6 +1,5 @@
 """The bound account, its watermark and the package name — all defaulted,
-never asked at install (spec §Setup, "What the plugin works out for
-itself"); the self-check; reset."""
+never asked at install; the self-check; reset."""
 from __future__ import annotations
 
 import json
@@ -32,7 +31,7 @@ def _bind(conn, account_id: str, label: str) -> None:
 
 def bind_in_tx(conn, account_id: str, label: str, *, grant) -> dict:
     """The operator names the business account, inside the caller's transaction, under a
-    tap's grant (S7 §8.1). passes.record_probe's automatic binding of a single company
+    tap's grant. passes.record_probe's automatic binding of a single company
     account calls _bind: that is not an operator decision."""
     authority.require(conn, grant)
     b = get(conn)
@@ -48,9 +47,9 @@ def bind_in_tx(conn, account_id: str, label: str, *, grant) -> dict:
 def acknowledge_ledger_reset_in_tx(conn, *, grant) -> dict:
     """The operator's word that the bank ledger was wiped on purpose
     (delete_all_data, or everything purged before this plugin ever wrote), under a tap's
-    grant (S7 §8.1). If the next import cannot prove it is the ledger the store was built
+    grant. If the next import cannot prove it is the ledger the store was built
     on, it RE-BINDS the store to the ledger it reads (ledger._rebind); either way the
-    word is consumed by that import (plan §D4)."""
+    word is consumed by that import."""
     authority.require(conn, grant)
     if get(conn) is None:
         raise db.Refusal("no account is bound yet")
@@ -115,7 +114,7 @@ def check_setup(conn) -> dict:
     searching = gmail is None or gmail["ok"]
     if gmail is not None and not gmail["ok"]:
         if (gmail["data"] or {}).get("absent"):
-            # S2 §6.4: finance has no Gmail tools — not connected, nothing to re-authorise
+            # Finance has no Gmail tools — not connected, nothing to re-authorise
             conditions.append("Gmail isn't connected for the finance specialist — invoices "
                               "aren't being searched.")
         else:
@@ -128,7 +127,7 @@ def check_setup(conn) -> dict:
         conditions.append("Stopped before writing anything: " + gate["reason"] + ".")
         can_run, header = False, "Stopped."
     if gate.get("older_workflows"):
-        # spec §Testing: a version upgrade without a restore "reports the older
+        # A version upgrade without a restore "reports the older
         # version's writes still present" — a report, not a stop
         conditions.append("The older version's writes are still present in bank-feed's ledger ("
                           + ", ".join(gate["older_workflows"]) + ").")
@@ -159,7 +158,7 @@ ERASE_REPORT_KEEPS = (
 
 
 def reset_store(conn) -> dict:
-    """Wipe to the fresh-install state (spec §Setup, "Test install"), and the
+    """Wipe to the fresh-install state, and the
     plugin's uninstall eraser (casa.eraseTool, Casa v0.329.0+): argument-free,
     protected (one Casa tap), answering {"erasure", "report"}. No precondition:
     the server could not check one. In place, under the write lock, so other
@@ -169,8 +168,7 @@ def reset_store(conn) -> dict:
     the freed pages reclaimed (VACUUM, WAL truncate), so erased rows do not
     stay readable in free pages. `complete` only when every step finished."""
     problems = []
-    # The custody lock spans the row wipe AND the file erasure (fix wave B, Astra +
-    # Terra S1): an ingest either commits its row before the wipe (and both go) or
+    # The custody lock spans the row wipe AND the file erasure: an ingest either commits its row before the wipe (and both go) or
     # installs its bytes after the erasure (and both stay).
     with db.custody_lock():
         with db.tx(conn):
@@ -180,13 +178,13 @@ def reset_store(conn) -> dict:
                          % ",".join("'%s'" % t for t in _TABLES_TO_WIPE))
             conn.execute("UPDATE counters SET value=0 WHERE name='seq'")
             conn.execute("UPDATE counters SET value = value + 1 WHERE name='pass_generation'")
-            # S2 §6.3 (Astra plan-r3 S1): with `claims` empty every old job token is refused
+            # With `claims` empty every old job token is refused
             # (check_claim)
             # the marker row carries the last pass's trigger, id and start time —
-            # operator data (fix wave B, Astra S2); the monotonic generation that
+            # operator data; the monotonic generation that
             # fences a running pass lives in counters, bumped above
             conn.execute("DELETE FROM pass_marker")
-            # g2 (Terra S1): a new store identity — Casa #1312's delivery keys of the wiped
+            # A new store identity — Casa #1312's delivery keys of the wiped
             # store never suppress a message of this one
             conn.execute("DELETE FROM meta WHERE key='store_id'")
             # A "restored" or "other-ledger" refusal concerned the store just wiped; a
@@ -205,7 +203,7 @@ def reset_store(conn) -> dict:
         busy, log_frames, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         if busy or log_frames:
             # Another session still reads an older snapshot: erased rows stay in the
-            # WAL until it lets go (round p11, Astra S2). Never report that as complete.
+            # WAL until it lets go. Never report that as complete.
             problems.append("another session is still reading the store, so erased rows "
                             "remain in its write-ahead log until it closes; try again")
     except Exception as exc:  # the rows are gone; their free pages may not be

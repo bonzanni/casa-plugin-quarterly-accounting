@@ -17,14 +17,14 @@ import work  # noqa: E402
 
 
 def assert_operator_words(text):
-    """R4: every text the operator sees speaks operator words."""
+    """Every text the operator sees speaks operator words."""
     for word in views.FORBIDDEN:
         assert word not in text, (word, text)
     assert re.search(r"#\d|\br\d+\b|\ba [aeiou]", text) is None, text
 
 
 def apply_now(conn, ops, quoted=None):
-    """S7 §8 (Task 6), #121: the desk's operations proposed (propose_reading) and, when a
+    """#121: the desk's operations proposed (propose_reading) and, when a
     reading was posted, its Apply tapped (tests._base.apply_now). The proposal and the
     receipt both speak operator words."""
     out = _base.apply_now(conn, ops, quoted)
@@ -55,8 +55,7 @@ class Base(StoreCase):
         if not paired:
             # Integration fix: a required payment nobody has searched for is "not
             # searched", not "missing", and a status/missing sheet counts it
-            # without printing it (Task 16, spec §Weekly pass "four states stay
-            # distinct"). These fixtures mean a MISSING line the operator saw.
+            # without printing it. These fixtures mean a MISSING line the operator saw.
             work.record_search(self.conn, pid=pid, token=self.token, queries=[cp])
         if paired:
             d = self.doc(counterparty=cp, issuer=cp, amount_minor=amount, document_date=day)
@@ -126,7 +125,7 @@ class TestGrammar(Base):
                                            (pid,)).fetchone()[0], "open")
 
     def test_an_item_never_shown_is_refused_and_nothing_applies(self):
-        # binding R3: words resolve only on the one bound rendering; nothing names it
+        # Words resolve only on the one bound rendering; nothing names it
         # (#121: a pid not on the post is refused to the desk, nothing read)
         pid = self.item("Zapier", 9900, "2026-09-17")
         self.not_on_post([("reject", pid)])
@@ -173,7 +172,7 @@ class TestGrammar(Base):
                          .fetchone()[0], 0)
 
     def test_more_asks_for_the_next_page(self):
-        # final fix wave I-1: "more" is the bound rendering's `next` as show_view arguments;
+        # "more" is the bound rendering's `next` as show_view arguments;
         # a one-page list has none (#121: the desk reads it from reading_context)
         import posting
         self.item("Zapier", 9900, "2026-09-17")
@@ -183,7 +182,7 @@ class TestGrammar(Base):
     def test_identity_on_an_unseen_item_applies_nothing_and_a_changed_one_lists_it(self):
         self.deliver()
         pid = self.item("BCK*XYZ", 18000, "2026-09-16", paired=False)    # never shown
-        # binding R2/R3: no provenance on the bound rendering — refused, nothing re-shown
+        # No provenance on the bound rendering — refused, nothing re-shown
         # (#121: refused to the desk)
         self.not_on_post([("identity", pid, "my accountant")])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 0)
@@ -192,14 +191,14 @@ class TestGrammar(Base):
                  value_date="2026-09-16")                                # changed since shown
         self.settle(pid)
         out = apply_now(self.conn, [("identity", pid, "my accountant")])
-        # R2: provenance is the named payment on R; the payment it changes is listed in the
+        # Provenance is the named payment on R; the payment it changes is listed in the
         # proposal as it is now (170.00), and Apply's replay-and-compare guards that set
         self.assertEqual((len(out["applied"]), out["reshow"]), (1, []))
         self.assertIn("170.00", out["proposal"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM counterparties").fetchone()[0], 1)
 
     def test_a_vendor_wide_rule_needs_the_vendor_on_the_bound_rendering(self):
-        # round p6 (Terra S1); binding R2: provenance, not a re-show of every payment
+        # Provenance, not a re-show of every payment
         self.deliver()
         pid = self.item("Adobe", 5445, "2026-09-14")                     # paired, unseen
         self.not_on_post([("never", pid)])
@@ -211,8 +210,8 @@ class TestGrammar(Base):
         self.assertEqual(len(out["applied"]), 1)
 
     def test_an_identity_lists_every_payment_it_changes(self):
-        # round p7 (Astra S1): the identity reaches an unseen payment with the same bank text.
-        # Binding R2 (d1 Astra S2): it binds by provenance and lists that payment in the
+        # The identity reaches an unseen payment with the same bank text.
+        # it binds by provenance and lists that payment in the
         # proposal — the operator sees it before Apply; no re-show, no livelock
         import kb
         kb.upsert_counterparty(self.conn, "my accountant")
@@ -234,7 +233,7 @@ class TestGrammar(Base):
         self.settle(pid)
         r = views.build_review(self.conn, view="missing", quarter="2026-Q2")
         views.mark_rendering_delivered(self.conn, r["render_id"])
-        # S7 §8: the reading's touched quarter is the one the rule changes (the quarter a
+        # The reading's touched quarter is the one the rule changes (the quarter a
         # delivered package's "no longer matches" line names); a rebuild waits for the Apply
         # (#121: rebuild is get_package, never a reading operation)
         ops = reply.check_ops(_base.as_ops([("never", pid)]))
@@ -265,8 +264,8 @@ class TestGrammar(Base):
 
 class TestPreflightRulings(Base):
     def test_a_refused_setting_rides_in_the_same_receipt(self):
-        # R2: a setting refused after an earlier clause committed: the operator still gets
-        # one receipt with both (r4 Astra S2: re-aimed at a setting that survives 0.11.2 —
+        # A setting refused after an earlier clause committed: the operator still gets
+        # one receipt with both (re-aimed at a setting that survives 0.11.2 —
         # the zip name — refused by the store, so the guard in _Run.setting is what runs)
         import binding
         z = self.item("Zapier", 9900, "2026-09-17")
@@ -325,7 +324,7 @@ class TestPreflightRulings(Base):
                                            (z,)).fetchone()[0], n)
 
 
-class TestFixRound1(Base):
+class TestReplyEdgeCases(Base):
     def candidates(self):
         pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
         docs = []
@@ -373,9 +372,9 @@ class TestFixRound1(Base):
         self.assertEqual(said, "this payment needs a credit note, and this is a document")
 
 
-class TestFixWaveD(Base):
+class TestReplyFit(Base):
     def test_all_good_binds_to_the_sheet_delivered_last_within_one_second(self):
-        # Astra S1: delivered_at has one-second resolution; B then A delivered in the
+        # delivered_at has one-second resolution; B then A delivered in the
         # same second must bind the reading to A (delivery order), never to B (creation
         # order). #121: ops — Figma, only on B, is refused to the desk
         a = self.item("Adobe", 5445, "2026-09-14")
@@ -404,8 +403,8 @@ class TestFixWaveD(Base):
 
 
 class TestReceiptPages(Base):
-    """fix wave D (Astra S2): 100 rejections committed, then a 4,199-unit
-    receipt nobody could be sent. S7 §8: a reading is one proposal and its Apply
+    """100 rejections committed, then a 4,199-unit
+    receipt nobody could be sent. a reading is one proposal and its Apply
     one receipt, so a reading too long to show whole is refused before anything is
     read, and every text it does produce fits one message."""
     def setUp(self):
@@ -435,7 +434,7 @@ class TestReceiptPages(Base):
         with self.assertRaises(db.Refusal):                      # past the sanity bound
             posting.propose_reading(self.conn, [{"op": "reject", "pid": 1}] * (reply.OPS_MAX + 1))
 
-    # S7 §8: test_one_overlong_line_is_split_and_nothing_is_lost is deleted with
+    # test_one_overlong_line_is_split_and_nothing_is_lost is deleted with
     # reply._pages — a reading's answer is one proposal, one receipt or one `say`.
 
     def test_a_short_receipt_is_one_message(self):
@@ -446,8 +445,8 @@ class TestReceiptPages(Base):
 
 class TestReceiptSplit(Base):
     def test_a_proposal_too_long_to_show_is_refused_whole(self):
-        # fix wave D round 2 (Astra S2): the splitter appended ";" to a full
-        # piece and produced a 4097-unit page. S7 §8: one that cannot be shown whole is
+        # The splitter appended ";" to a full
+        # piece and produced a 4097-unit page. one that cannot be shown whole is
         # refused and nothing is read. #121: ops — a vendor-wide rule lists every payment
         # it moves (147 here), which cannot fit one proposal
         import posting
@@ -466,7 +465,7 @@ class TestReceiptSplit(Base):
 
 
 class TestFieldClip(Base):
-    """fix wave D round 3: a whole line clipped at 600 units stayed bound although
+    """A whole line clipped at 600 units stayed bound although
     what identified it (amount, date, a second candidate) was cut away. Only
     free-text FIELDS are clipped; identifying fields always print."""
     def test_two_payees_with_one_long_prefix_each_show_amount_and_date(self):
@@ -496,7 +495,7 @@ class TestFieldClip(Base):
 
 
 class TestIdentity(Base):
-    """fix wave D round 4: every entity a rendering binds is uniquely identified
+    """Every entity a rendering binds is uniquely identified
     by text visibly in it, and every item is bindable in a reachable view."""
     def pair(self, pid, number, date="2026-09-02", **kw):
         """A machine match through the floor (the document carries the payment's amount);
@@ -538,7 +537,7 @@ class TestIdentity(Base):
         return None if row is None else {int(k) for k in json.loads(row[0])}
 
     def test_numbers_alike_in_their_first_sixty_characters_render_apart(self):
-        # Astra S1 (a): 65 x "A" + CORRECT / WRONG rendered identically
+        # 65 x "A" + CORRECT / WRONG rendered identically
         x = self.item("Adobe", 5445, "2026-09-14", paired=False)
         y = self.item("Adobe", 6000, "2026-09-15", paired=False)
         self.pair(x, "A" * 65 + "CORRECT", labels=("guessed",))
@@ -550,7 +549,7 @@ class TestIdentity(Base):
         self.assertIn(b, " ".join(r["text"].split()))
 
     def test_two_candidates_alike_in_their_first_sixty_characters_render_apart(self):
-        # Astra S1 (b): both rendered identically, and "Adobe is wrong" rejected both
+        # Both rendered identically, and "Adobe is wrong" rejected both
         pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
         m = [self.pair(pid, "A" * 65 + tail) for tail in ("CORRECT", "WRONG")]
         r = self.deliver(view="check")
@@ -563,7 +562,7 @@ class TestIdentity(Base):
         del m
 
     def test_same_number_across_issuers_binds_both_and_applies(self):
-        # round 5 (Astra S2): number SAME, date 2 Sep, two issuers — the backstop bound
+        # Number SAME, date 2 Sep, two issuers — the backstop bound
         # neither and "Adobe is wrong" re-showed forever. Distinct by construction now.
         pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
         for issuer in ("Adobe", "Adobe Ireland"):
@@ -626,7 +625,7 @@ class TestIdentity(Base):
         return docs
 
     def test_a_literal_number_cannot_forge_a_generated_identity(self):
-        # round 6 (Astra S2): SAME, SAME and literally "SAME from Adobe ·7692"
+        # SAME, SAME and literally "SAME from Adobe ·7692"
         pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
         docs = self.conflicted(pid, [("SAME", "Adobe"), ("SAME", "Adobe"),
                                      ("SAME from Adobe ·7692", "Adobe"),
@@ -655,7 +654,7 @@ class TestIdentity(Base):
         self.assertIn("Ruled out 5 invoices", out["receipt"])
 
     def alias_after(self, between):
-        # round 8 (Astra + Terra S1): an alert or an unrelated item view delivered after the
+        # An alert or an unrelated item view delivered after the
         # sheet dropped the alias, and the reply unpaired the EUR 70.00 payment silently
         import passes
         a = self.item("A·B", 5445, "2026-09-14", labels=("guessed",))
@@ -671,7 +670,7 @@ class TestIdentity(Base):
         else:
             it = views.build_review(self.conn, view="item", pid=z)
             views.mark_rendering_delivered(self.conn, it["render_id"])
-        # binding R3: unquoted words bind what came last, which shows neither payment
+        # Unquoted words bind what came last, which shows neither payment
         # (#121: ops — refused to the desk)
         self.not_on_post([("reject", b)])
         self.assertEqual((self.author(a)[0], self.author(b)[0]), ("auto", "auto"))
@@ -689,7 +688,7 @@ class TestIdentity(Base):
         self.alias_after("item")
 
     def test_a_four_hex_digest_collision_is_lengthened(self):
-        # round 5 (Astra S1): "A"*65+"149" and +"257" share the digest 0844
+        # "A"*65+"149" and +"257" share the digest 0844
         n1, n2 = "A" * 65 + "149", "A" * 65 + "257"
         self.assertEqual(views.field(n1), views.field(n2))       # the collision, outside a view
         x = self.item("Adobe", 5445, "2026-09-14", paired=False)
@@ -703,7 +702,7 @@ class TestIdentity(Base):
         self.assertEqual(sorted(views.render_items(self.conn, r["render_id"])), sorted([x, y]))
 
     def test_a_hundred_runners_up_leave_the_item_bindable_everywhere(self):
-        # Astra + Terra: 80-120 runners-up made the item unbindable in every view
+        # 80-120 runners-up made the item unbindable in every view
         pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
         mid = self.pair(pid, "INV-1", labels=("guessed",),
                         runners_up=tuple("runner-up invoice %03d from Adobe" % i
@@ -738,7 +737,7 @@ class TestIdentity(Base):
             if it["next"] is None:
                 break
             self.assertTrue(it["text"].endswith(views.MORE_LINE))
-            # binding V1: More's call names this page as `prev`, so the next page adds its
+            # More's call names this page as `prev`, so the next page adds its
             # candidates — the last page binds all 60
             kw, page = dict(it["next"]), it["next"]["page"]
         self.assertGreater(page or 1, 1)
@@ -750,8 +749,7 @@ class TestIdentity(Base):
 class TestIntegration(Base):
     def test_a_counted_but_unprinted_payment_is_refused_not_changed(self):
         # a never-searched payment is counted ("not searched"), not printed: the
-        # operator never saw its line, so a correction naming it applies nothing (binding
-        # R3: it is not on the bound rendering; #121: refused to the desk)
+        # operator never saw its line, so a correction naming it applies nothing (it is not on the bound rendering; #121: refused to the desk)
         self.n += 1
         self.row(self.n, counterparty="BCK*XYZ", amount_minor=18000,
                  booking_date="2026-09-16", value_date="2026-09-16")

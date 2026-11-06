@@ -52,7 +52,7 @@ def _report(out, fn):
 
 def gate_paused(path, decided, resume, out):
     """bank_write_gate, paused right after _decide_gate returned its verdict
-    and before that verdict is persisted (fix wave B, Astra S1)."""
+    and before that verdict is persisted."""
     import db
     import passes
     real = passes._decide_gate
@@ -72,7 +72,7 @@ def gate_paused(path, decided, resume, out):
 
 def ingest_paused(source_path, installed, resume, out):
     """ingest_document, paused after its bytes are installed and before the
-    index row commits (fix wave B, Astra + Terra S1)."""
+    index row commits."""
     import db
     import documents
     real = documents._install
@@ -94,7 +94,7 @@ def ingest_paused(source_path, installed, resume, out):
 
 def reset_paused(committed, resume, out):
     """reset_store, paused after its row wipe committed and before documents/
-    is removed (fix wave B, Terra's variant)."""
+    is removed."""
     import shutil
 
     import binding
@@ -147,8 +147,7 @@ def pending_rendering(path, barrier, out):
 
 
 def import_export(export_path, token, instance, out, acq=None):
-    """A second session's import_ledger_export under the same pass token (round
-    E3, Astra S1: an import landing between a read and its record)."""
+    """A second session's import_ledger_export under the same pass token (an import landing between a read and its record)."""
     import db
     import ledger
     conn = db.open_store()
@@ -162,7 +161,7 @@ def import_export(export_path, token, instance, out, acq=None):
 
 def build_paused(quarter, rendered, resume, out):
     """package.build_quarterly_package, paused after its frozen inputs were rendered and
-    before the package is registered (round E3, Terra S1)."""
+    before the package is registered."""
     import db
     import package
     real = package._render
@@ -182,7 +181,7 @@ def build_paused(quarter, rendered, resume, out):
 
 def import_paused(export_path, token, instance, acq, withdrawn, resume, out):
     """import_ledger_export, paused right after it withdrew the staged bytes of the
-    first sends it revokes and before its commit (round E6, Terra S1)."""
+    first sends it revokes and before its commit."""
     import db
     import delivery
     import ledger
@@ -204,7 +203,7 @@ def import_paused(export_path, token, instance, acq, withdrawn, resume, out):
 
 
 def hold_custody(held, release, out):
-    """Hold the custody lock until released (round E6, Astra S1: another session
+    """Hold the custody lock until released (another session
     filing or erasing documents)."""
     import db
     with db.custody_lock():
@@ -236,7 +235,7 @@ def build_repeatedly(quarter, n, out):
 def import_poison_paused(export_path, token, instance, rolled_back, resume, out, acq=None):
     """import_ledger_export with a mismatched ledger instance, paused inside poison()
     right after it rolled back the checked transaction and before its own verdict
-    transaction (review C4: a superseded caller must not poison the live pass)."""
+    transaction (a superseded caller must not poison the live pass)."""
     import contextlib
     import inspect
 

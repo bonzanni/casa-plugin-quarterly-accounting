@@ -1,8 +1,8 @@
-"""decide (design rev 17 §2.2 step 4): a vendor group's decisions in one call. The floor
+"""decide: a vendor group's decisions in one call. The floor
 (matches.machine_in_tx) is applied to each entry on its own, in the order given; a refused
 entry is reported with its reason and rolls back alone (a savepoint), the others commit.
 An earlier entry's write is in the same transaction, so the document it took is taken for
-the later ones by construction. "No invoice needed" is never the job's (r9)."""
+the later ones by construction. "No invoice needed" is never the job's."""
 from __future__ import annotations
 
 import json
@@ -13,8 +13,8 @@ import matches
 import passes
 
 ENTRIES_MAX = 30
-OUTCOMES = ("match", "propose", "missing",      # no `not-needed`: the operator's (§2.2, r9)
-            "keep", "replace",                 # a handover onto a paired payment (rev 18.4)
+OUTCOMES = ("match", "propose", "missing",      # no `not-needed`: the operator's
+            "keep", "replace",                 # a handover onto a paired payment
             "optional",                        # #97: nice-to-have, by the job's judgement
             "leave")                           # #105: an unsettled classification, left
 REASON_MAX = 200
@@ -29,7 +29,7 @@ DATE_READ = ("pass document_date: the date printed on the document you opened (i
 
 
 def note_progress(conn, token) -> None:
-    """§2.2 `progressed`: the batch persisted work (a decision, a filing, a search) — Casa's
+    """The batch persisted work (a decision, a filing, a search) — Casa's
     batch progress report. (A hand-out's own progress is the queues' stamps: queues.settle.)"""
     conn.execute("UPDATE claims SET progressed=1, progressed_seq=? WHERE gen=?",
                  (db.next_seq(conn), int(token)))
@@ -49,7 +49,7 @@ def record_outcome(conn, token, pid, outcome, reason=None) -> None:
 
 
 def _handover_onto_pairing(conn, token, pid, e) -> bool:
-    """Rev 18.4 §R18.3: a handover entry whose payment already holds a document (a match or
+    """A handover entry whose payment already holds a document (a match or
     a proposal) is answered keep or replace — never a match or proposal of another document
     by the job (nothing is replaced without the operator's tap)."""
     import loop
@@ -60,14 +60,14 @@ def _handover_onto_pairing(conn, token, pid, e) -> bool:
         return False
     why = conn.execute("SELECT why FROM run_work WHERE job_id=? AND pid=?",
                        (job_id, pid)).fetchone()
-    # e2 (Astra S2): a handed document is never committed onto a paired payment by the job,
+    # A handed document is never committed onto a paired payment by the job,
     # whatever listed the payment
     return (why is not None and why[0] == "handover") or \
         e.get("doc_id") in loop.run_handover_docs(conn, job_id)
 
 
 def _handover_entry(conn, token, pid, e, outcome) -> dict:
-    """keep | replace (rev 18.4 §R18.3), checked against the payment as handed out."""
+    """keep | replace, checked against the payment as handed out."""
     import queues
     import replace
     proj = lineage.projection(conn, pid)
@@ -108,7 +108,7 @@ def _labels(e) -> tuple:
 
 
 def _revoke_judgement(conn, pid) -> None:
-    """#97 (d2, Astra S1): a later decision of the job (match, propose, missing) supersedes
+    """#97: a later decision of the job (match, propose, missing) supersedes
     its nice-to-have judgement: a revoking `judge` entry (no basis), so restored facts never
     bring the old judgement back."""
     r = conn.execute("SELECT fp FROM log WHERE pid=? AND kind='judge' ORDER BY seq DESC"
@@ -119,7 +119,7 @@ def _revoke_judgement(conn, pid) -> None:
 
 
 def optional_in_tx(conn, pid, expected_revision, reason) -> dict:
-    """#97 (operator ruling, a ruled exception — not a licence): the job judged this
+    """#97: the job judged this
     payment's document nice-to-have (money back from a tax authority), with its reason.
     Recorded as a `judge` log entry bound to the facts it judged (lineage.judgement_basis):
     it applies while the payment keeps them; new facts bring the default back and the
@@ -142,7 +142,7 @@ def optional_in_tx(conn, pid, expected_revision, reason) -> dict:
 def missing_in_tx(conn, pid, expected_revision, reason) -> dict:
     """A `missing` decision, inside the caller's transaction: the floor's own preconditions
     (matches.decidable: as handed out, managed, fresh, a document expected, booked), no
-    operator exemption, and no pairing held (§2.2: missing is for a payment no document
+    operator exemption, and no pairing held (missing is for a payment no document
     fits)."""
     proj, _row, _exp = matches.decidable(conn, pid, expected_revision)
     st = lineage.fold_of(conn, pid)
@@ -187,7 +187,7 @@ def _entry(conn, token, e, seen) -> dict:
     if outcome == "leave":
         reason = str(e.get("reason") or "").strip()[:REASON_MAX]
         matches.decidable(conn, pid, rev)
-        _revoke_judgement(conn, pid)            # d1 (Astra S2): a later decision, as missing
+        _revoke_judgement(conn, pid)            # A later decision, as missing
         record_outcome(conn, token, pid, "settled", reason or "classification not settled")
         seen.add(pid)
         return {"pid": pid, "applied": True, "wrote": False,
@@ -216,8 +216,8 @@ def _entry(conn, token, e, seen) -> dict:
 
 
 def _check_handed(conn, token, entries) -> None:
-    """e1 (Terra S2): once the run's work list exists, the job decides the payment handed
-    out now, alone (rev 18.4 §R18.1) — never one whose facts and candidates it was not
+    """Once the run's work list exists, the job decides the payment handed
+    out now, alone — never one whose facts and candidates it was not
     handed."""
     import queues
     job_id = queues.job_of(conn, token)
@@ -235,9 +235,9 @@ def _check_handed(conn, token, entries) -> None:
 
 
 def guard_single(conn, token, pid, doc_id) -> None:
-    """e3 (Astra S2): the single-decision tools (record_match, propose_match) pass the same
+    """The single-decision tools (record_match, propose_match) pass the same
     job checks as decide — the payment handed out now, its found attachments filed, and a
-    handed document never committed onto a paired payment (rev 18.4 §R18.3). Inside the
+    handed document never committed onto a paired payment. Inside the
     caller's transaction, its token checked."""
     entry = {"pid": pid, "doc_id": doc_id}
     _check_handed(conn, token, [entry])
@@ -248,7 +248,7 @@ def guard_single(conn, token, pid, doc_id) -> None:
 
 
 def _check_listed(conn, token, pid) -> None:
-    """Issue #50 (operator ruling A, the narrow reading): `missing` waits while an email this
+    """Issue #50: `missing` waits while an email this
     payment's own reference search returned has never had its attachments listed — as
     record_search reported it (a reminder the model fills in: it catches a skipped step on
     an honest report, never an omitted email). The refusal names the emails."""
@@ -268,7 +268,7 @@ def _check_listed(conn, token, pid) -> None:
 
 
 def _check_order(conn, token, entries) -> None:
-    """Rev 18.4 §R18.2: a payment whose searches found an attachment still queued decides
+    """A payment whose searches found an attachment still queued decides
     nothing — what a search found is filed (or set aside) before the decision."""
     import queues
     job_id = queues.job_of(conn, token)
@@ -305,7 +305,7 @@ def decide(conn, token, entries) -> dict:
 
 
 def record_missing(conn, token, pid, expected_revision, reason) -> dict:
-    """A single `missing` decision (a continuation run, a handover; §2.2)."""
+    """A single `missing` decision (a continuation run, a handover)."""
     out = decide(conn, token, [{"pid": pid, "outcome": "missing", "reason": reason,
                                 "expected_revision": expected_revision}])["results"][0]
     if not out["applied"]:

@@ -1,4 +1,4 @@
-"""0.11.2, the approved conversation script (docs/superpowers/specs/2026-10-08-*): #53 the
+"""0.11.2, the approved conversation script: #53 the
 render tag is the composition time in seconds; #55 two intents (where a quarter stands: a
 status card and nothing runs; get a quarter done: run it, moving the books' start when it
 lies before it); #52 one purchase is one line and one button on the Review card too; no
@@ -71,7 +71,7 @@ class SameSecond(StoreCase):
         self.assertEqual(a["text"], b["text"])
         with self.assertRaises(views.QuoteRefusal):
             views.bound_rendering(self.conn, views.displayed(b["text"]))
-        with self.patch_clock(AT + dt.timedelta(days=1)):     # d1 Terra S2: a day later
+        with self.patch_clock(AT + dt.timedelta(days=1)):     # A day later
             d = views.build_review(self.conn, "status", quarter="2026-Q3")
         views.mark_rendering_delivered(self.conn, d["render_id"])
         self.assertEqual(views.bound_rendering(self.conn, views.displayed(d["text"]))["render_id"],
@@ -127,7 +127,7 @@ class StatusCard(_Cards):
 
 
 class GetItDone(StoreCase):
-    """No run is live: the ask moves the start (d1: a live run refuses, below)."""
+    """No run is live: the ask moves the start (a live run refuses, below)."""
 
     def setUp(self):
         super().setUp()
@@ -195,7 +195,7 @@ class PlainWords(_Cards):
 
 
 class GetItDoneWhileARunIsLive(_Cards):
-    """d1 (Astra S2): a running check read the bank from the old start; nothing moves and
+    """A running check read the bank from the old start; nothing moves and
     nothing is asked, and the operator is told to ask again."""
 
     def test_nothing_moves_and_nothing_is_queued(self):
@@ -212,7 +212,7 @@ class GetItDoneWhileARunIsLive(_Cards):
 
 
 class EndCardIsTheQuartersCard(_Cards):
-    """d1 (Astra S2): the run's end card lists only its quarter's items."""
+    """The run's end card lists only its quarter's items."""
 
     def test_a_q3_run_lists_q3_and_summarises_q4(self):
         import cards
@@ -232,7 +232,7 @@ class EndCardIsTheQuartersCard(_Cards):
 
 
 class CompletionText(_Cards):
-    """d1 (Astra S1): the completion says the card is posted only when it was delivered."""
+    """The completion says the card is posted only when it was delivered."""
 
     def end(self):
         import cards, job
@@ -256,7 +256,7 @@ class CompletionText(_Cards):
 
 class AnOperatorsAskGetsTheOperatorsCard(_Cards):
     """A run someone else started that took an operator's check naming a quarter answers the
-    operator: their quarter's card, never the scheduled "· new:" form (pin review, 0.11.2)."""
+    operator: their quarter's card, never the scheduled "· new:" form."""
 
     def test_an_agent_started_run_with_an_operator_ask(self):
         import asks, loop
@@ -306,7 +306,7 @@ class WalkLegend(_Cards):
 
 
 class LegendMatchesTheWalk(_Cards):
-    """§B (operator ruling): a quarter's vendor card lists only that quarter's payments, so
+    """A quarter's vendor card lists only that quarter's payments, so
     the legend counts the quarter's own missing payments the walk lists."""
 
     def test_two_quarters_one_vendor(self):
@@ -319,7 +319,7 @@ class LegendMatchesTheWalk(_Cards):
 
 
 class EmptyQuarterEndCard(_Cards):
-    """r2 (Astra S2): a quarter with no payment offers no package, on every end-card branch."""
+    """A quarter with no payment offers no package, on every end-card branch."""
 
     def test_nothing_to_check_offers_no_package(self):
         import cards
@@ -330,7 +330,7 @@ class EmptyQuarterEndCard(_Cards):
 
 
 class QuestionsAreTheQuartersOnEveryBranch(_Cards):
-    """r3 (Astra S2): a Q3 end card with nothing open never offers a Q4 payment's question."""
+    """A Q3 end card with nothing open never offers a Q4 payment's question."""
 
     def test_a_q4_replace_question_stays_off_the_q3_card(self):
         import cards, replace
@@ -354,8 +354,8 @@ class QuestionsAreTheQuartersOnEveryBranch(_Cards):
 
 
 class OtherQuartersStayUnseen(_Cards):
-    """r4 (Astra S1): a Q3 card's "Q4 so far" count never marks Q4's proposal seen, so the
-    §1 new-state rule still owes it its card."""
+    """A Q3 card's "Q4 so far" count never marks Q4's proposal seen, so the
+    new-state rule still owes it its card."""
 
     def test_q4s_proposal_is_not_reported_by_the_q3_card(self):
         import cards, views

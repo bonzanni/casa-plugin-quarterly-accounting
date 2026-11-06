@@ -1,8 +1,8 @@
 # tests/test_decide.py
-"""Simple loop §2.2 step 4: decide applies the floor to each entry on its own, in order; a
+"""Decide applies the floor to each entry on its own, in order; a
 refused entry is reported and the others apply; a document an earlier entry took is taken
 for the later ones; no `not-needed` outcome; record_missing; the run's outcome and the
-batch's progress (§2.2 `progressed`)."""
+batch's progress."""
 from tests._base import StoreCase
 import db                     # server/ is on sys.path once tests._base is imported
 
@@ -237,7 +237,7 @@ class Decide(StoreCase):
                          {self.pids[0]: "match", self.pids[1]: "propose"})
         self.assertEqual(self.progressed(), 1)
 
-    # --- fix round 1: missing meets the floor's own preconditions -----------------------
+    # --- Missing meets the floor's own preconditions -----------------------
 
     def outcome(self, pid):
         return self.conn.execute("SELECT outcome FROM run_work WHERE pid=?",
@@ -363,7 +363,7 @@ class Filing(StoreCase):
         self.assertEqual((stored, kb.norm(stored)), ("Adobe Systems", kb.norm("adobe systems")))
 
     def test_a_vendor_is_bounded(self):
-        """e2/e6 (Astra): the payment unit hands the vendor exactly — an identity — so the
+        """The payment unit hands the vendor exactly — an identity — so the
         bound is far above any bank text; still bounded."""
         import documents
         self.assertEqual(documents.VENDOR_MAX, 2000)

@@ -2,8 +2,7 @@
 """Issue #22: the date that names a file in a package was read on the document, or the
 package says it was not. The store marks a date read by a machine pairing or a
 confirmation; a package round's judge is handed the quarter's pairings whose date was
-never read; the caption and notes.md count what is left (design
-docs/superpowers/specs/2026-09-30-issues-21-22-design.md, Part B)."""
+never read; the caption and notes.md count what is left."""
 import unittest
 
 from tests.test_package import Base
@@ -54,7 +53,7 @@ class TestTheMark(Dates):
         self.assertIsNotNone(self.read_at(doc))
 
     def test_a_date_cleared_is_no_date_read(self):
-        # D2 (Astra S2): the file then falls back to the payment's date, unread
+        # The file then falls back to the payment's date, unread
         doc = self.file_doc()
         documents.update_document_metadata(self.conn, doc, token=self.token,
                                            document_date="2026-07-02")
@@ -70,7 +69,7 @@ class TestThePackageSays(Dates):
     def test_a_file_named_by_an_unread_date_is_counted_and_listed(self):
         self.paired(date=None)
         out, z = self.build()
-        # simple loop §1: the caption is one line; the count lives in notes.md
+        # The caption is one line; the count lives in notes.md
         self.assertNotIn("not yet read", out["caption"])
         notes = z.read("notes.md").decode()
         self.assertIn("## Dates not yet read from the document\n\n- invoices/"

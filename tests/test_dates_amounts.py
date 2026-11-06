@@ -17,7 +17,7 @@ class TestDates(unittest.TestCase):
                 dates.parse_quarter(bad)
 
     def test_the_operators_quarter_words_normalize_to_the_canonical_form(self):
-        # fix wave F (3): the tool layer takes "Q3", "Q3 2026" and "2026-Q3"
+        # The tool layer takes "Q3", "Q3 2026" and "2026-Q3"
         today = "2026-09-28"
         for said, canonical in (("2026-Q3", "2026-Q3"), ("2026-q3", "2026-Q3"),
                                 ("Q3", "2026-Q3"), ("q2", "2026-Q2"), (" Q3 2026 ", "2026-Q3"),
@@ -46,7 +46,7 @@ class TestDates(unittest.TestCase):
 
     def test_short_forms(self):
         self.assertEqual(dates.short_day("2026-09-20"), "20 Sep")
-        self.assertEqual(dates.long_day("2026-09-02"), "2 Sep 2026")    # §2.4's note date
+        self.assertEqual(dates.long_day("2026-09-02"), "2 Sep 2026")    # The note date
         self.assertEqual(dates.long_day("2025-12-31"), "31 Dec 2025")
         self.assertEqual(dates.quarter_label("2026-Q3"), "Q3 2026")
 

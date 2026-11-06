@@ -1,4 +1,4 @@
-"""Progress, defined in ONE place (rev 18.4 §R18.5; d7 Astra S1b): a run made progress since
+"""Progress, defined in ONE place: a run made progress since
 store sequence `since` when, after it, a payment was decided or (re)listed, a search was
 recorded, an owed item (an erase check, the own-mail search, a found attachment) was closed
 or enqueued, a document was filed, or a mirror call was reported. Casa's batch report

@@ -2,7 +2,7 @@
 """The skills are the only thing that makes agents do what the server assumes.
 These pin the load-bearing sentences so an edit cannot quietly drop one.
 
-Two skills since S7 (§3): finance's desk (`quarterly-accounting`: answering with a view,
+Two skills: finance's desk (`quarterly-accounting`: answering with a view,
 typed replies, asks, filing a file the operator sent, sending again, setup) and the job's
 (`quarterly-job`: the finance specialist's procedure, one unit at a time)."""
 import re
@@ -40,16 +40,16 @@ NOT_TOOLS = {"workflow", "expected_generation", "pass_token", "render_id", "row_
              # the job's unit fields
              "documents_first", "page_next", "triage_remaining", "start_job", "end_batch",
              "delivery_id", "job_busy", "emails_to_list",
-             # S7: the desk's and the units' answer fields
+             # The desk's and the units' answer fields
              "render_ids", "casa_delivery", "package_id",
-             # the payment unit's fields (rev 18.4 §R18.1)
+             # the payment unit's fields
              "exact_fit", "search_window",
              # queues: a unit's handed items and the probe's / record_search's answer
              "files", "files_total", "rows", "snapshot_id", "refs", "search",
-             # rev 18.4: the payment unit's fields
+             # The payment unit's fields
              "searches_left", "holds", "why", "candidates", "handed_over", "decided",
              "handed_fits"}                      # #72
-# §15: tools that left the surface in S7 (their functions stay server-side).
+# Tools that left the surface (their functions stay server-side).
 REMOVED_S7 = ("job_report", "apply_reply", "confirm_match", "reject_match", "set_exemption",
               "stop_chasing", "set_watermark", "set_package_name")
 
@@ -69,7 +69,7 @@ class TestBothSkills(TempEnv):
         self.assertTrue(SKILL.startswith(
             "---\nname: quarterly-accounting\ndescription: Finance's desk for the business "
             "books"))
-        # T16: the job skill is keyed on what Casa's job brief carries (the background job
+        # The job skill is keyed on what Casa's job brief carries (the background job
         # "Accounting check" and a `Job id:` line), never on the job's qualified name — a
         # delegation asking the desk to start the check names quarterly-accounting:work.
         self.assertTrue(JOB.startswith("---\nname: quarterly-job\ndescription: "))
@@ -92,7 +92,7 @@ class TestBothSkills(TempEnv):
             d = text.split("---")[1].split("description: ", 1)[1].strip()
             self.assertNotIn(": ", d)
             self.assertNotIn(" #", d)
-        # §3: the notification relay is gone with job_report
+        # The notification relay is gone with job_report
         self.assertNotIn("notification", desc)
 
     def test_the_job_skill_fits_its_budget(self):
@@ -124,8 +124,8 @@ class TestBothSkills(TempEnv):
                 for kw in re.findall(r"(?:^|[(,\s])([a-z_]+)=", args):
                     self.assertIn(kw, props, f"{name}({kw}=)")
 
-    def test_the_skills_call_only_the_s7_surface(self):
-        """The S7 tools both skills call are on the surface (§15), so the backticked-tool
+    def test_the_skills_call_only_the_surface(self):
+        """The tools both skills call are on the surface, so the backticked-tool
         pin above is not vacuous for them."""
         import tools  # noqa: F401
         for n in ("show_view", "post_results", "post_package", "propose_reading",
@@ -139,8 +139,8 @@ class TestBothSkills(TempEnv):
                 self.assertNotIn(gone, text, gone)
 
     def test_every_bank_feed_write_carries_workflow_and_generation(self):
-        # S7 §3: the desk makes no bank-feed write; any the job names carries all three (the
-        # simple loop's mirror unit hands its calls whole, their arguments included)
+        # The desk makes no bank-feed write; any the job names carries all three (the
+        # The mirror unit hands its calls whole, their arguments included)
         for line in (SKILL + JOB).splitlines():
             if re.search(r"`(tag_transaction|untag_transaction|add_note)[`(]", line):
                 self.assertIn("workflow", line, line)
@@ -151,7 +151,7 @@ class TestBothSkills(TempEnv):
     def test_refusals_are_relayed_not_retried(self):
         self.assertIn("`refused: `", JOB)
         self.assertIn("never retry it blindly", JOB)
-        # S7 §3/INV-PLUG-028: the desk's tools refuse with the no-post shape; the desk says it
+        # The desk's tools refuse with the no-post shape; the desk says it
         self.assertIn("A posting tool's answer with `refused` posted nothing: say the refusal "
                       "in your own reply.", flat(SKILL))
         self.assertIn("If staging refuses, say the refusal", flat(SKILL))
@@ -168,11 +168,11 @@ class TestBothSkills(TempEnv):
 
 
 class TestDesk(TempEnv):
-    """S7 §3: finance's desk. The Ellen-era pins (the ask-before-start_job flows, the relay
+    """Finance's desk. The Ellen-era pins (the ask-before-start_job flows, the relay
     of job_report's texts, the cancelled/no-id report, notification relays, package
     continuations, refused builds, closed email requests, the Install trigger prompt and
-    the 20,000 budget) are deleted with the sections they pinned (§3, §9); the 10,000
-    budget is pinned in tests/test_s7_skills.py."""
+    the 20,000 budget) are deleted with the sections they pinned; the 10,000
+    budget is pinned in tests/test_skills.py."""
 
     def test_no_invention_rules(self):
         f = flat(SKILL)
@@ -193,7 +193,7 @@ class TestDesk(TempEnv):
     def test_more_and_all_of_them_follow_next(self):
         ans = flat(section(SKILL, "## Two intents about a quarter", "## The operator's words"))
         self.assertIn("`show_view(view=…, quarter=…, page=…, after=…)`", ans)
-        # final fix wave I-1: a fresh desk session cannot know the last view's `next`;
+        # A fresh desk session cannot know the last view's `next`;
         # #121: reading_context returns it as show_view arguments
         self.assertIn('"More", "all of them": `show_view` with `reading_context`\'s `next`, '
                       "unchanged.", ans)
@@ -214,13 +214,13 @@ class TestDesk(TempEnv):
         self.assertIn("`check_setup()`, then the check ask above", sec)
         self.assertIn("`reset_store` is Casa's to confirm with the operator's tap", sec)
         self.assertIn("run it only when the operator asked to erase the accounting store", sec)
-    # test_reset_never_picks_among_versions: deleted (§3) — the desk no longer restores a
+    # test_reset_never_picks_among_versions: deleted — the desk no longer restores a
     # bank-feed backup; "never pick a backup otherwise" left with the old reset section.
 
     def test_every_receipt_page_is_sent(self):
-        # S7 §5: receipt pages are now render_ids posted by post_results, then marked.
+        # Receipt pages are now render_ids posted by post_results, then marked.
         s = flat(section(SKILL, "## Sending again", "## Setup"))
-        # final fix wave T13-a: which id goes in render_ids is named
+        # Which id goes in render_ids is named
         self.assertIn("`record_delivery` may return `speak` (a notice): "
                       "`post_results(render_ids=[speak.render_id])`, then "
                       "`mark_rendering_delivered` on its receipt.", s)
@@ -262,7 +262,7 @@ class TestDesk(TempEnv):
         # 0.11.2: a fresh look at the email is the check ask (#121: asked directly, no reading)
         self.assertIn("a fresh look at the bank and email", asks)
         self.assertLess(asks.index("`request_work("), asks.index("`start_job`"))
-        # simple loop §1: the desk never builds through the old staging path for a package
+        # The desk never builds through the old staging path for a package
         # ask; staging is only "send it again" / "send the last one" (Sending again)
         self.assertNotIn("stage_for_delivery", asks)
         filing = flat(section(SKILL, "## A file the operator sent", "## Sending again"))
@@ -278,7 +278,7 @@ class TestDesk(TempEnv):
             self.assertIn(phrase, filing, phrase)
 
     def test_a_reply_is_only_what_answers_a_sheet_or_an_offer(self):
-        """#39, ported to S7 §8: only the operator's words about the books go to
+        """#39, ported to only the operator's words about the books go to
         propose_reading; when it understood nothing, the message is conversation."""
         rep = flat(section(SKILL, "## The operator's words about the books",
                            "## Asks"))
@@ -302,7 +302,7 @@ class TestDesk(TempEnv):
         never = flat(section(SKILL, "## Never"))
         self.assertIn("Never call `job_next`, `decide`, `record_mirror`, `record_not_found`, "
                       "`import_ledger_export` or any pass tool: those are the job's.", never)
-        # §2.5: a handover's filing continuation is the job's; the desk's own filing steps
+        # A handover's filing continuation is the job's; the desk's own filing steps
         # name ingest_document only
         self.assertNotIn("set_aside", never)
         self.assertIn("Never ask the operator for an id, a token or a path.", never)
@@ -355,7 +355,7 @@ class TestJob(TempEnv):
         self.assertEqual(pos, sorted(pos))
 
     def test_a_done_job_status_completes_without_reporting_progress_again(self):
-        """PLAY T7 F3: the batch that answered `complete` already reported; a second
+        """The batch that answered `complete` already reported; a second
         report_job_progress would show Casa's batch line twice."""
         rule = flat(section(JOB, "- Last, always: `job_status(", "## Units"))
         self.assertIn('`emit_completion(status="ok", text=<its text>)`', rule)
@@ -379,7 +379,7 @@ class TestJob(TempEnv):
         self.assertLessEqual(len(text), 11_600)    # 0.11.21: row 5 judged (#105, +290); 0.11.18: classify first, the tax-refund exception (#98 #97, +285); queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90); 0.11.7: the reading unit, handed documents proposed (#67, +200); 0.11.8: handed_fits, no commentary (#72, +170)
 
     def test_the_units_come_in_the_loops_order(self):
-        """Simple loop §2: probes, snapshot, filing, vendor, mirror, the run's one post."""
+        """Probes, snapshot, filing, vendor, mirror, the run's one post."""
         units = section(JOB, "## Units", "## Never")
         order = ["### `probes`", "record_probe", "sync", "### `snapshot`",
                  "import_ledger_export", "### `erasures`", "record_not_found", "### `filing`",
@@ -417,7 +417,7 @@ class TestJob(TempEnv):
                       'bank-feed")`', units)
 
     def test_the_filing_records_gmail_skips_what_is_filed_and_names_no_vendor(self):
-        """The gmail probe is the filing's own search (simple loop §2); own mail is no
+        """The gmail probe is the filing's own search; own mail is no
         vendor's. d4, queues: the probe carries every ref found, at once; the server queues
         the exact unfiled ones and answers `files`."""
         f = flat(self.units("filing", "### `payment`"))
@@ -440,7 +440,7 @@ class TestJob(TempEnv):
         turn = flat(section(JOB, "## Every turn", "**Refusals.**"))
         self.assertIn("Casa ends the turn when its batch is full, and what a unit still owes "
                       "then comes again.", turn)
-        self.assertNotIn("filed_refs", JOB)                  # d5: one membership, the server's
+        self.assertNotIn("filed_refs", JOB)                  # One membership, the server's
         self.assertNotIn("max_files", JOB)
         self.assertNotIn("Which are new", JOB)
         v = flat(self.vendor())
@@ -453,7 +453,7 @@ class TestJob(TempEnv):
         self.assertIn("refused while a found attachment is neither filed nor set aside", v)
 
     def test_own_mail_and_vendor_filing_pass_the_reading(self):
-        """d2 (Astra S2), Q2 R7: the model files each document, then reads it through
+        """The model files each document, then reads it through
         read_document and records the reading — own mail with no vendor (a candidate, never
         an exact_fit), the vendor search's filing with the unit's vendor."""
         f = flat(self.units("filing", "### `payment`"))
@@ -479,13 +479,13 @@ class TestJob(TempEnv):
         return self.units("payment", "### `mirror`")
 
     def test_a_reading_is_recorded_even_when_nothing_is_readable(self):
-        """h1 (design d1): a found ref is done only once its document's reading is recorded
+        """A found ref is done only once its document's reading is recorded
         — by update_document_metadata, also with no field read."""
         self.assertIn("Call it even with nothing readable: it records the reading.",
                       flat(JOB))
 
     def test_the_search_tries_the_payments_reference_and_opens_its_mail(self):
-        """Q2 re-run R7: three invoices run 1 found were decided missing. Two were found by
+        """Three invoices a first run found were decided missing on a re-run. Two were found by
         the remittance's reference or order number (one invoice was dated before the
         window); one email named the order and carried the invoice, judged from its
         snippet. The reference goes first after a hint, with no dates, and a vendor email
@@ -497,13 +497,13 @@ class TestJob(TempEnv):
         pos = [step3.index(k) for k in order]
         self.assertEqual(pos, sorted(pos))
         self.assertIn("never rules an invoice out", step3)
-        # h1 (Astra S1): the listing comes BEFORE the search's record, which carries its refs
+        # The listing comes BEFORE the search's record, which carries its refs
         self.assertLess(step3.index("`list_attachments`"),
                         step3.index("Record EACH `search_emails` **right after it ran and its "
                                     "listing, before anything else**"))
 
     def test_the_payment_unit_judges_then_searches_then_decides_once(self):
-        """Rev 18.4 §R18.1: `files` first; the candidates judged from their stored reading;
+        """`files` first; the candidates judged from their stored reading;
         nothing fits: the vendor's mail searched (hint, plain, wider), each search recorded
         at once with its refs, every invoice found filed; then ONE decide."""
         v = flat(self.vendor())
@@ -522,9 +522,9 @@ class TestJob(TempEnv):
         self.assertNotIn("once per run", JOB)
 
     def test_the_payment_is_decided_certain_or_proposed_on_doubt(self):
-        """R5/G1: commit only when certain; any doubt, look-alikes or another currency
+        """Commit only when certain; any doubt, look-alikes or another currency
         propose; no not-needed; the printed issue date; a handover onto a paired payment is
-        keep or replace (rev 18.4 §R18.3)."""
+        keep or replace."""
         v = flat(self.vendor())
         for phrase in ("`decide(pass_token, entries=[{pid, expected_revision, …}])`",
                        "only when you are **certain**",
@@ -550,7 +550,7 @@ class TestJob(TempEnv):
         self.assertIn("No read-backs.", m)
 
     def test_the_units_post_and_view(self):
-        """S7 §5: the two posting units (simple loop §1: the job never builds or sends a
+        """The two posting units (the job never builds or sends a
         package)."""
         post = self.units("post", "### `view`")
         self.assertIn("`post_results(render_ids=<the unit's render_ids>)`", post)
@@ -560,7 +560,7 @@ class TestJob(TempEnv):
         self.assertIn("`mark_rendering_delivered(render_id)`", view)
 
     def test_a_refusal_in_a_topic_message_is_answered_not_followed_by_job_next(self):
-        """Fix round 1 (Task 12 review, M3): the call-job_next-after-a-refusal rule is a
+        """The call-job_next-after-a-refusal rule is a
         batch's; in a topic message the refusal is answered in the reply."""
         r = flat(section(JOB, "**Refusals.**", "**An operator message in the job's topic"))
         self.assertIn("- In a batch: call `job_next(pass_token=…)`", r)
@@ -571,10 +571,10 @@ class TestJob(TempEnv):
     def test_the_job_never_speaks_binds_packages_or_calls_a_protected_tool(self):
         never = flat(section(JOB, "## Never"))
         self.assertIn("You never speak to the operator", never)
-        # T16: a misrouted desk turn must not conclude the desk is someone else
+        # A misrouted desk turn must not conclude the desk is someone else
         self.assertIn("Never call `request_work` or `start_job`: those asks are made at your "
                       "desk (skill quarterly-accounting), not by the job.", never)
-        self.assertNotIn("get_package", JOB)            # R6: never in the job
+        self.assertNotIn("get_package", JOB)            # Never in the job
         self.assertIn("Never fetch or send a package.", never)
         for t in ("set_expectation", "verdict", "apply_reading", "cancel_reading",
                   "bind_account"):

@@ -1,5 +1,5 @@
 # tests/test_fit.py
-"""fix wave D round 2: the 4096 shape recurred in views, alerts and receipts,
+"""The 4096 shape recurred in views, alerts and receipts,
 so it is pinned as a property. Randomized (seeded) long and non-BMP details,
 counterparty names and clause counts go through the one fit and through every
 site that produces operator text; every output must be deliverable and keep
@@ -219,7 +219,7 @@ class TestAlertsProperty(Base):
 
 class TestReplyProperty(Base):
     def test_every_reading_text_is_deliverable_and_nothing_is_lost(self):
-        """S7 §8: a reading is posted as one proposal and applied with one receipt. Every
+        """A reading is posted as one proposal and applied with one receipt. Every
         text it produces fits one message; a reading that cannot be shown whole is refused
         and applies nothing; one that is shown applies exactly the payments it listed, and
         its receipt names every one of them."""
@@ -299,7 +299,7 @@ def _digest_collisions(prefix, k=6):
 
 
 class TestIdentityProperty(Base):
-    """fix wave D round 4, the property stated once: every entity a rendering
+    """The property stated once: every entity a rendering
     binds is uniquely identified by text visibly in it, and every item (and
     every candidate) is bindable in at least one reachable view."""
 

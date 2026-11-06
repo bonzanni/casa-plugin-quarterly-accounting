@@ -12,7 +12,7 @@ import amounts
 
 RATE_RE = re.compile(r"^[0-9]{1,15}(?:\.[0-9]{1,20})?$")
 CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
-TOLERANCE = decimal.Decimal("0.03")     # 3% of the expected amount (R3) ...
+TOLERANCE = decimal.Decimal("0.03")     # 3% of the expected amount ...
 FLOOR_MINOR = 2                         # ... and never less than 0.02
 
 
@@ -29,7 +29,7 @@ def pair(rate, unit):
 
 
 def canonical(fx):
-    """The pair compared as evidence (C1, Astra S1): the rate by its value, so `1.10` and
+    """The pair compared as evidence: the rate by its value, so `1.10` and
     `1.100` are the same rate; the stored rate stays verbatim."""
     if not fx:
         return None
@@ -41,7 +41,7 @@ def canonical(fx):
 
 def expected(fx, pay_minor: int, pay_cur: str, doc_cur: str):
     """The document's amount, in its currency's minor units, that the bank's rate gives
-    for the payment (R2), or None when there is no rate or it converts neither way."""
+    for the payment, or None when there is no rate or it converts neither way."""
     if not fx or pay_minor is None or not pay_cur or not doc_cur or pay_cur == doc_cur:
         return None
     rate, unit = fx["rate"], fx["unit"]
@@ -60,7 +60,7 @@ def expected(fx, pay_minor: int, pay_cur: str, doc_cur: str):
 
 def screen(fx, pay_minor, pay_cur, doc_minor, doc_cur):
     """None when the document's amount can be the payment at the bank's rate (or there is
-    nothing to screen by); else the sentence that says why it cannot (R3)."""
+    nothing to screen by); else the sentence that says why it cannot."""
     want = expected(fx, pay_minor, pay_cur, doc_cur)
     if want is None or doc_minor is None:
         return None

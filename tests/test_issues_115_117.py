@@ -60,7 +60,7 @@ class Bucketing(_Uncl):
         self.assertNotIn("what is it?", card)
 
     def test_a_pending_payment_waits_whatever_its_status(self):
-        # r1 (Astra S2): a pending payment tagged as needing no invoice (optional) waits too
+        # A pending payment tagged as needing no invoice (optional) waits too
         done = self.pay("Adobe", 1000, "2026-09-03")
         self.machine_entry(done, self.doc(amount_minor=1000, document_date="2026-09-03"))
         self.pending_parked()
@@ -79,7 +79,7 @@ class Bucketing(_Uncl):
         self.assertNotIn("Everything matched cleanly.", text)
 
     def test_a_pending_guess_is_not_asked_about(self):
-        # r1 (Terra S2): a proposed pairing on a payment the bank put back to pending
+        # A proposed pairing on a payment the bank put back to pending
         p = self.pay("Adobe", 1000, "2026-09-03")
         self.propose(p, amount_minor=1000, document_date="2026-09-03")
         with db.tx(self.conn):
@@ -99,7 +99,7 @@ class Bucketing(_Uncl):
         self.assertIn("Waiting on the bank", text.split("\n"))
 
     def test_an_older_pending_payment_is_counted_and_listed(self):
-        # r2 (Astra S2, the reachable half): a Q2 payment still pending on the Q3 sheet
+        # A Q2 payment still pending on the Q3 sheet
         done = self.pay("Adobe", 1000, "2026-09-03")
         self.machine_entry(done, self.doc(amount_minor=1000, document_date="2026-09-03"))
         with db.tx(self.conn):
@@ -121,7 +121,7 @@ class Bucketing(_Uncl):
         self.assertNotIn("what is it?", older)
 
     def test_a_pending_proposal_card_asks_nothing(self):
-        # r3 (Astra S2): bank-feed's reconciliation can put a booked row back to pending
+        # Bank-feed's reconciliation can put a booked row back to pending
         p = self.pay("Adobe", 1000, "2026-09-03")
         self.propose(p, amount_minor=1000, document_date="2026-09-03")
         with db.tx(self.conn):
@@ -138,7 +138,7 @@ class Bucketing(_Uncl):
         self.assertEqual(json.loads(row[0]), {})
 
     def test_an_older_pending_payment_of_any_status_is_listed(self):
-        # r3 (Astra S2): an earlier quarter's pending payment tagged as needing no invoice
+        # An earlier quarter's pending payment tagged as needing no invoice
         done = self.pay("Adobe", 1000, "2026-09-03")
         self.machine_entry(done, self.doc(amount_minor=1000, document_date="2026-09-03"))
         with db.tx(self.conn):
@@ -159,7 +159,6 @@ class Bucketing(_Uncl):
         self.assertIn("Waiting on the bank.", older)
 
     def test_a_nice_to_have_is_not_everything(self):
-        # r3 (Astra S2)
         done = self.pay("Adobe", 1000, "2026-09-03")
         self.machine_entry(done, self.doc(amount_minor=1000, document_date="2026-09-03"))
         t = self.pay("Belastingdienst", 2000, "2026-09-04")
@@ -172,7 +171,7 @@ class Bucketing(_Uncl):
         self.assertIn("Everything else matched cleanly.", text)
 
     def test_review_offers_no_confirmation_card_for_a_waiting_payment(self):
-        # r4 (Astra S2): a Review tap after the payment went back to pending
+        # A Review tap after the payment went back to pending
         p = self.pay("Adobe", 1000, "2026-09-03")
         self.propose(p, amount_minor=1000, document_date="2026-09-03")
         with db.tx(self.conn):
@@ -185,7 +184,7 @@ class Bucketing(_Uncl):
             self.assertIsNone(cards._proposal_card(self.conn, "r", 0, 1, "2026-Q3", False, p))
 
     def test_its_own_card_waits_on_the_bank(self):
-        # r1 (Astra S2): the one-payment card agrees with the cards' count
+        # The one-payment card agrees with the cards' count
         p = self.pending_parked()
         text = views.displayed(views.build_review(self.conn, view="item", pid=p)["text"])
         self.assertIn("Waiting on the bank.", text)
@@ -193,7 +192,7 @@ class Bucketing(_Uncl):
         self.assertNotIn("No document", text)
 
     def test_a_pending_no_document_payment_waits_on_its_card(self):
-        # r3 (Terra S2): tagged as needing no document while still pending
+        # Tagged as needing no document while still pending
         p = self.pending_parked()
         self.classify(p, {"internal-transfer"})
         self.settle(p)

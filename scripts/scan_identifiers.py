@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""No account identifier in the tree (spec §Privacy). Exits 1 on any
+"""No account identifier in the tree. Exits 1 on any
 IBAN-shaped token in a tracked file outside tests/upstream/ (vendored
 upstream test fixtures carry bank-feed's own synthetic IBANs)."""
 from __future__ import annotations

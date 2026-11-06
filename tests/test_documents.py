@@ -36,7 +36,7 @@ class TestCustody(StoreCase):
         self.assertEqual(stored.name, first["sha256"] + ".pdf")
 
     def test_the_same_bytes_under_another_extension_reuse_the_held_file(self):
-        # fix wave F: the second filing left <sha>.png beside <sha>.pdf, which no row
+        # The second filing left <sha>.png beside <sha>.pdf, which no row
         # names and the reaper never removed (its stem is a held hash)
         first = ingest(self.conn, self.publish("scan.pdf", PDF))
         again = ingest(self.conn, self.publish("scan.png", PDF))
@@ -136,7 +136,7 @@ class TestCuration(StoreCase):
 
 
 class TestCustodyUnderConcurrency(StoreCase):
-    """fix wave B (Astra + Terra S1): after an ingest, a reset or a reap returns,
+    """After an ingest, a reset or a reap returns,
     no index row may name bytes that are gone — under any interleaving."""
 
     def _rows_without_bytes(self):
@@ -203,7 +203,7 @@ class TestCustodyUnderConcurrency(StoreCase):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)
 
     def test_a_stale_pass_ingest_waiting_behind_a_reset_installs_nothing(self):
-        # round B2 (Astra S2): the ingest captured its bytes, waited behind reset's
+        # The ingest captured its bytes, waited behind reset's
         # custody lock, then installed them BEFORE its token (fenced by the reset)
         # was refused — reset said "complete" and the bytes were back on disk
         token = self.pass_("cron")

@@ -2,9 +2,8 @@
 given (the projection's for lineage-level writes, the match's for writes
 naming a pairing); every decision is ONE log entry (two for lift-then-pair),
 appended under the write lock, then lineage.settle() in the same
-transaction. A machine write meets the floor (design rev 17 §2 "The floor",
-machine_in_tx): same currency and exact amount for a match, a document no other
-payment holds (`holders`, R5); row cardinality stays the fold's."""
+transaction. A machine write meets the floor: same currency and exact amount for a match, a document no other
+payment holds (`holders`); row cardinality stays the fold's."""
 from __future__ import annotations
 
 import json
@@ -33,7 +32,7 @@ def _labels(labels) -> str:
 
 
 def _match_id_for(conn, pid, doc_id) -> int:
-    """The lineage's id for this document (plan §D12: a pairing's identity is
+    """The lineage's id for this document (a pairing's identity is
     re-used, never duplicated). A lineage can hold two ids for one document
     after a merge of two lineages that each paired it; the one activated
     latest is re-used, deterministically, and no third id is minted."""
@@ -79,7 +78,7 @@ def _effects(before: dict, after: dict) -> list:
 
 
 def payment_snapshot(facts, kind, fx_pair) -> str | None:
-    """Issue #34 (G1, D1): what an operator's rejection is bound to on the payment's side —
+    """Issue #34: what an operator's rejection is bound to on the payment's side —
     its facts and expected kind as they were when the operator rejected, and the bank's
     exchange rate (a corrected rate is new evidence, #35)."""
     if facts is None:
@@ -94,7 +93,7 @@ def row_fx(row):
 
 
 def rejected_by_operator(conn, pid, doc, facts, kind, fx_pair):
-    """Issue #34 (G2, D1): the time of the operator's rejection that blocks a machine
+    """Issue #34: the time of the operator's rejection that blocks a machine
     pairing of document `doc` with payment `pid`, or None. The operator's latest verdict on
     that document in this lineage — over every pairing id it holds, a merge's too — is a
     rejection, made against the payment and the document exactly as they are now. A
@@ -112,20 +111,19 @@ def rejected_by_operator(conn, pid, doc, facts, kind, fx_pair):
     return None
 
 
-# rev 18.4 §R18.4: a document is held only by a match or a proposal's PRIMARY document (a
-# joint set's members included); a proposal's alternatives hold nothing (r2 Astra S1 #2)
+# A document is held only by a match or a proposal's PRIMARY document (a
+# joint set's members included); a proposal's alternatives hold nothing
 HOLDERS_SQL = (
     "SELECT s.pid, s.state AS how FROM match_state s JOIN projections p ON p.pid=s.pid"
     " WHERE s.doc_id=:d AND (s.state IN ('matched','proposed') OR (s.state='conflicted'"
     " AND p.status='proposed' AND p.current_match IS NULL))")
-ALTERNATIVES_MAX = 3      # §1: up to four named candidates on a card, the chosen one included
+ALTERNATIVES_MAX = 3      # Up to four named candidates on a card, the chosen one included
 
 
 def holders(conn, doc_id) -> list:
-    """THE ownership of a document (R5), the one function the floor, the candidates and the
+    """THE ownership of a document, the one function the floor, the candidates and the
     exact fit all read: every (pid, how) holding it — `matched`, `proposed` (a proposal's
-    primary) or `conflicted` (a joint set, D3). A proposal's alternatives hold nothing (rev
-    18.4 §R18.4)."""
+    primary) or `conflicted` (a joint set). A proposal's alternatives hold nothing."""
     return [(r["pid"], r["how"]) for r in conn.execute(HOLDERS_SQL, {"d": doc_id})]
 
 
@@ -138,8 +136,8 @@ def purchase_holders(conn, doc_id) -> list:
 
 
 def taken_elsewhere(conn, doc_id, pid) -> bool:
-    """R5, purchase-wide (issue #48): held by ANOTHER payment through any document of its
-    purchase. What `pid` itself holds is never taken against `pid` (§2.2 reopening). The
+    """Purchase-wide (issue #48): held by ANOTHER payment through any document of its
+    purchase. What `pid` itself holds is never taken against `pid`. The
     job's readers: the floor, the exact fit, the candidates, a card's offered alternatives,
     the replace question."""
     return taken_by(conn, doc_id, pid) is not None
@@ -180,7 +178,7 @@ def taken_refusal(conn, doc_id, pid) -> str | None:
 
 def _own_machine(st) -> list:
     """What the payment holds by the machine: a match, a proposal, or a joint set's members
-    (§2.2 reopening: replaced by its own re-decision, never taken against it)."""
+    (replaced by its own re-decision, never taken against it)."""
     return [c for c in st.cands.values()
             if c.author == "auto" and c.state in ("matched", "proposed", "conflicted")]
 
@@ -191,13 +189,13 @@ def _alternatives(conn, match_id) -> list:
 
 
 def alternatives(conn, match_id) -> list:
-    """D3: the alternative documents a machine proposal names (doc ids, in its order)."""
+    """The alternative documents a machine proposal names (doc ids, in its order)."""
     return _alternatives(conn, match_id)
 
 
 def _relevant_doc(conn, doc_id):
     """A real document not marked irrelevant (checked BEFORE the exemption branch too, so an
-    exempt payment's residue names only a real, relevant document: fix round 1)."""
+    exempt payment's residue names only a real, relevant document)."""
     doc = documents._doc(conn, doc_id)
     if doc["irrelevant"]:
         raise db.Refusal(f"document #{doc_id} was marked irrelevant")
@@ -229,7 +227,7 @@ def _floor_doc(conn, kind, pid, row, exp, doc_id, document_date):
                         doc["amount_minor"], doc["currency"])           # #35, kept
         if why is not None:
             raise db.Refusal(why + " — not proposed")
-    # C1 (Terra S1, Astra S1): the document as this write leaves it — a date read on it in
+    # The document as this write leaves it — a date read on it in
     # this call is a corrected fact, and may lift a rejection
     effective = dict(doc, document_date=document_date) if document_date else doc
     rejected = rejected_by_operator(conn, pid, effective, R.facts_of(row), exp.kind,
@@ -290,7 +288,7 @@ def in_window_or_refuse(conn, row, doc_id, date_read) -> None:
 def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=(),
                   labels=("clean",), rationale="", runners_up=(), document_date=None,
                   row_digest=None, row_snapshot=None) -> dict:
-    """THE floor (design rev 17 §2 "The floor", R5), at the write, inside the caller's
+    """THE floor, at the write, inside the caller's
     transaction, its token already checked. Every floor refusal raises (db.Refusal or
     authorship.Stale), so the caller's transaction rolls back whole; an exempt payment
     returns {"applied": False, "refused": …} and records residue."""
@@ -326,10 +324,10 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
         raise db.Refusal("the operator confirmed this payment's pairing; it is never reopened")
     own = _own_machine(st)
     if kind == "propose":
-        # §2.2 reopening (ruling, Task 3 review): a proposal that replaces the payment's own
+        # Reopening: a proposal that replaces the payment's own
         # machine pairing keeps the replaced document as one of its alternatives, so it stays
-        # held by this payment and on its card; a match replaces it outright (G1)
-        # #72 (0118-r3, Terra S1): a document of another period the payment held (a pairing
+        # held by this payment and on its card; a match replaces it outright
+        # #72: a document of another period the payment held (a pairing
         # made before 0.11.8) is released, never kept as an alternative
         kept = [c.doc_id for c in own if c.doc_id != doc_id and c.doc_id not in alts
                 and _in_window(conn, row, c.doc_id, None)]
@@ -341,7 +339,7 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
         alts += list(dict.fromkeys(kept))
     for d in [doc_id, *alts]:
         # #72: the books guard, for every document the write attaches — the primary on the
-        # date the write leaves on it (0118-r1), each alternative on its stored date (r2)
+        # date the write leaves on it, each alternative on its stored date
         in_window_or_refuse(conn, row, d, document_date if d == doc_id else None)
         _floor_doc(conn, kind, pid, row, exp, d, document_date if d == doc_id else None)
     want = "matched" if kind == "pair" else "proposed"
@@ -351,11 +349,11 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
     if (current and own[0].state == want and own[0].doc_id == doc_id
             and proj["status"] == want and document_date in (None, filed_date)
             and (kind == "pair" or _alternatives(conn, own[0].match_id) == alts)):
-        # §2.2: the same EFFECTIVE outcome and the same document, made against the payment
+        # The same EFFECTIVE outcome and the same document, made against the payment
         # as it is now, writes nothing — no revision moves, so a delivered card's buttons
         # stay valid. A pairing whose payment changed since (its fingerprint's facts differ:
         # the reducer shows it proposed, `facts-changed`) is written again, which
-        # re-fingerprints it (plan round 1, Astra S2). A date read that corrects the filed
+        # re-fingerprints it. A date read that corrects the filed
         # one (issue #19) is a changed document, so it is written too. The date-read stamp
         # (issue #22) is not in any digest: set when missing, it moves no revision
         if document_date:
@@ -380,7 +378,7 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
                  " alternatives_json=? WHERE match_id=?",
                  (_labels(labels), rationale or "", json.dumps(list(runners_up or ())),
                   json.dumps(alts), mid))
-    # §2.2 reopening: what this payment holds by the machine — a match or a proposal — is
+    # Reopening: what this payment holds by the machine — a match or a proposal — is
     # replaced by this decision, never counted as taken against it (fold `resolves`)
     replaced = tuple(c.match_id for c in own if c.match_id != mid)
     lineage.append(conn, pid, kind, "auto", match_id=mid, doc_id=doc_id,
@@ -392,7 +390,7 @@ def machine_in_tx(conn, kind, pid, doc_id, *, expected_revision, alternatives=()
 
 def _operator_pair(conn, pid, doc_id, render_id, *, match_id=None):
     """Inside the transaction: lift (if an exemption stands) then pair. The operator pairs
-    whatever kind of document they were shown (design rev 17 §2: the kind and
+    whatever kind of document they were shown (the kind and
     classification gates are deleted); the pairing is fingerprinted against the
     expectation as it is now."""
     proj = lineage.projection(conn, pid)
@@ -427,7 +425,7 @@ def record_match(conn, *, pid, doc_id, author, expected_revision, token, render_
     """A machine match (G1: certain), the floor applied at the write (machine_in_tx)."""
     import passes
     if author == "operator":
-        # S7 §8.1: an operator pairing is a tap's (matches.confirm_in_tx under a grant)
+        # An operator pairing is a tap's (matches.confirm_in_tx under a grant)
         raise db.Refusal(authority.TAP_ONLY)
     if author != "auto":
         raise db.Refusal("author is 'auto'")
@@ -455,7 +453,7 @@ def propose_match(conn, *, pid, doc_id, expected_revision, token, **kw) -> dict:
 
 
 def _single(conn, token, outcome, out) -> dict:
-    """A single decision lands on the run's work list too (§2.2: record_match and
+    """A single decision lands on the run's work list too (record_match and
     propose_match "stay for single decisions"). decide imports this module, so it is
     imported here, lazily."""
     import decide
@@ -466,7 +464,7 @@ def _single(conn, token, outcome, out) -> dict:
 
 def confirm_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="rendered") -> dict:
     """The operator approves a pairing they were shown, inside the caller's transaction,
-    under a tap's grant (S7 §8.1)."""
+    under a tap's grant."""
     authority.require(conn, grant)
     s = _state(conn, match_id)
     pid = _operator_pid(conn, s["pid"])
@@ -480,7 +478,7 @@ def confirm_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="
 
 
 def _require_unheld(conn, doc_id, pid) -> None:
-    """R5 at an operator pairing (Task 3 review carry): a document another payment holds —
+    """At an operator pairing: a document another payment holds —
     its match, its proposal's primary, a joint set (`holders`, the one ownership function)
     — is never paired onto `pid` as well."""
     other = next(((p, how) for p, how in holders(conn, doc_id) if p != pid), None)
@@ -491,9 +489,9 @@ def _require_unheld(conn, doc_id, pid) -> None:
 
 def pick_in_tx(conn, *, grant, pid, doc_id, render_id, mrevs: dict,
                alternatives_shown=()) -> dict:
-    """§1 named candidate: the operator pairs `doc_id`, which the card displayed (the chosen
+    """Named candidate: the operator pairs `doc_id`, which the card displayed (the chosen
     document, an alternative, or one of a joint set). Every OTHER candidate the card
-    displayed — and only those (plan round 8: `mrevs` is what the card bound,
+    displayed — and only those (`mrevs` is what the card bound,
     `alternatives_shown` the alternatives it printed) — is the operator's rejection (#34),
     so it is never proposed again for this payment while neither side changes."""
     authority.require(conn, grant)
@@ -522,7 +520,7 @@ def pick_in_tx(conn, *, grant, pid, doc_id, render_id, mrevs: dict,
 
 def reject_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="rendered") -> dict:
     """The operator removes a pairing they were shown, inside the caller's transaction,
-    under a tap's grant (S7 §8.1)."""
+    under a tap's grant."""
     authority.require(conn, grant)
     s = _state(conn, match_id)
     pid = _operator_pid(conn, s["pid"])
@@ -536,7 +534,7 @@ def reject_in_tx(conn, *, grant, match_id, expected_revision, render_id, bind="r
 
 
 def _append_rejection(conn, pid, s, render_id) -> None:
-    """Issue #34 (G1, D1): the rejection is bound to the payment and the document as they
+    """Issue #34: the rejection is bound to the payment and the document as they
     are now — what the operator rejected — recorded on the rejection itself."""
     _append_unpair(conn, pid, s["match_id"], s["doc_id"], render_id)
 
@@ -563,7 +561,7 @@ def _append_doc_rejections(conn, pid, doc_ids, render_id) -> None:
 
 
 def reject_alternatives_in_tx(conn, *, grant, pid, doc_ids, render_id) -> None:
-    """D3 (plan round 2, Astra S1): the operator's rejection of the alternatives a card
+    """The operator's rejection of the alternatives a card
     displayed, bound as #34 binds any rejection — never proposed again for this payment
     while neither side changes."""
     authority.require(conn, grant)
@@ -577,7 +575,7 @@ def reject_alternatives_in_tx(conn, *, grant, pid, doc_ids, render_id) -> None:
 def reject_all_in_tx(conn, pid, bound, *, grant) -> list:
     """"Wrong" over every displayed candidate, inside the caller's transaction, under a
     tap's grant, each already checked against the revision the operator was shown: every
-    rejection is recorded, then the payment settles ONCE (C3, Astra S1: settling between
+    rejection is recorded, then the payment settles ONCE (settling between
     them let the store rule retire a merged duplicate of the same document and move the
     revision the next rejection was bound to). Returns the effects."""
     authority.require(conn, grant)
@@ -595,7 +593,7 @@ def reject_all_in_tx(conn, pid, bound, *, grant) -> list:
 def set_exemption_in_tx(conn, *, grant, pid, exempt, expected_revision, render_id,
                         bind="rendered") -> dict:
     """The operator says one payment needs no document (exempt) or needs one after all,
-    inside the caller's transaction, under a tap's grant (S7 §8.1)."""
+    inside the caller's transaction, under a tap's grant."""
     authority.require(conn, grant)
     pid = _operator_pid(conn, pid)
     authorship.require_projection(conn, pid, render_id, expected_revision, bind=bind)
@@ -619,10 +617,10 @@ def relabel_match(conn, *, match_id, labels, rationale=None, runners_up=None, to
         passes.check_token(conn, token)
         s = _state(conn, match_id)
         if s["state"] not in ("matched", "proposed"):
-            # spec §Tool surface: relabel_match "re-labels an accepted match". A
+            # relabel_match "re-labels an accepted match". A
             # retired pairing's label is invisible, yet it is in settle's digest:
             # relabelling one would make an operator's pending correction Stale
-            # over a change they cannot see (fix round 1).
+            # over a change they cannot see.
             raise db.Refusal(f"pairing #{match_id} is {s['state']}; only a standing pairing "
                              "is relabelled")
         sets = {"label": _labels(labels)}

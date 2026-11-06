@@ -1,4 +1,4 @@
-"""The job's claim and its run's closing words (simple loop, design rev 17 §2): one Casa
+"""The job's claim and its run's closing words: one Casa
 job run is one pass; the cursor is loop.next_unit. A job turn's first, token-less job_next
 claims: the claim rotates the token and records itself in `claims`, and only the newest
 claim's token may act (check_claim)."""
@@ -39,7 +39,7 @@ def check_claim(conn, token) -> None:
 
 
 # #45: the line Casa (0.344.31 on) writes right after the first `Job id:` of the job's launch
-# prompt and brief, as the job model copies it. Only §4.1's implicit check reads it: the
+# prompt and brief, as the job model copies it. Only the implicit check reads it: the
 # trigger it records. `scheduled` and `agent` keep today's cron; anything else, and no line
 # (an older Casa), is "Casa did not say" — today's cron too. The job model sometimes copies
 # only the value (live 2026-10-07: "operator"), so the bare value counts as its line.
@@ -63,10 +63,10 @@ def _completed(conn, job_id) -> bool:
 
 
 def claim(conn, job_id, started_by=None) -> int:
-    """A job turn's token-less job_next (simple loop §2: one Casa job run is one pass).
+    """A job turn's token-less job_next (one Casa job run is one pass).
     Under the custody lock, taken before the transaction (the stalled-send recovery removes
     staged bytes), in one transaction:
-    1. a posted send nobody recorded is settled `uncertain` (D15);
+    1. a posted send nobody recorded is settled `uncertain`;
     2. the token rotates and the claim is recorded with its batch (`_batch_of`);
     3. a job id's first claim makes its run: started_by "operator" iff Casa's starter line
        says so (#45), else "scheduled";
@@ -74,15 +74,15 @@ def claim(conn, job_id, started_by=None) -> int:
        nothing to adopt), its taken requests queued again for this run;
     5. the run's one pass starts on its first claim (loop.start_pass); a later claim moves
        the live pass's marker to its token;
-    6. a first claim that finds nothing queued records the implicit check (§4.1), and the
+    6. a first claim that finds nothing queued records the implicit check, and the
        pass takes every queued request (loop.take);
-    7. a stalled staged send is recovered (§6.1)."""
+    7. a stalled staged send is recovered."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
     import delivery, loop
     with db.custody_lock():                 # the stalled-send recovery removes staged bytes
         with db.tx(conn):
-            # r3 #1 (INV-S7-6): a posted send has left the plugin — before anything can
+            # A posted send has left the plugin — before anything can
             # requeue its ask, it is settled `uncertain`, whatever its lease (a late
             # receipt still upgrades it; "send it again" is the only second file)
             for d in delivery.posted_unrecorded(conn):
@@ -115,11 +115,11 @@ def claim(conn, job_id, started_by=None) -> int:
             live = loop.run_pass(conn, conn.execute("SELECT * FROM runs WHERE job_id=?",
                                                     (job_id,)).fetchone())
             if live is not None:
-                # #67 (d1): a handover alone makes a narrow run (loop.handover_only) only
+                # #67: a handover alone makes a narrow run (loop.handover_only) only
                 # when the operator started it on a store already imported; a run Casa
                 # explicitly says is scheduled (or an agent's), or a store never imported,
                 # records its check too — fixed here, never re-judged mid-run. A missing
-                # starter line adds nothing (Terra d1)
+                # starter line adds nothing
                 said = started_by.strip() if isinstance(started_by, str) else None
                 queued = {r[0] for r in conn.execute("SELECT DISTINCT kind FROM work_requests"
                                                      " WHERE state='queued'")}
@@ -131,13 +131,13 @@ def claim(conn, job_id, started_by=None) -> int:
                                  " ?, ?, 'queued')", (starter_trigger(started_by),
                                                       db.next_seq(conn), db.now()))
                 loop.take(conn, job_id, live["pass_id"])
-            for d in delivery.stalled_sends(conn, passes.LEASE_S):            # §6.1
+            for d in delivery.stalled_sends(conn, passes.LEASE_S):
                 delivery.recover_staged(conn, d)
             return token
 
 
 def _batch_of(conn, job_id, token, holder_changed) -> int:
-    """The batch claim `token` belongs to (design r6, round 5): a new one — named by this
+    """The batch claim `token` belongs to: a new one — named by this
     claim's own gen — iff it is the job id's first claim, or that job id's latest claim
     belongs to a batch answered `complete`, or already holding
     TURNS_PER_BATCH claims, or the live pass's holder changes with it; otherwise the
@@ -155,13 +155,13 @@ def _batch_of(conn, job_id, token, holder_changed) -> int:
 
 
 def next_unit(conn, token) -> dict:
-    """The cursor is the simple loop's (loop.next_unit, design rev 17 §2)."""
+    """The cursor is loop.next_unit's."""
     import loop
     return loop.next_unit(conn, token)
 
 
-# --- the job posts its own results (S7 §5) -------------------------------------------
-OFFER_MAX = 2              # hand-outs of one rendering per run (§5: a broken channel)
+# --- the job posts its own results -------------------------------------------
+OFFER_MAX = 2              # hand-outs of one rendering per run (a broken channel)
 POST_MAX = 3               # renderings per post: 3 × BODY_LIMIT + label < 12,000
 POST_CHARS = 11_900        # a post's joined text: 12,000 minus the label
 
@@ -180,7 +180,7 @@ def _offer(conn, render_id, job_id) -> None:
 
 
 def status(conn, job_id) -> dict:
-    """Never a claim (ha-casa-app#1180; S7 §10): may this job end now? `done` once the run
+    """Never a claim (ha-casa-app#1180; ): may this job end now? `done` once the run
     answered `complete` (runs.completed_at) — an operator-message turn in the job's topic
     calls it last, so a completion Casa refused is re-issued from the store."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
@@ -192,16 +192,15 @@ def status(conn, job_id) -> dict:
 
 RUN_FINISHED = "Accounting work finished."
 TOPIC_MAX = 200     # one topic line: Casa keeps a summary's or completion's first line, cut
-                    # at 300 characters; the full stop line is posted by the job (S7 §5)
+                    # at 300 characters; the full stop line is posted by the job
 
 
 CARD_POSTED = "The result card is posted in the chat; there is nothing to add."
 HANDOVER_DONE = "The handed-over documents are filed; ask me where the quarter stands to see them."
 
 def run_end(conn, job_id) -> tuple:
-    """THE closing words of job run `job_id` (PLAY T7 F2): (the completion's text, its
-    progress summary), shared by job_next's `complete` and job_status. The run has one pass
-    (simple loop §2): "Finished" when it ended complete (or never started), else its end
+    """THE closing words of job run `job_id`: (the completion's text, its
+    progress summary), shared by job_next's `complete` and job_status. The run has one pass: "Finished" when it ended complete (or never started), else its end
     in the operator's words, with the stored stop reason."""
     import loop, views
     r = conn.execute("SELECT p.outcome, p.report_json FROM runs u JOIN passes p ON"
@@ -209,7 +208,7 @@ def run_end(conn, job_id) -> tuple:
                      (job_id,)).fetchone()
     if r is None or r["outcome"] == "complete":
         # issue #47: what happened, for whoever started the run (an assistant relays it);
-        # h3: as it was said at completion (runs.end_text), never re-derived later
+        # as it was said at completion (runs.end_text), never re-derived later
         kept = conn.execute("SELECT end_text FROM runs WHERE job_id=?", (job_id,)).fetchone()
         if kept is not None and kept[0]:
             return kept[0], loop.WORDS["complete"]

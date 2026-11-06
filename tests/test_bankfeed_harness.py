@@ -46,7 +46,7 @@ class TestHarness(TempEnv):
         self.assertIn(rows[first]["superseded_by"], rows)
 
     def test_first_seen_survives_an_in_place_update(self):
-        # D4 relies on it: `first_seen` is written at insert and never rewritten.
+        # Instance continuity relies on it: `first_seen` is written at insert and never rewritten.
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1", amount=10000)])
         before = self.bf.rows()[0]
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1", amount=9000)])
@@ -82,7 +82,7 @@ class TestHarness(TempEnv):
         self.assertIn("acct@0.1.0", self.bf.registered())
 
     def test_acct_tag_keeps_the_row_in_the_classifier_queue(self):
-        # spec §Testing round 9/10: pinned against real untagged_only / queue_totals.
+        # Pinned against real untagged_only / queue_totals.
         import rules
         self.bf.fetch([self.bf.row("2026-07-05", ref="R1")])
         rid = self.bf.rows()[0]["row_id"]

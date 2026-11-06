@@ -1,8 +1,8 @@
-"""Simple loop §1 "Complete": the quarter ended; the ledger covers it (a row booked after
+"""Simple loop the quarter ended; the ledger covers it (a row booked after
 its last day, or a successful sync after it); nothing pending; nothing proposed; every
 payment matched, needing no invoice, optional, or left missing by the operator. The ready
 notice is owed until delivered, once per completion, "updated" after a reopening; a run
-that completes a quarter posts exactly one message, the completion (D19)."""
+that completes a quarter posts exactly one message, the completion."""
 from tests._base import StoreCase
 import db                     # server/ is on sys.path once tests._base is imported
 
@@ -138,7 +138,7 @@ class Completion(StoreCase):
 
 
     def test_coverage_boundaries_a_pending_row_is_no_evidence(self):
-        """§1: BOOKED after the quarter's last day — a pending row booked later is not; the
+        """BOOKED after the quarter's last day — a pending row booked later is not; the
         first day after the quarter is; a sync through that day is."""
         import loop
         self.row(9007, booking_date="2026-10-04", value_date="2026-10-04", status="PDNG")
@@ -153,7 +153,7 @@ class Completion(StoreCase):
         self.assertTrue(loop.covered(self.conn, "2026-Q3"))
 
     def test_a_pending_payment_keeps_the_quarter_open_whatever_its_answer(self):
-        """§1 "no payment of the quarter is still pending": even one the operator left
+        """Even one the operator left
         missing; and a quarter not yet ended is never complete."""
         import loop
         self.snap("2026-10-03")
@@ -169,7 +169,7 @@ class Completion(StoreCase):
             self.assertFalse(loop.complete(self.conn, "2026-Q3"))
 
     def test_an_uncovered_or_proposed_quarter_is_not_complete(self):
-        """§1: the ledger must cover the quarter, and nothing may be proposed."""
+        """The ledger must cover the quarter, and nothing may be proposed."""
         import loop
         self.granted(lambda c, grant: __import__("work").leave_missing_in_tx(
             c, [self.pid], grant=grant))

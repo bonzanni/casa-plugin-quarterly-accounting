@@ -1,6 +1,6 @@
-"""S2 (spec §6): what Ellen asks for, recorded before start_job so no ask is lost, and
-what becomes of it. A request is queued, taken by the run's live pass only (INV-J9), and
-settled reported at that pass's end: the run's one message is its result (simple loop §1)."""
+"""What Ellen asks for, recorded before start_job so no ask is lost, and
+what becomes of it. A request is queued, taken by the run's live pass only, and
+settled reported at that pass's end: the run's one message is its result."""
 from __future__ import annotations
 
 import json
@@ -16,7 +16,7 @@ DONE_ALREADY = "That's done already — ask me for the status to see it."
 
 
 def request_work(conn, kind, trigger, doc_ids=None, quarter=None) -> dict:
-    """`quarter` (ruling Q2): an operator check that names a quarter ("check Q2") makes it
+    """`quarter`: an operator check that names a quarter ("check Q2") makes it
     the run's main quarter — the end message's header and its [Get package] quarter."""
     if kind not in ("check", "handover"):
         raise db.Refusal("kind is 'check' or 'handover'")
@@ -32,7 +32,7 @@ def request_work(conn, kind, trigger, doc_ids=None, quarter=None) -> dict:
                                                   for i in ids)):
         raise db.Refusal("a handover names the documents you just filed: doc_ids=[…]")
     with db.tx(conn):
-        # a handover names documents that are filed (final review FW-I1): an id the
+        # a handover names documents that are filed: an id the
         # run can never find would leave the handover owed forever
         unknown = [i for i in ids if conn.execute("SELECT 1 FROM documents WHERE doc_id=?",
                                                   (i,)).fetchone() is None]
@@ -48,10 +48,10 @@ def request_work(conn, kind, trigger, doc_ids=None, quarter=None) -> dict:
             line = (f"Filed {len(set(ids))} documents. Checking them against the payments — "
                     "I'll post what I find.")
         if quarter is not None and trigger == "operator" and cards.before_the_books(conn, quarter):
-            # #55 (operator ruling 2026-10-08, "just do it, no question"): getting a quarter
+            # #55: getting a quarter
             # before the books' start done moves the start to its first day, then checks it
             if _live_run(conn):
-                # d1 (Astra S2): a running check already read the bank from the old start;
+                # A running check already read the bank from the old start;
                 # its list cannot take the newly included payments, so nothing moves and
                 # nothing is asked: the operator asks again when it has finished
                 return {"request_id": None, "kind": "work", "start_job": None,
@@ -69,7 +69,7 @@ def request_work(conn, kind, trigger, doc_ids=None, quarter=None) -> dict:
 
 def _live_run(conn) -> bool:
     """The latest claim's run will still take a queued ask: its job id has no
-    runs.completed_at (S7 §4) and its end message is not yet composed — d1 (Astra S1): a
+    runs.completed_at and its end message is not yet composed — a
     run whose runs.end_render_id is set ('' included) takes nothing more (loop.take), so an
     ask queued then is answered BUSY_NO_RESULT, never the ask's own line."""
     top = conn.execute("SELECT job_id FROM claims ORDER BY gen DESC LIMIT 1").fetchone()
@@ -81,7 +81,7 @@ def _live_run(conn) -> bool:
 
 
 def ask_state(conn, kind, request_id) -> dict:
-    """Read-only (S7 §4): will the running job take this ask? `taken`, or `queued` with a
+    """Read-only: will the running job take this ask? `taken`, or `queued` with a
     live run, says the ask's own line; `queued` with none, BUSY_NO_RESULT; anything else
     is `done` (DONE_ALREADY)."""
     if kind != "work":
@@ -103,9 +103,9 @@ def ask_state(conn, kind, request_id) -> dict:
 
 
 def take_queued(conn, pass_id) -> list:
-    """The queued work requests the run's pass takes (simple loop §2: one pass per run): all
+    """The queued work requests the run's pass takes (one pass per run): all
     of them, at its claim and at every job_next — a handover asked during the run joins
-    that run's list (§2.5)."""
+    that run's list."""
     assert conn.in_transaction
     ids = [r[0] for r in conn.execute("SELECT request_id FROM work_requests WHERE"
                                       " state='queued' ORDER BY request_id")]
@@ -116,8 +116,8 @@ def take_queued(conn, pass_id) -> list:
 
 
 def settle_taken(conn, pass_id, outcome) -> None:
-    """The run's pass ended (simple loop §2): every request it took is done, and reported
-    at once — the run's one message (§1) is its result; nothing else is posted for it."""
+    """The run's pass ended: every request it took is done, and reported
+    at once — the run's one message is its result; nothing else is posted for it."""
     assert conn.in_transaction
     conn.execute("UPDATE work_requests SET state='reported', outcome=? WHERE pass_id=? AND"
                  " state='taken'", (outcome, pass_id))

@@ -95,7 +95,7 @@ class Redated(StoreCase):
         self.assertIn("15 Sep", untag(self.drv.posted_end("dddddddd-4")["text"]))
 
     def test_a_reading_of_amount_and_date_together_is_judged_on_the_new_date(self):
-        """r1 (Terra S2): a job proposal made on a wrong date (as before 0.11.8), corrected in
+        """A job proposal made on a wrong date (as before 0.11.8), corrected in
         ONE reading to its amount and a date that fits — kept, not released on the old date."""
         import documents, loop
         doc = self.drv.file_unread("5004871233", "LinkedIn", 5784, document_date="2026-04-15")

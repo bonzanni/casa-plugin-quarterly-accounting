@@ -1,4 +1,4 @@
-"""S7 §7.6/§12/§6.1: every deposit this plugin makes, judged by Casa's REAL deposit
+"""Every deposit this plugin makes, judged by Casa's REAL deposit
 (ReferenceStore.deposit: proposal_ok, _message_ok, _file_caption_ok, the S7a filename
 predicate), Casa's real message plan (render_paged ≤ MAX_MESSAGE_PAGES) and Casa's real
 renderer (tg_richtext.render: the displayed text equals the unescaped composition; its
@@ -10,7 +10,7 @@ REQUIRED_KINDS must be present, and every deposit must carry either a display ex
 an explicit `display_skip` reason — the checked count must reach the header's. An empty,
 truncated or thinned file fails.
 
-The simple loop (Task 17, Casa floor v0.344.37+):
+The simple loop:
 - #1301: the manifest's `work` job is `quietWhenScheduled: true`, judged by Casa's own
   manifest_jobs (validate_manifest runs it on the real manifest), and a non-boolean value is
   refused (the gate discriminates a tree without #1301).
@@ -54,8 +54,7 @@ casa_tools._display_name_for_role = lambda role: DISPLAY
 # declares must have a deposit judged (read from the manifest: a new one is covered or fails)
 REQUIRED_KINDS = ("operator_proposal", "operator_message", "operator_file")
 # what must be judged at least once: the posted kinds, and a tap's next card (#1302). The
-# quote binding keeps iterating REQUIRED_KINDS: a next card is not quoted here (plan round
-# 4, Astra S1)
+# quote binding keeps iterating REQUIRED_KINDS: a next card is not quoted here
 REQUIRED_JUDGED = REQUIRED_KINDS + ("next_card",)
 JOB = "work"
 
@@ -202,9 +201,8 @@ def main(path) -> int:
             if shown != expect or _bold(shown, entities) != rec.get("bold_expect", []):
                 bad.append((n, "display differs or an entity was produced", rec["case"]))
         if "bind" in rec and (mode == "check" or dkind == rb.OPERATOR_FILE):
-            # binding r7 (#44: the package note and the file too): Casa's real quote of the
-            # post, clipped as the desk context quotes it (specialist_desk.clip at
-            # DESK_QUOTE_CHARS) — a proposal's or a message's text with the label line
+            # (#44: the package note and the file too) Casa's real quote of the
+            # post, clipped as the desk context quotes it — a proposal's or a message's text with the label line
             # composed onto it (_post_proposal, compose_operator_message), rendered; a file's
             # caption composed under the label (compose_file_caption), shown as plain text.
             # A post whose display is not promised (a legacy rendering) is not quoted
@@ -237,7 +235,7 @@ def main(path) -> int:
             quotes.append((n, rec["case"] + ":page", str(pathlib.Path(path).parent / (
                 pathlib.Path(path).name + ".stores") / f"{rec['bind']['store']}.sqlite"),
                            clip(raw, DESK_QUOTE_CHARS), pb["render_id"], raw))
-    # binding r7: every displayed view post's quote binds back to its own rendering, by the
+    # binding every displayed view post's quote binds back to its own rendering, by the
     # plugin's own views.bound_rendering in a process of its own (scripts/bind_quotes.py)
     bound = 0
     if quotes:

@@ -1,4 +1,4 @@
-"""Simple loop §2.4: the mirror is a diff over every in-scope row — tags against the run's
+"""The mirror is a diff over every in-scope row — tags against the run's
 own export tags, the note against mirror_note — grouped into calls of up to 100 rows by
 identical tag lists and identical note texts; distinct invoice notes one call each; no
 read-backs; an immediate rerun owes nothing."""
@@ -94,7 +94,7 @@ class Mirror(StoreCase):
         self.assertEqual((mirror.plan(self.conn), mirror.owed(self.conn, job)), ([], 0))
 
     def test_a_change_after_the_mirror_began_is_mirrored_in_the_same_run(self):
-        """Plan round 7 (Astra S2): a payment mirrored missing, then matched mid-run (a
+        """A payment mirrored missing, then matched mid-run (a
         handover's continuation): the fresh diff owes the corrective calls; the run reaches
         `post` only when it is empty."""
         import mirror
@@ -124,7 +124,7 @@ class Mirror(StoreCase):
         self.assertEqual(mirror.owed(self.conn, job), 0)
         self.assertEqual(pending_mirror_lines(self.conn),
                          ["2 bank-ledger updates did not go through — tried again at the "
-                          "next check."])                # d1: alerts, one per row and payload
+                          "next check."])                # Alerts, one per row and payload
         self.assertEqual(lineage_error(self.conn, pid), "refused: stale generation")
         self.assertTrue(mirror.plan(self.conn))              # still owed: the next run writes it
         self.run_claim(instance=self.LEDGER)
@@ -139,7 +139,7 @@ def lineage_error(conn, pid):
 
 
 def pending_mirror_lines(conn) -> list:
-    """The refused mirror writes' line as the run's message would carry it (d1: alerts)."""
+    """The refused mirror writes' line as the run's message would carry it (alerts)."""
     import alerts
     with db.tx(conn):
         lines = alerts.pending_lines(conn)[0]          # wrapped: one sentence, joined back
@@ -147,7 +147,7 @@ def pending_mirror_lines(conn) -> list:
 
 
 class NoteTexts(Mirror):
-    """§2.4's table, one status at a time (the amount is the document's, in its own
+    """The note table, one status at a time (the amount is the document's, in its own
     currency; no revision counter, no fingerprint, no "Supersedes")."""
 
     def write(self, kind, pid, doc_id, **kw):
@@ -216,7 +216,7 @@ class NoteTexts(Mirror):
         self.assertEqual([sorted(c["pids"]) for c in notes], [sorted([transfer, exempt])])
 
     def test_an_ineligible_row_has_no_note_and_loses_its_accounting_tags(self):
-        """Fix round 1: a row the export still carries that left scope owes the removal of
+        """A row the export still carries that left scope owes the removal of
         every acct:: tag it carries (as 26b68ee's sweep untagged it), and no note."""
         import mirror
         pid = self.payment(1, observed=["acct::open", "acct::matched", "software"])
@@ -254,7 +254,7 @@ class NoteTexts(Mirror):
 
 
 class HandOut(Mirror):
-    """D9 and plan round 7: in-flight calls first, then a fresh diff that never repeats a
+    """In-flight calls first, then a fresh diff that never repeats a
     row's write already in flight, and never retries a refused one within the run."""
 
     def test_a_row_joining_a_group_in_flight_gets_its_own_call(self):
@@ -322,7 +322,7 @@ class HandOut(Mirror):
         self.assertEqual(mirror.owed(self.conn, self.job_id), 0)
 
     def test_an_older_note_reported_in_a_later_record_does_not_win(self):
-        """Fix round 1: two notes for one row in flight, acknowledged in reverse order by
+        """Two notes for one row in flight, acknowledged in reverse order by
         two separate record_mirror calls: the newer note stays the row's mirror_note."""
         import mirror
         pid = self.payment(1)
@@ -461,7 +461,7 @@ class RealBankFeed(StoreCase):
         mirror.start(self.conn, self.job_id)
         self.assertEqual(mirror.hand_calls(self.conn, self.job_id, budget=50), [])
         self.assertEqual(mirror.owed(self.conn, self.job_id), 0)
-        # fix round 1: the watermark moves past the matched row (still in the export): it
+        # The watermark moves past the matched row (still in the export): it
         # is untagged and gets no new note; the others are untouched
         with db.tx(self.conn):
             self.conn.execute("UPDATE binding SET watermark='2026-08-15'")

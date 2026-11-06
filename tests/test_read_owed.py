@@ -1,4 +1,4 @@
-"""Round h1 (Astra S1 ×2, design round d1: Astra + Terra): the branch split filing from
+"""The branch split filing from
 reading (finance's path_scope denies `Read` on a download). A found attachment's ref is done
 only once its document is filed AND its reading recorded (documents.read_at): a cut between
 filing and reading hands the ref again — own mail too, whose vendorless unread document is no
@@ -102,7 +102,7 @@ class ReadOwed(StoreCase):
         self.assertTrue(work.filed(self.conn, "m-1:att-1"))
 
     def test_a_reading_without_the_token_goes_through_the_same_rule(self):
-        """h2 (Astra S1): a job reading sent without its pass_token wrote the amount past
+        """A job reading sent without its pass_token wrote the amount past
         the conflict rule, and a €12 document matched a €10 payment. Every write of a
         document's amount goes through _reread, token or none (no other caller writes one)."""
         import documents
@@ -113,14 +113,14 @@ class ReadOwed(StoreCase):
                          (None, 1))
 
     def test_withdrawing_a_held_currency_or_amount_makes_the_amount_unknown(self):
-        """h3 (Astra S1): currency="" (through the tool) or amount_minor=None withdraws a
+        """Currency="" (through the tool) or amount_minor=None withdraws a
         held value — a reading that disagrees, so the amount is unknown for good."""
         import documents, qa_server, tools  # noqa: F401
         for how in ("tool-currency", "tool-amount", "tool-null-currency", "direct-amount"):
             with self.subTest(how=how):
                 self.setUp()
                 doc = self._filed_unread(amount=1000)
-                if how.startswith("tool-"):        # h4 (Terra S1): a null amount too
+                if how.startswith("tool-"):        # A null amount too
                     qa_server.TOOLS["update_document_metadata"]["fn"](
                         {"doc_id": doc, **({"currency": ""} if how == "tool-currency"
                                            else {"currency": None}
@@ -134,7 +134,7 @@ class ReadOwed(StoreCase):
                 self.assertTrue(documents.amount_unknown(d))
 
     def test_refiling_with_a_blank_or_null_amount_says_nothing(self):
-        """The ingest contract (BRAIN, h6): ingest FILES the document — a blank or null
+        """The ingest contract: ingest FILES the document — a blank or null
         amount or currency there is "not read here", never a withdrawal (that would make
         every refile of a read invoice propose-only); only update_document_metadata
         withdraws a held reading. A concrete disagreeing value still conflicts."""
@@ -192,7 +192,7 @@ class ReadOwed(StoreCase):
         self.assertTrue(work.filed(self.conn, "m-1:att-1"))
 
     def test_a_document_filed_under_a_bare_message_id_is_owed_until_read(self):
-        """h2 (Astra S1): the legacy bare-id fallback counted an unread document filed."""
+        """The legacy bare-id fallback counted an unread document filed."""
         import documents, work
         path = self.publish("y.pdf", b"%PDF-1.4 bare\n")
         doc = documents.ingest_document(self.conn, source_path=path, kind="invoice",
@@ -224,7 +224,7 @@ class Migration(StoreCase):
         self.assertEqual(got, {read: True, unread: False, clash: True})
 
     def test_13_to_14_keeps_a_completed_runs_words_as_said(self):
-        """h4 (Astra S2): a run completed before the upgrade said "Accounting work
+        """A run completed before the upgrade said "Accounting work
         finished." — kept, never re-derived from a later store."""
         import db, job
         with db.tx(self.conn):

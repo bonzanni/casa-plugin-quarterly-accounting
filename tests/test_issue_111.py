@@ -1,4 +1,4 @@
-"""#111: residuals after 0.11.23 (casa-test PLAY s78). A merge posts the card of a payment that
+"""#111: residuals after 0.11.23 . A merge posts the card of a payment that
 shows the vendor and never replaces another payment's open card; a payment not classified yet
 is asked about on its own card, on the lists and on the status card, and is named by its bank
 description when the bank gave no payee; notes.md prints no "None"; the lists carry no bare
@@ -70,7 +70,7 @@ class NotClassified(_Uncl):
         self.assertIsNotNone(p)
 
     def test_a_reply_about_the_named_payment_binds(self):
-        # r1 (Astra S2): the card's not-classified line binds as the views' does
+        # The card's not-classified line binds as the views' does
         from tests._base import apply_now
         p = self.parked()
         with FakeBroker():
@@ -82,7 +82,7 @@ class NotClassified(_Uncl):
         self.assertIn("Loonadministratie NL", views.displayed(res["proposal"]))
 
     def test_a_scheduled_end_card_names_the_new_one(self):
-        # r1 (Terra S2): the scheduled run's card names it too
+        # The scheduled run's card names it too
         self.parked()
         with db.tx(self.conn):
             rid = cards.compose_end(self.conn, self.job_id, scheduled=True)
@@ -91,7 +91,7 @@ class NotClassified(_Uncl):
         self.assertIn("Loonadministratie NL · EUR 1,480.00 · 2 Sep — what is it?", text)
 
     def test_a_crowded_card_cuts_the_lines_and_still_posts(self):
-        # r2 (Astra S2): receipts that fill the card cut the not-classified lines; the card
+        # Receipts that fill the card cut the not-classified lines; the card
         # is still stored, binding only what it prints whole
         p = self.parked()
         head = ["Q3 checked"] + [f"Receipt vendor {n:02d} Services International BV · 3 Sep"

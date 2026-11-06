@@ -1,4 +1,4 @@
-"""#89 (OPERATOR DECISION): naming a vendor posts its own outcome — the model adds nothing.
+"""#89: naming a vendor posts its own outcome — the model adds nothing.
 rename_vendor finds one vendor from the operator's words (a name, part of it, a bank text, the
 name on its invoice) and posts "<old> is now called <new>." before the vendor's card;
 rename_vendors_to_invoice_names renames every vendor to the name on its invoice and posts one
@@ -99,7 +99,7 @@ class OneVendor(_Case):
             call("rename_vendor", {"vendor": "coolblue", "new_name": "Coolblue B.V."})
         self.assertEqual(json.loads(b.deposits[0]["value"])["pages"],
                          ["Coolblue B.V. already has that name."])
-        # #92 r1: asked for, the name is pinned (named_at) though it was already shown
+        # #92: asked for, the name is pinned (named_at) though it was already shown
         self.assertIsNotNone(self.entry("Coolblue B.V.")["named_at"])
         self.assertEqual(self.entries(), 1)
 
@@ -122,7 +122,7 @@ class OneVendor(_Case):
                          ["Amazon is now called Amazon.nl."])
 
     def test_a_bank_name_and_another_vendors_invoice_name_are_one_level(self):
-        # r1 (Terra S1): "Other supplier"'s card shows its invoice's "Acme"; the words fit both
+        # "Other supplier"'s card shows its invoice's "Acme"; the words fit both
         self.pay("Acme", 100, "2026-08-03")
         other = self.pay("Other supplier", 200, "2026-08-04")
         self.matched_to(other, "Acme", amount_minor=200, document_date="2026-08-04")
@@ -168,11 +168,11 @@ class OneVendor(_Case):
 class InvoiceName(_Case):
     def test_a_sales_invoice_names_its_recipient_and_a_payslip_names_nobody(self):
         sale = self.pay("Klant BV", 50000, "2026-08-03")
-        self.machine_entry(sale, self.doc(kind="sales-invoice", issuer="Lesina Holding B.V.",
+        self.machine_entry(sale, self.doc(kind="sales-invoice", issuer="Voorbeeld Holding B.V.",
                                           recipient="Klant Holding B.V.", amount_minor=50000,
                                           document_date="2026-08-03"))
         slip = self.pay("Jan Jansen", 300000, "2026-08-25")
-        self.machine_entry(slip, self.doc(kind="payslip", issuer="Lesina Holding B.V.",
+        self.machine_entry(slip, self.doc(kind="payslip", issuer="Voorbeeld Holding B.V.",
                                           amount_minor=300000, document_date="2026-08-25"))
         with db.tx(self.conn):
             got = {v["name"]: v["invoice_name"] for v in work.vendors(self.conn)}
@@ -231,7 +231,7 @@ class AllVendors(_Case):
         self.assertEqual(json.loads(self.entry("Ryanair Mtw0")["patterns_json"]), [])
 
     def test_a_refusal_after_a_write_rolls_that_vendor_back(self):
-        # r1 (Astra): a refusal raised after the rename wrote (as the store's second shared-
+        # A refusal raised after the rename wrote (as the store's second shared-
         # text check can) undoes that vendor's writes only; the summary keeps its name
         from unittest import mock
         for t, issuer in (("Aws Emea", "Amazon Web Services EMEA SARL"), ("Zapier Inc", "Zapier")):

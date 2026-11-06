@@ -25,35 +25,35 @@ EXPECTED = {
     "record_search",
     "list_quarter_state", "build_review", "mark_rendering_delivered",
     "stage_for_delivery", "record_delivery", "read_document",
-    # S2 (spec §8, §13): the job's tools
+    # The job's tools
     "job_next", "job_status", "request_work",
-    # queues (operator ruling A): record_filing left (filing ends when its queue is empty);  # removed-name: asserted absent
+    # queues: record_filing left (filing ends when its queue is empty);  # removed-name: asserted absent
     # set_aside closes an item no other write closes
     "set_aside",
-    # simple loop Task 11 (§4): the sweep's two tools, the package ask and the request-bound
+    # The sweep's two tools, the package ask and the request-bound
     # build left the surface (get_package builds; no sweep, no package requests)
-    # S7 Task 8 (§4): will the running job take this ask?
+    # Will the running job take this ask?
     "ask_state",
-    # S7 Task 9 (§9): job_report left the surface (the job posts its own results)
-    # S7 §8.1: confirm_match, reject_match, set_exemption, bind_account, set_watermark,
+    # job_report left the surface (the job posts its own results)
+    # confirm_match, reject_match, set_exemption, bind_account, set_watermark,
     # set_package_name, stop_chasing and apply_reply left the surface (a tap's grant only)
-    # S7 §7 (Task 5): a view posted with its buttons, and the verdict a button carries
+    # a view posted with its buttons, and the verdict a button carries
     "show_view", "verdict",
-    # S7 §8 (Task 6): typed words read into a reading, and its Apply / Cancel buttons
+    # Typed words read into a reading, and its Apply / Cancel buttons
     "propose_reading", "apply_reading", "cancel_reading",
     # #121: what the operator's words can be about, by pid
     "reading_context",
-    # S7 §11 (Task 7): the business account chosen by button
+    # The business account chosen by button
     "propose_account", "bind_account",
-    # S7 §5 (Task 10): the job posts its own results
+    # The job posts its own results
     "post_results",
-    # S7 §6.1 (Task 11): the job posts the package as a file, under its name
+    # The job posts the package as a file, under its name
     "post_package",
-    # simple loop Task 4 (§2.2 step 4): a vendor group's decisions, and a single missing
+    # A vendor group's decisions, and a single missing
     "decide", "record_missing",
-    # simple loop Task 5 (§2.4): the model's report of a mirror unit
+    # The model's report of a mirror unit
     "record_mirror",
-    # simple loop Task 10 (§2.4 "Erased rows"): the snapshot unit's erasure confirmation
+    # The snapshot unit's erasure confirmation
     "record_not_found",
 }
 
@@ -111,13 +111,13 @@ class TestSurface(TempEnv):
     def test_exactly_the_planned_tools(self):
         import tools  # noqa: F401
         self.assertEqual(set(qa_server.TOOLS), EXPECTED)
-        self.assertEqual(len(EXPECTED), 46)     # #121: + reading_context; #90: + merge_vendors; #89: + rename_vendor, rename_vendors_to_invoice_names; #84: + list_vendors; #56: + get_document; S2: 38; S7 Task 4: - 8 (§8.1); Task 5: + 2; Task 6: + 3;
-                                                # Task 7: + 2; T8: + ask_state; T9: - job_report (§9);
-                                                # T10: + post_results (§5); T11: + post_package (§6.1);
-                                                # simple loop T4: + decide, record_missing (§2.2);
-                                                # T5: + record_mirror (§2.4); T9: + get_package (§1);
-                                                # T10: + record_not_found (§2.4); T11: - the
-                                                # sweep's two, the package ask, the build (§4)
+        self.assertEqual(len(EXPECTED), 46)     # #121: + reading_context; #90: + merge_vendors; #89: + rename_vendor, rename_vendors_to_invoice_names; #84: + list_vendors; #56: + get_document; before those: 38; - 8; + 2; + 3;
+                                                # + 2; + ask_state; - job_report;
+                                                # + post_results; + post_package;
+                                                # + decide, record_missing;
+                                                # + record_mirror; + get_package;
+                                                # + record_not_found; - the
+                                                # sweep's two, the package ask, the build
 
     def test_manifest_agrees(self):
         r = subprocess.run([sys.executable, str(ROOT / "scripts/check_tool_agreement.py")],
@@ -160,7 +160,7 @@ class TestSurface(TempEnv):
 
 
 class TestDeliverableBoundary(TempEnv):
-    """fix wave D round 2: an operator-facing text over Telegram's limit never
+    """An operator-facing text over Telegram's limit never
     leaves a tool as a result — it is an error (isError), loud."""
     def setUp(self):
         super().setUp()
@@ -174,14 +174,14 @@ class TestDeliverableBoundary(TempEnv):
         big = "x" * 4097
         cases = [("build_review", views, "build_review", {"render_id": "r1", "text": big},
                   {}),
-                 # S7 Task 9 (§9): job_report (texts, speak) left the surface
-                 # fix wave F: the offer an uncertain package send returns
+                 # job_report (texts, speak) left the surface
+                 # The offer an uncertain package send returns
                  ("record_delivery", delivery, "record_delivery",
                   {"speak": {"render_id": "r1", "text": big}},
                   {"delivery_id": 1, "outcome": "uncertain"})]
-        # S7: apply_reply (receipt, receipt_pages) left the surface (Task 4); a reading's
+        # apply_reply (receipt, receipt_pages) left the surface; a reading's
         # proposal and its Apply receipt are fitted by construction (views.fit_message,
-        # views.fits_proposal), pinned in test_s7_readings and test_fit
+        # views.fits_proposal), pinned in test_readings and test_fit
         for tool, mod, fn, out, args in cases:
             with mock.patch.object(mod, fn, lambda *a, _o=out, **k: _o):
                 res = _tool(tool, **args)
@@ -244,7 +244,7 @@ class TestResend(ToolCase):
     def send(self, pkg_id, outcome):
         from tests.fakebroker import FakeBroker
         d = _json("stage_for_delivery", channel="telegram", package_id=pkg_id)
-        with FakeBroker():                         # r3 #2: posted, then its outcome recorded
+        with FakeBroker():                         # Posted, then its outcome recorded
             _json("post_package", delivery_id=d["delivery_id"])
         _json("record_delivery", delivery_id=d["delivery_id"], outcome=outcome)
         for f in os.listdir(self.outbox):          # Casa consumes the outbox copy on send
@@ -260,7 +260,7 @@ class TestResend(ToolCase):
         self.send(self.a["package_id"], "uncertain")
         self.send(self.b["package_id"], "delivered")
         self.assertIn(views.field(self.a["filename"]), self.show())
-        # S7 §6.3/§8, #121: "send it again" is stage_for_delivery(resend=true), not a reading
+        # #121: "send it again" is stage_for_delivery(resend=true), not a reading
         staged = _json("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(staged["filename"], self.a["filename"])
         self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),
@@ -314,7 +314,7 @@ class TestPaging(ToolCase):
 
 
 class TestMachineWritesNeedAPass(ToolCase):
-    """D10: a specialist's write belongs to a pass (spec: a stale pass is refused
+    """A specialist's write belongs to a pass (a stale pass is refused
     at every write into this plugin's own store); operator-side writes carry none."""
     def test_a_specialist_filing_without_a_token_is_refused(self):
         path = self.publish("s.pdf", b"%PDF-1.4\ns\n%%EOF\n")
@@ -341,18 +341,18 @@ class TestMachineWritesNeedAPass(ToolCase):
         optional = [n for n, t in qa_server.TOOLS.items()
                     if "pass_token" in t["schema"]["properties"]
                     and "pass_token" not in t["schema"]["required"]
-                    # S2: job_next's first call claims with job_id; its token is not a write's
+                    # job_next's first call claims with job_id; its token is not a write's
                     and n != "job_next"]
-        self.assertEqual(len(optional), 10, optional)       # + list_quarter_state (the clock); S7: - bind_account
+        self.assertEqual(len(optional), 10, optional)       # + list_quarter_state (the clock); - bind_account
         for n in optional:
-            # record_match's description (design rev 17 §2) names it in its own sentence
+            # record_match's description names it in its own sentence
             self.assertIn("and the pass_token." if n == "record_match"
                           else "During a pass, pass the pass_token.",
                           qa_server.TOOLS[n]["description"], n)
 
 
 class TestRowSnapshotFromTheListing(ToolCase):
-    """Task 22 review, item 2: get_transaction's text cannot rebuild the facts
+    """get_transaction's text cannot rebuild the facts
     record_match compares (signed decimals, fenced text, labels), so the item the
     specialist judges from carries them, and passing that value back is accepted."""
     def setUp(self):
@@ -383,7 +383,7 @@ class TestRowSnapshotFromTheListing(ToolCase):
                         expected_revision=item["revision"], row_digest=bad,
                         pass_token=self.token, document_date="2026-07-01")
             self.assertTrue(out.startswith("refused: the payment's facts changed"), out)
-        # design rev 17 (D5): row_digest is optional; without it the revision binds
+        # row_digest is optional; without it the revision binds
         out = _json("record_match", pid=self.pid, doc_id=self.doc(), author="auto",
                     expected_revision=item["revision"], pass_token=self.token,
                     document_date="2026-07-01")
@@ -401,9 +401,9 @@ class TestArgumentTypes(ToolCase):
         import tools  # noqa: F401
         bools = [(n, k) for n, t in qa_server.TOOLS.items()
                  for k, v in t["schema"]["properties"].items() if v.get("type") == "boolean"]
-        # fix wave F: + fresh_only; + failed; #10: + stopped_by_refusal, out_of_time; #15: +
-        # last_built; #22: + dates_unread; S2: the job's tools take the old step flags' place;
-        # S7 Task 4: - set_exemption's exempt; simple loop Task 11: - the unread-dates
+        # + fresh_only; + failed; #10: + stopped_by_refusal, out_of_time; #15: +
+        # last_built; #22: + dates_unread; the job's tools take the old step flags' place;
+        # - set_exemption's exempt; - the unread-dates
         # listing's flag, - the sweep's not-found flag
         self.assertEqual(len(bools), 13, bools)       # #94: + show_view's package
         for n, k in bools:
@@ -463,7 +463,7 @@ class TestSetupSentence(ToolCase):
 
 class TestInstallSmoke(TempEnv):
     def test_one_server_files_another_reads_the_same_record(self):
-        # final fix wave T11-a: a single document is no longer staged from the surface
+        # A single document is no longer staged from the surface
         # (post_package posts packages only); the staging half now pins the refusal
         env = dict(os.environ)
         resident, specialist = _server(env), _server(env)

@@ -34,7 +34,7 @@ class Classify(unittest.TestCase):
         self.assertIn("the payment under discussion; ask which only when several fit", self.sec)
 
     def test_what_a_payment_needs_stays_a_reading(self):
-        """r1 (Astra, Terra S1): a document rule is the reply grammar's (`exempt`, `never`),
+        """A document rule is the reply grammar's (`exempt`, `never`),
         never a classification."""
         self.assertIn('"Needs no invoice" (no document at all) stays a reading.', self.sec)
         self.assertIn("a payment needs no document, whose payment it is, a vendor never needs one",
@@ -46,7 +46,7 @@ class Classify(unittest.TestCase):
 
     def test_the_documents_it_names_are_the_derived_defaults(self):
         """The skill's defaults against expectation.derive, for a payment out with no
-        operator rule; r1 (Terra S1): payroll and taxes together conflict, and the skill says
+        operator rule; payroll and taxes together conflict, and the skill says
         the check judges it."""
         m = re.search(r"By default a payment out tagged (.+?) needs a statement, (.+?) a "
                       r"payslip, both nice to have \(both together: the check judges\)\.",

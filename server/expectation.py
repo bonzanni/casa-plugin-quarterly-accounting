@@ -1,7 +1,5 @@
-"""Document expectation — spec §"Document expectation". PURE: no store, no
-I/O. One decision procedure, direction-aware, first rule that applies; the
-spec's table (rows 1–13) is the oracle and tests/test_expectation.py encodes
-it row by row. This plugin classifies nothing: it reads the classifier's
+"""Document expectation. PURE: no store, no
+I/O. One decision procedure, direction-aware, first rule that applies; tests/test_expectation.py encodes the decision table (rows 1–13) row by row. This plugin classifies nothing: it reads the classifier's
 tags and derives what document, if any, the transaction needs."""
 from __future__ import annotations
 
@@ -17,11 +15,11 @@ NAMESPACE_SEP = "::"
 
 # Flow corrections that decide a row on their own (rows 6–8). Two of them on
 # one row is a classification conflict (row 5). `fees` is a chain marker
-# here (row 10), as the spec's rows 5 and 10 use it (plan §D7).
+# here (row 10), as rows 5 and 10 use it.
 FLOW = {"internal-transfer": 6, "cash-withdrawal": 6, "refund": 7, "reimbursement": 8}
 DBIT_PAYROLL = frozenset({"salary", "payroll"})              # row 9
 DBIT_STATEMENT = frozenset({"fees", "interest", "tax", "taxes"})  # row 10; `taxes` is the
-# classifier's own tag (design rev 17 §2, PLAY Q3)
+# classifier's own tag
 CRDT_NO_DOCUMENT = frozenset({"interest", "dividend"})       # row 12
 
 # The shipped mapping (rows 6–13). Defaults err toward required.
@@ -72,7 +70,7 @@ def classification_state(tags) -> str:
 
 def decisive(tags, direction: str):
     """(row, key) that `tags` select among rows 6–13, or None for a conflict
-    (row 5). The key is what an override must be a subset of (plan §D6)."""
+    (row 5). The key is what an override must be a subset of."""
     tags = frozenset(t for t in tags if is_classification_tag(t))
     flows = sorted(t for t in tags if t in FLOW)
     if len(flows) > 1:
@@ -89,8 +87,8 @@ def decisive(tags, direction: str):
             return 10, stmt
         return 11, tags
     # Row 12 is the chain `income, interest` / `income, dividend`
-    # specifically (spec lines 907-908) — the marker alone, without the
-    # `income` root, is row 13's "unknown chain" (S1, round on 61bcbaa).
+    # specifically — the marker alone, without the
+    # `income` root, is row 13's "unknown chain".
     nodoc = tags & CRDT_NO_DOCUMENT
     if nodoc and "income" in tags:
         return 12, nodoc
@@ -151,7 +149,7 @@ def derive(direction: str, tags, *, exempt: bool = False,
 def _reject_colliding_scopes(chain_overrides) -> None:
     """Two chain overrides that normalize to the same (rows, key) are
     indistinguishable to the tie-break below, which would then let iteration
-    order silently pick a winner (round p2 finding: `refund` and
+    order silently pick a winner (`refund` and
     `income, refund` both normalize to `({7}, {refund})`; `bank, fees` and
     `card, fees` both normalize to `({10}, {fees})`). This is a store-level
     invariant (`set_expectation` replaces any override with the same
@@ -173,7 +171,7 @@ KEYED_ROWS = (6, 7, 8, 9, 10, 12)
 def normalize_scope(scope_tags) -> tuple | None:
     """Fix, ONCE, where an override written for `scope_tags` applies: the rows
     it decides at, and the key a row's own key must contain. Computed when the
-    override is set, never re-derived per row (round p1: re-deriving "salary"
+    override is set, never re-derived per row (re-deriving "salary"
     for a CRDT landed it on row 13 and silenced every sales invoice for
     `income, salary`). A scope whose tags select a keyed row (a flow
     correction, a payroll/statement/no-document marker) applies there only;
@@ -182,7 +180,7 @@ def normalize_scope(scope_tags) -> tuple | None:
     classification tag at all (workflow markers and `owner::name` tags don't
     count): such a scope would otherwise normalize to `({11, 13}, frozenset())`,
     an empty key that every row-11/13 override key is a superset of — a
-    catch-all that silences every such transaction (round p2 finding)."""
+    catch-all that silences every such transaction."""
     scope_tags = frozenset(t for t in scope_tags if is_classification_tag(t))
     if not scope_tags:
         return None

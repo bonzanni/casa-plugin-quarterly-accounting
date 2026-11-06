@@ -1,4 +1,4 @@
-"""0.11.2, PLAY's live check (2026-10-08): five reading problems. 1) one thing, one number:
+"""0.11.2: five reading problems. 1) one thing, one number:
 the legend and the Review receipt never print a number the counts line does not; 2) a
 vendor card has [Leave for now]; 3) a vendor card's subject is its missing payments, the
 others one summary line, and its receipts name the payments acted on; 4) the document's own
@@ -125,9 +125,9 @@ class Reading(_Tapping):
         self.assertNotIn("A document button", card["text"])      # #99: no legend
 
 
-class R7Fixes(Reading):
+class PageAndVendorFixes(Reading):
     def test_an_answered_middle_page_does_not_end_the_vendors_walk(self):
-        """r7 Astra S1: page 2's payments matched meanwhile; Next page goes on to page 3."""
+        """Page 2's payments matched meanwhile; Next page goes on to page 3."""
         pids = [self.pay("Adobe", 100 + i, "2026-08-14") for i in range(60)]
         card = self.tap(self.end(), "Review")["next"]
         pages = self.scope_of(card)["pages"]
@@ -152,9 +152,9 @@ class R7Fixes(Reading):
         self.assertIn("Confirm all", self.labels(end))
 
 
-class R8Fixes(Reading):
+class CompactLineFixes(Reading):
     def test_two_lines_that_read_the_same_without_the_payee_are_told_apart(self):
-        """r8 Astra S2: Belastingdienst / BELASTINGDIENST, same amount and day."""
+        """Belastingdienst / BELASTINGDIENST, same amount and day."""
         self.pay("Belastingdienst", 2000, "2026-08-14")
         self.pay("BELASTINGDIENST", 2000, "2026-08-14")
         card = self.tap(self.end(), "Review")["next"]
@@ -163,7 +163,7 @@ class R8Fixes(Reading):
         self.assertTrue(all(b.startswith("EUR 20.00 · 14 Aug · ref ") for b in body), body)
 
     def test_a_full_vendor_receipt_names_every_payment(self):
-        """r8 Astra S2: the receipt names the vendor once and every payment whole."""
+        """The receipt names the vendor once and every payment whole."""
         name = "*_" * 30
         for i in range(25):
             self.pay(name, 100000000 + i, "2026-08-14")

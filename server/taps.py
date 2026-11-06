@@ -1,5 +1,5 @@
-"""S7: the keyed handlers — the only constructors of authority.OperatorGrant, each after its
-key check (§8.1). Every answer is {"receipt": …}: Casa posts that sentence as the tap's
+"""The keyed handlers — the only constructors of authority.OperatorGrant, each after its
+key check. Every answer is {"receipt": …}: Casa posts that sentence as the tap's
 receipt (INV-PROP-002)."""
 from __future__ import annotations
 
@@ -16,12 +16,12 @@ import views
 import work
 
 ACTIONS = ("all-good", "right", "wrong", "no-invoice")
-# simple loop §1: the cards' taps (cards.buttons), each valid on its own kind of card only
+# The cards' taps (cards.buttons), each valid on its own kind of card only
 CARD_ACTIONS = ("review", "confirm-all", "links", "confirm", "wrong", "leave", "pick",
                 "exempt-these", "leave-missing", "never", "next-page",
-                "all-quarters", "this-quarter",              # 0.11.2 §B: the one switch
+                "all-quarters", "this-quarter",              # The one switch
                 "leave-vendor",
-                "keep-current", "use-new")             # rev 18.4 §R18.3
+                "keep-current", "use-new")
 _ON_KIND = {"end": ("review", "confirm-all", "links"),
             "open-items": ("review", "confirm-all", "links"),
             "review": ("confirm", "wrong", "leave", "pick"),
@@ -51,7 +51,7 @@ def _item(conn, render_id, pid):
 
 def _changed(conn, render_id, pids) -> list:
     """The pids among `pids` whose projection revision, or any match revision the rendering
-    recorded for them, differs from now (§7.3: read from the rendering, not from `shown`)."""
+    recorded for them, differs from now (read from the rendering, not from `shown`)."""
     out = []
     for pid in pids:
         it = _item(conn, render_id, pid)
@@ -107,10 +107,10 @@ def _apply_one(conn, grant, render_id, action, d) -> tuple:
 
 
 def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
-    """§7.3: the only button that writes. After the key check (§7.5) and in ONE transaction:
+    """The only button that writes. After the key check and in ONE transaction:
     every affected payment must stand exactly as the tapped rendering recorded it, or
     nothing commits; `all-good` confirms exactly the pairings that rendering proposed.
-    Simple loop §1 (#1302): a tap on a cards rendering (cards.KINDS) answers
+    (#1302): a tap on a cards rendering (cards.KINDS) answers
     {"receipt", "next"} — the next card, composed in the tap's own transaction. The key
     binds (render, action, pid, doc_id); a key, rendering or action that does not hold is
     a refusal — {"receipt"} only, no card."""
@@ -157,7 +157,7 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
 def _all_good_receipt(scope, ds, lines, tail) -> str:
     """#102: a title, then one tight line per payment named as the card showed it (its
     scope `names`: the receipt never renames a vendor the card named otherwise), as many as
-    fit whole, then how many more (d1 Terra)."""
+    fit whole, then how many more."""
     names = scope.get("names") or {}
     rows = []
     for d, line in zip(ds, lines):
@@ -177,7 +177,7 @@ def _all_good_receipt(scope, ds, lines, tail) -> str:
 
 
 def _show(conn, render_id, view, pid=None) -> dict:
-    """#93 (d1, r1, r2 Astra S2): a button that shows another view (the missing or the
+    """#93: a button that shows another view (the missing or the
     check list, one payment), decided when tapped. A view with something to act on is the
     next card (its pages before it); one with nothing to act on is the tap's answer, plain,
     as stored (it binds what it shows); a list longer than a message says how to see it."""
@@ -194,11 +194,11 @@ def _show(conn, render_id, view, pid=None) -> dict:
         value, _ = posting._view_value(conn, lst)
         # #102: the shown view replaces the tapped card (Casa #1339: a landed edit sends no
         # receipt; a card with pages is never an edit — Casa posts receipt, pages, card).
-        # The receipt never reads like the card's opening (d1 Astra): a quote of it binds
+        # The receipt never reads like the card's opening: a quote of it binds
         # nothing it did not show
         return {"receipt": SHOW_RECEIPT[view], "next": json.loads(value), "in_place": True}
     if pages:
-        # a list longer than one message cannot be one answer (r1 Astra S2: a clipped one
+        # a list longer than one message cannot be one answer (a clipped one
         # bound what it never showed); the desk posts it whole, page by page
         return {"receipt": f"Too long for one message — ask me to {SHOW_SAY[view]} and I'll "
                            "post it all."}
@@ -221,7 +221,7 @@ def _answer(conn, receipt, next_rid, in_place=False) -> dict:
         if not posting.has_actions(conn, r):
             # #93: a card with nothing to tap is no card: its text follows the receipt, as
             # one plain message (stamped posted, so a reply quoting it binds)
-            # d1 (Astra S2): the rendering holds the whole message as sent, so a quote of
+            # the rendering holds the whole message as sent, so a quote of
             # it binds
             receipt, next_rid = views.fit_message(f"{receipt}\n\n{r['text']}"), None
             conn.execute("UPDATE renders SET text=?, posted_seq=? WHERE render_id=?",
@@ -245,8 +245,7 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
     page, pages = scope.get("page", 1), scope.get("pages") or []
 
     def later_page():
-        """The first later page of this vendor that still has something to show (r7 Astra
-        S1: a page answered meanwhile is skipped, never the end of the vendor), or None."""
+        """The first later page of this vendor that still has something to show (a page answered meanwhile is skipped, never the end of the vendor), or None."""
         for p in range(page + 1, len(pages) + 1):
             nxt = cards.card(conn, review_of, pos, p)
             if nxt is not None:
@@ -255,16 +254,16 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
 
     def onward():
         """The next page of this vendor that has something left, else the next item
-        (cards.card is None when a later page has nothing left: Task 7 carry)."""
+        (cards.card is None when a later page has nothing left:)."""
         return later_page() or cards.next_after(conn, review_of, pos)
 
     def fresh():
-        """The same item as it is now (a fresh first page for a vendor, r10/r11), else the
+        """The same item as it is now (a fresh first page for a vendor), else the
         next item when it is no longer open."""
         return cards.card(conn, review_of, pos, 1) or cards.next_after(conn, review_of, pos)
 
     if action == "review":
-        # PLAY 0.11.2: the counts line's own numbers, never a count of cards
+        # The counts line's own numbers, never a count of cards
         return _answer(conn, f"Reviewing {cards.walk_words(scope, ', then ')}.",
                        cards.next_after(conn, rid, -1)
                        or cards.compose_open(conn, scope["quarter"],
@@ -281,28 +280,28 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
         if nxt is not None:
             at = json.loads(_row_scope(conn, nxt))["page"]
             return _answer(conn, f"Page {at} of {len(pages)}.", nxt, in_place=True)
-        # r1 Terra S1: page 1 may still hold payments; fresh() re-posts it, else the next item
+        # Page 1 may still hold payments; fresh() re-posts it, else the next item
         return _answer(conn, "Nothing is left on the later pages: answered meanwhile.",
                        fresh())
     if action in ("all-quarters", "this-quarter"):
-        # §B: a switch writes nothing; the same card comes back switched (Casa #1302: the
+        # A switch writes nothing; the same card comes back switched (Casa #1302: the
         # receipt is required, so it is the shortest plain phrase)
         on = action == "all-quarters"
         nxt = cards.switched(conn, rid, on)
         if nxt is None:
-            # r2 Astra S1: as for an emptied later page, the vendor's page 1 may still be owed
+            # As for an emptied later page, the vendor's page 1 may still be owed
             return _answer(conn, "Nothing is left on this card: answered meanwhile.", fresh())
         return _answer(conn, "All quarters on." if on else "This quarter only.", nxt,
                        in_place=True)
     if action == "leave-vendor":
-        # PLAY 0.11.2: a vendor card's non-answer, as on a to-confirm card
+        # A vendor card's non-answer, as on a to-confirm card
         return _answer(conn, f"Left for now: {views.field(cards.vendor_name(scope))}.",
                        cards.next_after(conn, review_of, pos))
     if action == "leave":
         return _answer(conn, f"Left for now: {views.headline(work.describe(conn, pid))}.",
                        cards.next_after(conn, review_of, pos))
     # the decision in a savepoint: a refusal (or a changed binding) commits nothing of it,
-    # and the answer is still a receipt plus the item as it is now (§1: every answer's
+    # and the answer is still a receipt plus the item as it is now (every answer's
     # `next` re-offers what is still open); the next card is composed after it
     then = "next"
     try:
@@ -311,7 +310,7 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
                 out = _vendor_answer(conn, rid, scope, action, grant)
                 receipt, then = out if out is not None else (LIST_CHANGED, "fresh")
             elif action in ("keep-current", "use-new"):
-                # rev 18.4 §R18.3: bound to the payment and the pairing the card displayed
+                # Bound to the payment and the pairing the card displayed
                 import replace
                 if _changed(conn, rid, [pid]):
                     receipt, then = CARD_CHANGED, "fresh"
@@ -326,7 +325,7 @@ def _card_tap(conn, r, action, pid, doc_id, grant) -> dict:
     except db.Refusal as exc:
         receipt, then = f"Nothing was applied: {str(exc).rstrip('.')}.", "fresh"
     if then == "fresh" and action in ("keep-current", "use-new"):
-        # e2 (Astra S2): a superseded or stale replace card is answered with the payment's
+        # A superseded or stale replace card is answered with the payment's
         # live question, when it has one
         newer = cards.live_question_card(conn, review_of, pos, pid)
         if newer is not None and newer != rid:
@@ -351,9 +350,9 @@ def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:
         return f"Matched {views.headline(d)}."
     if action == "confirm":
         return _apply_one(conn, grant, rid, "right", d)[1]
-    # D3 / plan round 2 (Astra S1): Wrong answers every candidate the card displayed — the
+    # Wrong answers every candidate the card displayed — the
     # chosen document and its displayed alternatives, or a set's displayed members — and
-    # nothing it did not display (plan round 8)
+    # nothing it did not display
     _, line = _apply_one(conn, grant, rid, "wrong", d)
     matches.reject_alternatives_in_tx(conn, grant=grant, pid=pid, doc_ids=shown_alts,
                                       render_id=rid)
@@ -365,13 +364,13 @@ def _proposal_answer(conn, rid, scope, action, pid, doc_id, grant) -> str:
 
 def _vendor_answer(conn, rid, scope, action, grant):
     """A vendor page's writing buttons. [No invoice needed for these] and [Leave missing]
-    bind only this page's own payments (plan round 2, Astra S2); [Never for X] binds the
-    union of the pages the walk displayed, by membership (review round 1 ruling): it
+    bind only this page's own payments; [Never for X] binds the
+    union of the pages the walk displayed, by membership: it
     applies when every payment the rule changes now was on one of those pages, so the
     operator's own earlier-page answers ([Leave missing], [No invoice needed for these])
-    never block it, and a payment that arrived since (r10) refuses it. Returns
+    never block it, and a payment that arrived since refuses it. Returns
     (receipt, "onward" | "next"), or None when the binding changed (nothing written).
-    Never's set is cards.never_set — the rule rehearsed (d1 ruling) — and the real write
+    Never's set is cards.never_set — the rule rehearsed — and the real write
     that follows in the same transaction changes exactly that set."""
     import cards
     import kb
@@ -383,7 +382,7 @@ def _vendor_answer(conn, rid, scope, action, grant):
         if _changed(conn, rid, listed):          # Never binds every line it displayed
             return None
         union = set(listed) | {int(p) for p in scope.get("others") or {}} \
-            | {int(p) for p in scope.get("also") or []}      # §B, PLAY 0.11.2: stated
+            | {int(p) for p in scope.get("also") or []}      # Stated
         for p in scope.get("prior") or []:
             union |= set(views.render_items(conn, p))
         changes = cards.never_set(conn, scope["vendor"])
@@ -395,13 +394,13 @@ def _vendor_answer(conn, rid, scope, action, grant):
                 f"{_plural(len(changes), 'payment')} "
                 "changed.", "next")
     # the page's missing lines only: a pending, proposed, matched or exempted line is
-    # listed because Never would change it (d1 ruling), never to be exempted or left
+    # listed because Never would change it, never to be exempted or left
     acts = [p for p in listed if p in set(scope.get("missing", listed))]
     if not acts or _changed(conn, rid, acts):   # bound to the missing lines it acts on
         return None
     revs = {p: _item(conn, rid, p)["projection_revision"] for p in acts}
     if scope.get("all_quarters"):
-        # §B: the switch on — plus the other quarters' missing payments the card stated
+        # The switch on — plus the other quarters' missing payments the card stated
         # (bound to its count line), at the revisions frozen on page 1 and recorded by
         # this card: one that moved since refuses the whole answer
         frozen = scope.get("others_rev") or {}
@@ -410,8 +409,8 @@ def _vendor_answer(conn, rid, scope, action, grant):
                 lineage.projection(conn, p)["revision"] != frozen.get(str(p)) for p in more):
             return None
         revs.update({p: _item(conn, rid, p)["projection_revision"] for p in more})
-    # PLAY 0.11.2: the receipt names the payments it acted on, as the card showed them
-    # (r8 Astra S2: the vendor once, then the card's own compact lines, so every payment
+    # The receipt names the payments it acted on, as the card showed them
+    # (the vendor once, then the card's own compact lines, so every payment
     # fits whole); the other quarters' are counted
     shown = scope.get("bound_lines") or {}
     named = "; ".join(shown.get(str(p)) or views.headline(work.describe(conn, p)) for p in acts)
@@ -428,7 +427,7 @@ def _vendor_answer(conn, rid, scope, action, grant):
 
 
 def _confirm_all(conn, r, scope, grant) -> dict:
-    """§1 (S7 §7.3 extended): over the proposals the message listed, in order — one the
+    """Over the proposals the message listed, in order — one the
     operator answered after this rendering (Review, or an applied reading: an operator log
     entry past its seq) is skipped; one changed by anything else gets a refusal line and
     commits nothing; the rest are confirmed, each in its own savepoint."""
@@ -481,7 +480,7 @@ class _Changed(Exception):
 
 
 def apply_reading(conn, reading_id, key) -> dict:
-    """§8: Apply on a reading. After the key check, the stored words are read again under
+    """Apply on a reading. After the key check, the stored words are read again under
     the operator's grant, bound to the same rendering, in ONE transaction; they commit only
     when that plan is exactly the stored one — every step, every revision it read, the
     binding row. Anything else: nothing applies, and the reading is stale."""
@@ -507,7 +506,7 @@ def apply_reading(conn, reading_id, key) -> dict:
 
 
 def cancel_reading(conn, reading_id, key) -> dict:
-    """§8: Cancel on a reading — nothing is applied, and the key is spent. It constructs no
+    """Cancel on a reading — nothing is applied, and the key is spent. It constructs no
     grant: it writes no operator authority."""
     with db.tx(conn):
         _reading(conn, reading_id, key)
@@ -517,7 +516,7 @@ def cancel_reading(conn, reading_id, key) -> dict:
 
 
 def bind_account(conn, choice, key) -> dict:
-    """§11: a tap on `Account n` binds the account frozen under the key at n (§7.6). The
+    """A tap on `Account n` binds the account frozen under the key at n. The
     key is spent with the binding, in ONE transaction: a refusal from binding.bind_in_tx
     (an account already bound) rolls the spend back too."""
     if isinstance(choice, bool) or not isinstance(choice, int) or not 1 <= choice <= 5:

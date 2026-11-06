@@ -1,5 +1,5 @@
-"""Operator authorship is checked, not declared (spec §Match records), and
-the revision the operator was SHOWN is what binds (spec §Flows). An
+"""Operator authorship is checked, not declared, and
+the revision the operator was SHOWN is what binds. An
 operator-authored write must carry the render_id of the rendering that showed
 the item (its render_items row); the revision it names must be the one recorded
 there, and still the current one. A guard against a mistaken
@@ -25,8 +25,8 @@ class Stale(db.Refusal):
 
 def _shown(conn, pid, render_id, bind="rendered"):
     """The revisions the operator was shown for `pid`: the row `render_id` itself recorded
-    for it — a verdict's tap binds to the rendering its button sits on (S7 §7.3), a reading
-    to its one bound rendering (binding §1). No step reads the `shown` table (§2 #12)."""
+    for it — a verdict's tap binds to the rendering its button sits on, a reading
+    to its one bound rendering. No step reads the `shown` table."""
     if bind != "rendered":
         raise ValueError(bind)
     s = conn.execute("SELECT render_id, projection_revision, match_revisions_json"

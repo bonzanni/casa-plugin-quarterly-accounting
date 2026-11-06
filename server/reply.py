@@ -1,5 +1,5 @@
 # server/reply.py
-"""A reading (S7 §8, #121): the operations the desk read in the operator's words, applied
+"""A reading: the operations the desk read in the operator's words, applied
 under a rehearsal and posted to the operator to Apply.
 
 The desk model reads the words — which payment, which decision, in any wording or language
@@ -10,10 +10,10 @@ bound to (views.bound_rendering: the quoted post, else the last delivered one), 
 write's own validation (authorship.py: the revision that rendering recorded; an item it did
 not show, or changed since, is refused and re-shown; the other operations still apply).
 
-Binding (rounds-2026-10-03-s7-diff/binding/): every write reads only the bound rendering
+Binding: every write reads only the bound rendering
 R's record (_Scope): its render_items rows and the scope fields views.FACT_FIELDS lists.
 
-S7 §8: nothing commits from a turn. reading_in_tx runs the operations under a rehearsal
+Nothing commits from a turn. reading_in_tx runs the operations under a rehearsal
 (always rolled back) and returns the plan of writes, each with the revisions it read;
 taps.apply_reading replays the stored operations under the operator's grant and commits
 only an identical plan. The receipt is generated from what the replay wrote."""
@@ -88,7 +88,7 @@ _KIND_TOKEN = re.compile(r"\b(an?) (" + "|".join(sorted(views.KIND_WORD, key=len
 
 
 def _say(conn, exc) -> str:
-    """A store refusal in the operator's words (pre-flight R4): the store's
+    """A store refusal in the operator's words: the store's
     messages are written for the model that calls the tools, and a receipt
     carries no render id, no #number and no machine kind."""
     msg = str(exc)
@@ -131,7 +131,7 @@ def _delivered_package_for(conn, quarter):
 
 def package_lines(conn, quarters) -> list:
     """A receipt's closing lines: for each touched quarter whose package was already sent,
-    say it no longer matches (a reading's receipt and a verdict's, S7 §7.3)."""
+    say it no longer matches (a reading's receipt and a verdict's)."""
     out = []
     for q in sorted(quarters):
         pk = _delivered_package_for(conn, q)
@@ -143,14 +143,14 @@ def package_lines(conn, quarters) -> list:
 
 # A step records every binding column that decides a verdict; import bookkeeping and the
 # announce flags are not among them, so an unrelated bank import (or a delivered rendering
-# announcing the watermark) never stales an open reading (final fix wave T6-c, M-2)
+# announcing the watermark) never stales an open reading
 BINDING_NOT_READ = ("row_high_water", "watermark_announced", "package_name_announced")
 
-# S7 §8: each write's two phrasings — the proposal's line, then the Apply receipt's. Every
+# Each write's two phrasings — the proposal's line, then the Apply receipt's. Every
 # value is a field (views.field; views.headline already takes its fields through it)
 PHRASE = {
     "confirm": ("Confirm {h}.", "Confirmed {h}."),
-    # PLAY 0.11.2: a proposal is rejected, a match is removed (plain words for what it is)
+    # A proposal is rejected, a match is removed (plain words for what it is)
     "unpair": ("{act} {h}.", "{done} {h}."),
     "set_aside": ("Rule out {n} for {h}.", "Ruled out {n} for {h}."),
     "exempt": ("{h}: needs no document{drop}.", "{h}: needs no document{dropped}."),
@@ -171,7 +171,7 @@ _LIVE = "SELECT pid, revision FROM projections WHERE merged_into IS NULL AND end
 
 
 class _Scope:
-    """THE bound rendering R's own record (binding §1): every write reads only this — R's
+    """THE bound rendering R's own record: every write reads only this — R's
     render_items rows (`rev`, `mrevs`, by the pid R recorded) and the scope fields
     views.FACT_FIELDS lists (an AST pin holds this module to that list). With no R it is
     empty. A payment merged since R was posted is on R by neither pid: its old pid is no
@@ -186,17 +186,17 @@ class _Scope:
                             (self.rid,)).fetchall() if bound is not None else []
         self.rev = {r["pid"]: r["projection_revision"] for r in rows}
         self.mrevs = {r["pid"]: json.loads(r["match_revisions_json"]) for r in rows}
-        # r1 (Terra S1): the payments R recorded, by the pid it recorded — a merge's survivor
+        # The payments R recorded, by the pid it recorded — a merge's survivor
         # is not on R (it was never shown in that form): the desk posts its own card
         self.pids = set(self.rev)
         self.quarter = scope.get("quarter")
-        # r1 (Astra S2): the ref R printed on each payment ("Adobe · … · ref e40c"), so the
+        # The ref R printed on each payment ("Adobe · … · ref e40c"), so the
         # desk can tell two otherwise-equal payments apart as the operator does
         self.refs = {}
         for ref, ps in (scope.get("refs") or {}).items():
             for p in (ps if isinstance(ps, list) else [ps]):
                 self.refs[p] = ref
-        # a list page's continuation (reading_context). r3 #4: a view page an earlier version
+        # a list page's continuation (reading_context). A view page an earlier version
         # composed stored no `next` — "more" on it starts the same view again at page 1 (an
         # explicit null stays "nothing more")
         self.next = scope.get("next")
@@ -206,8 +206,8 @@ class _Scope:
                          **({"pid": scope.get("pid")} if self.kind == "item" else {})}
         import cards
         if bound is not None and self.kind in cards.KINDS and not self.next:
-            # r2 (Terra S2): "more" on a card (an end message, the open items, a tap's card)
-            # is the quarter's open-items card, afresh (simple loop §1 Recovery)
+            # "more" on a card (an end message, the open items, a tap's card)
+            # is the quarter's open-items card, afresh
             self.next = {"view": "open", **({"quarter": self.quarter} if self.quarter else {})}
 
 
@@ -220,7 +220,7 @@ class _Run:
         self.touched_quarters = set()
 
     def recorded(self, d, cur) -> bool:
-        """§2 #10: the pairing a verdict judges is the one R recorded — False when R
+        """The pairing a verdict judges is the one R recorded — False when R
         recorded the payment with another (or no) pairing."""
         return d["pid"] not in self.scope.rev or \
             str(cur["match_id"]) in self.scope.mrevs[d["pid"]]
@@ -237,7 +237,7 @@ class _Run:
                 "quarters": sorted(self.touched_quarters)}
 
     def write(self, op, params, fn, phrase_args, check=None):
-        """THE one way an operation writes (S7 §8): `fn` runs in the savepoint `clause`; the
+        """THE one way an operation writes: `fn` runs in the savepoint `clause`; the
         step records `op`, its parameters, the revision BEFORE the write of every live
         payment whose revision it changed (`read`), and the binding row it saw. `check(read)`
         may refuse inside the savepoint. Returns (fn's result, read)."""
@@ -296,14 +296,14 @@ class _Run:
 
 def _bind_projection(conn, run, d):
     """(render_id, revision, bind): the bound rendering's own row for the payment, or
-    NotShown (binding §2 #5)."""
+    NotShown."""
     if d["pid"] not in run.scope.rev:
         raise authorship.NotShown(d["pid"], "not shown")
     return run.scope.rid, run.scope.rev[d["pid"]], "rendered"
 
 
 def _bind_match(conn, run, d, match_id):
-    """The revision R recorded for the pairing, or NotShown (§2 #6: no fallback)."""
+    """The revision R recorded for the pairing, or NotShown (no fallback)."""
     rev = run.scope.mrevs.get(d["pid"], {}).get(str(match_id))
     if rev is None:
         raise authorship.NotShown(d["pid"], "not shown")
@@ -312,7 +312,7 @@ def _bind_match(conn, run, d, match_id):
 
 def _bind_candidates(conn, run, d) -> dict:
     """A set-aside's step parameters: every displayed candidate, each bound to R, which
-    must record them all (§2 #7; a continued page records its predecessor's, V1)."""
+    must record them all."""
     mids = [c["match_id"] for c in d["candidates"]]
     mrevs = run.scope.mrevs.get(d["pid"])
     if mrevs is None or any(str(m) not in mrevs for m in mids):
@@ -341,7 +341,7 @@ def _target(conn, run, op, items) -> dict:
     mechanical fact about the call, never the operator's to read)."""
     pid = op["pid"]
     if pid not in items:
-        # r1 (Terra S1): a merged payment's old pid never stands for its survivor — the
+        # A merged payment's old pid never stands for its survivor — the
         # survivor is decided from its own place on the post, through reading_context
         raise db.Refusal(NOT_OPEN.format(pid=pid))
     if pid not in run.scope.pids:
@@ -354,7 +354,7 @@ PID_OPS = ("confirm", "reject", "no_document", "needs_document", "look_again", "
 
 
 def _run(conn, ops, grant, bound) -> "_Run":
-    """The operations applied inside the caller's transaction (S7 §8): every write under
+    """The operations applied inside the caller's transaction: every write under
     `grant` and inside a savepoint of its own, bound to `bound` (a renders row or None)."""
     run = _Run(conn, grant, bound)
     items = {d["pid"] for d in _open_items(conn)}
@@ -379,7 +379,7 @@ def _op(conn, run, op, items) -> None:
             _one(conn, run, name, d, op)
     elif name == "class_none":
         k = op["kind"]
-        # R2: R records at least one payment the class's chain scope covers
+        # R records at least one payment the class's chain scope covers
         if not any(_class_covers(conn, p, CLASS_SCOPES[k]) for p in run.scope.pids):
             raise db.Refusal(f"the post the operator's words are about shows no payment "
                              f"{k} would cover — nothing was read")
@@ -407,9 +407,8 @@ def _op(conn, run, op, items) -> None:
 
 
 def reading_in_tx(conn, ops, quoted=None) -> dict:
-    """S7 §8 propose: what `ops` (check_ops'd) would do, learnt by running them under a
-    rehearsal that is always rolled back. Nothing it wrote survives. Bound to ONE rendering
-    (binding §1). A quote that binds no one rendering raises views.QuoteRefusal."""
+    """Propose: what `ops` (check_ops'd) would do, learnt by running them under a
+    rehearsal that is always rolled back. Nothing it wrote survives. Bound to ONE rendering. A quote that binds no one rendering raises views.QuoteRefusal."""
     import authority
     bound = views.bound_rendering(conn, quoted)
     with authority.rehearsal(conn) as r:
@@ -419,7 +418,7 @@ def reading_in_tx(conn, ops, quoted=None) -> dict:
 
 
 def replay(conn, row, grant) -> dict:
-    """S7 §8 apply: the stored operations run again under the operator's grant, against the
+    """Apply: the stored operations run again under the operator's grant, against the
     rendering they were bound to; the caller compares the plan and commits or rolls back.
     A refusal (or a reading stored before #121, whose `text` is words) raises db.Refusal."""
     try:
@@ -473,7 +472,7 @@ def context(conn, quoted=None) -> dict:
     items = _open_items(conn)
     items.sort(key=lambda d: d["date"] or "", reverse=True)
     items.sort(key=lambda d: d["pid"] not in sc.pids)          # stable: the post's own first
-    # r2 (Astra S2): every payment on the post is listed; the cap holds only the others
+    # Every payment on the post is listed; the cap holds only the others
     keep = max(CONTEXT_MAX, sum(1 for d in items if d["pid"] in sc.pids))
     out = []
     for d in items[:keep]:
@@ -493,10 +492,10 @@ def context(conn, quoted=None) -> dict:
 
 def _broad(conn, run, op, params, change, phrase_args) -> None:
     """A vendor- or class-wide operator change — or an identity, which reaches every
-    payment with that bank text — binds by provenance (binding R2: the caller checked that
+    payment with that bank text — binds by provenance (the caller checked that
     the bound rendering shows what the operation names). Its effect set, every payment whose
     revision the change moves (the step's `read`), is computed in this rehearsal and listed
-    in the proposal, one headline each and all of them (round p6, Terra S1; #121 d1: never
+    in the proposal, one headline each and all of them (never
     truncated — a list that cannot fit is refused by the reading's size limit); `read` is in
     the plan, so Apply's replay-and-compare refuses a changed set."""
     try:
@@ -509,7 +508,7 @@ def _broad(conn, run, op, params, change, phrase_args) -> None:
         n = len(heads)
         run.propose[-1] += (f" It changes {n} payment{'s' if n != 1 else ''}:\n"
                             + "\n".join(f"  {h}" for h in heads))
-    for pid in read:                       # a package build covers the quarters it changed (p8)
+    for pid in read:                       # a package build covers the quarters it changed
         q = work.describe(conn, pid)["quarter"]
         if q:
             run.touched_quarters.add(q)
@@ -517,12 +516,12 @@ def _broad(conn, run, op, params, change, phrase_args) -> None:
 
 def _provenance(run):
     """The provenance stamp of an operator's broad rule (`never`, `class_none`): the
-    rendering the reading is bound to (S7 §8)."""
+    rendering the reading is bound to."""
     return run.bound["render_id"] if run.bound is not None else None
 
 
 def _class_covers(conn, pid, scopes) -> bool:
-    """R2: a chain scope of the class covers the payment — the row and key its
+    """A chain scope of the class covers the payment — the row and key its
     classification selects meet expectation.normalize_scope's (rows, key) for one of
     `scopes`, as expectation.derive applies an override."""
     try:
@@ -556,7 +555,7 @@ def _confirm(conn, run, d, cur):
 
 def _set_aside_all(conn, run, p) -> dict:
     """"Wrong" on a payment with several displayed candidates sets them ALL
-    aside or none (fix round 1): inside the operation's savepoint every candidate
+    aside or none: inside the operation's savepoint every candidate
     is checked against the revision the operator was shown BEFORE the first
     write; any refusal rolls the whole set back and the payment is re-shown."""
     for mid, rid, rev in p["bound"]:
@@ -616,9 +615,8 @@ def _one(conn, run, name, d, op):
     elif name == "identity":
         who = op["who"]
         # An identity reaches every payment with that bank text (the KB re-settles
-        # them all), so it binds like a vendor-wide rule (R2): its provenance is the
-        # named payment, on R; every payment it changes is listed in the proposal
-        # (round p7, Astra S1). The receipt is read after the write.
+        # them all), so it binds like a vendor-wide rule: its provenance is the
+        # named payment, on R; every payment it changes is listed in the proposal. The receipt is read after the write.
 
         def ident():
             kb.upsert_in_tx(conn, who, patterns=[d["bank_counterparty"]])

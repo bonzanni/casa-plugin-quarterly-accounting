@@ -1,5 +1,4 @@
-"""The plugin's version and the workflow string every bank-feed write carries
-(spec §Setup, "Test install"). One source: .claude-plugin/plugin.json."""
+"""The plugin's version and the workflow string every bank-feed write carries. One source: .claude-plugin/plugin.json."""
 from __future__ import annotations
 
 import json

@@ -1,8 +1,7 @@
-"""The lineage decision log and its fold — spec §Match records. PURE.
+"""The lineage decision log and its fold. PURE.
 
 A lineage's match-record state is the fold of its log in store-wide
-sequence order, from the empty state, through ONE transition table (the
-spec's reducer step 2). The log holds writer entries (pair, propose, unpair,
+sequence order, from the empty state, through ONE transition table. The log holds writer entries (pair, propose, unpair,
 exempt, lift) and the retirements the store recorded (`retire X@a -> state`,
 bound to the ACTIVATION a it retires). The fold never decides anything the
 log does not say: it reports, in `produced`, every retirement a transition
@@ -109,7 +108,7 @@ def _step(st: FoldState, e: Entry, occupied) -> None:
             if named is not None:
                 named.state = "rejected"                          # the writer's own decision
         # Operator precedence is judged BEFORE the machine entry touches any
-        # candidate (round p1, Astra S1): a machine entry naming the pairing
+        # candidate: a machine entry naming the pairing
         # the operator holds would otherwise replace the operator's activation.
         op = st.operator_current()
         if op is not None and op.match_id == e.match_id:

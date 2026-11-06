@@ -1,4 +1,4 @@
-"""Simple loop §2.1–§2.2, rev 18.4 §R18.1/§R18.3: the work list (open, changed facts, a
+"""The work list (open, changed facts, a
 handover's payments — a paired one included; never reopened by a later mail document, never
 pending, never a payment expecting no document, never one the operator left missing),
 walked by date one payment at a time; the payment unit's candidates, exact fit and search."""
@@ -53,7 +53,7 @@ class Work(StoreCase):
         self.assertEqual(self.listed(), [open_])
 
     def test_a_document_filed_later_never_reopens_a_machine_pairing(self):
-        """Rev 18.4 §R18.3: a later mail document never reopens a machine match or a machine
+        """A later mail document never reopens a machine match or a machine
         proposal; it stays filed, unmatched."""
         import matches
         pid = self.pay()
@@ -68,14 +68,14 @@ class Work(StoreCase):
         self.assertEqual(self.listed(), [])
 
     def file_later(self, doc_id):
-        """The document as a filing now stamps it (documents.filed_seq, Task 4)."""
+        """The document as a filing now stamps it (documents.filed_seq)."""
         with db.tx(self.conn):
             self.conn.execute("UPDATE documents SET filed_seq=? WHERE doc_id=?",
                               (db.next_seq(self.conn), doc_id))
 
     def test_the_list_is_walked_by_date_one_payment_at_a_time(self):
-        """Rev 18.4 §R18.1: date order, one payment per hand-out; an undecided one is
-        handed again (D8), then the next."""
+        """Date order, one payment per hand-out; an undecided one is
+        handed again, then the next."""
         z = self.pay(who="Zapier", day="2026-07-05")
         a2 = self.pay(who="Adobe", day="2026-09-05")
         a1 = self.pay(who="Adobe", day="2026-07-01")
@@ -104,7 +104,7 @@ class Work(StoreCase):
         self.assertIsNone(loop.exact_fit(self.conn, pid, row, "Adobe", cands))
 
     def test_a_live_proposals_alternative_is_free_for_another_payment(self):
-        """Rev 18.4 §R18.4: the primary is held; an alternative holds nothing."""
+        """The primary is held; an alternative holds nothing."""
         import loop, lineage, matches
         p1 = self.pay(who="Adobe", day="2026-09-02")
         p2 = self.pay(who="Adobe", day="2026-09-03")
@@ -138,7 +138,7 @@ class Work(StoreCase):
                          {first, ninth})                                     # both exact
 
     def test_a_handed_document_beyond_the_cap_is_handed_out_first(self):
-        """A handover's document (D17) is a must-show candidate: first, uncapped."""
+        """A handover's document is a must-show candidate: first, uncapped."""
         import asks, loop
         pid = self.pay(who="Adobe", day="2026-09-02")
         for k in range(9):                                   # nine closer extras
@@ -206,7 +206,7 @@ class Work(StoreCase):
         self.assertEqual(loop.run_handover_docs(self.conn, self.job_id), [usd])
 
     def test_an_undecided_payment_is_handed_at_most_twice(self):
-        """Rev 18.4 §R18.5: ATTEMPTS_MAX hand-outs without progress, then the next one;
+        """ATTEMPTS_MAX hand-outs without progress, then the next one;
         each ends "missing · search incomplete" (outcome NULL)."""
         import loop, queues
         pids = [self.pay(who="Adobe", day="2026-08-%02d" % (i + 1)) for i in range(3)]
@@ -223,7 +223,7 @@ class Work(StoreCase):
             " job_id=?", (self.job_id,)).fetchone()), (3, 2, 2, 0))
 
     def test_a_search_is_the_handed_payments_and_capped(self):
-        """Rev 18.4 §R18.1/§R18.5: a job search is recorded for the payment handed out now,
+        """A job search is recorded for the payment handed out now,
         with its refs, at most SEARCHES_MAX a run; its refs are the payment's owed items."""
         import loop, work
         p1 = self.pay(who="Adobe", day="2026-08-01")
@@ -307,7 +307,7 @@ class Work(StoreCase):
         self.assertEqual(p["pid"], pid)
 
     def test_building_again_never_reopens_a_decided_entry(self):
-        """A handover onto a matched payment: the job keeps it (or asks, rev 18.4 §R18.3);
+        """A handover onto a matched payment: the job keeps it (or asks);
         building the list again in a new batch never reopens the decided entry."""
         import asks, decide, loop
         pid = self.pay()

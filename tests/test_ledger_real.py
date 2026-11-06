@@ -1,5 +1,5 @@
 """Admission and lineage behaviour against bank-feed's REAL export,
-reconcile, apply_plan and purge (spec §Testing, rounds 11-13, 41)."""
+reconcile, apply_plan and purge."""
 import unittest
 
 from tests._base import StoreCase
@@ -81,7 +81,7 @@ class TestReal(Base):
         self.assertNotIn(old_id, new_ids)
 
     def test_cut_chain_at_the_floor_ends_nothing(self):
-        # round-41 case: pending #1 (30 Jun) superseded by booked #2 (1 Jul),
+        # Pending #1 (30 Jun) superseded by booked #2 (1 Jul),
         # purge before 1 Jul deletes ZERO rows of the chain at bank-feed >= 0.13.0.
         with db.tx(self.conn):
             self.conn.execute("UPDATE binding SET watermark='2026-06-01'")

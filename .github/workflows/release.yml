@@ -2,12 +2,14 @@
 #
 # The version lives in .claude-plugin/plugin.json. When `ci` concludes success
 # on a push to main, this job reads that version and, if no tag `v<version>`
-# exists yet, pushes a lightweight tag at exactly the commit `ci` passed on.
+# exists yet, pushes a lightweight tag at exactly the commit `ci` passed on. If
+# that tag has no GitHub release yet, it publishes one marked latest, with the
+# version's CHANGELOG.md entry as its notes.
 # Bumping the version in plugin.json and merging it to main is therefore the
-# whole release procedure; an unchanged version is a no-op.
+# whole release procedure; a version already tagged and released is a no-op.
 #
-# The tag name is the only text this job publishes, and it is validated as
-# digits and dots. No GitHub Release, no notes.
+# The tag name is validated as digits and dots. The notes are text from the
+# commit `ci` just passed, already public on main.
 name: release
 
 on:
@@ -21,7 +23,7 @@ permissions:
 
 jobs:
   tag:
-    name: Tag the version on main
+    name: Tag and release the version on main
     # A push to main of this repository that ci passed. A pull_request run is
     # excluded by event, another branch by head_branch, a fork by head_repository.
     if: >-
@@ -29,9 +31,12 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository
+    concurrency:
+      group: release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
-      contents: write # push the tag ref
+      contents: write # push the tag ref, create the release
     env:
       SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
@@ -41,6 +46,7 @@ jobs:
           fetch-depth: 0
 
       - name: Tag v<plugin.json version> if it does not exist yet
+        id: tag
         run: |
           set -euo pipefail
           [ "$(git rev-parse HEAD)" = "$SHA" ]
@@ -55,6 +61,7 @@ jobs:
           PY
           )
           TAG="v${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           existing=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
           if [ -n "$existing" ]; then
@@ -64,3 +71,30 @@ jobs:
 
           git push origin "$SHA:refs/tags/$TAG"
           echo "$TAG -> $SHA"
+
+      - name: Publish the GitHub release if it does not exist yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG is already released"
+            exit 0
+          fi
+          notes="$RUNNER_TEMP/notes.md"
+          awk -v h="## ${VERSION}" '$0 == h {f=1; next} /^## /{f=0} f' CHANGELOG.md > "$notes"
+          [ -s "$notes" ] || echo "Release $TAG." > "$notes"
+          # GitHub makes every new release latest unless told otherwise; a late run
+          # for an older version must not move latest backwards.
+          # Only a confirmed "no release yet" counts as none; any other failure stops here.
+          if ! current=$(gh release view --json tagName --jq .tagName 2>"$RUNNER_TEMP/lookup.err"); then
+            grep -q "release not found" "$RUNNER_TEMP/lookup.err" || { cat "$RUNNER_TEMP/lookup.err" >&2; exit 1; }
+            current=""
+          fi
+          make_latest=true
+          if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$TAG" | sort -V | tail -1)" != "$TAG" ]; then
+            make_latest=false
+          fi
+          gh release create "$TAG" --verify-tag --latest="$make_latest" --title "$TAG" --notes-file "$notes"

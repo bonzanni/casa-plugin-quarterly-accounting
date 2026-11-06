@@ -1,6 +1,6 @@
-"""Simple loop §2 table: the kind gate's store-side twins and the classification gate
+"""Table: the kind gate's store-side twins and the classification gate
 are deleted; `taxes` is a statement chain (row 10); a joint machine proposal is shown as
-a proposal (D3)."""
+a proposal."""
 import json
 from tests._base import StoreCase
 

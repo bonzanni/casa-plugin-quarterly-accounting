@@ -70,7 +70,7 @@ class TestMachineWrites(Base):
             self.auto(doc_id=self.doc())
 
     def test_a_machine_redecision_replaces_its_own_pairing(self):
-        # design rev 17 §2.2: what the payment holds by the machine is replaced by its own
+        # What the payment holds by the machine is replaced by its own
         # re-decision (the server computes `resolves`), never collides with it
         a = self.auto(doc_id=self.doc())["match_id"]
         b = self.auto(doc_id=self.doc())["match_id"]
@@ -199,7 +199,7 @@ class TestOperatorWrites(Base):
                          render_id=rid)
 
     def test_confirming_a_document_another_proposal_names_as_an_alternative_is_allowed(self):
-        """Rev 18.4 §R18.4 (r2 Astra S1 #2): P2's live proposal names B only as an
+        """P2's live proposal names B only as an
         alternative, which holds nothing — P1's own pairing of B is confirmed."""
         self.row(2)
         p2 = self.lineage_for(2)
@@ -248,7 +248,7 @@ class TestRace(Base):
         results = [q.get(timeout=60) for _ in procs]
         for p in procs:
             p.join(60)
-        # design rev 17 §2 "The floor": the later-serialized write finds the document taken
+        # The later-serialized write finds the document taken
         # and is refused whole; it never lands conflicted beside the winner
         self.assertEqual(sorted(r[0] for r in results), ["error", "ok"], results)
         err = next(r for r in results if r[0] == "error")
@@ -259,7 +259,7 @@ class TestRace(Base):
                          .fetchone()[0], 1)
 
     def test_two_processes_same_revision_different_documents_one_wins(self):
-        # round C1 (Astra S2): the machine CAS guard (`_machine`'s revision check) is what
+        # The machine CAS guard (`_machine`'s revision check) is what
         # stops a second writer that captured a now-stale revision from landing at all. Two
         # real processes race to pair the SAME lineage, at the SAME captured revision, with
         # two DIFFERENT documents (no doc-level occupancy collision to catch this instead):
@@ -292,7 +292,7 @@ class TestRace(Base):
         self.assertEqual((active, conflicted, pairs), (1, 0, 1))
 
 
-class TestFixRound1(Base):
+class TestMatchEdgeCases(Base):
     def residue(self, reason="exempt-doc"):
         return self.conn.execute("SELECT COUNT(*) FROM residue WHERE reason=?",
                                  (reason,)).fetchone()[0]
@@ -338,7 +338,7 @@ class TestFixRound1(Base):
         self.assertEqual(self.residue(), 2)
 
     def test_two_ids_for_one_document_reuse_the_latest_never_mint_a_third(self):
-        # what a merge of two lineages that each paired d leaves behind (plan §D12)
+        # what a merge of two lineages that each paired d leaves behind
         d = self.doc()
         with db.tx(self.conn):
             ids = []
@@ -392,7 +392,7 @@ class TestFixRound1(Base):
         self.assertIn("snapshot", str(caught.exception))
 
     def test_a_write_binds_the_rows_of_the_rendering_it_names(self):
-        # binding §2 #12: the `shown` pointer no longer binds — a write is checked against
+        # The `shown` pointer no longer binds — a write is checked against
         # the render_items row of the rendering it names, older or not; a rendering that
         # did not show the payment, or a revision changed since, refuses
         old = self.show(self.pid)

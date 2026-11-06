@@ -43,7 +43,7 @@ class EmptyCheck(StoreCase):
                          "(the books start 1 Oct 2026). Ask me to do Q3 to include it.")
 
     def test_the_books_quarter_empty_with_a_later_payment_claims_nothing_beyond_it(self):
-        """h1 (Astra S2): bound from the quarter's start, a payment only in a LATER quarter,
+        """Bound from the quarter's start, a payment only in a LATER quarter,
         the books' quarter checked: it has no payment, the bank does — never "since"."""
         import asks
         self.bind(watermark="2026-07-01")
@@ -54,7 +54,7 @@ class EmptyCheck(StoreCase):
         # 0.11.2: the operator's ask posts its end card; the completion says only that
         import job
         self.assertEqual(units[-1]["text"], job.CARD_POSTED)
-        # r1 (Astra S2): pinned on the card the operator got — the quarter's plain sentence,
+        # Pinned on the card the operator got — the quarter's plain sentence,
         # the later quarter's payment summarised, no package for an empty quarter
         card = drv.posted_end("47474747-05")
         text = views.displayed(card["text"])
@@ -66,15 +66,15 @@ class EmptyCheck(StoreCase):
         self.assertNotIn("Get package", [b["label"] for b in card["buttons"]])
 
     def test_a_completed_runs_line_never_changes_with_a_later_run(self):
-        """h3 (Astra S2): job_status of a completed run re-derived its line from the store
+        """job_status of a completed run re-derived its line from the store
         as it is now, so a later run's quarter replaced it. The line is kept at completion."""
         import job
         self.bind(watermark="2026-04-01")
         drv = JobDriver(self, payments=0)
         drv.pay_once("Zapier", 1000, "2026-05-05")
         drv.gmail.invoice("Zapier", 1000, "EUR", "2026-05-05", "ZAP-Q2")
-        # r2 (Astra S2): a run whose end card was NOT delivered completes with its checked
-        # line — the line h3 freezes (a delivered card's CARD_POSTED is constant)
+        # A run whose end card was NOT delivered completes with its checked
+        # line — the line completion freezes (a delivered card's CARD_POSTED is constant)
         drv.deliver = False
         a = drv.run_job("47474747-06", started_by="agent")[-1]["text"]
         drv.deliver = True
@@ -92,7 +92,7 @@ class EmptyCheck(StoreCase):
         import job
         units, end = self.run_it("agent", "47474747-02", quarter="2026-Q2")
         self.assertEqual(units[-1]["text"], job.CARD_POSTED)
-        # r1 (Astra S2): pinned on the card the operator got
+        # Pinned on the card the operator got
         self.assertTrue(views.displayed(end).startswith(
             "Nothing to check for Q2 2026 yet: the bank has no payment in it (the books start "
             "1 Apr 2026). Ask me to do Q1 to include it."), end)
@@ -119,7 +119,7 @@ class EmptyCheck(StoreCase):
         # (the completion without a delivered card) still counts the quarter
         import cards, job
         self.assertEqual(units[-1]["text"], job.CARD_POSTED)
-        # r1 (Astra S2): the counts are pinned on the card the operator got, not recomputed
+        # The counts are pinned on the card the operator got, not recomputed
         lines = drv.posted_end("47474747-04")["text"].split("\n")
         self.assertTrue(views.displayed(lines[0]).startswith("Q3 checked · 3 payments · "),
                         lines)

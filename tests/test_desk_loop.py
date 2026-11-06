@@ -1,5 +1,5 @@
 # tests/test_desk_loop.py
-"""Simple loop §1: a typed "what's open" posts a fresh open-items card (recovery after a
+"""A typed "what's open" posts a fresh open-items card (recovery after a
 broken walk, or after [Get package]); a typed "confirm all 3" on the end message commits on
 Apply as Confirm all does; the desk skill names get_package for every package ask."""
 import json
@@ -78,7 +78,7 @@ class Desk(StoreCase):
 
 
 class DeskMore(StoreCase):
-    """The carried items of Task 12: the recovery of a reply bound to a card, the sheet-wide
+    """The carried items of the recovery of a reply bound to a card, the sheet-wide
     approval on cards, the desk's quarter on a check, and the account the job no longer asks."""
 
     def setUp(self):
@@ -125,7 +125,7 @@ class DeskMore(StoreCase):
                              "operator")
 
     def test_the_desk_check_names_the_quarter_the_operator_named(self):
-        """Ruling Q2: "check Q2" carries quarter to request_work, which stores it."""
+        """"check Q2" carries quarter to request_work, which stores it."""
         import qa_server, tools  # noqa: F401
         asks = flat(section(DESK.read_text(), "## Asks", "## A file the operator sent"))
         self.assertIn('`request_work(kind="check", trigger="operator", quarter=<the quarter, '
@@ -139,7 +139,7 @@ class DeskMore(StoreCase):
                          "2026-Q3")
 
     def test_the_desk_asks_for_the_business_account_the_check_no_longer_asks(self):
-        """Task 10 ruling: the job never offers the account choice; the desk's check_setup →
+        """The job never offers the account choice; the desk's check_setup →
         propose_account is the way, also after a check stopped for it."""
         setup = flat(section(DESK.read_text(), "## Setup", "## Test install"))
         self.assertIn("The check never asks which account is the business account", setup)
@@ -163,9 +163,8 @@ def _dt(day):
 
 
 class NamedQuarter(StoreCase):
-    """Ruling Q2b (review round 1): after an operator's "check Q2", a desk view or a bare
-    "send the package" with no quarter is Q2's (runs.quarter of the newest run), not D11's
-    latest in-scope quarter; a later run that named none gives D11 back."""
+    """After an operator's "check Q2", a desk view or a bare
+    "send the package" with no quarter is Q2's (runs.quarter of the newest run), not the latest in-scope quarter; a later run that named none gives that back."""
 
     def setUp(self):
         super().setUp()
@@ -211,7 +210,7 @@ class NamedQuarter(StoreCase):
             self.assertEqual(json.loads(self.conn.execute(
                 "SELECT scope_json FROM renders WHERE render_id=?",
                 (st["render_id"],)).fetchone()[0])["quarter"], "2026-Q2")
-            # a later check that names no quarter gives D11's latest in-scope quarter back
+            # a later check that names no quarter gives the latest in-scope quarter back
             self.check("eeeeeeee-2")
             _, card = self.open_card()
             self.assertTrue(card["text"].lstrip("*").startswith("Q3 · "), card["text"])
@@ -221,7 +220,7 @@ class NamedQuarter(StoreCase):
 
 
 class DeskHandover(StoreCase):
-    """§2.5 at the desk: a file filed at the desk and handed over (request_work
+    """At the desk: a file filed at the desk and handed over (request_work
     kind=handover) starts a continuation whose work list is the payments it could fit."""
 
     def test_a_desk_handover_lists_the_payments_the_document_could_fit(self):
@@ -250,7 +249,7 @@ class DeskHandover(StoreCase):
         rows = [tuple(r) for r in self.conn.execute(
             "SELECT pid, why, outcome FROM run_work WHERE job_id='ffffffff-2'")]
         # the continuation's work list is the one payment the document fits (the 2000 one)
-        self.assertEqual(rows, [(listed[1], "handover", "match")])   # operator ruling 2026-10-09
+        self.assertEqual(rows, [(listed[1], "handover", "match")])
         self.assertEqual(tuple(self.conn.execute(
             "SELECT kind, state FROM work_requests WHERE request_id=?",
             (ask["request_id"],)).fetchone()), ("handover", "reported"))

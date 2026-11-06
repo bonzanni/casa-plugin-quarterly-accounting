@@ -130,7 +130,7 @@ class TestResolution(Base):
         self.assertEqual(len(self.live()), 1)
 
     def test_a_rebound_ledgers_row_never_merges_into_an_ended_lineage(self):
-        # round p4 (Astra S1): after a re-bind, the new ledger allocates the old row id
+        # After a re-bind, the new ledger allocates the old row id
         import binding
         self.imp([{"row_id": 2}])
         (old,) = self.live()
@@ -288,7 +288,7 @@ class TestDeliveredKindHalf(Base):
         self.assertEqual(self.check(a, exp_kind="none", ended="erased"), 0)
 
     def test_a_lineage_is_alerted_when_its_own_row_is_read(self):
-        # review C7 (L3): reading X never alerts Y; Y is alerted when Y is read, so a
+        # Reading X never alerts Y; Y is alerted when Y is read, so a
         # short-lived change of Y's kind that is undone before Y's read raises nothing
         self.imp([{"row_id": 1}, {"row_id": 2, "amount_minor": 5000}])
         x, y = sorted(self.live())
@@ -310,7 +310,7 @@ class TestDeliveredKindHalf(Base):
 
 
 class TestInstance(Base):
-    """Ledger identity is bank-feed's instance id (#69; plan §D4)."""
+    """Ledger identity is bank-feed's instance id (#69)."""
     OTHER = "b" * 32
 
     def test_a_fresh_store_binds_to_the_exports_instance(self):
@@ -319,7 +319,7 @@ class TestInstance(Base):
         self.assertEqual(binding.get(self.conn)["ledger_instance"], self.LEDGER)
 
     def test_another_instance_imports_and_ends_nothing(self):
-        # rounds p1-p4: a different ledger carrying the same account and none of our rows
+        # A different ledger carrying the same account and none of our rows
         self.imp([{"row_id": 1}])
         self.token = self.pass_(instance=self.OTHER)
         self.instance = self.OTHER
@@ -373,7 +373,7 @@ class TestInstance(Base):
         self.assertEqual({r[0] for r in self.conn.execute("SELECT row_id FROM aliases")}, {1, 50})
 
     def test_the_acknowledgement_is_consumed_by_any_successful_import(self):
-        # round p3 (Astra S1): an acknowledgement that met the same ledger stayed armed
+        # An acknowledgement that met the same ledger stayed armed
         import binding
         import passes
         self.imp([{"row_id": 1}])
@@ -389,7 +389,7 @@ class TestInstance(Base):
         with self.assertRaises(db.Refusal):
             self.imp([{"row_id": 1}])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM projections").fetchone()[0], 0)
-        # the refusal the import met sticks: it is not rolled back with the import (D11)
+        # the refusal the import met sticks: it is not rolled back with the import
         prior = self.conn.execute("SELECT value FROM meta WHERE key='gate_refusal'").fetchone()
         self.assertEqual(json.loads(prior[0])["kind"], "dirty-ledger")
         gate = self.conn.execute("SELECT gate_json FROM passes WHERE generation=?",
@@ -446,7 +446,7 @@ class TestInstance(Base):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 1)
 
 
-# --- against the REAL bank-feed (moved from tests/test_freshness.py, simple loop Task 11):
+# --- against the REAL bank-feed (moved from tests/test_freshness.py):
 # classification freshness at the import, the custody lock, and the first send / resend
 # against a newer import. A pass is pass_ (the run's claim) with bank-feed's own probes,
 # and its import runs under the run's acquisition (self.acq).
@@ -582,14 +582,14 @@ class RealLedger(StoreCase):
         return delivery.stage_for_delivery(self.conn, channel="telegram", **kw)
 
     def posted(self, delivery_id):
-        """r3 #2: a delivered outcome needs the post post_package marks."""
+        """A delivered outcome needs the post post_package marks."""
         with db.tx(self.conn):
             self.conn.execute("UPDATE deliveries SET posted_at=coalesce(posted_at, ?) WHERE"
                               " delivery_id=?", (db.now(), delivery_id))
 
 
 class TestTheImportObservesTheClassification(RealLedger):
-    """Round E2 (Terra) and issue #1: the import itself observes every exported row's
+    """Issue #1: the import itself observes every exported row's
     classification — with no read of the row, the work list sees a reclassification."""
     def test_a_reclassification_is_known_at_the_import_without_a_read(self):
         bf = self.bf
@@ -606,7 +606,7 @@ class TestTheImportObservesTheClassification(RealLedger):
         cur = tri[self.pid_of(ids["A1"])]
         self.assertTrue(cur["fresh"])
         self.assertEqual(cur["expectation"]["kind"], "credit-note")
-        # design rev 17 §2: the kind gate is deleted — the invoice is paired, and the
+        # The kind gate is deleted — the invoice is paired, and the
         # pairing is fingerprinted against the live kind the import made known
         out = json.loads(_raw("record_match", pid=cur["pid"], doc_id=doc, author="auto",
                               expected_revision=cur["revision"], row_digest=cur["row_digest"],
@@ -639,7 +639,7 @@ class TestTheImportObservesTheClassification(RealLedger):
 
 class TestAnImportCannotLandInsideABuild(RealLedger):
     def test_an_import_cannot_land_inside_a_build_in_flight(self):
-        # round E6: the import takes the custody lock the build holds from its freeze
+        # The import takes the custody lock the build holds from its freeze
         # through its registration, so N+1 cannot land in between; it waits (here:
         # refuses Busy at a short bound) and lands after the build registered under N
         import multiprocessing
@@ -675,13 +675,13 @@ class TestAnImportCannotLandInsideABuild(RealLedger):
                          "build it again")
         self.end_live_pass()
         _, files, rows, _ = self.zip_of()
-        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])   # §2: no kind gate
+        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])   # No kind gate
         self.assertEqual({r["counterparty"]: r["expectation_kind"] for r in rows},
                          {"Adobe": "credit-note", "Zapier": "invoice"})
 
 
 class TestFirstSendChecksTheBuildSnapshot(RealLedger):
-    """Round E4 (Terra, Astra): a package built under snapshot N, then a real
+    """A package built under snapshot N, then a real
     reclassification and import N+1 — staging the still-unsent package carried the
     superseded invoice to the outbox. Its FIRST send is refused at the delivery-log
     write; a resend of a file already sent is that exact file."""
@@ -716,7 +716,7 @@ class TestFirstSendChecksTheBuildSnapshot(RealLedger):
         self.assertEqual(self.handoff_files(), handoff_before)
         # built again after the import, it ships the truth and stages
         pkg2, files, rows, _ = self.zip_of()
-        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])   # §2: no kind gate
+        self.assertEqual(files, ["invoices/2026-07-05_Adobe_10.00.pdf"])   # No kind gate
         staged = self.stage(package_id=pkg2["package_id"])
         self.assertEqual(self.outbox_files(), [os.path.basename(staged["path"])])
 
@@ -736,7 +736,7 @@ class TestFirstSendChecksTheBuildSnapshot(RealLedger):
         r = _call("build_review", view="status", quarter="2026-Q3")
         self.assertIn(views.field(pkg["filename"]), r["text"])                     # offered again
         _call("mark_rendering_delivered", render_id=r["render_id"])
-        # S7 §6.3/§8, #121: "send it again" is stage_for_delivery(resend=true), not a reading
+        # #121: "send it again" is stage_for_delivery(resend=true), not a reading
         staged = _call("stage_for_delivery", channel="telegram", resend=True)
         self.assertEqual(staged["filename"], pkg["filename"])
         self.assertEqual(pathlib.Path(staged["path"]).read_bytes(),
@@ -744,7 +744,7 @@ class TestFirstSendChecksTheBuildSnapshot(RealLedger):
 
 
 class TestImportRevokesAnUnsentFirstSend(RealLedger):
-    """Round E5 (Terra S1): a first send staged under snapshot N stayed sendable after
+    """A first send staged under snapshot N stayed sendable after
     import N+1. The import revokes it in its own commit: the staged bytes go, and
     record_delivery refuses it. A resend of a file already sent is never revoked."""
     def built(self):
@@ -798,7 +798,7 @@ class TestImportRevokesAnUnsentFirstSend(RealLedger):
 
 
 class TestWithdrawalUnderTheCustodyLock(RealLedger):
-    """Round E6 (Terra, Astra S1): the import withdraws the staged bytes before it
+    """The import withdraws the staged bytes before it
     commits the revocation, under the custody lock taken before its transaction."""
     built = TestImportRevokesAnUnsentFirstSend.built
 
@@ -879,7 +879,7 @@ class TestWithdrawalUnderTheCustodyLock(RealLedger):
     @unittest.skipIf(hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
                      "root ignores the mode")
     def test_a_failed_withdrawal_refuses_the_whole_import(self):
-        # round E7 (Terra, Astra S1): a withdrawal that fails must not leave the
+        # A withdrawal that fails must not leave the
         # superseded package sendable under a committed newer snapshot
         import os
         import pathlib
@@ -931,8 +931,7 @@ class TestWithdrawalUnderTheCustodyLock(RealLedger):
 
 class TestPackageWithANonFreshMember(RealLedger):
     """A build never ships a non-fresh row's documents as MATCHED: the row ships as
-    UNCLASSIFIED, its documents under unresolved/, and the caption counts it (spec
-    §Error handling: packaging ships rather than blocking). Since issue #1 every row
+    UNCLASSIFIED, its documents under unresolved/, and the caption counts it (packaging ships rather than blocking). Since issue #1 every row
     the export carries is observed at the import, so this is defense in depth: the
     lineage is made unobserved by hand (mutation check of the build's guard)."""
     def test_a_matched_row_not_observed_at_the_import_does_not_ship_its_invoice(self):
@@ -959,7 +958,7 @@ class TestPackageWithANonFreshMember(RealLedger):
         st = {r["counterparty"]: (r["status"], r["expectation_kind"], r["document"]) for r in rows}
         self.assertEqual(st["Adobe"], ("UNCLASSIFIED", "", ""))
         self.assertEqual(st["Zapier"], ("MISSING", "invoice", ""))
-        # simple loop §1: one line; the unread row is not documented (UNCLASSIFIED: open)
+        # One line; the unread row is not documented (UNCLASSIFIED: open)
         self.assertTrue(pkg["caption"].endswith(" · 0 of 2 documented · 2 open"),
                         pkg["caption"])
         self.assertIn("## Not seen in the last bank check", z.read("notes.md").decode())
@@ -1011,7 +1010,7 @@ class TestFreshnessProperty(RealLedger):
                 self.assertEqual(d["expectation"]["kind"], self.KIND[live[ref]], (trial, ref))
                 if d["status"] != "open":
                     continue
-                # design rev 17 §2: no kind gate — a fresh open payment takes its invoice
+                # No kind gate — a fresh open payment takes its invoice
                 # whatever its live kind (the kind assertion above is the freshness proof)
                 matches.record_match(self.conn, pid=d["pid"], doc_id=docs[ref], author="auto",
                                      expected_revision=d["revision"],
@@ -1026,7 +1025,7 @@ class TestFreshnessProperty(RealLedger):
                 else:
                     self.assertEqual(r["expectation_kind"], self.KIND[live[ref]], (trial, ref))
                     self.assertEqual(r["status"], "MATCHED" if r["document"] else "MISSING",
-                                     (trial, ref))        # §2: a kept pairing ships, whatever the kind
+                                     (trial, ref))        # A kept pairing ships, whatever the kind
         self.assertEqual(matched, len(refs))                  # every payment took its invoice
 
 
@@ -1035,7 +1034,7 @@ if __name__ == "__main__":
 
 
 class TestPackageUnsettledClassification(RealLedger):
-    """#105 d1 (Terra): an open payment whose tags conflict ships UNCLASSIFIED, as the cards
+    """#105: an open payment whose tags conflict ships UNCLASSIFIED, as the cards
     say "not classified yet" — never MISSING."""
     def test_a_conflicting_payment_ships_unclassified(self):
         bf = self.bf

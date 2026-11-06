@@ -1,4 +1,4 @@
-"""#103 (operator ruling 2026-10-08): "check Q3" asks where the quarter stands — the status
+"""#103: "check Q3" asks where the quarter stands — the status
 card — and a check job starts only when the operator asks for the work. The model judges
 from the operator's own words, also when a delegate relays them as "run the check"; the
 skill and request_work's description carry the ruling (no keyword gate)."""

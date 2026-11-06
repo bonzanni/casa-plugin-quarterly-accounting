@@ -1,5 +1,4 @@
-"""settle(): the ONE place a lineage's log becomes state (spec §Match
-records; §"The projection"). Called inside the write transaction of every
+"""settle(): the ONE place a lineage's log becomes state. Called inside the write transaction of every
 change that can move a lineage — a decision, an import, an observation, a
 KB or document edit. It:
 
@@ -10,7 +9,7 @@ KB or document edit. It:
   3. materializes match_state; the partial unique index on active documents
      is the backstop, and a violation becomes a recorded `conflicted`
      retirement for that later activation, never an error;
-  4. reduces (reducer.py) and bumps revisions by digest (plan §D3).
+  4. reduces (reducer.py) and bumps revisions by digest.
 
 Document availability is not stored: the document_status view derives it
 from match_state, so every retirement recomputes it by construction."""
@@ -72,8 +71,7 @@ def add_residue(conn, pid, reason: str, detail: str = "") -> None:
 def live_row(conn, proj):
     """The destination row in the latest snapshot. An ERASED lineage has none,
     ever: its id belongs to a ledger (or a row) that is gone, and after a
-    re-bind the same number can name another ledger's payment (round p11,
-    Astra S2). Its last known facts stay in last_facts_json."""
+    re-bind the same number can name another ledger's payment. Its last known facts stay in last_facts_json."""
     if proj["ended"] == "erased":
         return None
     r = conn.execute("SELECT * FROM bank_rows WHERE row_id=?", (proj["dest_row_id"],)).fetchone()
@@ -89,7 +87,7 @@ def eligible(conn, row) -> bool:
 
 
 def judgement_basis(row, tags) -> str:
-    """#97 (d2, Astra + Terra S1): the facts a job's judgement was made on — every payment
+    """#97: the facts a job's judgement was made on — every payment
     fact the job is handed (reducer.facts_of: amount, dates, counterparty, remittance, …)
     and the classification tags. A judgement applies only while the payment has them."""
     return db.canonical([R.facts_of(row), sorted(tags)])
@@ -97,8 +95,7 @@ def judgement_basis(row, tags) -> str:
 
 def judged_optional(conn, pid, row, tags) -> bool:
     """#97: the payment's latest `judge` entry was made on the facts it has now. A later
-    decision of the job (match, propose, missing) appends a revoking entry (fp NULL, d2
-    Astra S1), so a superseded judgement never comes back."""
+    decision of the job (match, propose, missing) appends a revoking entry, so a superseded judgement never comes back."""
     r = conn.execute("SELECT fp FROM log WHERE pid=? AND kind='judge' ORDER BY seq DESC"
                      " LIMIT 1", (pid,)).fetchone()
     return r is not None and r["fp"] == judgement_basis(row, tags)
@@ -140,19 +137,19 @@ def _holds(st: F.FoldState, r: F.Retirement) -> bool:
     """A produced retirement is recorded only if the fold's final state still
     shows it: the candidate is on that same activation, in the retired-to
     state. Recording exists to keep a retirement from being undone by a
-    re-fold (spec §Match records); one that a later entry of the same
+    re-fold; one that a later entry of the same
     activation already superseded (an unpair, a writer's `resolves=`) or a
     newer activation replaced protects nothing, and replaying it could never
     change the state. The case it filters is real: the occupancy check reads
     TODAY's store, so a re-fold of [pair m@a d, unpair m] with d now active
     on another lineage produces `retire m@a -> conflicted (occupied)` for a
-    pairing unpaired long ago (fold review finding)."""
+    pairing unpaired long ago."""
     c = st.cands.get(r.match_id)
     return c is not None and c.activation == r.activation and c.state == r.to
 
 
 def _fx_seen(row):
-    """Issue #35 (C1, Astra S1): the bank's rate is review evidence (the converted amount
+    """Issue #35: the bank's rate is review evidence (the converted amount
     is shown), so a changed rate moves the revisions; absent, no digest changes."""
     import fx
     import matches
@@ -160,7 +157,7 @@ def _fx_seen(row):
 
 
 def _operator_rejections(conn, pid, proj, st, exp, row) -> list:
-    """Issue #34 (C1, Astra S1): a machine pairing that an operator's unchanged rejection
+    """Issue #34: a machine pairing that an operator's unchanged rejection
     covers — another id for the same document, a merge's — is retired, so the operator is
     never asked the same question again."""
     import documents
@@ -168,7 +165,7 @@ def _operator_rejections(conn, pid, proj, st, exp, row) -> list:
     if proj["ended"] or row is None:
         return []
     out = []
-    # a conflicted candidate too (C2, Astra S1): a merge's collision makes it one before
+    # a conflicted candidate too: a merge's collision makes it one before
     # this rule looks, and the review would still offer it
     for c in st.cands.values():
         if c.author != "auto" or c.state not in F.ACTIVE + ("conflicted",):
@@ -290,7 +287,7 @@ def settle(conn, pid: int) -> R.Reduction:
         alts = json.loads(m["alternatives_json"]) if live else []
         digest = db.canonical({
             # the live facts and expectation under the pairing, not only whether they
-            # still agree with its fingerprint (round p2, Astra S1: €100 -> €90 -> €80
+            # still agree with its fingerprint (€100 -> €90 -> €80
             # kept one revision, so a confirmation shown at €90 committed at €80)
             "facts": inp.facts if live else None,
             **({"fx": _fx_seen(row)} if (live and _fx_seen(row)) else {}),
@@ -300,8 +297,7 @@ def settle(conn, pid: int) -> R.Reduction:
             "row_ok": (json.loads(c.fp)["facts"] == inp.facts) if (live and c.fp) else None,
             "label": m["label"], "rationale": m["rationale"], "runners_up": m["runners_up_json"],
             "doc": _doc_digest(conn, c.doc_id),
-            # a live proposal's alternatives are part of what its card binds (plan round 1,
-            # Astra S1: an alternative edited after display was committed by a tap); absent
+            # a live proposal's alternatives are part of what its card binds (an alternative edited after display was committed by a tap); absent
             # when there are none, so a pairing without alternatives keeps its revision
             **({"alts": [_doc_digest(conn, a) for a in alts]} if alts else {})})
         old = conn.execute("SELECT digest, revision FROM match_state WHERE match_id=?",
@@ -317,7 +313,7 @@ def settle(conn, pid: int) -> R.Reduction:
         **({"fx": _fx_seen(row)} if _fx_seen(row) else {}),
         "exp": [exp.kind, exp.tier, exp.row, exp.conflict], "ended": proj["ended"],
         "search_state": proj["search_state"], "identity": proj["identity_question"],
-        # what the KB makes visible on the line (round p6, Astra S2: a renamed payee
+        # what the KB makes visible on the line (a renamed payee
         # kept the shown revision and a correction landed on an unseen identity)
         "payee": kb.display_name(conn, row["counterparty"]) if row else None,
         "link": cp["document_link"] if cp is not None else None,
@@ -341,7 +337,7 @@ def latest_import(conn) -> int:
 
 def is_fresh(conn, proj) -> bool:
     """A lineage's classification is FRESH iff it was observed at the latest
-    successful import (fix E2; issue #1): the import itself observes every row
+    successful import (issue #1): the import itself observes every row
     the export carries (bank-feed 0.20.0 exports each row's tags). A row absent
     from the latest export stays unobserved until a later import observes it. Compared by snapshot id,
     never by timestamp (a one-second clock cannot order an import and a read)."""

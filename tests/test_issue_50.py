@@ -1,5 +1,5 @@
 # tests/test_issue_50.py
-"""Issue #50 (operator ruling A, the narrow reading): record_search carries `emails` — the
+"""Issue #50: record_search carries `emails` — the
 vendor emails a search on the payment's OWN reference or order number returned, each
 `listed` or not. `missing` is refused while a reported email is unlisted (queued, or given up
 with a payment a handover reopened); the refusal names it. Model-reported: a reminder that
@@ -29,7 +29,7 @@ class UnlistedEmail(StoreCase):
         self.u = self.drv.to_unit(JOB, "payment")
         self.pid = self.u["pid"]
 
-    def search(self, emails, queries=("ME280426000457",), refs=()):
+    def search(self, emails, queries=("ME000000000002",), refs=()):
         return self.drv._tool("record_search", {
             "pass_token": self.drv.token, "pids": [self.pid], "search": "payment",
             "queries": list(queries), "refs": list(refs), "emails": emails})
@@ -65,7 +65,7 @@ class UnlistedEmail(StoreCase):
         self.search([], queries=(), refs=["m-ship:att-1"])
         self.assertEqual(items(self.conn, JOB, kind="email")[0][3], "done")
         with self.assertRaisesRegex(db.Refusal, "not yet filed"):
-            self.missing()                                      # the ref is owed (§R18.2)
+            self.missing()                                      # the ref is owed
         self.drv._tool("set_aside", {"pass_token": self.drv.token,
                                      "items": [{"ref": "m-ship:att-1"}],
                                      "reason": "shipping notice"})
@@ -78,22 +78,22 @@ class UnlistedEmail(StoreCase):
         self.assertEqual(self.missing()["applied"], 1)
 
     def test_a_listing_is_remembered_when_a_later_search_returns_the_email_again(self):
-        """r1 Astra S2: listed at its first search, reported unlisted by a later one — the
+        """Listed at its first search, reported unlisted by a later one — the
         listing already happened; missing is not refused."""
         self.search([{"id": "m-ship", "listed": True}])
-        self.search([{"id": "m-ship", "listed": False}], queries=("ME280426000457 bis",))
+        self.search([{"id": "m-ship", "listed": False}], queries=("ME000000000002 bis",))
         self.assertEqual(self.missing()["applied"], 1)
 
     def test_a_listing_report_moves_no_age_out_count(self):
-        """r1 Astra S2: a listing is not a search — `exhausted` on it counts no fruitless
+        """A listing is not a search — `exhausted` on it counts no fruitless
         pass."""
         def streak():
             return self.conn.execute("SELECT passes_without_candidate FROM projections WHERE"
                                      " pid=?", (self.pid,)).fetchone()[0]
-        # Astra's sequence: a search that found a candidate (no fruitless pass counted) …
+        # A search that found a candidate (no fruitless pass counted) …
         self.drv._tool("record_search", {
             "pass_token": self.drv.token, "pids": [self.pid], "search": "payment",
-            "queries": ["ME280426000457"], "refs": ["m-other:att-1"], "found_candidate": True,
+            "queries": ["ME000000000002"], "refs": ["m-other:att-1"], "found_candidate": True,
             "emails": [{"id": "m-ship", "listed": False}]})
         self.drv._tool("set_aside", {"pass_token": self.drv.token,
                                      "items": [{"ref": "m-other:att-1"}], "reason": "terms"})
@@ -120,7 +120,7 @@ class UnlistedEmail(StoreCase):
         self.assertEqual(out["applied"], 1, out)
 
     def test_a_listing_report_is_not_a_search(self):
-        """d1: a payment that used its searches can still report the listing (no stall)."""
+        """A payment that used its searches can still report the listing (no stall)."""
         import loop
         for n in range(loop.SEARCHES_MAX):
             self.search([{"id": f"m{n}", "listed": False}], queries=(f"REF-{n}",))
@@ -144,7 +144,7 @@ class UnlistedEmail(StoreCase):
         self.assertEqual(u["emails_to_list"], ["m-ship"])
 
     def test_a_given_up_email_still_refuses_missing_once_the_payment_is_reopened(self):
-        """d1 Astra S1, d2 Terra S2: given up with its payment, reopened by a handover —
+        """Given up with its payment, reopened by a handover —
         missing is refused until the listing is reported, and the report clears it."""
         self.search([{"id": "m-ship", "listed": False}])
         with db.tx(self.conn):                  # the payment and what it owes, given up …
@@ -157,7 +157,7 @@ class UnlistedEmail(StoreCase):
         self.assertEqual(self.missing()["applied"], 1)
 
     def test_a_given_up_email_is_no_give_up_of_its_own(self):
-        """d2 Astra S2: its payment's undecided outcome reports it; the email kind never
+        """Its payment's undecided outcome reports it; the email kind never
         marks the run interrupted nor every missing "search incomplete"."""
         import queues
         self.search([{"id": "m-ship", "listed": False}])
@@ -177,14 +177,14 @@ class UnlistedEmail(StoreCase):
         a key in any state)."""
         self.search([{"id": "m-ship", "listed": False}])
         self.search([{"id": "m-ship", "listed": True}], queries=())
-        self.search([{"id": "m-ship", "listed": False}], queries=("ME280426000457 bis",))
+        self.search([{"id": "m-ship", "listed": False}], queries=("ME000000000002 bis",))
         self.assertEqual(items(self.conn, JOB, kind="email")[0][3], "done")
         self.assertEqual(self.missing()["applied"], 1)
 
 
 class Schema15(StoreCase):
     def test_14_to_15_keeps_run_items_and_admits_the_email_kind(self):
-        """The rebuild that widens run_items.kind keeps a live run's rows (d1 question)."""
+        """The rebuild that widens run_items.kind keeps a live run's rows."""
         import db as D
         old = D.RUN_ITEMS_DDL.replace("'erase', 'search', 'ref', 'email'",
                                       "'erase', 'search', 'ref'")

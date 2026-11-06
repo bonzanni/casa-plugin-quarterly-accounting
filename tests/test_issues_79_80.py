@@ -1,4 +1,4 @@
-"""0.11.12: issues #79 and #80 (casa-test PLAY of 0.11.10): a matched payment's card said
+"""0.11.12: issues #79 and #80: a matched payment's card said
 "matched" twice; "To check" opened with one quarter's "Not checked yet."; each view gets
 one plain line in the desk skill and the show_view description (the model picks the view)."""
 import pathlib
@@ -68,7 +68,7 @@ class ViewsDescribed(LoopCase):
 
 class OwedCardFollows(_Tapping):
     def test_a_switch_on_an_answered_page_re_posts_page_one(self):
-        """r2 Astra S1: page 2 answered meanwhile, then its quarter switch: the vendor's
+        """Page 2 answered meanwhile, then its quarter switch: the vendor's
         page 1 still holds payments, so it follows the receipt (not the walk's end)."""
         import matches
         for i in range(30):                         # the walk's quarter (the run's: Q4)

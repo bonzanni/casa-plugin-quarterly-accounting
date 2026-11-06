@@ -339,7 +339,7 @@ class TestSheet(Base):
             self.conn.execute("UPDATE counterparties SET document_link=? WHERE name=?",
                               ("https://adobe.example/" + "x" * 5000, "Adobe"))
         pid = self.add()
-        # fix wave D round 2: the unbounded link is clipped with its mark, so the
+        # The unbounded link is clipped with its mark, so the
         # item prints whole and is bound (before, the whole text was cut and bound nothing)
         for r in (self.render(), self.render("item", pid=pid), self.render("all")):
             self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
@@ -349,8 +349,8 @@ class TestSheet(Base):
             self.assertEqual(r["printed"], 1)
 
     def test_the_fit_is_the_net_under_the_field_clip(self):
-        # fix wave D round 2/3: with the link field clip disabled, the final fit alone
-        # keeps the text deliverable, and a cut text binds nothing (D3).
+        # With the link field clip disabled, the final fit alone
+        # keeps the text deliverable, and a cut text binds nothing.
         kb.upsert_counterparty(self.conn, "Adobe", source="portal",
                                document_link="https://adobe.example/")
         with db.tx(self.conn):   # as an earlier version stored it: upsert now refuses it
@@ -507,7 +507,7 @@ class TestRenderLog(Base):
 
     def test_same_store_same_bytes(self):
         self.add()
-        # binding V2 / #53: two renderings of one unchanged store differ only by their tag
+        # #53: two renderings of one unchanged store differ only by their tag
         # (the composition second: composed a second apart here)
         import datetime as dt
         with self.patch_clock(dt.datetime(2026, 10, 7, 12, 0, 1, tzinfo=dt.timezone.utc)):
@@ -542,7 +542,7 @@ class TestRenderLog(Base):
         pid = self.add()
         for _ in range(2):                                   # a joint machine set
             self.machine_entry(pid, self.doc())
-        r = self.render("missing")         # D3: the joint set is a proposal, not "missing"
+        r = self.render("missing")         # The joint set is a proposal, not "missing"
         views.mark_rendering_delivered(self.conn, r["render_id"])
         self.assertIsNone(self.conn.execute("SELECT match_revisions_json FROM shown WHERE pid=?",
                                             (pid,)).fetchone())

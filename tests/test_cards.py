@@ -1,4 +1,4 @@
-"""Simple loop §1 (rev 17): the end message (counts, numbered proposals, [Review N]
+"""The end message (counts, numbered proposals, [Review N]
 [Confirm all K] [Get package] last; Confirm all only when every proposal is listed and
 fewer than 25), the Review order (proposals, then one item per vendor), paged vendor cards
 ([Never for X] only on the last page, never on a scheduled walk), the open-items card, the
@@ -88,7 +88,7 @@ class Cards(LoopCase):
         self.assertEqual(scope["order"], [{"v": "Adobe", "pids": [new]}])
         self.assertTrue(r["text"].lstrip("*").startswith("Q3 · new: 1 missing"))
         page = self.c(cards.card, rid, 0)
-        self.assertNotIn("Never for Adobe", self.labels(page))                 # rev 17
+        self.assertNotIn("Never for Adobe", self.labels(page))
         p, pscope = self.rendering(page)
         self.assertEqual([int(x) for x in pscope["bound_lines"]], [new])     # not the old one
         self.assertEqual(json.loads(p["membership_json"]), [new])
@@ -115,7 +115,7 @@ class Cards(LoopCase):
         self.assertEqual(bound, [p])                             # only what it displays
 
     def assert_binds_exactly_what_it_shows(self, rid):
-        """Plan round 7: every bound payment's line is in the deposited text, and the
+        """Every bound payment's line is in the deposited text, and the
         rendering binds nothing else."""
         r, scope = self.rendering(rid)
         bound = {r2[0] for r2 in self.conn.execute(
@@ -208,7 +208,7 @@ class Cards(LoopCase):
         self.assertEqual(self.labels(rid), ["Review", "Close"])
 
     def test_an_oversized_vendor_page_is_sized_from_its_real_lines(self):
-        """Round 7 (Astra S1): a punctuated 60-character vendor name, 24 "left missing"
+        """A punctuated 60-character vendor name, 24 "left missing"
         marks and a long portal link — every page fits, every bound line is whole, and
         the pages' union is the vendor's never-set."""
         import cards, kb, work
@@ -252,7 +252,7 @@ class Cards(LoopCase):
         import cards, work
         pids = [self.pay(self.WIDE, 100000000 + i, "2026-%02d-%02d" % (7 + i % 3, i % 28 + 1))
                 for i in range(30)]
-        # PLAY 0.11.2: a vendor line no longer carries the payee, so 25 lines fit a real
+        # A vendor line no longer carries the payee, so 25 lines fit a real
         # card; a smaller body limit keeps the real-lines measure under test
         from unittest import mock
         import views
@@ -277,7 +277,7 @@ class Cards(LoopCase):
         import cards, work
         pids = [self.pay(self.WIDE, 100000000 + i, "2026-%02d-%02d" % (7 + i % 3, i % 28 + 1))
                 for i in range(50)]
-        # PLAY 0.11.2: a vendor line no longer carries the payee, so a real card holds 25
+        # A vendor line no longer carries the payee, so a real card holds 25
         # grown lines; a smaller body limit keeps the growth past the fit under test
         from unittest import mock
         import views
@@ -295,9 +295,9 @@ class Cards(LoopCase):
         self.assertEqual(sorted(pids), cards.never_set(self.conn, self.WIDE))
 
     def test_a_later_page_marks_a_payment_matched_meanwhile_and_never_exempts_it(self):
-        """Review round 1, ported for d1 (Never's set is the rehearsed rule): page 1 froze
+        """Ported (Never's set is the rehearsed rule): page 1 froze
         50 payments over two pages; a page-2 payment is machine-matched meanwhile. The rule
-        still changes it (its expectation); PLAY 0.11.2: page 2 lists only missing payments,
+        still changes it (its expectation); page 2 lists only missing payments,
         so it is no line there and Never on page 2 refuses (fresh card, `also` states it);
         exemption and Leave missing act only on the missing lines."""
         import cards
@@ -316,7 +316,7 @@ class Cards(LoopCase):
         r, scope = self.rendering(second)
         self.assert_binds_exactly_what_it_shows(second)
         bound = sorted(int(p) for p in scope["bound_lines"])
-        # PLAY 0.11.2: a vendor page lists only missing payments; the matched one is no
+        # A vendor page lists only missing payments; the matched one is no
         # line any more (and was not in page 1's frozen `also`: it was missing then)
         self.assertEqual(bound, sorted(p for p in pages[1] if p != gone))
         self.assertNotIn(str(gone), scope["bound_lines"])
@@ -369,7 +369,7 @@ class Cards(LoopCase):
         self.assertIsNotNone(self.c(cards.compose_end, self.job_id, scheduled=True))
 
     def test_an_end_line_binds_only_the_pairing_it_names(self):
-        """Review round 1: a joint set's summary line names no pairing, and binds none."""
+        """A joint set's summary line names no pairing, and binds none."""
         import cards
         p, mids = self.legacy_set(2)
         q = self.pay("AWS", 4120)
@@ -408,7 +408,7 @@ class Cards(LoopCase):
         self.assert_binds_exactly_what_it_shows(end)
 
     def legacy_set(self, n):
-        """A payment holding a legacy joint machine set of `n` candidates (D3)."""
+        """A payment holding a legacy joint machine set of `n` candidates."""
         p = self.pay()
         mids = [self.machine_entry(p, self.doc(document_number="LEG-%d" % i,
                                                document_date="2026-09-%02d" % (i + 1)))
@@ -416,7 +416,7 @@ class Cards(LoopCase):
         return p, mids
 
     def test_an_oversized_review_card_binds_only_the_candidates_it_displays(self):
-        """Plan round 8 (Astra S1): a legacy set of six; the card offers four by name,
+        """A legacy set of six; the card offers four by name,
         counts the rest, and its render_items holds only the four shown."""
         import cards
         p, mids = self.legacy_set(6)
@@ -481,7 +481,7 @@ class Cards(LoopCase):
         self.assertEqual(json.loads(r["membership_json"]), [p])
 
     def test_the_review_order_and_next_after(self):
-        """§1: proposals in line order, then one item per vendor with unanswered missing
+        """Proposals in line order, then one item per vendor with unanswered missing
         payments; next_after skips what is answered and ends with no card (#80)."""
         import cards, work
         a = self.pay("Zeta", 300)
@@ -571,7 +571,7 @@ class Cards(LoopCase):
         self.assertEqual(r["kind"], "ready")
         self.assertIn("Q3 complete · 1 of 1 accounted for · package ready", r["text"])
         self.assertIsNone(self.c(cards.compose_end, self.job_id, scheduled=True))
-        # Task 10: a failure line alone never makes a scheduled end message (§1: it "is
+        # A failure line alone never makes a scheduled end message (it "is
         # otherwise the run's one message" — the run posts the alerts rendering itself)
         self.assertIsNone(self.c(cards.compose_end, self.job_id, scheduled=True,
                                  extra=["Gmail is down"]))
@@ -667,7 +667,7 @@ class Cards(LoopCase):
 
 
 class Helpers(StoreCase):
-    """Task 8 / Task 10 helpers built here (ruling P1)."""
+    """Helpers built here."""
 
     def setUp(self):
         super().setUp()
@@ -740,7 +740,7 @@ class Helpers(StoreCase):
         s1 = loop.completion_sig(self.conn, "2026-Q3")
         self.assertNotEqual(s1, s0)
         # Wrong: status, search state and pairing are back to what s0 recorded; the latest
-        # decision is not (plan round 4)
+        # decision is not
         rid = self.show(p)
         with db.tx(self.conn):
             matches.reject_in_tx(self.conn, grant=self.grant(), match_id=mid,

@@ -2,7 +2,7 @@
 """Issue #48: one purchase (the same issuer and the same document number; a document with no
 number is a purchase of its own) backs at most one payment, through the job's writes. Q2
 re-run #3: May's invoice + receipt twin were filed as two documents; July's payment was then
-proposed with May's receipt. The operator's taps are not limited by it (design §#48)."""
+proposed with May's receipt. The operator's taps are not limited by it."""
 from tests._base import StoreCase
 import db                     # server/ is on sys.path once tests._base is imported
 
@@ -62,7 +62,7 @@ class OnePurchase(_Twins):
         self.assertFalse(self.decide(self.entry(self.july, "propose", twin))[0]["applied"])
 
     def test_one_normalisation_on_both_sides(self):
-        """r1 Astra + Terra S1: non-ASCII case, tab padding and an empty issuer falling back to
+        """Non-ASCII case, tab padding and an empty issuer falling back to
         the counterparty compare the same on both sides (SQLite's lower() folds ASCII only) —
         and as `collisions` sees them."""
         import documents
@@ -90,7 +90,7 @@ class OnePurchase(_Twins):
         self.assertTrue(self.decide(self.entry(self.july, "propose", b))[0]["applied"])
 
     def test_a_payment_may_take_its_own_purchases_twin(self):
-        """§2.2 reopening: what the payment itself holds is never taken against it."""
+        """Reopening: what the payment itself holds is never taken against it."""
         self.decide(self.entry(self.may, "propose", self.invoice))
         out = self.decide(self.entry(self.may, "match", self.receipt))[0]
         self.assertTrue(out["applied"], out)
@@ -143,7 +143,7 @@ class OnePurchase(_Twins):
 
 
 class OnePurchaseMetadata(_Twins):
-    """d1 Terra S1: the job's metadata edit can make two held documents one purchase."""
+    """The job's metadata edit can make two held documents one purchase."""
 
     def test_the_jobs_edit_that_joins_two_held_purchases_is_refused(self):
         import documents
@@ -224,7 +224,7 @@ class OnePurchaseMetadata(_Twins):
 
 
 class OnePurchaseReplace(StoreCase):
-    """d1 Astra S1 (the job's replace answer) and d2 Astra S1 (an open replace question)."""
+    """The job's replace answer and an open replace question."""
 
     def setUp(self):
         super().setUp()

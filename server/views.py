@@ -1,5 +1,5 @@
 # server/views.py
-"""The views (spec §"Pull only", §"What the operator can ask for"). The server
+"""The views. The server
 renders; Ellen relays the text verbatim. Every count, sum, date and ordering
 is computed here.
 
@@ -30,12 +30,12 @@ CAP = 8
 TELEGRAM_LIMIT = 4096
 LABEL_ALLOWANCE = 64       # Casa's "📊 <display name>" label line: the plugin cannot read it
 PROPOSAL_SETTLE_RESERVE = 1 + 2 + 2 * 32     # casa:result_broker.py, a83d6aa8
-BODY_LIMIT = TELEGRAM_LIMIT - PROPOSAL_SETTLE_RESERVE - LABEL_ALLOWANCE - 1   # 3964 (S7 §7.6)
+BODY_LIMIT = TELEGRAM_LIMIT - PROPOSAL_SETTLE_RESERVE - LABEL_ALLOWANCE - 1   # 3964
 VIEWS = ("status", "missing", "check", "rest", "older", "all", "item", "quarter")
 KIND_WORD = {"invoice": "invoice", "sales-invoice": "sales invoice", "credit-note": "credit note",
              "payslip": "payslip", "statement": "statement", "receipt": "receipt",
              "other": "document"}
-# Machinery the operator never has to learn (spec §"The reversibility ladder").
+# Machinery the operator never has to learn.
 FORBIDDEN = ("proposed", "conflicted", "revision", "projection", "CAS", "no-ref",
              "partial-search", "recipient?", "acct::", "pid", "match_id",
              "render_id")
@@ -45,24 +45,23 @@ def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-# Only unbounded free-text FIELDS are clipped, each to its own bound (fix wave D
-# round 3): a payee / bank counterparty text, a document number or recipient, a
+# Only unbounded free-text FIELDS are clipped, each to its own bound: a payee / bank counterparty text, a document number or recipient, a
 # runner-up description, a residue detail — FIELD_MAX; a link — LINK_MAX. What
 # identifies an item or a candidate (amount, currency, date, kind, the "Could
 # be:" enumeration itself) is never clipped, so a bound item always prints
-# everything that identifies it (D3). A whole line is never clipped: that cut
+# everything that identifies it. A whole line is never clipped: that cut
 # the amount and date, or a second candidate, off lines that stayed bound.
 FIELD_MAX = 60
 LINK_MAX = 500              # = kb.LINK_MAX (#57): a stored link prints whole — a
                             # clipped URL is a wrong link; only older, longer ones clip
 
 
-MARK = "\u00b7"             # reserved: only generated text prints it (round 6)
+MARK = "\u00b7"             # reserved: only generated text prints it
 LITERAL_MARK = "\u2022"     # what a literal "·" in free text prints as
 
 
 class _Names:
-    """Per-rendering disambiguation (rounds 5-6): displayed identities are made
+    """Per-rendering disambiguation: displayed identities are made
     unique BY CONSTRUCTION within one rendering, before anything is composed,
     so the bind-time backstop (_bindable) never decides liveness.
 
@@ -81,7 +80,7 @@ class _Names:
 
 
 _NAMES = None
-_TAG = ""                   # binding V2: the first-line tag of the rendering being composed
+_TAG = ""                   # The first-line tag of the rendering being composed
 
 
 def printed_ref(pid):
@@ -91,7 +90,7 @@ def printed_ref(pid):
 
 
 def tag_now() -> str:
-    """#53 (operator ruling 2026-10-08, the day added by BRAIN's ruling on d1 Terra S2): every
+    """#53: every
     rendering's first line ends with " · 8 Oct 21:04:37", the moment it is composed in the
     operator's zone (CASA_TZ, then TZ, then UTC: Casa's
     timekeeping.resolve_tz order). A reply quoting a card binds the card it quotes; two
@@ -134,8 +133,8 @@ def _flat(text: str) -> str:
 
 
 def esc(text, plain: bool = False):
-    """THE escape (S7 §12): a dynamic field reaches a body only through here (inside
-    `field`). Control characters and newlines become spaces (§7.6: Casa's body check, and
+    """THE escape: a dynamic field reaches a body only through here (inside
+    `field`). Control characters and newlines become spaces (Casa's body check, and
     a caption's one line); the dialect's markers are backslash-escaped unless `plain` (a
     file caption is sent as plain text)."""
     if not text:
@@ -152,7 +151,7 @@ _UNESC = re.compile(r"\\([!-/:-@\[-`{-~])")
 
 def unesc(text: str) -> str:
     """What the dialect displays for escaped text (a backslash before ASCII punctuation
-    is consumed): used to compare a quoted post with a stored rendering (§8)."""
+    is consumed): used to compare a quoted post with a stored rendering."""
     return _UNESC.sub(r"\1", text)
 
 
@@ -179,7 +178,7 @@ _BOLD = re.compile(r"(?<!\\)\*\*")
 
 
 def displayed(text: str) -> str:
-    """#99 d1 (Astra S2): what the operator sees of a stored text — the house style's bold
+    """#99: what the operator sees of a stored text — the house style's bold
     markers (unescaped `**`) are formatting, not characters, then unesc. A quote is compared
     with this."""
     return unesc(_BOLD.sub("", text))
@@ -195,8 +194,8 @@ def bold_spans(text: str) -> list:
 
 
 def deposit_safe(body: str) -> str:
-    """The last step on every body a posting tool deposits (S7 §7.6): any Cc character
-    other than newline and tab becomes a space — renderings stored before S7 included."""
+    """The last step on every body a posting tool deposits: any Cc character
+    other than newline and tab becomes a space — renderings stored by older versions included."""
     return "".join(" " if (unicodedata.category(ch) == "Cc" and ch not in "\n\t") else ch
                    for ch in body)
 
@@ -317,7 +316,7 @@ def shown(d: dict) -> str:
 
 
 def headline(d: dict, view_quarter=None, payee=True) -> str:
-    """`payee=False` (PLAY 0.11.2): a vendor card's line — its head names the vendor once;
+    """`payee=False`: a vendor card's line — its head names the vendor once;
     the generated ref still tells two otherwise-equal payments apart (names_for is composed
     with the same `payee`)."""
     parts = ([field(shown(d))] if payee else []) + [_money(d), _day(d["date"])]
@@ -342,7 +341,7 @@ def _docname(doc: dict) -> str:
     return f"{w} {field(doc['number'])}" if doc.get("number") else w
 
 
-# Evidence enumerations are bounded (round 4). Runner-ups are context and never
+# Evidence enumerations are bounded. Runner-ups are context and never
 # bind: at most RUNNERS_MAX, then "and N others". Candidates DO bind: a view
 # prints at most CANDIDATES_MAX and binds only those; the rest are one phrase
 # away — an item view that pages every candidate, each page binding what it prints.
@@ -390,8 +389,7 @@ def evidence(d: dict, cands=None) -> list:
             out.append("The invoice's amount was read two different ways — check it.")
         labels = cur["labels"]
         if _names_pick(d):
-            # a line that asks for a verdict names what it is asking about (round p7:
-            # a no-ref line never named its invoice, yet "all good" confirmed it)
+            # a line that asks for a verdict names what it is asking about (a no-ref line never named its invoice, yet "all good" confirmed it)
             out.insert(0, f"{'Suggested' if d['status'] == 'proposed' else 'Matched to'}"
                           f"{':' if d['status'] == 'proposed' else ''} {ident(doc)}.")
         if "guessed" in labels and cur["author"] != "operator":
@@ -416,7 +414,7 @@ def evidence(d: dict, cands=None) -> list:
             import fx
             at = fx.expected(d.get("fx"), d["amount_minor"], d["currency"], doc["currency"])
             bank = (f" ({amounts.fmt(at, doc['currency'])} at the bank's rate)"
-                    if at is not None else "")             # issue #35 (R4)
+                    if at is not None else "")             # issue #35
             out.append(f"The {KIND_WORD.get(doc['kind'], 'document')} is in "
                        f"{amounts.fmt(doc['amount_minor'], doc['currency'])}; the payment is "
                        f"{_money(d)}{bank}.")
@@ -431,7 +429,7 @@ def evidence(d: dict, cands=None) -> list:
 
 
 def _fx(doc: dict, d: dict) -> str:
-    """Issue #30 (C1, Astra S2): a candidate in another currency names its own amount."""
+    """Issue #30: a candidate in another currency names its own amount."""
     if (doc.get("currency") and d.get("currency") and doc["currency"] != d["currency"]
             and doc.get("amount_minor") is not None):
         return f" in {amounts.fmt(doc['amount_minor'], doc['currency'])}"
@@ -467,14 +465,13 @@ def waiting(d) -> bool:
 def _searched(d):
     """Looked for, or no longer to be looked for: an item the operator stopped
     chasing (or a merge carried `accepted-missing` onto) is never searched
-    again, and stays "still open, still listed" as missing (spec §"What a pass
-    works on"), never "the next pass looks"."""
+    again, and stays "still open, still listed" as missing, never "the next pass looks"."""
     return (bool(d["search"].get("last_searched_at")) or d["identity_question"]
             or d["search_state"] != "active")
 
 
 def _is_missing(d):
-    """Missing means searched and not found (spec §Weekly pass: four states stay
+    """Missing means searched and not found (four states stay
     distinct). A required item nobody has looked for yet is `not searched` or
     `not checked`, never `missing`; #98: nor one not classified yet."""
     return (_open_required(d) and _searched(d) and not _is_unclassified(d)
@@ -499,7 +496,7 @@ def _is_conflict(d):
 
 
 def _guess(d) -> bool:
-    """A pairing the lists ask the operator to check: #117 r1 (Terra S2), never one waiting on
+    """A pairing the lists ask the operator to check: #117, never one waiting on
     the bank — the cards count that one "waiting on the bank", not "to confirm"."""
     return _needs_check(d) and not waiting(d)
 
@@ -509,7 +506,7 @@ def _needs_check(d):
         return False
     if d["candidates"] or d["status"] == "proposed":
         return True
-    # an operator-confirmed pairing is not a proposal (S7 §7.3), whatever its label row says:
+    # an operator-confirmed pairing is not a proposal, whatever its label row says:
     # a confirmation appends an operator pair but leaves the match's "guessed" label
     return (d["status"] == "matched" and d["current"] is not None
             and d["current"]["author"] != "operator" and d["current"]["labels"] != ["clean"])
@@ -576,7 +573,7 @@ def coverage(conn, members) -> str:
 
 def _lead(conn):
     """(stop lines or None, gmail unavailable, the interrupted pass's report or None,
-    Gmail not connected for the finance specialist at all — S2's `absent` probe)."""
+    Gmail not connected for the finance specialist at all — the `absent` probe)."""
     setup = binding.check_setup(conn)
     if not setup["can_run"]:
         return ([setup["header"], *setup["conditions"], "Nothing else to do until then."], False,
@@ -585,7 +582,7 @@ def _lead(conn):
     gmail_down = gmail is not None and not gmail["ok"]
     absent = gmail_down and bool((gmail["data"] or {}).get("absent"))
     # A package snapshot or a document handover is not a review pass: it must not
-    # erase an interrupted review's block (Task 22 review, item 5).
+    # erase an interrupted review's block.
     last = conn.execute("SELECT * FROM passes WHERE ended_at IS NOT NULL"
                         " AND trigger NOT IN ('package', 'handover')"
                         " ORDER BY ended_at DESC, generation DESC LIMIT 1").fetchone()
@@ -600,9 +597,9 @@ def _lead(conn):
 
 
 def _status_notes(conn) -> list:
-    """S2: what the status head adds — how old the bank read the last check's decisions
-    rested on, when its freshness window was waived (§5.2); how many payments still await
-    classification (§6.4); and a check asked for that no job has started yet (§6.3)."""
+    """What the status head adds — how old the bank read the last check's decisions
+    rested on, when its freshness window was waived; how many payments still await
+    classification; and a check asked for that no job has started yet."""
     import passes
     out = []
     last = conn.execute("SELECT report_json FROM passes WHERE ended_at IS NOT NULL"
@@ -635,8 +632,7 @@ def _plural(n, one, many=None):
 
 def _degraded_block(gmail_down, interrupted, missing, unsearched, absent=False) -> list:
     """A degraded pass leads with its own condition, ahead of any accounting
-    result, and keeps `missing` apart from `not searched` / `not checked`
-    (spec §Weekly pass, "A broken pass must not read as deficient books")."""
+    result, and keeps `missing` apart from `not searched` / `not checked`."""
     out = []
     if gmail_down:
         out.append("Review incomplete - Gmail unavailable.")
@@ -714,7 +710,7 @@ def _residue_blocks(conn) -> tuple:
 
 def _item_blocks(ds, detail, q, shows_pairings=False, guessed=False, inline=False) -> list:
     """`pairings` are the match ids whose proposition the text displays. Only
-    those are bound for a later correction (round p1, Astra S1: a missing view
+    those are bound for a later correction (a missing view
     that bound candidates it never showed let "Adobe is wrong" reject them). `inline`
     (#99): the detail follows the headline on its one line."""
     def lines(d):
@@ -755,7 +751,7 @@ def _compose(conn, view, q, items, members, lead):
     every page, the announcement printed once, the sections, and a tail built
     from what was actually printed."""
     stop, gmail_down, interrupted, absent = lead
-    # #117 r3: ONE partition first, as cards._bucket orders it — a payment waiting on the bank
+    # #117: ONE partition first, as cards._bucket orders it — a payment waiting on the bank
     # is in the waiting lists and in no other, whatever its status; every other list below
     # is built from the rest only
     waiting_all = [d for d in items if _tracked(d) and waiting(d)]
@@ -814,8 +810,7 @@ def _compose(conn, view, q, items, members, lead):
     if view in ("status", "all"):
         res, parts["silent"] = _residue_blocks(conn)
         secs.append(_Section("", res))
-        # a send that may not have arrived is offered, never resent by itself
-        # (spec §Packaging, "Delivery"); a block like any other, so the cap,
+        # a send that may not have arrived is offered, never resent by itself; a block like any other, so the cap,
         # the paging and the final fit all apply to it. The rendering records
         # the packages it printed: "send it again" resolves against those only
         # (delivery.resend_target).
@@ -829,7 +824,7 @@ def _compose(conn, view, q, items, members, lead):
         secs.append(_Section(title("Missing") if view != "missing" else "",
                              _item_blocks(missing, _missing_detail, q, inline=True),
                              empty="Nothing is missing." if view == "missing" else None))
-        # #106 r1: the payments not classified yet, each a bindable line, under their title;
+        # #106: the payments not classified yet, each a bindable line, under their title;
         # #111: each line asks what it is (the title is not said twice)
         secs.append(_Section(title("Not classified yet"), _item_blocks(
             uncl, lambda d: [WHAT_IS_IT], q, inline=True)))
@@ -878,8 +873,8 @@ def _compose(conn, view, q, items, members, lead):
             # missing and not-searched stay distinct states, each on its own line
             for ds, state in ((older_missing, "still missing"),
                               (older_unsearched, "not searched yet"),
-                              (older_unclassified, "not classified yet"),       # #98 r1
-                              (older_waits, "waiting on the bank")):            # #117 r2
+                              (older_unclassified, "not classified yet"),       # #98
+                              (older_waits, "waiting on the bank")):            # #117
                 if ds:
                     qs = sorted({dates.quarter_label(d["quarter"]).split()[0] for d in ds})
                     out.append(f'+{len(ds)} older {state} ({", ".join(qs)})')
@@ -959,7 +954,7 @@ SAY_MORE = "There are more after these."
 
 
 def _day_ordinal(day) -> int:
-    """A block's date as an int for the paging cursor (S7 §7.6: a stored More button's
+    """A block's date as an int for the paging cursor (a stored More button's
     `after` holds only ints, never bank text); a missing or malformed date is 0."""
     try:
         return dates.parse_day(day).toordinal() if day else 0
@@ -977,7 +972,7 @@ def _page(parts, after, first):
     continuation line. A cursor rather than a page number, so blocks that
     delivering an earlier page removed (residue) do not shift later pages.
     The continuation phrase is never the one that asked for the whole list
-    (spec: "the rest stays one word away")."""
+    ("the rest stays one word away")."""
     # ordered by the cursor's own key, so the cursor and the page order always agree
     flat = sorted(((i, blk) for i, sec in enumerate(parts["sections"]) for blk in sec.blocks),
                   key=lambda e: _key(*e))
@@ -1031,21 +1026,20 @@ def clip(text: str, units: int) -> str:
 
 
 def fit_lines(lines, closing=None, always_close=False, tag="") -> tuple:
-    """THE fit (fix wave D round 2, generalized after the same shape recurred in
-    views, alerts and receipts): every operator-facing message is produced
+    """THE fit: every operator-facing message is produced
     through here, and what it returns joins with "\n" to at most
     BODY_LIMIT UTF-16 units — every separator and the closing line
     included, whatever the inputs.
 
     Returns (out_lines, whole): `whole` is how many leading input lines are
-    printed IN FULL — the only ones a caller may bind (D3). When everything fits,
+    printed IN FULL — the only ones a caller may bind. When everything fits,
     out_lines is the input (plus `closing` if always_close). Otherwise whole
     lines while they fit beside the closing line; when not even the first line
     fits, it is clipped with CLIP_MARK so the message still says something (and
     `whole` is 0). The closing line is never cut away (it is clipped only if it
     alone exceeds the limit).
 
-    `tag` (binding V2) ends line 1 and is counted inside the fit; it is never cut: a line 1
+    `tag` ends line 1 and is counted inside the fit; it is never cut: a line 1
     that must be clipped is clipped before its tag."""
     lines = list(lines)
     if tag:
@@ -1086,13 +1080,13 @@ def _item_sentence(d) -> str:
     if d["status"] == "matched":
         return f"{_docname(cur['document'])[0].upper() + _docname(cur['document'])[1:]} is filed with it."
     if d["status"] == "proposed" and cur is None:
-        return "Several documents could fit, and none is picked."   # D3: a joint machine set
+        return "Several documents could fit, and none is picked."   # A joint machine set
     if d["status"] == "proposed":
         return f"Paired with {_docname(cur['document'])}, not confirmed."
     if d["status"] == "ineligible":
         return "Before the start date; not tracked."
     if waiting(d):
-        return "Waiting on the bank."          # #117: as the cards count it (r3: first)
+        return "Waiting on the bank."          # #117: as the cards count it (first)
     if d["status"] in ("exempt", "no-document"):
         return "Needs no document."
     if d["status"] == "optional":
@@ -1106,7 +1100,7 @@ def _item_sentence(d) -> str:
 
 def _item_block(d, cands, more) -> _Block:
     if waiting(d) and _tracked(d):
-        # #117 r3: waiting on the bank, as the cards count it — no pairing question, nothing
+        # #117: waiting on the bank, as the cards count it — no pairing question, nothing
         # bound but the payment itself
         return _Block([title(headline(d)), "Waiting on the bank."], pid=d["pid"],
                       ident=headline(d), pairings={})
@@ -1122,11 +1116,11 @@ def _item_block(d, cands, more) -> _Block:
 
 
 def _item_page(d, after):
-    """The item view pages EVERY candidate (round 4): as many as fit one
+    """The item view pages EVERY candidate: as many as fit one
     message after the cursor (the last match id printed), each page binding
     the candidates it prints. Returns (block, cursor or None)."""
     if waiting(d) and _tracked(d):
-        return _item_block(d, [], False), None          # #117 r3: nothing to page
+        return _item_block(d, [], False), None          # #117: nothing to page
     rest = [c for c in d["candidates"] if after is None or c["match_id"] > after[0]]
     n = 1 if rest else 0
     while n < len(rest) and utf16_len(_text(_item_block(d, rest[:n + 1],
@@ -1157,7 +1151,7 @@ def _build_review(conn, view="status", quarter=None, pid=None, page=None, after=
 
 def review_in_tx(conn, view="status", quarter=None, pid=None, page=None, after=None,
                  prev=None) -> dict:
-    """The rendering, inside the caller's write transaction (S2 §6.4: job_report composes
+    """The rendering, inside the caller's write transaction (job_report composes
     a result in its own one transaction). The per-rendering disambiguation (_NAMES) is
     reset after, as build_review does."""
     global _NAMES, _TAG
@@ -1172,7 +1166,7 @@ _RENDER_ID = re.compile(r"^r\d{1,18}$")
 
 
 def _predecessor_mrevs(conn, prev, pid, page, after) -> dict:
-    """Binding V1: the candidates a continued item page (page >= 2) adds from its explicit
+    """The candidates a continued item page (page >= 2) adds from its explicit
     predecessor `prev` — that rendering's RECORDED match revisions for `pid` — only when it
     is an item rendering of the same pid whose `next` is exactly this page's call and whose
     projection revision is still current. Anything else adds nothing; a candidate changed
@@ -1198,7 +1192,7 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
     `after` is the cursor the previous page's `next` returned; the `all` view
     is the status view paged. The answer's `next` is the call that the phrase
     the text ends with asks for (`all of them`, `more`), or None; it names this
-    rendering as `prev` (binding V1)."""
+    rendering as `prev`."""
     global _NAMES, _TAG
     if view not in VIEWS:
         raise db.Refusal(f"view is one of {', '.join(VIEWS)}")
@@ -1215,16 +1209,16 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
     if prev is not None and (not isinstance(prev, str) or not _RENDER_ID.fullmatch(prev)):
         raise db.Refusal("prev is the render id the More button carried")
     import cards
-    # ruling Q2b: after an operator's "check Q2" a view with no quarter is Q2's
+    # After an operator's "check Q2" a view with no quarter is Q2's
     q = quarter or cards.named_quarter(conn) or dates.quarter_of(db.now()[:10])
     dates.parse_quarter(q)
-    # binding V2: the render id is minted before composing — its tag ends line 1, counted
-    # inside every page budget (_limit), and this page's `next` names it as `prev` (V1)
+    # The render id is minted before composing — its tag ends line 1, counted
+    # inside every page budget (_limit), and this page's `next` names it as `prev`
     rid = f"r{db.next_seq(conn)}"
     _TAG = tag_now()
     lead = _lead(conn)                  # may record the pass's gate
     # Compose and persist under ONE write lock, so the revisions recorded are
-    # exactly those of the facts the text shows (round p1, Astra S1: a write
+    # exactly those of the facts the text shows (a write
     # between composing and recording bound the operator to an unseen document).
     # The caller holds it (review_in_tx).
     members, chosen, scope, nxt = [], [], {"quarter": q, "pid": pid}, None
@@ -1286,7 +1280,7 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
             if page in (None, 1):
                 scope["residue_silent"] = parts["silent"]
     printed = _bindable(chosen, text)
-    # S7 §7.2: what the page's buttons act on, recorded with the rendering so a stored
+    # What the page's buttons act on, recorded with the rendering so a stored
     # rendering rebuilds them. Its own map, defined on every branch: `by_pid` below exists
     # only when names were composed, and a setup-stop page composes none (`items` is []).
     # `printed` keeps the printed order (_bindable builds it from `chosen` in order).
@@ -1307,8 +1301,8 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
     scope["next"] = nxt
     if _NAMES is not None:
         # the generated refs this rendering printed on payments it binds: a reply's
-        # "ref <hex>" is honoured only against these (round 6)
-        # hex -> EVERY payment printed with that ref (round 9: refs are distinct only
+        # "ref <hex>" is honoured only against these
+        # hex -> EVERY payment printed with that ref (refs are distinct only
         # within a payee-collision group, so two groups can print the same hex)
         refs: dict = {}
         for p in sorted(printed):
@@ -1317,12 +1311,12 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
         if refs:
             scope["refs"] = refs
         # the payee name each bound payment was SHOWN as: a reply resolves names
-        # against what the operator saw, as well as the stored names (round 7)
+        # against what the operator saw, as well as the stored names
         by_pid = {d["pid"]: d for d in items}
         seen = {str(p): field_raw(shown(by_pid[p])) for p in printed if p in by_pid}
         if seen:
             scope["names"] = seen
-    # r5: every grammar-read field (FACT_FIELDS) is stored, an empty one explicitly — a
+    # Every grammar-read field (FACT_FIELDS) is stored, an empty one explicitly — a
     # field a rendering lacks is one an earlier version never recorded
     for k, empty in (("names", {}), ("refs", {}), ("offers", []), ("walk", None)):
         scope.setdefault(k, empty)
@@ -1336,7 +1330,7 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
             "SELECT match_id, revision FROM match_state WHERE pid=?", (p,))
             if r[0] in shown_ids}
         if view == "item" and page and page > 1 and prev is not None:
-            # V1: a later page of one item adds its explicit predecessor's candidates, at
+            # A later page of one item adds its explicit predecessor's candidates, at
             # the revisions that predecessor recorded (a stale one refuses at bind)
             mrevs = {**_predecessor_mrevs(conn, prev, p, page, after), **mrevs}
         conn.execute("INSERT INTO render_items(render_id, pid, projection_revision,"
@@ -1349,7 +1343,7 @@ SHEET_VIEWS = ("check", "missing")
 
 
 def fits_proposal(text: str) -> bool:
-    """A stored rendering can be posted with buttons (S7 §7.1): its deposited body fits the
+    """A stored rendering can be posted with buttons: its deposited body fits the
     proposal budget, and Casa's proposal text bound."""
     body = deposit_safe(text)
     return utf16_len(body) <= BODY_LIMIT and len(body) <= 4000
@@ -1366,7 +1360,7 @@ def show_counts(conn, q) -> tuple:
 def check_label(conn, q, check) -> str:
     """#102: [Show matches to confirm] opens the check view, which spans every quarter (#77);
     a quarter's card counts its own. The label says both when they differ and it fits
-    Casa's 32 characters (d1 Terra), else the count of what it opens."""
+    Casa's 32 characters, else the count of what it opens."""
     items = [work.describe(conn, p) for p in membership(conn, "status", q)]
     mine = sum(1 for d in items if _guess(d) and d["quarter"] == q)
     if mine == check:
@@ -1381,7 +1375,7 @@ CLOSE = ("Close", None, None, None)          # Casa v0.344.64: clears the keyboa
 
 
 def buttons_for(conn, r) -> list:
-    """S7 §7.2: the stored calls of a posted rendering `r` (a renders row), in order, at
+    """The stored calls of a posted rendering `r` (a renders row), in order, at
     most six, as (label, tool, args, key_spec); the last is Close (#66), beside at least
     one action (#93: none at all when there is nothing to act on). A writing
     button carries key_spec=(action, pid, None); the caller mints and stores its key. No
@@ -1408,7 +1402,7 @@ def buttons_for(conn, r) -> list:
     q = scope.get("quarter")
     if kind != "item" and q:
         missing, check = show_counts(conn, q)
-        # d1, r1, r2 (Astra S2): every button that shows another view is a tap that decides
+        # Every button that shows another view is a tap that decides
         # when tapped whether that view is a card or, with nothing to act on, a plain answer
         # (a stored show_view call could not post it plain)
         if missing and kind != "missing":
@@ -1446,8 +1440,8 @@ def list_card(conn, page_ids, nxt) -> str:
                                 {**(prev[1] if prev else {}), **mrevs})
     rid = f"r{db.next_seq(conn)}"
     if nxt is not None:
-        # r1 (Astra S2): the rest continues from THIS card, whose rows hold every page's
-        # candidates — so an item's next page merges them all (binding V1), as the last
+        # The rest continues from THIS card, whose rows hold every page's
+        # candidates — so an item's next page merges them all, as the last
         # More page did
         nxt = {**nxt, "prev": rid}
     proposed, names, refs, offers = [], {}, {}, []
@@ -1496,7 +1490,7 @@ def _norm(s: str) -> str:
 
 
 def _bindable(chosen, text) -> dict:
-    """THE bind-time check (round 4): a payment is bound only if its printed
+    """THE bind-time check: a payment is bound only if its printed
     identity (headline) is visible in the text and no other bound payment in
     this rendering prints the same identity; a pairing only if its identity
     string is visible and unique within its payment. Whatever the formatting,
@@ -1525,8 +1519,8 @@ def _bindable(chosen, text) -> dict:
 
 
 _LABEL_LINE = "\U0001f4ca "        # Casa's "📊 <display name>" label, first line of a post
-QUOTE_CAP = 2000                   # Casa quotes a post's first 2,000 characters (§2)
-# binding V3: the scope fields that decide what a reading or a tap binds — "same binding
+QUOTE_CAP = 2000                   # Casa quotes a post's first 2,000 characters
+# The scope fields that decide what a reading or a tap binds — "same binding
 # facts" is equality of these, the kind and the rendering's render_items rows. A new read
 # by reply.py joins this list (an AST pin holds reply.py to it)
 FACT_FIELDS = ("names", "refs", "proposed", "offers", "next", "walk", "quarter", "pid")
@@ -1535,7 +1529,7 @@ UNMATCHED = "I can't find the message you replied to — here is the list as it 
 
 
 class QuoteRefusal(Exception):
-    """A quote that binds no one rendering (binding R1/R3): `line` is said, nothing is
+    """A quote that binds no one rendering: `line` is said, nothing is
     applied, and `view` is the show_view arguments of the recovery."""
 
     def __init__(self, line, view):
@@ -1546,12 +1540,12 @@ class QuoteRefusal(Exception):
 def _bnorm(s: str) -> str:
     """A text as compared for binding: whitespace runs collapsed to one space, stripped.
     A stored rendering's body is compared this way, whole — its first line is data (a
-    payee named "📊 Analytics" heads its item view), never Casa's label (r6)."""
+    payee named "📊 Analytics" heads its item view), never Casa's label."""
     return re.sub(r"\s+", " ", s).strip()
 
 
 # What Casa does to a post before it reaches the desk as `quoted` — undone, exactly, by
-# _qnorm (r7, after r6's label; read at the Casa tree, bcebd66b):
+# _qnorm (read at the Casa tree, bcebd66b):
 # - result_broker.py:147 POST_LABEL_GLYPH "📊", :363 post_label() -> "📊 <display name>",
 #   :372 compose_operator_message() -> f"{label}\n{body}": the label line heads the post;
 # - specialist_desk.py:48 DESK_QUOTE_CHARS = 2000, :52 CLIP = "[…]", :78-84 clip(): a text
@@ -1574,7 +1568,7 @@ def _qnorm(s: str) -> str:
 
 
 def binding_facts(conn, r) -> str:
-    """V3: what a reading bound to rendering `r` can read — its kind, its render_items rows
+    """What a reading bound to rendering `r` can read — its kind, its render_items rows
     (pid, projection revision, match revisions) and every FACT_FIELDS value (a field the
     rendering never stored is told apart from an explicit null) — canonically."""
     scope = json.loads(r["scope_json"])
@@ -1598,7 +1592,7 @@ def _common_view(rows) -> dict:
     pids = {sc.get("pid") for sc in scopes}
     if len(kinds) == 1 and len(quarters) == 1 and len(pids) == 1:
         kind, (q,), (pid,) = next(iter(kinds)), quarters, pids
-        if kind in cards.KINDS:          # simple loop §1: a card recovers as open items
+        if kind in cards.KINDS:          # A card recovers as open items
             return {"view": "open", **({"quarter": q} if q else {})}
         if kind in VIEWS and (kind != "item" or pid is not None):
             out = {"view": kind}
@@ -1611,15 +1605,15 @@ def _common_view(rows) -> dict:
 
 
 def bound_rendering(conn, quoted):
-    """S7 §8, binding R1/R3: THE one rendering a reading binds. Words with no quote bind
+    """THE one rendering a reading binds. Words with no quote bind
     db.last_delivered. A quote's candidates are every SEEN rendering (db.seen_render:
     delivered, or posted), db.UNQUOTABLE_KINDS excluded, with no row limit and
     no ordering. A candidate matches when its normalised text and the normalised quote agree
     over their whole overlap, capped at QUOTE_CAP (the shorter is a prefix of the other: a
-    post joins up to job.POST_MAX renderings, §5, and its quote binds the first). One match
-    binds. Several with the same binding facts (V3) bind the lowest render id — the choice
+    post joins up to job.POST_MAX renderings, and its quote binds the first). One match
+    binds. Several with the same binding facts bind the lowest render id — the choice
     cannot change what commits. Several with differing facts raise QuoteRefusal (AMBIGUOUS:
-    possible only among pre-S7 renderings, V2 tags the rest); none raises it too
+    possible only among older renderings, the tag tells the rest apart); none raises it too
     (UNMATCHED) — an explicit quote never falls back. Recency never picks."""
     q = _qnorm(quoted)[:QUOTE_CAP] if isinstance(quoted, str) else ""
     if not q:
@@ -1629,8 +1623,8 @@ def bound_rendering(conn, quoted):
                           " IS NOT NULL) AND kind NOT IN (%s)"
                           % ",".join("?" * len(db.UNQUOTABLE_KINDS)),
                           db.UNQUOTABLE_KINDS):
-        # the body as posted: deposit_safe is the last step of every deposit (§7.6), so a
-        # pre-S7 body's control characters are spaces in what the operator saw
+        # the body as posted: deposit_safe is the last step of every deposit, so a
+        # older body's control characters are spaces in what the operator saw
         t = _bnorm(displayed(deposit_safe(r["text"] or "")))[:QUOTE_CAP]
         n = min(len(t), len(q))
         if db.seen_render(r) and n and t[:n] == q[:n]:
@@ -1671,9 +1665,8 @@ def _mark_delivered(conn, render_id: str) -> dict:
     conn.execute("UPDATE renders SET delivered_at=?, delivered_seq=? WHERE render_id=?",
                  (now, db.next_seq(conn), render_id))
     scope = json.loads(r["scope_json"])
-    # every delivered rendering's items become `shown` (S7 §9 retires renders.binding,
-    # the stamp job_report's hand-out wrote: it is ignored, whatever it holds)
-    # (binding §2 #13: a continued page's candidates are merged when it is composed,
+    # every delivered rendering's items become `shown` (it is ignored, whatever it holds)
+    # (a continued page's candidates are merged when it is composed,
     # from its explicit predecessor only — never here; nothing outside views reads
     # `shown`)
     for it in conn.execute("SELECT * FROM render_items WHERE render_id=?",
@@ -1689,7 +1682,7 @@ def _mark_delivered(conn, render_id: str) -> dict:
     for a in scope.get("alerts", []):
         conn.execute("UPDATE alerts SET sent_at=?, render_id=? WHERE alert_id=?",
                      (now, render_id, a))
-    # simple loop §1 (D19, shape d): a "package ready" notice — or an end message that
+    # A "package ready" notice — or an end message that
     # carries one — counts as given only once delivered, for the completion composed
     for q, sig in (scope.get("ready_sigs") or {}).items():
         conn.execute("INSERT OR IGNORE INTO quarter_notices(quarter) VALUES (?)", (q,))

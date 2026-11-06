@@ -1,7 +1,7 @@
 # tests/bankfeed.py
 """A REAL bank-feed ledger for tests: the vendored component tree, driven
 through its own ingest/apply functions and its own tool bodies — never a
-double (spec §Testing). One tree per process: bank-feed's module names are
+double. One tree per process: bank-feed's module names are
 global, so the below-floor tree only runs in a subprocess (run_below_floor).
 
 bank-feed reads CLAUDE_PLUGIN_DATA only when tools_read.CONN is unset; this
@@ -36,7 +36,7 @@ def load() -> None:
         return
     sys.path.append(str(plugin_root() / "server"))
     # bank-feed's own `casa_broker` (deposit_link, fit_caption) shares its name with ours
-    # (S7: deposit); its modules bind theirs at import, so swap it in only while they load
+    # (deposit); its modules bind theirs at import, so swap it in only while they load
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "casa_broker", plugin_root() / "server" / "casa_broker.py")

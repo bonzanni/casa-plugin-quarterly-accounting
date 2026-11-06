@@ -1,8 +1,7 @@
-"""OPERATOR RULING (2026-10-07, after diff round f3): no call budget. Progress no longer
+"""No call budget. Progress no longer
 depends on one — a cut batch's persisted work is reported by the next claim (said_seq), a
 payment cut mid-way is redone — so the server hands out work until Casa cuts the batch at
-its turn limit. f3's #5 (a model sending running totals) and #6 (a closing report past the
-budget) vanish by construction. A mirror unit is a chunk of MIRROR_CALLS bank-feed calls:
+its turn limit. A model sending running totals and a closing report past the budget vanish by construction. A mirror unit is a chunk of MIRROR_CALLS bank-feed calls:
 a cut inside one may repeat up to that many calls (tag calls are no-ops; a note call adds
 an identical line)."""
 import collections
@@ -99,7 +98,7 @@ class NoBudget(StoreCase):
         self.assertEqual(sum(len(u["calls"]) for u in again if u["unit"] == "mirror"), 0)
 
     def test_a_report_cut_before_it_reached_casa_is_handed_again(self):
-        """g1 (Terra S1): the `report` unit is handed, then the batch ends before its
+        """The `report` unit is handed, then the batch ends before its
         report_job_progress — twice in a row. It never reached Casa: the next claim is
         handed the report again, and the run finishes with every later batch reported."""
         drv = JobDriver(self, payments=60)
@@ -115,7 +114,7 @@ class NoBudget(StoreCase):
 
 
 class OneDeliveryAfterACut(StoreCase):
-    """g1 (Astra S1), OPERATOR RULING B: Casa #1312 dedupes a re-posted message by its key.
+    """Casa #1312 dedupes a re-posted message by its key.
     The end message is deposited, Casa cuts the batch before mark_rendering_delivered, the
     next claim re-hands it — and the operator gets it once."""
 
@@ -150,7 +149,7 @@ class OneDeliveryAfterACut(StoreCase):
                                                " render_id=?", (cut[0],)).fetchone()[0])
 
     def test_a_reset_store_never_suppresses_a_new_message_under_an_old_key(self):
-        """g2 (Terra S1): render ids restart after reset_store — the key names the store
+        """Render ids restart after reset_store — the key names the store
         (meta.store_id, new after every reset), so a new message is sent, never deduped."""
         from tests.fakebroker import FakeBroker
         import binding, posting

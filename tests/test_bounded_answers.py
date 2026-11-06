@@ -7,7 +7,7 @@ bank texts (one remittance of 24,000 characters), 50 long recorded queries each,
 a long KB hint and link, documents with long fields and many collisions, pairings
 with long runners-up and rationale and repeated labels.
 
-Revision 3 of the design: every listed item is bounded by construction, the facts
+Every listed item is bounded by construction, the facts
 a match compares are handed out as a digest, and every paged list is a stateless
 cursor over an order that never changes (pids, doc_ids)."""
 import json
@@ -26,7 +26,7 @@ N = 60
 NAME = "Adobe Systems Software Ireland Ltd — Ünïcødé Døcumént Cloud Subscriptions " * 2
 REMITTANCE = "Factuur IE-" + "0123456789 abonnement Creative Cloud Pro " * 4
 OTHER = "Other Vendor BV"
-HUGE = "X" * 24_000                       # C1 (Astra): one exact bank field over the page
+HUGE = "X" * 24_000                       # One exact bank field over the page
 
 
 class Bounded(RealLedger):
@@ -99,13 +99,13 @@ class Bounded(RealLedger):
         self.assertNotIn("row_snapshot", item)
 
     def test_a_page_asked_again_is_the_same_page(self):
-        # D2 (Astra, Terra): a lost answer is replayed by asking again, never consumed
+        # A lost answer is replayed by asking again, never consumed
         first = self.page(triage=True, pass_token=self.t1)
         again = self.page(first["next"], triage=True, pass_token=self.t1)
         self.assertEqual(again, self.page(first["next"], triage=True, pass_token=self.t1))
 
     def test_changes_between_pages_skip_nothing(self):
-        # C1 (Astra): a set_expectation between pages hid an unvisited payment. Half
+        # A set_expectation between pages hid an unvisited payment. Half
         # the payments start optional; after page 1 they turn required (a priority
         # order would now put the unvisited ones before the cursor), and the last
         # payment page 1 listed leaves triage.
@@ -131,7 +131,7 @@ class Bounded(RealLedger):
         self.assertEqual(seen, self.pids)          # page 1 listed `gone` before it left
 
     def test_the_payment_reference_is_listed(self):
-        # C2 (Astra): the reference tells identical payments apart
+        # The reference tells identical payments apart
         item = self.page(pid=self.pids[0])["item"]
         self.assertEqual(item["remittance"], REMITTANCE[:140])
         huge = self.page(pid=self.huge)["item"]["remittance"]
