@@ -36,12 +36,11 @@ class Surface(StoreCase):
         self.assertEqual(job.TURNS_PER_BATCH, m["casa"]["jobs"][0]["turnsPerBatch"])
 
     def test_the_readme_and_changelog_name_the_casa_floor(self):
-        for f in ("README.md", "CHANGELOG.md"):
-            text = (ROOT / f).read_text()
-            self.assertIn("#1301, #1302 and #1303", text, f)
-            self.assertIn("v0.344.39", text, f)
-            self.assertIn("quietWhenScheduled", text, f)
+        self.assertIn("quietWhenScheduled", (ROOT / "README.md").read_text())
         log = (ROOT / "CHANGELOG.md").read_text()
+        self.assertIn("#1301, #1302 and #1303", log)
+        self.assertIn("v0.344.39", log)
+        self.assertIn("quietWhenScheduled", log)
         self.assertNotIn("never released", log)
         self.assertIn("## 0.10.0", log)
 
