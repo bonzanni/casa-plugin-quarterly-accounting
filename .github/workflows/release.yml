@@ -31,6 +31,9 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository
+    concurrency:
+      group: release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write # push the tag ref, create the release
@@ -83,4 +86,11 @@ jobs:
           notes="$RUNNER_TEMP/notes.md"
           awk -v h="## ${VERSION}" '$0 == h {f=1; next} /^## /{f=0} f' CHANGELOG.md > "$notes"
           [ -s "$notes" ] || echo "Release $TAG." > "$notes"
-          gh release create "$TAG" --verify-tag --latest --title "$TAG" --notes-file "$notes"
+          # GitHub makes every new release latest unless told otherwise; a late run
+          # for an older version must not move latest backwards.
+          current=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          make_latest=true
+          if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$TAG" | sort -V | tail -1)" != "$TAG" ]; then
+            make_latest=false
+          fi
+          gh release create "$TAG" --verify-tag --latest="$make_latest" --title "$TAG" --notes-file "$notes"
