@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.31
+
+Same store schema (17) and behaviour. Now needs Casa v0.347.0 or newer through current finance.
+
+- Each version now gets a published GitHub release, marked latest.
+- The README states one Casa minimum and how to install by asking in chat.
+- Internal planning documents and notes are gone from the repository.
+
 ## 0.11.30
 
 Same store schema (17) and Casa floor (v0.344.67).
