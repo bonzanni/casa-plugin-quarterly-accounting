@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.0
+
+Needs Casa 0.355.0. Not backward compatible: a job running under the old version does not
+carry over; start it again after the upgrade. Same store schema (17).
+
+- **The accounting check runs as one session.** Casa 0.355.0 runs a background job as one
+  long session instead of batches of turns, so the job's manifest entry no longer declares
+  `batches`, `turnsPerBatch` or `session`. Casa 0.355.0 refuses a manifest that still does,
+  and an older Casa refuses this one.
+- The check asks for its next step until the work is done, then completes. After its
+  context is summarised or Casa restarts, it carries on where it was: a step it had not
+  finished comes again.
+- Your messages reach the check while it works: it answers them in the job's topic and
+  carries on.
+- The check posts a short progress line as it works, regularly: Casa keeps a
+  long job going only while it reports progress. The "Work saved" lines are gone.
+
 ## 0.11.31
 
 Same store schema (17) and behaviour. Now needs Casa v0.347.0 or newer through current finance.

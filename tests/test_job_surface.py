@@ -30,7 +30,7 @@ class Surface(StoreCase):
             "summary": "Checks the bank and Gmail, matches invoices, keeps the bank ledger's "
                        "notes current",
             "host": "specialist", "quietWhenScheduled": True}])
-        self.assertEqual(m["version"], "0.11.31")
+        self.assertEqual(m["version"], "0.12.0")
         # Casa 0.355.0 runs a job as one session and excludes a manifest that still
         # declares any of these
         for gone in ("batches", "turnsPerBatch", "session"):
