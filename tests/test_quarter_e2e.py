@@ -338,18 +338,19 @@ class RealisticQuarter(StoreCase):
     """A Q3-shaped quarter of 60 payments over 18
     vendors — recurring monthly charges, FX rows with USD invoices, tax and fee rows, one
     0.00 authorisation, one PDNG row — driven through sim_job with every tool call counted
-    against Casa's cut. Completion, no partial, at most 7 batches, every payment exactly once. The
+    and the session interrupted every 80 calls. Completion, no partial, at most 7 segments
+    (a bound on the calls the quarter takes), every payment exactly once. The
     dollar cost is not measurable offline (no model)."""
 
-    def test_sixty_payments_finish_within_seven_batches(self):
+    def test_sixty_payments_finish_within_seven_segments(self):
         import cards
         pin_clock(self)
         self.bind()
         drv = JobDriver(self, payments=0)
         rows = drv.quarter_fixture_60()
-        drv.casa_cut = 80                         # no call budget: Casa's cut ends a batch
+        drv.interrupt_at = 80                         # no call budget
         units = drv.run_job("ffffffff-1", started_by="operator")
-        self.assertLessEqual(len(drv.batch_calls), 7, drv.batch_calls)
+        self.assertLessEqual(len(drv.segment_calls), 7, drv.segment_calls)
         self.assertEqual(units[-1]["unit"], "complete")
         self.assertEqual(self.conn.execute("SELECT partial FROM runs WHERE job_id="
                                            "'ffffffff-1'").fetchone()[0], 0)
@@ -366,15 +367,15 @@ class RealisticQuarter(StoreCase):
                           "pending": 1})
         # Per payment, and a recurring vendor's first search (its quarter) files
         # what its later payments need — so a vendor is searched at most once per payment
-        # (no call budget: a payment Casa cut between a search and its record repeats that
+        # (no call budget: a payment interrupted between a search and its record repeats that
         # one search when redone), and the hinted vendors only hinted
         kinds = collections.Counter((v, k) for v, k, _ in drv.search_log)
         per_vendor = collections.Counter(drv._spec[n]["vendor"] for n in rows)
         excess = sum(max(0, c - per_vendor[v]) for (v, _), c in kinds.items())
-        self.assertLessEqual(excess, drv.cuts, kinds)
-        self.assertLessEqual(len(drv.search_log), 40 + drv.cuts)
+        self.assertLessEqual(excess, drv.interruptions, kinds)
+        self.assertLessEqual(len(drv.search_log), 40 + drv.interruptions)
         self.assertEqual({k for (v, k) in kinds if v == "Notion"}, {"hinted"})
         self.assertFalse(drv.searches_of("IKEA Business") + drv.searches_of("Conrad"))
         # every turn stays inside Casa's 80-call turn, counted honestly
-        self.assertLessEqual(max(drv.batch_calls), 80, drv.batch_calls)
-        self.assertEqual(sum(drv.batch_calls), drv.calls_total)
+        self.assertLessEqual(max(drv.segment_calls), 80, drv.segment_calls)
+        self.assertEqual(sum(drv.segment_calls), drv.calls_total)

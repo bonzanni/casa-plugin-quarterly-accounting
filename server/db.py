@@ -56,17 +56,20 @@ def data_dir() -> pathlib.Path:
 
 # The job protocol's own tables, module constants so a fresh store's
 # DDL and MIGRATIONS[9] create byte-identical tables.
+# claims: since 0.12.0 (a job is one Casa session) only gen, job_id, at and seq are read.
+# The other columns stay so every existing store opens unchanged; `batch` is NOT NULL, so a
+# claim writes its own gen there, and the rest keep their defaults.
 CLAIMS_DDL = """CREATE TABLE IF NOT EXISTS claims (
   gen INTEGER PRIMARY KEY, job_id TEXT NOT NULL, at TEXT NOT NULL,
-  batch INTEGER NOT NULL,        -- the batch this claim belongs to: its first claim's gen
-  closed INTEGER NOT NULL DEFAULT 0,    -- this claim was answered complete
-  seq INTEGER,                   -- the store sequence taken at the claim (S7 §10)
-  progressed INTEGER NOT NULL DEFAULT 0,    -- the batch moved the work list on (simple loop §2.2)
-  said INTEGER NOT NULL DEFAULT 0,          -- d3: this claim's progress was handed for reporting
-  progressed_seq INTEGER,        -- e3: when note_progress last stamped it (progress.made)
-  handed INTEGER NOT NULL DEFAULT 0,    -- e4: this claim handed out a work unit (progress)
-  said_seq INTEGER,              -- Q2 run 1: the store sequence of its last DELIVERED report
-  report_seq INTEGER);           -- g1: a `report` handed, not yet acknowledged by a job_next             -- Q2 run 1: the store sequence when it last reported progress"""
+  batch INTEGER NOT NULL,        -- unused: the claim's own gen
+  closed INTEGER NOT NULL DEFAULT 0,    -- unused
+  seq INTEGER,                   -- the store sequence taken at the claim
+  progressed INTEGER NOT NULL DEFAULT 0,    -- unused
+  said INTEGER NOT NULL DEFAULT 0,          -- unused
+  progressed_seq INTEGER,        -- unused
+  handed INTEGER NOT NULL DEFAULT 0,    -- unused
+  said_seq INTEGER,              -- unused
+  report_seq INTEGER);           -- unused"""
 
 # Schema 10's credits, frozen for MIGRATIONS[9]; MIGRATIONS[11] drops it.
 CREDITS_DDL = """CREATE TABLE IF NOT EXISTS credits (

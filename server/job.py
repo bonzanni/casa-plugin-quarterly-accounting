@@ -1,7 +1,9 @@
 """The job's claim and its run's closing words: one Casa
-job run is one pass; the cursor is loop.next_unit. A job turn's first, token-less job_next
-claims: the claim rotates the token and records itself in `claims`, and only the newest
-claim's token may act (check_claim)."""
+job run is one pass; the cursor is loop.next_unit. A token-less job_next claims — the job's
+first call, and again whenever its session no longer holds a pass_token (after a context
+summary or a Casa restart): the claim rotates the token and records itself in `claims`, and
+only the newest claim's token may act (check_claim). The same job id may claim any number of
+times; what a unit still owed comes again."""
 from __future__ import annotations
 
 import json
@@ -11,7 +13,6 @@ import db
 import passes
 
 JOB_ID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
-TURNS_PER_BATCH = 80       # turnsPerBatch: the manifest's casa.jobs
 
 
 def live_job_pass(conn):
@@ -25,11 +26,11 @@ def live_job_pass(conn):
 def check_claim(conn, token) -> None:
     assert conn.in_transaction
     if token is None:
-        raise db.Refusal("a job turn starts with job_next(job_id=…): pass the pass_token it gave you")
+        raise db.Refusal("the job starts with job_next(job_id=…): pass the pass_token it gave you")
     top = conn.execute("SELECT max(gen) FROM claims").fetchone()[0]
     if top is None or int(token) != top:
-        raise db.Refusal("this job turn is no longer the current one (a newer turn claimed "
-                         "the work); stop — nothing was written")
+        raise db.Refusal("this pass_token is no longer the current one (a newer job_next(job_id=…) "
+                         "claimed the work); nothing was written")
     p = live_job_pass(conn)
     if p is not None and p["holder_job"] == conn.execute(
             "SELECT job_id FROM claims WHERE gen=?", (int(token),)).fetchone()[0]:
@@ -63,11 +64,11 @@ def _completed(conn, job_id) -> bool:
 
 
 def claim(conn, job_id, started_by=None) -> int:
-    """A job turn's token-less job_next (one Casa job run is one pass).
+    """The job's token-less job_next (one Casa job run is one pass).
     Under the custody lock, taken before the transaction (the stalled-send recovery removes
     staged bytes), in one transaction:
     1. a posted send nobody recorded is settled `uncertain`;
-    2. the token rotates and the claim is recorded with its batch (`_batch_of`);
+    2. the token rotates and the claim is recorded;
     3. a job id's first claim makes its run: started_by "operator" iff Casa's starter line
        says so (#45), else "scheduled";
     4. a live pass held by another job id is ended `interrupted` (state is persisted:
@@ -94,9 +95,10 @@ def claim(conn, job_id, started_by=None) -> int:
                 p = None            # a finished run never ends another job's live pass
             token = passes.rotate(conn)
             changed = p is not None and p["holder_job"] != job_id
+            # claims.batch is no longer read; NOT NULL in every existing store, so each
+            # claim writes its own gen there
             conn.execute("INSERT INTO claims(gen, job_id, at, batch, seq) VALUES (?,?,?,?,?)",
-                         (token, job_id, db.now(), _batch_of(conn, job_id, token, changed),
-                          db.next_seq(conn)))
+                         (token, job_id, db.now(), token, db.next_seq(conn)))
             if first:
                 conn.execute("INSERT OR IGNORE INTO runs(job_id, started_by) VALUES (?,?)",
                              (job_id, "operator" if starter_trigger(started_by) == "operator"
@@ -136,24 +138,6 @@ def claim(conn, job_id, started_by=None) -> int:
             return token
 
 
-def _batch_of(conn, job_id, token, holder_changed) -> int:
-    """The batch claim `token` belongs to: a new one — named by this
-    claim's own gen — iff it is the job id's first claim, or that job id's latest claim
-    belongs to a batch answered `complete`, or already holding
-    TURNS_PER_BATCH claims, or the live pass's holder changes with it; otherwise the
-    latest claim's batch (a re-claim inside one batch). The claim count: a turn makes one
-    claim and a Casa batch has at most turnsPerBatch turns, so the window is bounded even
-    when every Casa batch is cut (no call budget: Casa's cut ends every batch but the
-    last)."""
-    prev = conn.execute("SELECT batch FROM claims WHERE job_id=? ORDER BY gen DESC LIMIT 1",
-                        (job_id,)).fetchone()
-    if prev is None or holder_changed:
-        return token
-    closed, n = conn.execute("SELECT max(closed), count(*) FROM claims WHERE batch=?",
-                             (prev["batch"],)).fetchone()
-    return token if closed or n >= TURNS_PER_BATCH else prev["batch"]
-
-
 def next_unit(conn, token) -> dict:
     """The cursor is loop.next_unit's."""
     import loop
@@ -181,8 +165,7 @@ def _offer(conn, render_id, job_id) -> None:
 
 def status(conn, job_id) -> dict:
     """Never a claim (ha-casa-app#1180; ): may this job end now? `done` once the run
-    answered `complete` (runs.completed_at) — an operator-message turn in the job's topic
-    calls it last, so a completion Casa refused is re-issued from the store."""
+    answered `complete` (runs.completed_at), with the completion's text kept in the store."""
     if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
         raise db.Refusal("job_id is the `Job id:` line of your brief, as given")
     with db.tx(conn):

@@ -474,12 +474,10 @@ def _import(conn, rows, token, ledger_instance, *, acq=None, export_ref=None) ->
         # cannot be refuses the whole import, which rolls back
         delivery.withdraw_revoked(conn)
         if job_pass:
-            import decide
             import queues
             # queues: every erase candidate is the erasures unit's item from this commit on
             queues.enqueue(conn, cur_pass["holder_job"], "erasures", "erase",
                            [c["pid"] for c in out["erase_candidates"]])
-            decide.note_progress(conn, token)       # The import persisted
         return out
 
 

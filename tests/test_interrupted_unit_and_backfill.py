@@ -1,9 +1,9 @@
 """An interrupted unit and the render_states backfill, reproduced through
 the real surface (qa_server.TOOLS, a real bank-feed):
-- a unit
-  interrupted (by Casa's cut) comes again as a
-  continuation, not counted against queues.ATTEMPTS_MAX while it progressed (queues: an item closed or queued, a search kind first recorded);
-  progress is reported on the first job_next after the batch persisted anything;
+- a unit interrupted (the session lost its pass_token) comes again as a continuation, not
+  counted against queues.ATTEMPTS_MAX while it progressed (queues: an item closed or
+  queued, a search kind first recorded);
+- every answer carries a one-line progress summary the job may post, and nothing more;
 - the 11 -> 12 migration backfills render_states from delivered legacy
   renderings whose items are provably unchanged, so the first scheduled run after the
   upgrade does not announce them again."""
@@ -14,7 +14,7 @@ from tests._base import StoreCase
 from tests.sim_job import JobDriver
 import db                     # server/ is on sys.path once tests._base is imported
 
-CASA_CALLS = 80
+INTERRUPT_AT = 80
 
 
 class EveryUnitHasABudget(StoreCase):
@@ -22,16 +22,16 @@ class EveryUnitHasABudget(StoreCase):
         super().setUp()
         self.bind()
 
-    def test_a_60_invoice_vendor_completes_reporting_every_batch(self):
-        """60 Zapier payments, 60 invoices in the vendor's mail, Casa's 80-call cuts."""
+    def test_a_60_invoice_vendor_completes_across_interruptions(self):
+        """60 Zapier payments, 60 invoices in the vendor's mail, an interruption every 80
+        calls."""
         drv = JobDriver(self, payments=60)
         for i in range(60):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"INV-{i + 1}")
-        drv.casa_cut = CASA_CALLS
+        drv.interrupt_at = INTERRUPT_AT
         units = drv.run_job("d3d3d3d3-a1")
-        self.assertEqual(drv.cuts, len(drv.batch_calls) - 1)   # no budget: Casa ends a batch
-        self.assertLessEqual(max(drv.batch_calls), CASA_CALLS, drv.batch_calls)
-        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
+        self.assertEqual(drv.interruptions, len(drv.segment_calls) - 1)   # no budget
+        self.assertLessEqual(max(drv.segment_calls), INTERRUPT_AT, drv.segment_calls)
         self.assertEqual(dict(self.conn.execute(
             "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
             {"matched": 60})
@@ -41,23 +41,20 @@ class EveryUnitHasABudget(StoreCase):
         self.assertFalse(run["partial"])
         # a payment handed again with the attachments its search found still to file
         self.assertTrue(any(u["unit"] == "payment" and u["files"] for u in units))
-        # a progress report mid-batch, not only at its end (the first answer after work)
-        self.assertTrue(any(u["report"] and u["unit"] != "complete" for u in units))
 
-    def test_progress_is_reported_on_the_first_answer_after_work_once_per_batch(self):
-        import job
+    def test_every_answer_carries_only_its_progress_summary(self):
+        """No `report` unit and no report flag: each answer's `progress` is its one-line
+        summary, for a progress line the job may post."""
+        import loop
         drv = JobDriver(self, payments=1)
-        drv.claim("d3d3d3d3-a2")
-        got = []
-        for _ in range(4):
-            u = drv.next()
-            drv.calls += 1
-            got.append((u["unit"], u["report"]))
-            drv.do(u, drv.token)
-        # The import persisted work — the next answer is the `report` unit, alone;
-        # filing persisted too, but the batch already reported
-        self.assertEqual(got, [("probes", False), ("snapshot", False), ("report", True),
-                               ("filing", False)])
+        units = drv.run_job("d3d3d3d3-a2")
+        self.assertEqual([u["unit"] for u in units[:3]], ["probes", "snapshot", "filing"])
+        for u in units:
+            self.assertNotIn("report", u)
+            self.assertEqual(set(u["progress"]), {"summary"})
+            if u["unit"] != "complete":
+                self.assertEqual(u["progress"]["summary"], loop.WORDS[u["unit"]])
+        self.assertEqual(units[-1]["progress"]["summary"], loop.WORDS["complete"])
 
     def test_a_continuation_that_progressed_is_not_counted(self):
         """Queues: a payment hand-out that records one search with a find and

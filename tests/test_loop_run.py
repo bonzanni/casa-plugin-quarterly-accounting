@@ -1,6 +1,5 @@
 """One Casa job run is one pass; the units in order; no call
-budget (2026-10-07): work is handed until Casa cuts the batch, progress rides the `report`
-unit alone; an operator-started run ends with ONE end message; a scheduled run is silent unless an
+budget: work is handed until the run completes; an operator-started run ends with ONE end message; a scheduled run is silent unless an
 item is in a new state, and then lists only those; the mirror leaves a rerun with
 nothing to write."""
 from tests._base import StoreCase
@@ -16,8 +15,7 @@ class Run(StoreCase):
 
     def test_an_operator_run_unit_by_unit(self):
         units = [u["unit"] for u in self.drv.run_job("aaaaaaaa-1", started_by="operator")]
-        # The import persisted work, so the `report` unit comes alone before filing
-        self.assertEqual(units[:4], ["probes", "snapshot", "report", "filing"])
+        self.assertEqual(units[:3], ["probes", "snapshot", "filing"])
         self.assertIn("payment", units)
         self.assertLess(units.index("payment"), units.index("mirror"))
         self.assertEqual(units[-2:], ["view", "complete"])
@@ -25,24 +23,6 @@ class Run(StoreCase):
         end = self.conn.execute("SELECT end_render_id FROM runs").fetchone()[0]
         self.assertIn("3 missing", self.conn.execute("SELECT text FROM renders WHERE"
                                                      " render_id=?", (end,)).fetchone()[0])
-
-    def test_a_report_rides_alone_once_per_claim_and_the_next_claim_reports_the_rest(self):
-        """A report never rides beside a work unit; a
-        claim reports once (Casa keeps a batch's LAST report); the work after it is reported
-        by the next claim, first thing."""
-        import job
-        tok = job.claim(self.conn, "aaaaaaaa-2", started_by="Started by: operator")
-        for _ in range(4):                          # probes, snapshot, report, filing
-            u = job.next_unit(self.conn, tok)
-            self.drv.do(u, tok)
-        u = job.next_unit(self.conn, tok)
-        self.assertEqual((u["unit"], u["report"]), ("payment", False))
-        self.drv.do(u, tok)                         # the payment decided: work persisted
-        self.assertNotEqual(job.next_unit(self.conn, tok)["unit"], "report")
-        tok = job.claim(self.conn, "aaaaaaaa-2")    # Casa cut the batch; a new one
-        u = job.next_unit(self.conn, tok)
-        self.assertEqual((u["unit"], u["report"], u["progress"]["progressed"]),
-                         ("report", True, True))
 
     def test_a_scheduled_run_lists_only_new_state_items_and_omits_never(self):
         self.drv.run_job("aaaaaaaa-3", started_by="operator")       # the 3 shown once
@@ -123,7 +103,7 @@ class Carries(StoreCase):
         drv = JobDriver(self, payments=3)
         seen = []
 
-        def cut(u, token):                       # the batch never gets to decide
+        def cut(u, token):                       # the payment is never decided
             seen.append([u["pid"]])
             if len(seen) == 1:
                 self.granted(lambda c, grant: work.leave_missing_in_tx(

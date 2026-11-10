@@ -3,8 +3,8 @@
 job_next, carrying out each unit it hands out the way the job skill describes it —
 against a REAL bank-feed (tests/bankfeed.py) and a Gmail fake. The cursor decides
 everything; the driver never chooses a unit or a token of its own. Every tool call the
-driver makes in a turn is counted (`calls`; a new turn — a claim — starts at 1) against
-Casa's cut.
+driver makes since its last claim is counted (`calls`; a claim starts at 1) against
+`interrupt_at`.
 
   probes    bank-feed's tools, list_accounts, sync, list_backups, the four record_probes
             (bank_sync with the unit's acq), check_setup
@@ -31,10 +31,9 @@ Casa's cut.
   post      post_results(render_ids); on the receipt, mark_rendering_delivered
 
 No call budget: the driver works until `complete`.
-`casa_cut` (an int): Casa's batch bound — a call past it ends the batch without job_next
-(the driver re-claims; what the unit still owed comes again), three batches in a row
-without a reported progress (`report` with `progressed`) fail the run, and so does a run
-past CASA_BATCHES, as Casa ends it.
+`interrupt_at` (an int): the session loses its pass_token after that many calls since the
+last claim — a summary of its context or a Casa restart, mid-unit or between units. The
+driver claims again with job_next(job_id); what the unit still owed comes again.
 
 Plugin tools are called through qa_server.TOOLS (#43: the call shape the model makes)."""
 from __future__ import annotations
@@ -73,12 +72,11 @@ def ledger_state(listing: str) -> dict:
             "instance": inst.group(1) if inst else None}
 
 MAX_UNITS = 600         # a cursor that never finishes is a failure, never a hang
-CASA_IDLE_BATCHES = 3   # Casa ends a run after this many batches without reported progress
-CASA_BATCHES = 20       # the manifest's "batches": Casa ends the run after this many
 
 
-class CasaCut(Exception):
-    """Casa ended the batch at its call bound, before the model's next job_next."""
+class Interrupted(Exception):
+    """The session lost its pass_token (a context summary, a restart) before the model's
+    next job_next."""
 
 
 class JobLedger(bankfeed.Ledger):
@@ -255,19 +253,15 @@ class JobDriver:
         self.fx_rates = {}              # provider_ref -> (exchange_rate, unit): see _export
         self._spec = {}                 # fixture row number -> its bank row (quarter fixtures)
         self._broker_now = None
-        self.batch_calls = []           # the calls at each batch's end, the last run_job
-        self.casa_cut = None            # Casa's batch call bound, when the test enforces it
-        self.cuts = 0                   # batches Casa cut (casa_cut)
-        self.batch_reported = []        # per batch: a progress report was handed (progressed)
+        self.segment_calls = []         # the calls between claims, the last run_job
+        self.interrupt_at = None        # calls after which the session loses its token
+        self.interruptions = 0          # times it did (interrupt_at)
         self.tool_calls = {}            # plugin tool name -> calls made, every run
         self.replace_days = 3           # a handed document this near an exact fit replaces
-        self.skip_attached_reports = False   # The model ignores report:true beside
-        #                                      a work unit (only `report`, complete count)
         self._at_next = 0               # calls at the previous job_next
         # a stray call count the model sends (ignored): "delta"
         # (run 1), "total", None
         self.calls_mode = None
-        self.cut_reports = 0            # Report calls Casa cuts (a model that stops there)
         self.broker = None              # a FakeBroker the whole run deposits to (else one a unit)
         self.read_mode = "store"        # how a found attachment is read (see _file_one)
         self.reads = []                 # every Read path
@@ -555,7 +549,7 @@ class JobDriver:
 
     # --- the loop --------------------------------------------------------------------
     def claim(self, job_id, started_by="operator") -> int:
-        """A job turn's first call: job_next(job_id, started_by) claims. Returns the token."""
+        """The job's first call: job_next(job_id, started_by) claims. Returns the token."""
         self.token = job.claim(self.conn, job_id, started_by=f"Started by: {started_by}")
         self.calls = 1
         self._at_next = 1
@@ -597,42 +591,30 @@ class JobDriver:
         raise AssertionError(f"{unit} was never handed out")
 
     def run_job(self, job_id, started_by="operator") -> list:
-        """Claim, then job_next until `complete`, re-claiming (a new turn, a new batch) at
-        Casa's cut. Returns every unit handed out."""
+        """Claim, then job_next until `complete`, claiming again whenever the session loses
+        its token (`interrupt_at`). Returns every unit handed out."""
         self.claim(job_id, started_by)
-        self.batch_calls = []
-        self.batch_reported = []
-        return self._loop(job_id)
+        self.segment_calls = []
+        return self._loop(job_id, started_by)
 
     @property
     def calls_total(self) -> int:
-        """The tool calls the last run_job made, every batch (turn) summed."""
-        return sum(self.batch_calls)
+        """The tool calls the last run_job made, every segment summed."""
+        return sum(self.segment_calls)
 
-    def _loop(self, job_id) -> list:
-        units, idle, reported = [], 0, False
+    def _loop(self, job_id, started_by="operator") -> list:
+        units = []
 
-        def batch_end():
-            nonlocal idle, reported
-            self.batch_calls.append(self.calls)
-            self.batch_reported.append(reported)
-            idle = 0 if reported else idle + 1
-            reported = False
-            if self.casa_cut is not None and idle >= CASA_IDLE_BATCHES:
-                raise AssertionError(f"Casa ends the run: {idle} batches without reported "
-                                     f"progress (calls {self.batch_calls})")
-            if self.casa_cut is not None and len(self.batch_calls) >= CASA_BATCHES \
-                    and not (units and units[-1]["unit"] == "complete"):
-                raise AssertionError(f"Casa ends the run: {CASA_BATCHES} batches (calls "
-                                     f"{self.batch_calls})")
+        def reclaim():
+            self.interruptions += 1
+            self.segment_calls.append(self.calls)
+            self.token = job.claim(self.conn, job_id, started_by=f"Started by: {started_by}")
+            self.calls = 1
+            self._at_next = 1
         with self._broker():
             for _ in range(MAX_UNITS):
-                if self.casa_cut is not None and self.calls + 1 > self.casa_cut:
-                    self.cuts += 1                 # cut before the job_next
-                    batch_end()
-                    self.token = job.claim(self.conn, job_id)
-                    self.calls = 1
-                    self._at_next = 1
+                if self.interrupt_at is not None and self.calls + 1 > self.interrupt_at:
+                    reclaim()                      # lost before the job_next
                     continue
                 u = self.next()
                 self.calls += 1
@@ -641,33 +623,15 @@ class JobDriver:
                 self.units.append(u)
                 self.last = u
                 assert u.get("pass_token") == self.token, u
-                said = reported
-                # A `report` reaches Casa only when its report_job_progress
-                # call is made (_report) — a cut before it delivers nothing
-                if u["report"] and u["unit"] != "report" and (
-                        not self.skip_attached_reports or u["unit"] == "complete"):
-                    reported = bool(u["progress"]["progressed"])   # Casa keeps the LAST
-                if u["report"] and u["unit"] == "complete":
-                    # the closing report_job_progress is a call of its own; past Casa's cut
-                    # it never reaches Casa
-                    if self.casa_cut is not None and self.calls + 1 > self.casa_cut:
-                        reported = said
-                    else:
-                        self.calls += 1
                 if u["unit"] == "complete":
-                    batch_end()
+                    self.calls += 1                # emit_completion
+                    self.segment_calls.append(self.calls)
                     return units
                 import db
                 try:
                     self.do(u, self.token)
-                    if u["unit"] == "report":
-                        reported = bool(u["progress"]["progressed"])   # delivered
-                except CasaCut:
-                    self.cuts += 1
-                    batch_end()
-                    self.token = job.claim(self.conn, job_id)
-                    self.calls = 1
-                    self._at_next = 1
+                except Interrupted:
+                    reclaim()
                 except db.Refusal as exc:   # the model reads `refused:` and calls job_next
                     if self.refusals is None:
                         raise
@@ -701,9 +665,10 @@ class JobDriver:
             return getattr(self, "_" + u["unit"].replace("-", "_"))(u, token)
 
     def _spend(self, k=1) -> None:
-        """k tool calls: past Casa's bound the batch is cut (the call is not made)."""
-        if self.casa_cut is not None and self.calls + k > self.casa_cut:
-            raise CasaCut()
+        """k tool calls: past `interrupt_at` the session is interrupted (the call is not
+        made)."""
+        if self.interrupt_at is not None and self.calls + k > self.interrupt_at:
+            raise Interrupted()
         self.calls += k
 
     def _tool(self, name, args):
@@ -782,7 +747,7 @@ class JobDriver:
         """The skill's filing: with `search`, the own-mail search and at once the gmail probe
         with every attachment found; then each of `files` (the unit's, or the probe's)
         downloaded, read once and filed with the reading (no vendor: own mail is no
-        vendor's). A unit Casa cut comes again (queues)."""
+        vendor's). A unit an interruption cut short comes again (queues)."""
         files = u["files"]
         if u["search"]:
             self._spend(1)
@@ -999,15 +964,6 @@ class JobDriver:
             if self._read(self.SESSION + f"doc-{doc}.pdf"):
                 self._tool("update_document_metadata", {"doc_id": doc, "pass_token": token,
                                                         **self.printed.get(doc, {})})
-        return None
-
-    def _report(self, u, token):
-        """`report` → report_job_progress(progress) (a Casa tool: one call), then job_next.
-        `cut_reports`: that many report calls are cut by Casa (the batch ends there)."""
-        if self.cut_reports > 0:
-            self.cut_reports -= 1
-            raise CasaCut()
-        self._spend(1)
         return None
 
     def _mirror(self, u, token):

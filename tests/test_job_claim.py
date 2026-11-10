@@ -1,6 +1,6 @@
-"""A job turn's claim rotates the token, and only the newest
-claim's token may act (another job's claim ends a live pass; none is
-adopted)."""
+"""A job's claim rotates the token, and only the newest claim's token may act (another
+job's claim ends a live pass; none is adopted). The same job id claims again after a context
+summary or a restart, as often as it needs."""
 
 from tests._base import StoreCase
 
@@ -24,20 +24,45 @@ class Claim(StoreCase):
         with self.assertRaises(db.Refusal):
             job.claim(self.conn, "x")
 
-    def test_a_claim_records_its_batch(self):
-        """claims.batch: a job id's first claim starts a batch named
-        by its own gen; a re-claim inherits it until the batch is answered end-batch."""
-        import db, job
+    def test_a_claim_writes_its_own_gen_into_the_kept_batch_column(self):
+        """claims.batch is NOT NULL in every existing store and no longer read: each claim
+        writes its own gen there."""
+        import job
         t1 = job.claim(self.conn, A)
         t2 = job.claim(self.conn, A)
         batch = lambda t: self.conn.execute("SELECT batch FROM claims WHERE gen=?",
                                             (t,)).fetchone()[0]
-        self.assertEqual((batch(t1), batch(t2)), (t1, t1))
-        with db.tx(self.conn):
-            self.conn.execute("UPDATE claims SET closed=1 WHERE gen=?", (t2,))
-        t3 = job.claim(self.conn, A)
-        self.assertEqual(batch(t3), t3)
-        self.assertEqual(batch(job.claim(self.conn, B)), t3 + 1)    # another job id's first
+        self.assertEqual((batch(t1), batch(t2)), (t1, t2))
+
+    def test_the_same_job_claims_again_and_again(self):
+        """A job whose session is summarised or restarted several times: every claim of
+        the same job id keeps the one run, its one pass and its one implicit check."""
+        import job
+        t = job.claim(self.conn, A, started_by="Started by: operator")
+        pass_id = self.conn.execute("SELECT pass_id FROM runs WHERE job_id=?",
+                                    (A,)).fetchone()[0]
+        for _ in range(5):
+            t = job.claim(self.conn, A, started_by="Started by: operator")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM runs").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT pass_id FROM runs WHERE job_id=?",
+                                           (A,)).fetchone()[0], pass_id)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM passes").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM work_requests").fetchone()[0],
+                         1)                     # the implicit check, recorded once
+
+    def test_a_claim_after_the_run_completed_answers_complete_again(self):
+        """A session summarised or restarted after `complete`, before emit_completion:
+        its new claim of the same job id is answered `complete` with the same text."""
+        import job
+        from tests.sim_job import JobDriver
+        self.bind()
+        drv = JobDriver(self, payments=1)
+        drv.gmail.invoice("Zapier", 1000, "EUR", drv.DATES[0], "ZAP-1")
+        done = drv.run_job(A)[-1]
+        self.assertEqual(done["unit"], "complete")
+        again = job.next_unit(self.conn, job.claim(self.conn, A,
+                                                   started_by="Started by: operator"))
+        self.assertEqual((again["unit"], again["text"]), ("complete", done["text"]))
 
     def test_an_adoption_moves_the_fence_to_the_adopter(self):
         import db, job, passes

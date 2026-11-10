@@ -308,7 +308,7 @@ class Work(StoreCase):
 
     def test_building_again_never_reopens_a_decided_entry(self):
         """A handover onto a matched payment: the job keeps it (or asks);
-        building the list again in a new batch never reopens the decided entry."""
+        building the list again after a new claim never reopens the decided entry."""
         import asks, decide, loop
         pid = self.pay()
         a = self.doc(vendor="Adobe", document_date="2026-09-01")
@@ -326,7 +326,7 @@ class Work(StoreCase):
             self.assertEqual(out["refused"], 0, "refused")
         decide.decide(self.conn, self.token, [{"pid": pid, "outcome": "keep",
                                                 "expected_revision": self.rev(pid)}])
-        self.run_claim(job_id=self.job_id)                     # the same job, a new batch
+        self.run_claim(job_id=self.job_id)                     # the same job, a new claim
         self.assertEqual(loop.build_work(self.conn, self.job_id, handover_docs=[usd]), 1)
         self.assertEqual(self.conn.execute("SELECT outcome FROM run_work WHERE pid=?",
                                            (pid,)).fetchone()[0], "keep")

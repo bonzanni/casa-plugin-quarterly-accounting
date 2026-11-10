@@ -3,8 +3,8 @@
 column or test helper) has a caller in server/, tests/, scripts/, skills/, README.md,
 CHANGELOG.md or the manifest. Prints `file:line: pattern (what was removed)`; exit 1 on a hit.
 
-Kept on purpose (so not listed): job.TURNS_PER_BATCH (the claim's batch logic, pinned to the
-manifest) and asks.requeue_taken (the interrupt requeue); `resolves` is removed only as a tool
+Kept on purpose (so not listed): asks.requeue_taken (the interrupt requeue), and the unused
+claims columns (batch, said_seq, report_seq, ...) that existing stores still carry; `resolves` is removed only as a tool
 argument (a quoted string), lineage's own `resolves=` stays.
 Exemptions: server/db.py inside MIGRATIONS (schema history), tests/schema_history.py, this
 script and its test, a line carrying `# removed-name: asserted absent` or `# removed-name: schema history`, and a
@@ -103,6 +103,11 @@ REMOVED = [
      r"_SENTENCE_END|_EXTENSIONS|_KEPT_DOT|_ESCAPE_LEAD|_ESCAPE_TAIL|_REF|_AMOUNT|_DATE|"
      r"_MONTHS)\b|\bviews\.LACKS\b|\bnot_a_reply\b|\breading_in_tx\(\s*[^,]+,\s*[\"f]",
      "the reply grammar and its words-in reading (#121)"),
+    # 0.12.0: a job is one Casa session — the batch window, the `report` unit and the progress
+    # bookkeeping that fed Casa's stuck guard
+    (r"\b(TURNS_PER_BATCH|_batch_of|_report_owed|note_progress|CasaCut|batch_reported|"
+     r"skip_attached_reports|cut_reports|CASA_IDLE_BATCHES|CASA_BATCHES)\b",
+     "the batch window, the report unit and its progress bookkeeping (0.12.0)"),
     # test helpers
     (r"\bself\.(handed|close_chunk|hand_empty_chunk|end_with_counts|package_built_unsent|"
      r"stage_stalled_package|check_round|bind_round_and_take|sweep_to_zero|start_job_pass|"

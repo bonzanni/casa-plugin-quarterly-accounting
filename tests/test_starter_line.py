@@ -114,28 +114,24 @@ class StarterLine(StoreCase):
 
 # --- the skill: position-based copying (a text-level pin: the model does the copy) -------
 def casa_job_brief(job_id, started_by, task, context):
-    """The fresh-turn brief, assembled as Casa af72a2ff's background_jobs.job_brief does
-    (casa/rootfs/opt/casa/background_jobs.py:486-519, starter_line at :387-390): the id
-    line, then `Started by: <token>\\n` only for a recorded token, then Request:, Context:."""
+    """The header Casa 0.355.0 re-states after a context summary
+    (background_jobs.job_header): the id line, then `Started by: <token>\\n` only for a
+    recorded token, then Request:."""
     starter = f"Started by: {started_by}\n" if started_by in ("operator", "scheduled",
                                                               "agent") else ""
-    return ('You are running the background job "Accounting check" (skill quarterly-job). '
-            "This turn starts a fresh conversation: nothing from the job's earlier turns is "
-            "visible here, so load the skill again before you work.\n"
-            f"Job id: {job_id}\n" + starter + f"Request: {task}\n" f"Context:\n{context}\n"
-            "What follows this brief is this turn: a batch to run, or a message from the "
-            "operator to answer. How the job runs:\n- Each batch is one turn of at most 80 "
-            "turns.\n")
+    return ('You are running the background job "Accounting check" (skill quarterly-job).\n'
+            f"Job id: {job_id}\n" + starter + f"Request: {task}\n"
+            "Your context was just summarised; carry on.")
 
 
 def casa_launch_prompt(job_id, started_by, task, context):
-    """background_jobs.launch_prompt at af72a2ff (:424-442)."""
+    """The brief Casa 0.355.0 writes once, at launch (background_jobs.launch_prompt)."""
     starter = f"Started by: {started_by}\n" if started_by in ("operator", "scheduled",
                                                               "agent") else ""
-    return ('You are starting the background job "Accounting check" (skill quarterly-job).\n'
+    return ('You are running the background job "Accounting check" (skill quarterly-job).\n'
             f"Job id: {job_id}\n" + starter + f"Request: {task}\n" f"Context: {context}\n"
-            "In THIS turn do no work: reply with one short line saying what you are about to "
-            "do, then end your turn.\n")
+            "How the job runs:\n- Load the skill and do the work. The job is one long "
+            "session: keep going until it is finished.\n")
 
 
 def copy_as_the_skill_says(prompt):
@@ -167,7 +163,7 @@ class SkillCopiesByPosition(StoreCase):
                       "`Request:` or `Context:` can contain a look-alike", s)
         self.assertIn("If the line right after the first `Job id:` line is not a "
                       "`Started by:` line, pass no `started_by`", s)
-        self.assertIn("Only on the first `job_next(job_id=…)` call", s)
+        self.assertIn("With every `job_next(job_id=…)` call, also pass `started_by`", s)
 
     def test_a_casa_brief_with_a_lookalike_in_request_names_casas_line(self):
         for build in (casa_job_brief, casa_launch_prompt):

@@ -1,7 +1,6 @@
-"""Progress reports and a late invoice, each case reproduced through the
-real surface:
-- a claim that handed out work or persisted anything reports progressed,
-  and its end-of-batch report never overwrites that with false — Casa reads the LAST one;
+"""Interrupted sessions and a late invoice, each case reproduced through the real surface:
+- long reads interrupted again and again still finish, and a payment handed out when the
+  session lost its token (a context summary, a restart) comes again to the next claim;
 - a later invoice of a checked quarter, filed after quarter-end, is listed in
   THAT quarter's package as unmatched (by its own date, not its filing quarter)."""
 from tests._base import StoreCase
@@ -9,15 +8,15 @@ from tests.sim_job import JobDriver
 import db                     # server/ is on sys.path once tests._base is imported
 
 
-class LastReportHolds(StoreCase):
+class InterruptedSessions(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
 
-    def test_long_reads_keep_every_batch_progressed_and_finish(self):
+    def test_long_reads_interrupted_every_80_calls_finish(self):
         """Twelve vendor invoices with 4,000-character refs (two per
-        hand-out) and long PDF reads on every other one — each batch files a few, then its
-        end-batch report must stay true (Casa keeps the LAST): the run finishes."""
+        hand-out) and long PDF reads on every other one — each segment files a few before the
+        session is interrupted: the run finishes."""
         drv = JobDriver(self, payments=1)
         for i in range(12):
             drv.gmail.invoice("Zapier", 1000, "EUR", drv.DATES[0], f"I{i}")
@@ -35,17 +34,16 @@ class LastReportHolds(StoreCase):
                 out += real(token, vendor, [ref])
             return out
         drv._file_vendor = long_reads
-        drv.casa_cut = 80                       # Casa's idle guard, last-report semantics
+        drv.interrupt_at = 80
         drv.run_job("e4e4e4e4-a1")
-        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM documents").fetchone()[0], 12)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM run_items WHERE"
                                            " state='queued'").fetchone()[0], 0)
 
-    def test_a_batch_that_worked_is_reported_true(self):
-        """The first payment is worked; the second is handed, then Casa cuts
-        the batch (no call budget: every batch but the last ends so) — the next claim's
-        first answer reports the work, true."""
+    def test_a_payment_handed_before_an_interruption_comes_again(self):
+        """The first payment is worked; the second is handed, then the session loses its
+        token. The same job id claims again: the old token is refused, and the new claim's
+        first unit is that second payment."""
         import job
         drv = JobDriver(self, payments=2)
         drv.claim("e4e4e4e4-a2")
@@ -58,11 +56,13 @@ class LastReportHolds(StoreCase):
                 if seen == 2:
                     break
             drv.do(u, drv.token)
-        tok = job.claim(self.conn, "e4e4e4e4-a2")                # Casa's cut, a new batch
+        handed, old = u, drv.token
+        tok = job.claim(self.conn, "e4e4e4e4-a2", started_by="Started by: operator")
+        with self.assertRaisesRegex(db.Refusal, "no longer the current one"):
+            job.next_unit(self.conn, old)
         u = job.next_unit(self.conn, tok)
-        self.assertEqual(u["unit"], "report")
-        self.assertTrue(u["report"])
-        self.assertTrue(u["progress"]["progressed"])
+        self.assertEqual((u["unit"], u["pid"]), ("payment", handed["pid"]))
+        self.assertEqual(u["pass_token"], tok)
 
 
 class UnmatchedByDocumentDate(StoreCase):

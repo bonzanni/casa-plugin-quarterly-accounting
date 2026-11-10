@@ -12,7 +12,7 @@ SWEEP = ("probes", "snapshot", "erasures", "filing", "mirror")
 
 
 def kinds(units):
-    return [u["unit"] for u in units if u["unit"] != "report"]
+    return [u["unit"] for u in units]
 
 
 class Case(StoreCase):

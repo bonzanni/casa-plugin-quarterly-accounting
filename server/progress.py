@@ -1,43 +1,25 @@
-"""Progress, defined in ONE place: a run made progress since
-store sequence `since` when, after it, a payment was decided or (re)listed, a search was
-recorded, an owed item (an erase check, the own-mail search, a found attachment) was closed
-or enqueued, a document was filed, or a mirror call was reported. Casa's batch report
-(loop._close, since the run's last report) and the hand-out settle (queues.settle) both read
-it; the import and the probes are progress through decide.note_progress's stamp
-(claims.progressed_seq)."""
+"""Progress, defined in ONE place: a hand-out of unit `unit` made progress since store
+sequence `since` when, after it, one of its items (an erase check, the own-mail search, a
+found attachment) was closed or enqueued, its payment was decided, (re)listed or searched,
+or one of its mirror calls was reported. The hand-out settle (queues.settle) reads it."""
 from __future__ import annotations
 
 
-def made(conn, job_id, since, unit=None) -> bool:
-    """Did the run `job_id` progress after `since`? `unit` narrows it to one hand-out's
-    unit: `payment:<pid>`, `erasures`, `filing` or `mirror`."""
+def made(conn, job_id, since, unit) -> bool:
+    """Did the run `job_id`'s hand-out of `unit` (`payment:<pid>`, `erasures`, `filing` or
+    `mirror`) progress after `since`?"""
     import queues
     pid = queues.pid_of_unit(unit)
-    if unit is None or unit in ("erasures", "filing") or pid is not None:
-        sql = "SELECT 1 FROM run_items WHERE job_id=? AND (closed_seq > ? OR seq > ?)"
-        args = [job_id, since, since]
-        if unit is not None:
-            sql += " AND unit=?"
-            args.append(unit)
-        if conn.execute(sql, args).fetchone():
+    if unit in ("erasures", "filing") or pid is not None:
+        if conn.execute("SELECT 1 FROM run_items WHERE job_id=? AND unit=? AND"
+                        " (closed_seq > ? OR seq > ?)", (job_id, unit, since, since)).fetchone():
             return True
-    if unit is None or pid is not None:
-        sql = ("SELECT 1 FROM run_work WHERE job_id=? AND (closed_seq > ? OR seq > ? OR"
-               " searched_seq > ?)")
-        args = [job_id, since, since, since]
-        if pid is not None:
-            sql += " AND pid=?"
-            args.append(pid)
-        if conn.execute(sql, args).fetchone():
-            return True
-    if unit in (None, "mirror") and conn.execute(
+    if pid is not None and conn.execute(
+            "SELECT 1 FROM run_work WHERE job_id=? AND pid=? AND (closed_seq > ? OR seq > ? OR"
+            " searched_seq > ?)", (job_id, pid, since, since, since)).fetchone():
+        return True
+    if unit == "mirror" and conn.execute(
             "SELECT 1 FROM run_mirror WHERE job_id=? AND closed_seq > ?",
             (job_id, since)).fetchone():
         return True
-    if unit is None and conn.execute("SELECT 1 FROM documents WHERE filed_seq > ?",
-                                     (since,)).fetchone():
-        return True
-    if unit is None and conn.execute("SELECT 1 FROM claims WHERE job_id=? AND progressed_seq"
-                                     " > ?", (job_id, since)).fetchone():
-        return True                 # the import and the probes: note_progress's own stamp
     return False

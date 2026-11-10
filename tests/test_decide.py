@@ -1,8 +1,8 @@
 # tests/test_decide.py
 """Decide applies the floor to each entry on its own, in order; a
 refused entry is reported and the others apply; a document an earlier entry took is taken
-for the later ones; no `not-needed` outcome; record_missing; the run's outcome and the
-batch's progress."""
+for the later ones; no `not-needed` outcome; record_missing; the run's outcome on its
+work list."""
 from tests._base import StoreCase
 import db                     # server/ is on sys.path once tests._base is imported
 
@@ -77,7 +77,7 @@ class Decide(StoreCase):
             decide.record_missing(self.conn, self.token, self.pids[0], self.rev(self.pids[0]),
                                   "x")
 
-    def test_the_outcome_lands_on_the_runs_work_list_and_marks_progress(self):
+    def test_the_outcome_lands_on_the_runs_work_list(self):
         import decide
         self.work_rows([self.pids[2]])         # the run's work list (the fixture helper)
         decide.decide(self.conn, self.token, [self.entry(self.pids[2], "missing",
@@ -85,8 +85,8 @@ class Decide(StoreCase):
         self.assertEqual(tuple(self.conn.execute(
             "SELECT outcome, reason FROM run_work WHERE pid=?", (self.pids[2],)).fetchone()),
             ("missing", "nothing in mail"))
-        self.assertEqual(self.conn.execute("SELECT progressed FROM claims WHERE gen=?",
-                                           (self.token,)).fetchone()[0], 1)
+        self.assertIsNotNone(self.conn.execute("SELECT closed_seq FROM run_work WHERE pid=?",
+                                               (self.pids[2],)).fetchone()[0])
 
     def test_ingest_records_the_vendor_and_a_filing_sequence(self):
         import documents
@@ -118,9 +118,10 @@ class Decide(StoreCase):
 
     # --- beyond the brief's nine -------------------------------------------------------
 
-    def progressed(self):
-        return self.conn.execute("SELECT progressed FROM claims WHERE gen=?",
-                                 (self.token,)).fetchone()[0]
+    def closed(self):
+        """How many work-list entries are closed (each a hand-out's progress)."""
+        return self.conn.execute("SELECT count(*) FROM run_work WHERE closed_seq IS NOT"
+                                 " NULL").fetchone()[0]
 
     def test_a_refused_entry_rolls_back_alone_and_writes_nothing(self):
         import decide
@@ -222,7 +223,7 @@ class Decide(StoreCase):
                       [self.entry(self.pids[0], "match", self.doc(amount_minor=1))])
         self.assertEqual(self.conn.execute("SELECT outcome FROM run_work WHERE pid=?",
                                            (self.pids[0],)).fetchone()[0], None)
-        self.assertEqual(self.progressed(), 0)
+        self.assertEqual(self.closed(), 0)
 
     def test_single_decisions_land_on_the_work_list_too(self):
         import matches
@@ -235,7 +236,7 @@ class Decide(StoreCase):
                               document_date="2026-09-01")
         self.assertEqual(dict(self.conn.execute("SELECT pid, outcome FROM run_work")),
                          {self.pids[0]: "match", self.pids[1]: "propose"})
-        self.assertEqual(self.progressed(), 1)
+        self.assertEqual(self.closed(), 2)
 
     # --- Missing meets the floor's own preconditions -----------------------
 
@@ -371,13 +372,9 @@ class Filing(StoreCase):
         with self.assertRaisesRegex(db.Refusal, "vendor"):
             self.ingest(b"%PDF-1.4 two", token=self.token, vendor="v" * 2001)
 
-    def test_a_token_bearing_filing_marks_progress_and_a_desk_filing_does_not(self):
-        progressed = lambda: self.conn.execute("SELECT progressed FROM claims WHERE gen=?",
-                                               (self.token,)).fetchone()[0]
+    def test_each_filing_takes_a_later_filing_sequence(self):
         self.ingest(b"%PDF-1.4 desk")
-        self.assertEqual(progressed(), 0)
         a = self.ingest(b"%PDF-1.4 job", token=self.token)
-        self.assertEqual(progressed(), 1)
         b = self.ingest(b"%PDF-1.4 later", token=self.token)
         self.assertGreater(
             self.conn.execute("SELECT filed_seq FROM documents WHERE doc_id=?",
@@ -402,7 +399,7 @@ class VendorSearch(StoreCase):
         self.work_rows(self.pids[:3], vendor="Adobe")
         self.work_rows(self.pids[3:], vendor="Zapier")
 
-    def test_a_search_marks_progress_and_the_kind_is_checked(self):
+    def test_a_search_is_recorded_and_the_kind_is_checked(self):
         import work
         with self.assertRaisesRegex(db.Refusal, "search is hinted"):
             work.record_search(self.conn, pids=self.pids[:1], token=self.token,
@@ -412,14 +409,14 @@ class VendorSearch(StoreCase):
         with self.assertRaisesRegex(db.Refusal, "not both"):
             work.record_search(self.conn, pids=self.pids[:1], pid=self.pids[1],
                                token=self.token, queries=["q"])
-        # an identity question or a bare `incomplete` is no search: no progress
+        # an identity question or a bare `incomplete` is no search: nothing counted
+        queries = lambda: (work.describe(self.conn, self.pids[0])["search"] or {}).get(
+            "queries") or []
         work.record_search(self.conn, pids=self.pids[:1], token=self.token, search="hinted",
                            identity_unknown=True, incomplete=True)
-        self.assertEqual(self.conn.execute("SELECT progressed FROM claims WHERE gen=?",
-                                           (self.token,)).fetchone()[0], 0)
+        self.assertEqual(queries(), [])
         work.record_search(self.conn, pid=self.pids[0], token=self.token, queries=["q"])
-        self.assertEqual(self.conn.execute("SELECT progressed FROM claims WHERE gen=?",
-                                           (self.token,)).fetchone()[0], 1)
+        self.assertEqual(queries(), ["q"])
 
     def test_the_tool_takes_pids_and_search(self):
         import qa_server

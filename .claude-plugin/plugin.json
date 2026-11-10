@@ -1,6 +1,6 @@
 {
   "name": "quarterly-accounting",
-  "version": "0.11.31",
+  "version": "0.12.0",
   "description": "Quarterly accounting preparation: matches every business-account transaction to the document it needs, mirrors the decisions into bank-feed as acct:: tags and notes, answers from its own store, and builds a quarter's zip on request.",
   "author": {
     "name": "Nicola Bonzanni"
@@ -12,9 +12,6 @@
         "skill": "quarterly-job",
         "title": "Accounting check",
         "summary": "Checks the bank and Gmail, matches invoices, keeps the bank ledger's notes current",
-        "batches": 20,
-        "turnsPerBatch": 80,
-        "session": "fresh",
         "host": "specialist",
         "quietWhenScheduled": true
       }

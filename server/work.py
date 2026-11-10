@@ -48,7 +48,6 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
     report lists it or names one of its attachments in `refs`; `missing` waits for it. A
     report with no queries and `emails` is a listing, not a search: it counts toward no
     SEARCHES_MAX (a payment that used its searches can still report it)."""
-    import decide
     import queues
     if pids is not None and pid is not None:
         raise db.Refusal("pass pids or pid (one payment), not both")
@@ -99,8 +98,6 @@ def record_search(conn, *, token, pids=None, pid=None, search="payment", queries
             rows = queues.queued(conn, job_id, unit, "ref")
             answer.update(files=[r["key"] for r in queues.take_fitting(rows)],
                           files_total=len(rows))
-        if token is not None and (effort or listing):
-            decide.note_progress(conn, token)       # A search recorded
     return answer
 
 

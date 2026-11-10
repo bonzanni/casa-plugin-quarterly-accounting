@@ -4,7 +4,7 @@ path_scope on Read. Now a document is filed with no reading, read through read_d
 (the session copy Read may open), and its reading recorded with update_document_metadata;
 a document a cut left unread is handed `unread` and read before it is judged."""
 from tests._base import StoreCase
-from tests.sim_job import CasaCut, JobDriver
+from tests.sim_job import Interrupted, JobDriver
 
 
 class ReadingUnderPathScope(StoreCase):
@@ -17,7 +17,7 @@ class ReadingUnderPathScope(StoreCase):
         for i in range(n):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"ZAP-{i + 1}")
         drv.read_mode = mode
-        drv.casa_cut = 80
+        drv.interrupt_at = 80
         drv.run_job(job_id)
         return drv, dict(self.conn.execute(
             "SELECT status, count(*) FROM projections GROUP BY status").fetchall())
@@ -44,10 +44,10 @@ class ReadingUnderPathScope(StoreCase):
         def cut_first_read(path):
             if not cut:
                 cut.append(path)
-                raise CasaCut()                  # filed; its reading never recorded
+                raise Interrupted()                  # filed; its reading never recorded
             return real(path)
         drv._read = cut_first_read
-        drv.casa_cut = 80
+        drv.interrupt_at = 80
         units = drv.run_job("c7c7c7c7-03")
         self.assertEqual(len(cut), 1)
         self.assertTrue(any(c.get("unread") for u in units if u["unit"] == "payment"
