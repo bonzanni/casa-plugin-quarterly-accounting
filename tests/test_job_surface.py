@@ -29,11 +29,12 @@ class Surface(StoreCase):
             "name": "work", "skill": "quarterly-job", "title": "Accounting check",
             "summary": "Checks the bank and Gmail, matches invoices, keeps the bank ledger's "
                        "notes current",
-            "batches": 20, "turnsPerBatch": 80, "session": "fresh",
             "host": "specialist", "quietWhenScheduled": True}])
         self.assertEqual(m["version"], "0.11.31")
-        import job                  # the batch budget and the batch window's claim count
-        self.assertEqual(job.TURNS_PER_BATCH, m["casa"]["jobs"][0]["turnsPerBatch"])
+        # Casa 0.355.0 runs a job as one session and excludes a manifest that still
+        # declares any of these
+        for gone in ("batches", "turnsPerBatch", "session"):
+            self.assertNotIn(gone, m["casa"]["jobs"][0])
 
     def test_the_readme_and_changelog_name_the_casa_floor(self):
         self.assertIn("quietWhenScheduled", (ROOT / "README.md").read_text())
@@ -172,10 +173,21 @@ class ToolLayer(StoreCase):
         import qa_server, tools  # noqa: F401
         nxt = " ".join(qa_server.TOOLS["job_next"]["description"].split())
         self.assertIn("then after each unit job_next(pass_token=…)", nxt)
-        self.assertIn("keep going until `complete`; Casa ends the turn when its batch is "
-                      "full, and an unfinished unit comes again", nxt)
-        self.assertIn("`report` → report_job_progress with its `progress` verbatim, then "
-                      "job_next", nxt)
+        self.assertIn("keep going until `complete`; a unit left unfinished comes again", nxt)
+        self.assertIn("first, and again whenever you hold no pass_token (after a summary of "
+                      "your context, or a restart)", nxt)
+        self.assertIn("Operator messages arrive between steps: answer them in text, act on "
+                      "them, carry on.", nxt)
+        self.assertIn("Report progress as you work: report_job_progress(summary=<the unit's "
+                      "progress.summary>) after a unit worth telling, and at least every 20 "
+                      "units — Casa keeps a long job going only while it reports progress.",
+                      nxt)
+        self.assertNotIn("optional", nxt)
+        self.assertIn('At complete, emit_completion(status="ok", text=<its text>).', nxt)
+        import re
+        for gone in (r"\bbatch", r"report_job_progress with its `progress` verbatim",
+                     r"\bturn\b", r"\breport\b"):
+            self.assertIsNone(re.search(gone, nxt), gone)
         status = " ".join(qa_server.TOOLS["job_status"]["description"].split())
         self.assertIn("never a claim", status)
 

@@ -1,6 +1,6 @@
 """The filing queue, a handover joining a check, and own-mail reading, each reproduced
 through the real surface (qa_server.TOOLS, a real bank-feed):
-- no batch Casa cuts at 80 calls is left without a progress report (the next claim reports it), and filing ends only once its queue
+- own-mail filing interrupted every 80 calls finishes, and filing ends only once its queue
   (queues: the own-mail search and every attachment it found) is empty;
 - a handover that joins an operator check keeps the check's full summary and
   Review order, the handover's receipt line added; the handover-only rendering is for a
@@ -11,7 +11,7 @@ from tests._base import StoreCase
 from tests.sim_job import JobDriver
 import db                     # server/ is on sys.path once tests._base is imported
 
-CASA_CALLS = 80               # Casa ends a batch at this many tool calls
+INTERRUPT_AT = 80             # the session loses its pass_token after this many calls
 
 
 class OwnMailFilingIsSliced(StoreCase):
@@ -22,20 +22,19 @@ class OwnMailFilingIsSliced(StoreCase):
         self.bind()
         self.drv = JobDriver(self, payments=2)          # Zapier EUR 10.00 and 20.00
 
-    def test_83_attachments_file_across_batches_each_reporting_progress(self):
+    def test_83_attachments_file_across_interruptions(self):
         import loop
         g = self.drv.gmail
         g.own(1000, day="2026-07-05", number="ZAP-1")      # the two that fit
         g.own(2000, day="2026-08-05", number="ZAP-2")
         for i in range(81):
             g.own(70000 + i, day="2026-07-20")
-        self.drv.casa_cut = CASA_CALLS
+        self.drv.interrupt_at = INTERRUPT_AT
         units = self.drv.run_job("d2d2d2d2-a1")
-        # no call budget: Casa's cut ends every batch but the last, each at most 80 calls
-        self.assertEqual(self.drv.cuts, len(self.drv.batch_calls) - 1)
-        self.assertLessEqual(max(self.drv.batch_calls), CASA_CALLS, self.drv.batch_calls)
-        self.assertGreaterEqual(len(self.drv.batch_calls), 4)    # 83 files: several batches
-        self.assertTrue(all(self.drv.batch_reported), self.drv.batch_reported)
+        # no call budget: an interruption ends every segment but the last, each at most 80 calls
+        self.assertEqual(self.drv.interruptions, len(self.drv.segment_calls) - 1)
+        self.assertLessEqual(max(self.drv.segment_calls), INTERRUPT_AT, self.drv.segment_calls)
+        self.assertGreaterEqual(len(self.drv.segment_calls), 4)    # 83 files: several segments
         filing = [u for u in units if u["unit"] == "filing"]
         self.assertGreater(len(filing), 1)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM documents").fetchone()[0], 83)
@@ -92,9 +91,9 @@ class OwnMailFilingIsSliced(StoreCase):
         refs = [r[0] for r in self.conn.execute("SELECT ref FROM operator_refs")]
         self.assertEqual(sorted(refs), sorted(m["ref"] for m in g.own_mail))
 
-    def test_a_new_ref_for_bytes_already_held_is_progress(self):
-        """A batch whose attachments are all copies of held files still persisted work —
-        their refs — so its batch reports progress; a ref filed again does not."""
+    def test_a_new_ref_for_bytes_already_held_is_recorded(self):
+        """Attachments that are all copies of held files still persist work — their refs;
+        a ref filed again records nothing new."""
         import job
         self.drv.claim("d2d2d2d2-a4")
         for _ in range(10):
@@ -103,16 +102,14 @@ class OwnMailFilingIsSliced(StoreCase):
                 break
             self.drv.do(u, self.drv.token)
         self.assertEqual(u["unit"], "filing")
+        refs = lambda: self.conn.execute("SELECT count(*) FROM operator_refs").fetchone()[0]
         for ref, expect in (("m1:a1", 1), ("m2:a1", 1), ("m2:a1", 0)):
-            with db.tx(self.conn):
-                self.conn.execute("UPDATE claims SET progressed=0 WHERE gen=?",
-                                  (self.drv.token,))
+            before = refs()
             path = self.publish("same.pdf", b"%PDF-1.4 the same bytes")
             self.drv._tool("ingest_document", dict(
                 source_path=path, kind="invoice", source="manual-email",
                 extraction_author="specialist", source_ref=ref, pass_token=self.drv.token))
-            self.assertEqual(self.conn.execute("SELECT progressed FROM claims WHERE gen=?",
-                                               (self.drv.token,)).fetchone()[0], expect, ref)
+            self.assertEqual(refs() - before, expect, ref)
 
 
 class HandoverJoiningACheck(StoreCase):

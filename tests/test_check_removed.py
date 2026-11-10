@@ -22,7 +22,9 @@ class ClosingGate(unittest.TestCase):
         self.assertTrue(hit("job.credit_sweep(conn)"))
         self.assertTrue(hit("hand(conn)"))
         self.assertFalse(hit("tests._base.hand_calls(x)"))
-        self.assertFalse(hit("job.TURNS_PER_BATCH"))
+        self.assertTrue(hit("job.TURNS_PER_BATCH"))
+        self.assertTrue(hit("decide.note_progress(conn, token)"))
+        self.assertFalse(hit("SELECT batch FROM claims"))
         self.assertFalse(hit("asks.requeue_taken(conn, pid)"))
         self.assertFalse(hit("lineage.append(conn, resolves=ids)"))
 

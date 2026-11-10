@@ -312,60 +312,52 @@ class TestJob(TempEnv):
     def units(self, unit, nxt):
         return flat(section(JOB, f"### `{unit}`", nxt))
 
-    def every_turn(self):
-        return flat(section(JOB, "## Every turn", "## Units"))
+    def the_job(self):
+        return flat(section(JOB, "## The job", "## Units"))
 
-    def topic(self):
-        return flat(section(JOB, "**An operator message in the job's topic", "## Units"))
+    def messages(self):
+        return flat(section(JOB, "**Operator messages**", "## Units"))
 
-    def test_the_job_skill_starts_every_turn_with_job_next(self):
-        turn = self.every_turn()
-        self.assertIn("Your first call is `job_next(job_id=<the Job id line of your brief>)`",
-                      turn)
-        first_call = re.search(r"`([a-z_]+)\(", turn).group(1)
+    def test_the_job_starts_with_job_next_and_claims_again_without_a_token(self):
+        job = self.the_job()
+        self.assertIn("The job is one session.", job)
+        self.assertIn("Call `job_next(job_id=<the Job id line of your brief>)` first, and "
+                      "again whenever you hold no `pass_token` (after your context was "
+                      "summarised, or a restart).", job)
+        first_call = re.search(r"`([a-z_]+)\(", job).group(1)
         self.assertEqual(first_call, "job_next")
         for phrase in ("call `job_next(pass_token=…)`",
-                       "Keep going until `complete`: Casa ends the turn when its batch is full, "
-                       "and what a unit still owes then comes again.",
-                       "`report` → `report_job_progress` with its `progress` verbatim, then "
-                       "`job_next`.",
+                       "Keep going until `complete`; what a unit still owes comes again.",
                        "load all a unit needs in ONE `ToolSearch` `select:` call",
-                       '`complete` → `report_job_progress` with its `progress`, then '
-                       '`emit_completion(status="ok", text=<its text>)`',
-                       "call `job_next(job_id=…)` once more; if that is refused too, end the "
-                       "turn"):
-            self.assertIn(phrase, turn, phrase)
+                       '`complete` → `emit_completion(status="ok", text=<its text>)`.',
+                       "Report progress: `report_job_progress(summary=<the unit's "
+                       "progress.summary>)` after a unit worth telling, at least every 20 "
+                       "units; Casa keeps a long job going only while it reports progress.",
+                       "A refusal that this `pass_token` is no longer the current one → "
+                       "`job_next(job_id=…)` for a new one."):
+            self.assertIn(phrase, job, phrase)
+        for gone in (r"\bbatch", r"\bturn\b", r"`report`", r"topic message", r"job_status",
+                     r"optional"):
+            self.assertIsNone(re.search(gone, job), gone)
 
-    def test_the_job_skill_never_calls_job_next_in_a_topic_message(self):
-        topic = self.topic()
-        self.assertIn("**Never call `job_next` in a topic message.**", topic)
-        self.assertNotIn("`job_next(", topic)
-        self.assertIn("Reply in the main chat on the message, or tap its buttons.", topic)
-        self.assertIn("never call `mark_rendering_delivered` in the topic", topic)
-        self.assertIn("Never post a view there: `show_view` posts to the operator's main chat",
-                      topic)
-        self.assertNotIn("build_review", topic)
-
-    def test_a_topic_message_turn_ends_with_job_status(self):
-        topic = self.topic()
-        order = ["Last, always: `job_status(job_id=<the Job id line of your brief>)`",
-                 'If `done`, call `emit_completion(status="ok", text=<its text>)` and nothing '
-                 'else']
-        pos = [topic.index(k) for k in order]
-        self.assertEqual(pos, sorted(pos))
-
-    def test_a_done_job_status_completes_without_reporting_progress_again(self):
-        """The batch that answered `complete` already reported; a second
-        report_job_progress would show Casa's batch line twice."""
-        rule = flat(section(JOB, "- Last, always: `job_status(", "## Units"))
-        self.assertIn('`emit_completion(status="ok", text=<its text>)`', rule)
-        self.assertNotIn("report_job_progress", rule)
+    def test_operator_messages_are_answered_in_the_session_and_the_job_carries_on(self):
+        m = self.messages()
+        self.assertIn("**Operator messages** reach you between your steps, in this same "
+                      "session.", m)
+        self.assertIn("Answer each in text (your text reaches the job's topic), act on it "
+                      "where the job can, then carry on with the job.", m)
+        self.assertIn("Reply in the main chat on the message, or tap its buttons.", m)
+        self.assertIn("Never post a view for a message: `show_view` posts to the operator's "
+                      "main chat, and only the `view` unit calls it.", m)
+        self.assertNotIn("Never call `job_next`", m)
+        self.assertNotIn("build_review", m)
 
     def test_the_job_skill_names_exactly_the_new_units_and_rules(self):
         text = (ROOT / "skills/quarterly-job/SKILL.md").read_text()
         for unit in ("probes", "snapshot", "erasures", "filing", "payment", "mirror", "view",
-                     "post", "report", "complete"):
+                     "post", "complete"):
             self.assertIn(f"`{unit}`", text)
+        self.assertNotIn("`report`", text)          # 0.12.0: one session, no report unit
         for gone in ("sweep", "gmail-probe", "`item`", "`judge`", "build_quarterly_package",  # removed-name: asserted absent
                      "list_projections", "record_observation", "judged", "resolves",  # removed-name: asserted absent
                      "set_expectation(", "window (default 10 days)",
@@ -376,7 +368,7 @@ class TestJob(TempEnv):
                      "vendor-and-dates search", "record_mirror", "record_not_found",
                      "certain", "reset_store", "set_aside(", "refs=["):
             self.assertIn(rule, text)
-        self.assertLessEqual(len(text), 11_600)    # 0.11.21: row 5 judged (#105, +290); 0.11.18: classify first, the tax-refund exception (#98 #97, +285); queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90); 0.11.7: the reading unit, handed documents proposed (#67, +200); 0.11.8: handed_fits, no commentary (#72, +170)
+        self.assertLessEqual(len(text), 11_600)    # 0.12.0: one session, progress reported (+1); 0.11.21: row 5 judged (#105, +290); 0.11.18: classify first, the tax-refund exception (#98 #97, +285); queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90); 0.11.7: the reading unit, handed documents proposed (#67, +200); 0.11.8: handed_fits, no commentary (#72, +170)
 
     def test_the_units_come_in_the_loops_order(self):
         """Probes, snapshot, filing, vendor, mirror, the run's one post."""
@@ -435,11 +427,10 @@ class TestJob(TempEnv):
     READING = "amount_minor, currency, document_date, issuer, document_number, pass_token)`"
 
     def test_what_a_unit_owes_comes_again(self):
-        """Queues; no call budget (2026-10-07): Casa's cut ends the turn, and what the unit
-        still owes is the server's and comes again."""
-        turn = flat(section(JOB, "## Every turn", "**Refusals.**"))
-        self.assertIn("Casa ends the turn when its batch is full, and what a unit still owes "
-                      "then comes again.", turn)
+        """Queues; no call budget: what a unit still owes is the server's and comes again,
+        also after the session lost its token."""
+        job = flat(section(JOB, "## The job", "**Refusals.**"))
+        self.assertIn("what a unit still owes comes again.", job)
         self.assertNotIn("filed_refs", JOB)                  # One membership, the server's
         self.assertNotIn("max_files", JOB)
         self.assertNotIn("Which are new", JOB)
@@ -559,18 +550,19 @@ class TestJob(TempEnv):
         self.assertIn("`show_view(render_id=<the unit's render_id>)`", view)
         self.assertIn("`mark_rendering_delivered(render_id)`", view)
 
-    def test_a_refusal_in_a_topic_message_is_answered_not_followed_by_job_next(self):
-        """The call-job_next-after-a-refusal rule is a
-        batch's; in a topic message the refusal is answered in the reply."""
-        r = flat(section(JOB, "**Refusals.**", "**An operator message in the job's topic"))
-        self.assertIn("- In a batch: call `job_next(pass_token=…)`", r)
-        self.assertIn("- In a topic message: answer the refusal in your reply, never with "
-                      "`job_next`.", r)
-        self.assertEqual(r.count("`job_next("), 1)
+    def test_a_refusal_is_followed_by_job_next_and_a_repeated_one_ends_the_job(self):
+        """One session: after a refusal the job asks for its next step; the same refusal
+        coming back again and again is the model's to judge, and it ends the job."""
+        r = flat(section(JOB, "**Refusals.**", "**Operator messages**"))
+        self.assertIn("Call `job_next(pass_token=…)` and carry on.", r)
+        self.assertIn('If the same unit keeps coming back refused the same way, stop with '
+                      '`emit_completion(status="failed", text=<what was refused>)`.', r)
+        self.assertNotIn("end the turn", r)
 
     def test_the_job_never_speaks_binds_packages_or_calls_a_protected_tool(self):
         never = flat(section(JOB, "## Never"))
-        self.assertIn("You never speak to the operator", never)
+        self.assertIn("You never speak to the operator, except to answer an operator message",
+                      never)
         # A misrouted desk turn must not conclude the desk is someone else
         self.assertIn("Never call `request_work` or `start_job`: those asks are made at your "
                       "desk (skill quarterly-accounting), not by the job.", never)

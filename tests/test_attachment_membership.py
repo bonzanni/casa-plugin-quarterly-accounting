@@ -1,10 +1,10 @@
-"""Which attachment refs are already filed, reproduced through the real surface under Casa's 80-call cut: ONE server-side membership for every attachment ref, own mail
+"""Which attachment refs are already filed, reproduced through the real surface with an interruption every 80 calls: ONE server-side membership for every attachment ref, own mail
 and a vendor's alike — of the refs a search found, only the exact ones no ingest of ANY run
 filed (work.filed) join the run's queue and are answered as `files`; no per-run list."""
 from tests._base import StoreCase
 from tests.sim_job import JobDriver
 
-CASA_CALLS = 80
+INTERRUPT_AT = 80
 
 
 class OneMembershipAcrossRuns(StoreCase):
@@ -24,22 +24,21 @@ class OneMembershipAcrossRuns(StoreCase):
         drv = JobDriver(self, payments=40)
         for i in range(40):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"INV-{i + 1}")
-        drv.casa_cut = CASA_CALLS
+        drv.interrupt_at = INTERRUPT_AT
         drv.run_job("d5d5d5d5-a1")
         self.assertEqual(self.conn.execute("SELECT count(*) FROM projections WHERE"
                                            " status='matched'").fetchone()[0], 40)
         drv.add_payments([drv.DATES[i % 3] for i in range(40, 83)])
         for i in range(40, 83):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"INV-{i + 1}")
-        before, cuts = len(drv.ingested), drv.cuts
+        before, earlier = len(drv.ingested), drv.interruptions
         old = {m["ref"] for m in drv.gmail.messages[:40]}
         drv.run_job("d5d5d5d5-a2")
         again = drv.ingested[before:]
         self.assertFalse(old & set(again))                      # no old one again
-        # each new one filed; one a cut parted from its reading is filed again
+        # each new one filed; one an interruption parted from its reading is filed again
         self.assertEqual(len(set(again)), 43)
-        self.assertEqual(drv.cuts - cuts, len(drv.batch_calls) - 1)   # no budget: Casa ends a batch
-        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
+        self.assertEqual(drv.interruptions - earlier, len(drv.segment_calls) - 1)   # no budget
         self.assertEqual(self.conn.execute("SELECT count(*) FROM documents").fetchone()[0], 83)
         self.assertEqual(dict(self.conn.execute(
             "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
@@ -91,7 +90,7 @@ class OneMembershipAcrossRuns(StoreCase):
         second = drv.gmail.invoice("Zapier", 2000, "EUR", drv.DATES[1], "INV-B",
                                    message=drv.gmail.messages[0]["id"])
         self.assertEqual(first.split(":")[0], second.split(":")[0])   # one email
-        drv.casa_cut = CASA_CALLS
+        drv.interrupt_at = INTERRUPT_AT
         drv.run_job("d5d5d5d5-d1")
         self.assertEqual(sorted(r[0] for r in self.conn.execute(
             "SELECT source_ref FROM documents")), sorted([first, second]))

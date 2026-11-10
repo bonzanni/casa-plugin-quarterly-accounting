@@ -147,7 +147,6 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
     """`vendor` is the KB counterparty of the vendor group being worked when the job files
     it; a document filed otherwise (own mail, a handover) carries
     none. `filed_seq` is the store sequence at filing: "newly filed"."""
-    import decide
     import passes
     if source not in SOURCES:
         raise db.Refusal(f"source is one of {', '.join(SOURCES)}")
@@ -190,8 +189,7 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                 _install(data, sha, "." + existing["ext"])
                 _reread(conn, existing[0],                      # Before the ref
                         *_amount_said(amount_minor, currency, filing=True))
-                if _operator_ref(conn, source, source_ref, existing[0]) and token is not None:
-                    decide.note_progress(conn, token)   # A newly filed ref is progress
+                _operator_ref(conn, source, source_ref, existing[0])
                 if vendor is not None:
                     # a vendor group that found it again names it, where none was recorded
                     conn.execute("UPDATE documents SET vendor=? WHERE doc_id=? AND vendor IS"
@@ -214,8 +212,6 @@ def ingest_document(conn, *, source_path, kind, source, extraction_author, count
                  db.now() if amount_minor is not None or currency else None))
             doc_id = cur.lastrowid
             _operator_ref(conn, source, source_ref, doc_id)
-            if token is not None:
-                decide.note_progress(conn, token)      # A document filed
             return {"doc_id": doc_id, "sha256": sha, "created": True,
                     "collisions": collisions(conn, doc_id)}
 
@@ -413,9 +409,8 @@ def update_document_metadata(conn, doc_id: int, *, token=None, **fields) -> dict
             conn.execute("UPDATE documents SET read_at=coalesce(read_at, ?) WHERE doc_id=?",
                          (db.now(), doc_id))
         # a recorded reading closes every queued item of a ref the document was filed under
-        if _read(conn, doc_id) and _close_read_refs(conn, doc_id) and token is not None:
-            import decide
-            decide.note_progress(conn, token)
+        if _read(conn, doc_id):
+            _close_read_refs(conn, doc_id)
         before = purchase(conn, doc_id)
         if fields:
             conn.execute("UPDATE documents SET %s WHERE doc_id=?"

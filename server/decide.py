@@ -28,16 +28,9 @@ DATE_READ = ("pass document_date: the date printed on the document you opened (i
              "date), YYYY-MM-DD")
 
 
-def note_progress(conn, token) -> None:
-    """The batch persisted work (a decision, a filing, a search) — Casa's
-    batch progress report. (A hand-out's own progress is the queues' stamps: queues.settle.)"""
-    conn.execute("UPDATE claims SET progressed=1, progressed_seq=? WHERE gen=?",
-                 (db.next_seq(conn), int(token)))
-
-
 def record_outcome(conn, token, pid, outcome, reason=None) -> None:
     """The run's work-list entry for `pid` (run_work, the job of claim `token`) takes
-    `outcome`; a payment not on the list: no row, nothing. Marks the batch progressed."""
+    `outcome`; a payment not on the list: no row, nothing."""
     job = conn.execute("SELECT job_id FROM claims WHERE gen=?", (int(token),)).fetchone()
     # the work row handed out for this payment: its own pid, or a pid since merged into it
     rows = [r for r in conn.execute("SELECT pid FROM run_work WHERE job_id=?", (job[0],))
@@ -45,7 +38,6 @@ def record_outcome(conn, token, pid, outcome, reason=None) -> None:
     for r in rows:
         conn.execute("UPDATE run_work SET outcome=?, reason=?, closed_seq=? WHERE job_id=? AND"
                      " pid=?", (outcome, reason, db.next_seq(conn), job[0], r["pid"]))
-    note_progress(conn, token)
 
 
 def _handover_onto_pairing(conn, token, pid, e) -> bool:

@@ -155,7 +155,7 @@ B = {"type": "boolean"}
 O = {"type": "object"}
 A = {"type": "array", "items": {"type": "string"}}
 AI = {"type": "array", "items": {"type": "integer"}}
-TOKEN = {"type": "integer", "description": "the pass_token job_next gave you in this turn"}
+TOKEN = {"type": "integer", "description": "the pass_token job_next gave you"}
 Q = {"type": "string", "description": "YYYY-Qn, e.g. 2026-Q3 (Qn and Qn YYYY accepted)"}
 
 
@@ -486,20 +486,23 @@ def t_import(args):
 
 # --- the job -------------------------------------------------
 @register("job_next",
-          "The job's next step. First call of every job turn: job_next(job_id=<your brief's "
-          "`Job id:` line>, started_by=<the line right after your brief's first `Job id:` "
-          "line, verbatim, when it is a `Started by:` line; else omit it>) — it gives you a "
-          "pass_token; then after each unit job_next(pass_token=…). Do exactly the unit it "
-          "returns: probes, snapshot, erasures, filing, payment, mirror, view, post, report — "
-          "and keep going until `complete`; Casa ends the turn when its batch is full, and "
-          "an unfinished unit comes again. `report` → report_job_progress with its "
-          "`progress` verbatim, then job_next. At complete, report_job_progress then "
-          "emit_completion(status=\"ok\", text=<its text>). `view` → show_view(render_id); "
+          "The job's next step. Call job_next(job_id=<your brief's `Job id:` line>, "
+          "started_by=<the line right after your brief's first `Job id:` line, verbatim, "
+          "when it is a `Started by:` line; else omit it>) first, and again whenever you "
+          "hold no pass_token (after a summary of your context, or a restart) — it gives you "
+          "a pass_token; then after each unit job_next(pass_token=…). Do exactly the unit it "
+          "returns: probes, snapshot, erasures, filing, payment, mirror, view, post — and "
+          "keep going until `complete`; a unit left unfinished comes again. Operator "
+          "messages arrive between steps: answer them in text, act on them, carry on. Report "
+          "progress as you work: report_job_progress(summary=<the unit's progress.summary>) "
+          "after a unit worth telling, and at least every 20 units — Casa keeps a long job "
+          "going only while it reports progress. At complete, emit_completion(status=\"ok\", text=<its text>). "
+          "`view` → show_view(render_id); "
           "on its receipt mark_rendering_delivered(render_id). `post` → "
           "post_results(render_ids); on its receipt mark_rendering_delivered(render_ids). A "
           "withheld post marks nothing — call job_next: it is offered again, at most twice.",
           obj({"job_id": S, "pass_token": TOKEN,
-               "started_by": {"type": "string", "description": "first job_id call only: "
+               "started_by": {"type": "string", "description": "with job_id: "
                               "Casa's `Started by:` line, the one right after the first "
                               "`Job id:` line of your brief, copied verbatim"}}))
 def t_job_next(args):
@@ -512,10 +515,9 @@ def t_job_next(args):
 
 
 @register("job_status",
-          "Read-only, never a claim: may this job end now? In an operator message's turn in the "
-          "job's topic, call it LAST with your brief's `Job id:`; if `done`, call "
-          "report_job_progress(summary=<its text>, progressed=true) then "
-          "emit_completion(status=\"ok\", text=<its text>).",
+          "Read-only, never a claim: may this job end now? `done` once job_next answered "
+          "`complete`, with the completion's `text`; then emit_completion(status=\"ok\", "
+          "text=<its text>).",
           obj({"job_id": S}, ("job_id",)))
 def t_job_status(args):
     import job

@@ -4,7 +4,7 @@ units come with job_next.
 
 Every reason a payment is on the list is a fact of that payment: its
 status, its machine pairing's facts, or a handover the run took. No reason reads a
-claim, a run or a batch, so a re-claim of the same job never loses an unreviewed document.
+claim or a run, so a re-claim of the same job never loses an unreviewed document.
 A document filed later never reopens a machine pairing by itself."""
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ import fx
 import kb
 import lineage
 import matches
-import progress
 import queues
 
 NEAR_DAYS = 31          # "a date near the payment's", either side
@@ -575,18 +574,17 @@ def completion_sig(conn, quarter) -> str:
 
 # ---- the run: one pass, its units in order --------------
 OFFER_MAX = 2            # One rendering is handed out at most this often per run
-# No call budget. A batch ends only when
-# Casa cuts it at its turn limit; a cut batch's persisted work is reported by the next
-# claim (said_seq), and a unit a cut interrupted comes again (its items persist as done).
-# The mirror is handed in chunks of MIRROR_CALLS bank-feed calls, each closed by its
-# record_mirror: a cut inside a chunk may repeat up to that many calls — repeated tag calls
-# are no-ops, a repeated note call adds an identical line
+# No call budget: work is handed until the run completes. A unit the session dropped (a
+# context summary or a Casa restart, then a fresh claim) comes again; its items persist as
+# done. The mirror is handed in chunks of MIRROR_CALLS bank-feed calls, each closed by its
+# record_mirror: an interruption inside a chunk may repeat up to that many calls — repeated
+# tag calls are no-ops, a repeated note call adds an identical line
 MIRROR_CALLS = 8
 WORDS = {"probes": "Reading the bank", "snapshot": "Importing the bank read",
          "erasures": "Checking the bank's erased rows",
          "filing": "Filing your own emailed documents", "payment": "Matching invoices",
          "mirror": "Updating the bank ledger", "post": "Posting the result",
-         "view": "Posting the result", "report": "Work saved",
+         "view": "Posting the result",
          "complete": "All accounting work done",
          "reading": "Reading the handed-over documents"}
 NO_TOOLS = "bank-feed's tools are not available to the finance specialist"
@@ -900,60 +898,14 @@ def _choose(conn, token, job_id, logs) -> dict:
     return {"unit": "complete", "text": _run(conn, job_id)["end_text"]}
 
 
-def _report_owed(conn, token, job_id):
-    """The model skipped `report: true` beside a work unit, so Casa's
-    3-batch guard ended a productive run. A claim that has not reported gets the `report`
-    unit, alone, when the run persisted work since its LAST report (this claim's work, or a
-    batch Casa cut before it could report — with no call budget, every batch but the last
-    ends in a cut); the next job_next carries on."""
-    c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
-    if c["said"] or c["seq"] is None or _run(conn, job_id)["completed_at"] is not None:
-        return None
-    # claims.said_seq is the DELIBERATE exception to "no since-the-last-report bookkeeping": a true report only for PERSISTED work keeps Casa's
-    # stuck-run guard able to stop a looping run before the 20-batch cap; revisit if Casa
-    # credits progress from job_next itself 
-    since = conn.execute("SELECT coalesce(max(said_seq), min(seq)) FROM claims WHERE"
-                         " job_id=?", (job_id,)).fetchone()[0]
-    return {"unit": "report"} if progress.made(conn, job_id, since) else None
-
-
-WORK_UNITS = ("erasures", "filing", "payment", "mirror", "reading")   # A payment, a file, an
-#                                                          erase check, a mirror call
-
-
-def _close(conn, token, out) -> dict:
-    """Every answer carries the pass_token. Progress is reported by the `report` unit
-    (_report_owed) and at the run's end (`complete`)."""
+def _close(conn, token, job_id, out) -> dict:
+    """Every answer carries the pass_token and a one-line `progress.summary` the job posts
+    with report_job_progress as it works (Casa keeps a long job going only while it reports
+    progress): the unit's words, or at `complete` the run's closing summary."""
     import job
-    c = conn.execute("SELECT * FROM claims WHERE gen=?", (token,)).fetchone()
-    ending = out["unit"] == "complete"
-    conn.execute("UPDATE claims SET closed=? WHERE gen=?", (int(ending or c["closed"]), token))
-    # progress/budget #3 under — generalized by SIMPLIFYING:
-    # this claim progressed iff it handed out a work unit or something was closed or
-    # persisted since it began (progress.made). Casa reads a batch's LAST report, never
-    # overwritten by a false; a stuck model is bounded by the per-payment caps and
-    # `"batches": 20`
-    if out["unit"] in WORK_UNITS:
-        conn.execute("UPDATE claims SET handed=1 WHERE gen=?", (token,))
-    # a `report` is handed only when work is owed since the run's last report, so it says
-    # true; a claim that said true never ends on a false
-    progressed = bool(c["said"] or c["handed"]) or out["unit"] in WORK_UNITS + ("report",) \
-        or (c["seq"] is not None and progress.made(conn, c["job_id"], c["seq"]))
-    # A report rides ONLY on the `report` unit (alone: the model cannot do a unit
-    # and skip it) and on `complete` — never beside a work unit
-    report = ending or (out["unit"] == "report")
-    if report and progressed:
-        # A handed `report` counts only once the model came back — its
-        # report_seq becomes said_seq on this claim's next job_next (next_unit); a batch
-        # cut before that delivered nothing, and the next claim is handed it again
-        col = "said_seq" if ending else "report_seq"
-        conn.execute(f"UPDATE claims SET said=1, {col}=? WHERE gen=?",
-                     (db.next_seq(conn), token))
-    summary = (job.run_end(conn, c["job_id"])[1] if out["unit"] == "complete"
+    summary = (job.run_end(conn, job_id)[1] if out["unit"] == "complete"
                else WORDS[out["unit"]])
-    out.update(pass_token=token, report=report,
-               progress={"summary": summary, "progressed": progressed, "done": None,
-                         "remaining": None})
+    out.update(pass_token=token, progress={"summary": summary})
     return out
 
 
@@ -961,21 +913,13 @@ def next_unit(conn, token) -> dict:
     """The cursor, in order: probes / snapshot (the bank read), filing, the work list
     (built once), the payments, the mirror (while the bank gate allows writes) until nothing
     is owed on a fresh diff, the run's one post, complete. One transaction that re-checks
-    the claim. No call budget: work is handed until Casa cuts
-    the batch. A claim that persisted work and has not reported is answered with the
-    `report` unit alone, so the report Casa's guard needs is never one more flag beside a
-    work unit."""
+    the claim. No call budget: work is handed until the run completes."""
     import job
     logs: list = []
     with db.tx(conn):
         job.check_claim(conn, token)
         job_id = _job_of(conn, token)
-        # the model came back after a handed `report`: it was delivered
-        conn.execute("UPDATE claims SET said_seq=report_seq, report_seq=NULL WHERE gen=? AND"
-                     " report_seq IS NOT NULL", (token,))
-        owed = _report_owed(conn, token, job_id)
-        out = _close(conn, token, owed if owed is not None else
-                     _choose(conn, token, job_id, logs))
+        out = _close(conn, token, job_id, _choose(conn, token, job_id, logs))
         if out["unit"] == "post":
             for rid in out["render_ids"]:
                 _offer(conn, rid, job_id)

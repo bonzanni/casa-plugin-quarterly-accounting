@@ -264,7 +264,6 @@ def record(conn, token, done, failed) -> dict:
     written (the export tags and mirror_note move, no read-back); a refused call is kept
     for the end message and not handed again in this run. Unknown or already recorded
     numbers are ignored."""
-    import decide
     done = sorted(_numbers(done or []))        # hand-out order: the later note wins
     bad = [f for f in failed or [] if not isinstance(f, dict)]
     if bad:
@@ -310,8 +309,6 @@ def record(conn, token, done, failed) -> dict:
                              [(err, pid) for pid in json.loads(r["pids_json"])])
             _raise_failed(conn, json.loads(r["args_json"]), json.loads(r["pids_json"]), err)
             recorded += 1
-        if recorded:
-            decide.note_progress(conn, token)
         left = owed(conn, job_id)
     return {"recorded": recorded, "owed": left}
 

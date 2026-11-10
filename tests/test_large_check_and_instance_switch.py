@@ -1,5 +1,4 @@
-"""A large check never reports three batches without
-progress; informational pages never take the operator's reply; a ledger instance switched
+"""A large check finishes across interruptions; informational pages never take the operator's reply; a ledger instance switched
 mid-pass after the reset acknowledgement stops the pass.
 
 The relay tests drive the registered tools (qa_server.TOOLS) against a synthetic bank,
@@ -14,21 +13,19 @@ OTHER = "b" * 32
 
 
 class LargeCheck(StoreCase):
-    """A run of many batches never reports three batches in a row
-    without progress (Casa ends a job after three): every vendor batch persists a search or
-    a decision (claims.progressed)."""
+    """A run of eighty payments whose session is interrupted every 80 calls (a context
+    summary, a restart) claims again each time and finishes, every payment decided."""
 
-    def test_eighty_payments_never_three_no_progress_batches(self):
+    def test_eighty_payments_finish_across_interruptions(self):
         import asks, job
         self.bind()
         drv = JobDriver(self, payments=0)
         for i in range(80):
             drv.add_payments(["2026-08-05"], counterparty=f"Vendor {i:02d}")
         asks.request_work(self.conn, "check", "cron")
-        drv.casa_cut = 80              # Casa's cut and its 3-batch guard (the driver's)
+        drv.interrupt_at = 80
         units = drv.run_job(A, started_by="scheduled")
-        self.assertGreaterEqual(len(drv.batch_calls), 3, drv.batch_calls)   # several
-        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
+        self.assertGreaterEqual(len(drv.segment_calls), 3, drv.segment_calls)   # several
         self.assertEqual(units[-1]["unit"], "complete")
         self.assertEqual(self.conn.execute("SELECT count(*) FROM run_work WHERE outcome IS"
                                            " NULL").fetchone()[0], 0)
@@ -81,8 +78,6 @@ class Tools(StoreCase):
         elif k == "payment":                # Nothing found, missing
             self.call("decide", pass_token=t, entries=[
                 {"pid": u["pid"], "outcome": "missing", "expected_revision": u["revision"]}])
-        elif k == "report":                 # report_job_progress, then job_next
-            pass
         elif k == "mirror":
             self.call("record_mirror", pass_token=t, done=[c["n"] for c in u["calls"]])
         elif k in ("post", "view"):
@@ -161,8 +156,8 @@ class InstanceSwitch(Tools):
     pass's gate was decided on the first instance."""
 
     def test_an_instance_switched_mid_pass_after_the_ack_stops_the_pass(self):
-        """The pass read the bank, its turn died before the import,
-        and the next batch reads another ledger instance: nothing is imported, the binding
+        """The pass read the bank, its session lost the token before the import,
+        and the next claim reads another ledger instance: nothing is imported, the binding
         stays, and the pass stops."""
         import binding, db, job
         self.until(self.start(2), "complete")             # run A: the store is on LEDGER
@@ -172,7 +167,7 @@ class InstanceSwitch(Tools):
         self.granted(binding.acknowledge_ledger_reset_in_tx)
         self.instance = OTHER                             # the next read sees another ledger
         u = self.call("job_next", job_id=B)
-        self.assertEqual(u["unit"], "probes")             # a new batch reads again
+        self.assertEqual(u["unit"], "probes")             # a new claim reads again
         u = self.do(u)
         self.assertEqual(u["unit"], "snapshot")
         with self.assertRaises(db.Refusal) as cm:

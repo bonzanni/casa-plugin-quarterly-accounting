@@ -10,6 +10,7 @@ class Schema10(StoreCase):
         self.assertGreaterEqual(db.SCHEMA_VERSION, 10)
         self.assertEqual(self.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], str(db.SCHEMA_VERSION))
+        # batch and closed are no longer read (0.12.0) but stay, so existing stores open
         self.assertTrue({"gen", "job_id", "at", "batch", "closed"} <= self.cols("claims"))
         # Schema 12: the batch budget and the credits are gone
         self.assertFalse({"spent", "reported"} & self.cols("claims"))  # removed-name: asserted absent

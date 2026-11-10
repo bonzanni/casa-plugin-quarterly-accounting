@@ -34,7 +34,7 @@ class VendorSearches(StoreCase):
         g.invoice(SHOP, 27796, "EUR", "2026-08-05", "M003193800", sender="notify@shop.example",
                   mentions=["ME000000000001"], listed=True)
         drv.search_mode = mode
-        drv.casa_cut = 80
+        drv.interrupt_at = 80
         drv.run_job(job_id)
         status = {no: self.conn.execute("SELECT status FROM projections WHERE pid=?",
                                         (drv.pid_of(no),)).fetchone()[0] for no in (a, b, c)}

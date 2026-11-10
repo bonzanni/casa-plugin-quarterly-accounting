@@ -39,8 +39,8 @@ class RestoreMidPass(StoreCase):
         self.drv = self._job_driver = JobDriver(self, payments=3)
 
     def test_a_restore_between_two_reads_of_one_pass_stops_it(self):
-        """The run's pass read the bank (its probes), its turn died
-        before the import, bank-feed was restored, and the next batch reads it again: the
+        """The run's pass read the bank (its probes), its session lost the token
+        before the import, bank-feed was restored, and the next claim reads it again: the
         import refuses (the ledger is not the one the pass's gate was decided on), nothing
         is imported or remembered, and the pass stops."""
         import asks, db, job, version
@@ -51,7 +51,7 @@ class RestoreMidPass(StoreCase):
         bf.call("tag_transaction", row_ids=[bf.rows()[0]["row_id"]], tags=["acct::open"],
                 workflow=version.WORKFLOW, expected_generation=bf.generation())
         bf.call("restore_backup", backup_id=bf.registered()[version.WORKFLOW])
-        t = self.drv.claim(A)                             # the next batch reads again
+        t = self.drv.claim(A)                             # the next claim reads again
         u = job.next_unit(self.conn, t)
         self.assertEqual(u["unit"], "probes")
         self.drv.do(u, t)

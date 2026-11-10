@@ -5,7 +5,7 @@ filing and reading hands the ref again — own mail too, whose vendorless unread
 payment's candidate. A job reading goes through the one sticky conflict rule (_reread), a
 partial reading included; the operator's correction outside a pass is written as before."""
 from tests._base import StoreCase
-from tests.sim_job import CasaCut, JobDriver
+from tests.sim_job import Interrupted, JobDriver
 
 
 def _status(conn):
@@ -29,7 +29,7 @@ class ReadOwed(StoreCase):
         def once(*a, **k):
             if not cut:
                 cut.append(a)
-                raise CasaCut()
+                raise Interrupted()
             return real(*a, **k)
         setattr(drv, name, once)
         return cut
@@ -42,10 +42,10 @@ class ReadOwed(StoreCase):
         def tool(name, args):
             if name == "read_document" and not cut:
                 cut.append(args)
-                raise CasaCut()                                 # filed; never read
+                raise Interrupted()                                 # filed; never read
             return real_tool(name, args)
         drv._tool = tool
-        drv.casa_cut = 80
+        drv.interrupt_at = 80
         drv.run_job("eeee0001-01")
         self.assertEqual(len(cut), 1)
         self.assertEqual(_status(self.conn), {"matched": 1})

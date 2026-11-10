@@ -1,31 +1,9 @@
-"""A quarter's live run, each failure reproduced:
-- the model miscounted its calls for the batch budget, and skipped a `report: true`
-  attached to a work unit — no batch ever reported, Casa's 3-batch guard ended a productive
-  run. Now a claim that persisted work gets the `report` unit alone (and, tests/test_no_budget.py, the server counts no calls at all);
-- a reading that copies the payment: the same bytes filed again with a different amount
-  make the amount unknown — such a document is proposed, never matched."""
+"""A quarter's live run, the failure reproduced: a reading that copies the payment — the
+same bytes filed again with a different amount make the amount unknown; such a document is
+proposed, never matched."""
 from tests._base import StoreCase
 from tests.sim_job import JobDriver
 import db                     # server/ is on sys.path once tests._base is imported
-
-
-class ProgressReachesCasa(StoreCase):
-    def setUp(self):
-        super().setUp()
-        self.bind()
-
-    def test_a_model_that_skips_attached_reports_still_reports_every_batch(self):
-        drv = JobDriver(self, payments=60)
-        for i in range(60):
-            drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"ZAP-{i + 1}")
-        drv.skip_attached_reports = True          # run 1's model
-        drv.casa_cut = 80                         # Casa's guard, last-report semantics
-        units = drv.run_job("a2a2a2a2-01")
-        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
-        self.assertGreater(sum(u["unit"] == "report" for u in units), 1)
-        self.assertEqual(dict(self.conn.execute(
-            "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
-            {"matched": 60})
 
 
 class ConflictingReadings(StoreCase):

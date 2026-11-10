@@ -226,7 +226,6 @@ def set_aside(conn, token, items, reason) -> dict:
     """The one closing write for an item no other write closes: a found attachment that
     is no invoice or no file this plugin takes ({"ref": …}), an erase candidate bank-feed
     still has ({"pid": …}). `reason` is kept on the item. Inside its own transaction."""
-    import decide
     import job
     if not isinstance(items, list) or not items or not all(
             isinstance(i, dict) and len(i) == 1 and (
@@ -245,6 +244,4 @@ def set_aside(conn, token, items, reason) -> dict:
         for i in items:
             kind, key = ("ref", i["ref"]) if "ref" in i else ("erase", i["pid"])
             (done if close(conn, job_id, kind, key, reason=reason) else not_queued).append(i)
-        if done:
-            decide.note_progress(conn, token)
     return {"set_aside": done, "not_queued": not_queued}

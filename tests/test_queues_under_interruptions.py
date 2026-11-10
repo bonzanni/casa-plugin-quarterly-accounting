@@ -1,5 +1,5 @@
 """The two cases behind the server-owned work queues, reproduced through the real surface (qa_server.TOOLS, a
-real bank-feed) under Casa's 80-call cut:
+real bank-feed) with an interruption every 80 calls:
 - "46/60 missing": the vendor search is recorded as soon as it ran, before its
   attachments are filed (the skill's order); the unit's budget ends with most of them
   unfiled. Every found attachment must still be filed and every payment matched.
@@ -9,7 +9,7 @@ real bank-feed) under Casa's 80-call cut:
 from tests._base import StoreCase
 from tests.sim_job import JobDriver
 
-CASA_CALLS = 80
+INTERRUPT_AT = 80
 
 
 def statuses(conn) -> dict:
@@ -26,10 +26,9 @@ class FoundAttachmentsAreFiled(StoreCase):
         drv = JobDriver(self, payments=60)
         for i in range(60):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"ZAP-{i + 1}")
-        drv.casa_cut = CASA_CALLS
+        drv.interrupt_at = INTERRUPT_AT
         drv.run_job("d6d6d6d6-a1")     # the sim records each search first, as the skill says
-        self.assertEqual(drv.cuts, len(drv.batch_calls) - 1)   # no budget: Casa ends a batch
-        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
+        self.assertEqual(drv.interruptions, len(drv.segment_calls) - 1)   # no budget
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM documents WHERE source='gmail'").fetchone()[0], 60)
         self.assertEqual(statuses(self.conn), {"matched": 60})
@@ -49,7 +48,7 @@ class ErasuresAreAllConfirmed(StoreCase):
         drv = JobDriver(self, payments=31)
         for i in range(31):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"ZAP-{i + 1}")
-        drv.casa_cut = CASA_CALLS
+        drv.interrupt_at = INTERRUPT_AT
         drv.run_job("d6d6d6d6-b1")
         self.assertEqual(statuses(self.conn), {"matched": 31})
         # bank-feed loses 30 of the rows (erased), and the last of them comes back under a
@@ -80,16 +79,15 @@ class ErasuresAreAllConfirmed(StoreCase):
         self.assertEqual(run["partial"], 0)
 
 
-class ErasureProgressIsReported(StoreCase):
-    """Confirming erasures is progress (progress in ONE
-    place): 150 erased payments take several batches, each reports progress, and the run
+class ManyErasures(StoreCase):
+    """150 erased payments take several segments between interruptions, and the run
     completes with every one confirmed."""
 
     def setUp(self):
         super().setUp()
         self.bind()
 
-    def test_d7_150_erasures_report_progress_every_batch_and_complete(self):
+    def test_d7_150_erasures_complete_across_interruptions(self):
         drv = JobDriver(self, payments=151)
         drv.run_job("d7d7d7d7-b1")
         bf = drv.bf
@@ -100,10 +98,9 @@ class ErasureProgressIsReported(StoreCase):
         bf.conn.commit()
         bf.fetch([bf.row(rows[0]["booking_date"], amount=rows[0]["amount_minor"],
                          ref=rows[0]["provider_ref"], counterparty=rows[0]["counterparty"])])
-        drv.casa_cut = CASA_CALLS
+        drv.interrupt_at = INTERRUPT_AT
         drv.run_job("d7d7d7d7-b2")
-        self.assertGreater(len(drv.batch_reported), 2)
-        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
+        self.assertGreater(len(drv.segment_calls), 2)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM projections WHERE"
                                            " ended='erased'").fetchone()[0], 150)
         self.assertIsNotNone(self.conn.execute("SELECT completed_at FROM runs WHERE"

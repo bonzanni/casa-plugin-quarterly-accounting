@@ -12,9 +12,6 @@
         "skill": "quarterly-job",
         "title": "Accounting check",
         "summary": "Checks the bank and Gmail, matches invoices, keeps the bank ledger's notes current",
-        "batches": 20,
-        "turnsPerBatch": 80,
-        "session": "fresh",
         "host": "specialist",
         "quietWhenScheduled": true
       }

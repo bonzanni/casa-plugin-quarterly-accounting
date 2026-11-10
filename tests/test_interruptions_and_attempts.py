@@ -1,37 +1,34 @@
-"""Reports per claim, attempts and job checks, each case reproduced through the
-real surface:
-- a batch Casa cuts after persisting work, re-claimed, reports its own progress —
-  the report is judged per claim, never latched across a cut;
+"""Interruptions, attempts and job checks, each case reproduced through the real surface:
+- a session interrupted mid-unit after persisting work claims again and finishes;
 - attempts count CONSECUTIVE unproductive hand-outs (a search in between resets);
 - record_match / propose_match pass the same job checks as decide."""
 from tests._base import StoreCase
-from tests.sim_job import CasaCut, JobDriver
+from tests.sim_job import Interrupted, JobDriver
 import db                     # server/ is on sys.path once tests._base is imported
 
 
-class ProgressPerClaim(StoreCase):
+class InterruptedMidUnit(StoreCase):
     def setUp(self):
         super().setUp()
         self.bind()
 
-    def test_cut_batches_that_filed_documents_keep_reporting_and_finish(self):
+    def test_sessions_interrupted_after_filing_claim_again_and_finish(self):
         drv = JobDriver(self, payments=60)
         for i in range(60):
             drv.gmail.invoice("Zapier", 1000 * (i + 1), "EUR", drv.DATES[i % 3], f"ZAP-{i + 1}")
         real, n = drv._file_vendor, {}
 
-        def cut_after_five(token, vendor, refs):
+        def interrupt_after_five(token, vendor, refs):
             out = []
             for ref in refs:
                 if n.get(token, 0) >= 5:
-                    raise CasaCut()                 # Casa ends the batch mid-unit
+                    raise Interrupted()                 # the session loses its token mid-unit
                 out += real(token, vendor, [ref])
                 n[token] = n.get(token, 0) + 1
             return out
-        drv._file_vendor = cut_after_five
-        drv.casa_cut = 80                           # Casa's idle guard is enforced
+        drv._file_vendor = interrupt_after_five
+        drv.interrupt_at = 80
         drv.run_job("e3e3e3e3-a1")
-        self.assertTrue(all(drv.batch_reported), drv.batch_reported)
         self.assertEqual(dict(self.conn.execute(
             "SELECT status, count(*) FROM projections GROUP BY status").fetchall()),
             {"matched": 60})
@@ -49,13 +46,13 @@ class ConsecutiveAttempts(StoreCase):
 
         def idle_search_idle(u, token):
             n[0] += 1
-            if n[0] == 2:                           # a search with its find, then cut
+            if n[0] == 2:                           # a search with its find, then interrupted
                 drv._tool("record_search", {"pass_token": token, "pids": [u["pid"]],
                                             "search": "plain", "queries": ["Zapier"],
                                             "refs": [ref]})
                 return None
             if n[0] in (1, 3):
-                return None                         # cut, nothing persisted
+                return None                         # interrupted, nothing persisted
             return real(u, token)
         drv._payment = idle_search_idle
         drv.run_job("e3e3e3e3-b1")
