@@ -73,6 +73,19 @@ class Cards(LoopCase):
         out = apply_now(self.conn, [("confirm", p)], quoted=self.text(rid))   # #121: ops
         self.assertTrue(out["applied"])
 
+    def test_a_handover_card_for_a_fetched_document_does_not_say_you_sent_it(self):
+        """#132: a document a colleague fetched from the vendor's website (source portal)
+        was not sent by the operator."""
+        import cards
+        q = self.pay("Runpod.io", 8792)
+        held = self.propose(q, amount_minor=8792, document_number="pi_3UKZabd",
+                            issuer="Runpod Inc")
+        self.conn.execute("UPDATE documents SET source='portal' WHERE doc_id=?", (held,))
+        rid = self.c(cards.compose_end, self.job_id, scheduled=False, handover_docs=[held])
+        first = self.text(rid).split("\n")[0]
+        self.assertTrue(first.startswith("**1 document filed**"), first)
+        self.assertNotIn("you sent", self.text(rid))
+
     def test_a_handover_card_names_what_happened_and_states_a_pair_once(self):
         import cards
         q = self.pay("Runpod.io", 8792)

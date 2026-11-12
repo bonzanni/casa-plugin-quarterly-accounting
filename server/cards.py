@@ -692,7 +692,14 @@ def _handover(conn, job_id, docs, quarter, tail, ready, sent=None, scheduled=Fal
     continuation changed — and the proposals among them to confirm."""
     head, props = _receipts(conn, docs, job_id)
     n = len(dict.fromkeys(docs))
-    top = [f"{_s(n, 'document')} you sent"]          # #99: the card's title
+    # #99: the card's title. #132: "you sent" only when the operator handed every one;
+    # a document a colleague fetched from a vendor's website (source portal) is "filed"
+    ids = list(dict.fromkeys(docs))
+    marks = ",".join("?" * len(ids))
+    fetched = ids and conn.execute(
+        f"SELECT 1 FROM documents WHERE doc_id IN ({marks}) AND source='portal' LIMIT 1",
+        ids).fetchone() is not None
+    top = [f"{_s(n, 'document')} {'filed' if fetched else 'you sent'}"]
     head = top + _fit_receipts(head, top, _confirm_room(props) + list(tail))
     return _summary(conn, "end", quarter, head, props, [], tail,
                     {d["pid"]: item_state(d) for d in props}, scheduled=False,
