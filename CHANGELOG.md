@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.13.1
+
+Same store schema (17). Text and card fixes only.
+
+- **A handover check no longer ends by answering your original request.** Its closing text
+  is the plugin's own, word for word. Before, a check started after an invoice was filed
+  could end by saying that invoice was still unfiled (#131).
+- **The handover card says "filed", not "you sent", for a document a colleague fetched** from
+  a vendor's website (#132).
+- **One message fewer after a filing request.** When the check's end only says its card is
+  posted, the specialist adds nothing (#133).
+
 ## 0.13.0
 
 Same store schema (17). Works with the Casa versions 0.12.0 works with.

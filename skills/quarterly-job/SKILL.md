@@ -26,7 +26,8 @@ pass no `started_by`. Then do exactly the unit it returns, and call `job_next(pa
 Keep going until `complete`; what a unit still owes comes again. Pass `pass_token` to every
 plugin write. **Tools** load lazily: load all a unit needs in ONE `ToolSearch` `select:`
 call, never one by one.
-- `complete` → `emit_completion(status="ok", text=<its text>)`.
+- `complete` → `emit_completion(status="ok", text=<its text, word for word>)`. Your brief's
+  `Request:` is why the job was started; the desk already did it: never do, answer or report on it.
 - Report progress: `report_job_progress(summary=<the unit's progress.summary>)` after a
   unit worth telling, at least every 20 units; Casa keeps a long job going only while it
   reports progress.

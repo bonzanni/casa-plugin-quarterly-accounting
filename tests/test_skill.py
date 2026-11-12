@@ -180,7 +180,9 @@ class TestDesk(TempEnv):
                        "figures.",
                        # issue #59 (5): silence is the whole reply, never a narration
                        "When a tool posted and you have nothing to add, your whole reply is "
-                       "`<silent/>`: never a sentence saying that something was posted.",
+                       "`<silent/>`: never a sentence saying that something was posted; "
+                       # #133: a check's end that only says its card is posted adds nothing
+                       "the same when your check's end says its card is posted.",
                        # issue #123: text before a tool call is posted too; no pids
                        "Every text you write in a turn, also before or between tool calls, "
                        "reaches the operator as a message of its own: never narrate what you "
@@ -329,7 +331,12 @@ class TestJob(TempEnv):
         for phrase in ("call `job_next(pass_token=…)`",
                        "Keep going until `complete`; what a unit still owes comes again.",
                        "load all a unit needs in ONE `ToolSearch` `select:` call",
-                       '`complete` → `emit_completion(status="ok", text=<its text>)`.',
+                       # #131: the plugin's end text, never the job's own; the brief's
+                       # Request was the desk's
+                       '`complete` → `emit_completion(status="ok", text=<its text, word for '
+                       'word>)`.',
+                       "Your brief's `Request:` is why the job was started; the desk already "
+                       "did it: never do, answer or report on it.",
                        "Report progress: `report_job_progress(summary=<the unit's "
                        "progress.summary>)` after a unit worth telling, at least every 20 "
                        "units; Casa keeps a long job going only while it reports progress.",
@@ -368,7 +375,7 @@ class TestJob(TempEnv):
                      "vendor-and-dates search", "record_mirror", "record_not_found",
                      "certain", "reset_store", "set_aside(", "refs=["):
             self.assertIn(rule, text)
-        self.assertLessEqual(len(text), 11_600)    # 0.12.0: one session, progress reported (+1); 0.11.21: row 5 judged (#105, +290); 0.11.18: classify first, the tax-refund exception (#98 #97, +285); queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90); 0.11.7: the reading unit, handed documents proposed (#67, +200); 0.11.8: handed_fits, no commentary (#72, +170)
+        self.assertLessEqual(len(text), 11_750)    # 0.13.1: the end text word for word, the brief's Request is not the job's (#131, +125); 0.12.0: one session, progress reported (+1); 0.11.21: row 5 judged (#105, +290); 0.11.18: classify first, the tax-refund exception (#98 #97, +285); queues; Q2 run 1: report unit, tool loading, reading rules; 0.11.2: the invoice judgment (+92); 0.11.6: never get_document (#68, +90); 0.11.7: the reading unit, handed documents proposed (#67, +200); 0.11.8: handed_fits, no commentary (#72, +170)
 
     def test_the_units_come_in_the_loops_order(self):
         """Probes, snapshot, filing, vendor, mirror, the run's one post."""
