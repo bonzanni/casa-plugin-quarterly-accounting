@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.0
+
+Same store schema (17). Works with the Casa versions 0.12.0 works with.
+
+- **A file a colleague fetched from a vendor's website can be filed as `portal`.**
+  `ingest_document` takes `source="portal"` beside `gmail`, `manual-telegram` and
+  `manual-email`, for a file the browser specialist downloaded when the finance specialist
+  asked it. The finance specialist's own guidance (casa-specialist-finance 0.31.0) says when
+  to use it and to record such a vendor as a website-only vendor with its link, so the next
+  check leaves that vendor out of the mail search and lists its payments with the link.
+
 ## 0.12.0
 
 Needs Casa 0.355.0. Not backward compatible: a job running under the old version does not

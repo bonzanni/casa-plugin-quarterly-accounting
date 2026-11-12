@@ -166,8 +166,10 @@ def obj(props, required=()):
 # --- custody -----------------------------------------------------------------
 @register("ingest_document",
           "File a document into custody. source_path must be a path in Casa's handoff folder "
-          "(gmail's download_attachment, or share_inbound_file for a document the operator "
-          "sent); any other path is refused. Bytes are copied and hashed; filing the same bytes "
+          "(gmail's download_attachment, share_inbound_file for a document the operator "
+          "sent, or a path a colleague handed back); any other path is refused. source is "
+          "gmail, manual-telegram, manual-email, or portal for a file a colleague fetched from "
+          "the vendor's website. Bytes are copied and hashed; filing the same bytes "
           "twice returns the same doc_id. The metadata is your provisional reading, for filing. "
           "extraction_author is desk (a desk turn's filing, no token) or specialist (the "
           "job's filing). During a pass, pass the pass_token. vendor: the handed payment's "

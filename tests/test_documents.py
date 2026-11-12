@@ -35,6 +35,16 @@ class TestCustody(StoreCase):
         self.assertEqual(stored.parent.name, first["sha256"][:2])
         self.assertEqual(stored.name, first["sha256"] + ".pdf")
 
+    def test_a_file_fetched_from_the_vendors_website_is_filed_as_portal(self):
+        doc = ingest(self.conn, self.publish("OpenAI invoice.pdf", PDF), source="portal",
+                     counterparty="OpenAI")
+        self.assertTrue(doc["created"])
+        row = self.conn.execute("SELECT source FROM documents WHERE doc_id=?",
+                                (doc["doc_id"],)).fetchone()
+        self.assertEqual(row["source"], "portal")
+        with self.assertRaises(db.Refusal):
+            ingest(self.conn, self.publish("other.pdf", PDF + b"x"), source="website")
+
     def test_the_same_bytes_under_another_extension_reuse_the_held_file(self):
         # The second filing left <sha>.png beside <sha>.pdf, which no row
         # names and the reaper never removed (its stem is a held hash)

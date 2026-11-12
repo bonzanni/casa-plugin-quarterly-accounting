@@ -20,7 +20,8 @@ import db
 import expectation as ex
 
 ALLOWED_EXT = {".pdf", ".png", ".jpg", ".webp", ".heic", ".gif", ".tif", ".tiff", ".xml"}
-SOURCES = ("gmail", "manual-telegram", "manual-email")
+# portal: fetched from the vendor's website by a colleague of the specialist
+SOURCES = ("gmail", "manual-telegram", "manual-email", "portal")
 EXTRACTION_AUTHORS = ("desk", "specialist")   # A stored "resident" stays readable
 EDITABLE = ("kind", "counterparty", "issuer", "document_date", "document_number",
             "amount_minor", "currency", "recipient")
