@@ -13,6 +13,7 @@ import views
 class _Q3(StoreCase):
     def setUp(self):
         super().setUp()
+        self.small_pages()                  # 40 items page, as at the old budget
         import datetime as dt
         cm = self.patch_clock(dt.datetime(2026, 9, 15, 12, 0, tzinfo=dt.timezone.utc))
         cm.__enter__()

@@ -108,6 +108,7 @@ class TestAlertBatching(StoreCase):
 
     def setUp(self):
         super().setUp()
+        self.small_pages()                  # 80 occurrences batch, as at the old budget
         self.bind()
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO packages(quarter, filename, path, built_at,"
@@ -214,7 +215,7 @@ class TestOversizedParkedRendering(StoreCase):
         first = self.end_and_speak()
         with db.tx(self.conn):                  # what pre-fix code could have saved
             self.conn.execute("UPDATE renders SET text=? WHERE render_id=?",
-                              ("x" * 5000, first["render_id"]))
+                              ("x" * (views.BODY_LIMIT + 1), first["render_id"]))
         t = self.pass_()
         gmail_failed(self, t, "invalid_grant")
         again = self.end_and_speak()

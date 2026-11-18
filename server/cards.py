@@ -31,7 +31,10 @@ KINDS = ("end", "open-items", "review", "vendor-page", "ready", "replace")
 TAP_CARDS = ("review", "vendor-page", "open-items")
 CONFIRM_ALL_MAX = 24          # With 25 or more proposals it is left out
 CANDIDATE_BUTTONS = 4         # Up to four named candidates
-PAGE_LINES = 25               # a vendor page's payments, then fitted to BODY_LIMIT
+PAGE_LINES = 25               # a vendor page's payments, then fitted to a card's bound
+# A card is fitted to Casa's receipt bound (views.receipt_limit), not to the larger message
+# bound: a card with nothing left to tap is posted as the tap's receipt (taps._answer), and
+# Casa clips a receipt at STORED_CALL_RECEIPT_CHARS 4,000 characters
 LABEL_MAX = 32                # casa:result_broker.py, a button label
 BUCKETS = ("matched", "proposed", "missing", "not_needed", "pending", "unclassified")
 NUMBER_SHOWN = 16       # #106: a document number at most this long is shown on its line
@@ -386,7 +389,7 @@ def _fits(lines) -> bool:
     if not lines:
         return True
     text = "\n".join([views.title(lines[0]) + TAG_WORST] + list(lines[1:]))
-    return views.utf16_len(text) <= views.BODY_LIMIT and views.fits_proposal(text)
+    return views.fits_body(text, views.receipt_limit()) and views.fits_proposal(text)
 
 
 def _fit_count(before, items, closing, after=(), total=None) -> int:
@@ -425,7 +428,7 @@ def _store(conn, kind, lines, scope, bound, states, docs=None) -> str:
            "walk": None, "pid": None, "pos": -1, "scheduled": False, **scope}
     # #99: line 1 is the card's title; the buttons say what they do (no legend)
     lines = [views.title(lines[0]), *lines[1:]] if lines else []
-    out, whole = views.fit_lines(lines, tag=views.tag_now())
+    out, whole = views.fit_lines(lines, tag=views.tag_now(), limit=views.receipt_limit())
     late = [pid for pid, i in bound.items() if i >= whole] + [
         (pid, m) for pid, ms in (docs or {}).items() for m, i in ms.items() if i >= whole]
     if late:
@@ -520,7 +523,8 @@ def _summary(conn, kind, quarter, head, proposals, vendors, tail, states, *, sch
         # Only those the card prints whole (as _store will fit it) — a card
         # crowded by receipts cuts its tail, and a cut bound line would lose the card
         whole = views.fit_lines([views.title(lines[0]), *lines[1:]],
-                                tag=views.tag_now())[1] if lines else 0
+                                tag=views.tag_now(),
+                                limit=views.receipt_limit())[1] if lines else 0
         shown_uncl = [d for j, d in enumerate(shown_uncl) if at + j < whole]
         bound.update({d["pid"]: at + j for j, d in enumerate(shown_uncl)})
         docs = {d["pid"]: ({d["current"]["match_id"]: bound[d["pid"]]}

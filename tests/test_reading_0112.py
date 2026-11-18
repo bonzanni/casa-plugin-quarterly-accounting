@@ -172,4 +172,5 @@ class CompactLineFixes(Reading):
         self.assertTrue(out["receipt"].startswith("Left missing ("), out["receipt"][:80])
         for i in range(25):
             self.assertIn(f"EUR 1,000,000.{i:02d}", out["receipt"])
-        self.assertEqual(out["receipt"].count(name.replace("*", "\\*").replace("_", "\\_")), 1)
+        import views
+        self.assertEqual(out["receipt"].count(views.esc(name)), 1)

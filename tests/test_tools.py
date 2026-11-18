@@ -160,7 +160,7 @@ class TestSurface(TempEnv):
 
 
 class TestDeliverableBoundary(TempEnv):
-    """An operator-facing text over Telegram's limit never
+    """An operator-facing text over what Casa takes in one message never
     leaves a tool as a result — it is an error (isError), loud."""
     def setUp(self):
         super().setUp()
@@ -171,7 +171,8 @@ class TestDeliverableBoundary(TempEnv):
         import asks
         import delivery
         import views
-        big = "x" * 4097
+        n = views.BODY_LIMIT + 1
+        big = "x" * n
         cases = [("build_review", views, "build_review", {"render_id": "r1", "text": big},
                   {}),
                  # job_report (texts, speak) left the surface
@@ -186,13 +187,15 @@ class TestDeliverableBoundary(TempEnv):
             with mock.patch.object(mod, fn, lambda *a, _o=out, **k: _o):
                 res = _tool(tool, **args)
             self.assertTrue(res.get("isError"), (tool, res))
-            self.assertIn("4097 UTF-16 units", res["content"][0]["text"])
-        fits = {"render_id": "r1", "text": "\U0001d518" * 2048}          # 4096 units exactly
+            self.assertIn(f"{n} UTF-16 units", res["content"][0]["text"])
+        # BODY_LIMIT units exactly (an astral character is two units, four bytes)
+        fits = {"render_id": "r1", "text": "\U0001d518" * (views.BODY_LIMIT // 2)}
         with mock.patch.object(views, "build_review", lambda *a, **k: fits):
             res = _tool("build_review")
         self.assertNotIn("isError", res)
         with mock.patch.object(views, "build_review",
-                               lambda *a, **k: {"render_id": "r1", "text": "\U0001d518" * 2049}):
+                               lambda *a, **k: {"render_id": "r1", "text": "\U0001d518"
+                                                * (views.BODY_LIMIT // 2 + 1)}):
             self.assertTrue(_tool("build_review").get("isError"))
 
 
@@ -283,6 +286,7 @@ class TestResend(ToolCase):
 class TestPaging(ToolCase):
     def test_next_is_the_exact_call_for_the_rest(self):
         import work
+        self.small_pages()                  # 200 items page, as at the old budget
         self.bind()
         token = self.pass_()
         with db.tx(self.conn):

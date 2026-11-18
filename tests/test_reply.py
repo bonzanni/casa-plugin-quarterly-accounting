@@ -716,6 +716,7 @@ class TestIdentity(Base):
             self.assertEqual(len(self.bound(r["render_id"], pid)), 1, view)
 
     def test_many_candidates_page_through_the_item_view_then_apply(self):
+        self.small_pages()                  # 60 candidates page, as at the old budget
         pid = self.item("Adobe", 5445, "2026-09-14", paired=False)
         for i in range(2):
             self.pair(pid, "CANDIDATE-%02d-" % i + "X" * 40, date="2026-09-%02d" % (1 + i))

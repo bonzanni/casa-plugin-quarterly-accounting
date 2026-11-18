@@ -121,7 +121,7 @@ class TestSheet(Base):
                              token=self.token, labels=("guessed",), runners_up=["8712 (10 Sep)"])
         text = self.render()["text"]
         self.assertLess(text.index("**Missing**"), text.index("**I guessed these**"))  # #99
-        self.assertIn("Adobe · EUR 100.00 · 14 Sep", text)
+        self.assertIn("| Adobe | EUR 100.00 | 14 Sep |", text)
         self.assertIn("https://adobe.example/invoices", text)
         self.assertIn("Picked invoice 8841 (17 Sep); 8712 \\(10 Sep\\) also fits.", text)
         self.assertIn("Tell me if one is wrong.", text)       # #117: no words to copy
@@ -158,12 +158,13 @@ class TestSheet(Base):
         self.add(counterparty="Unsearched", searched=False)
         self.add(tags=(), counterparty="Unclassified", searched=False)
         text = self.render()["text"]
-        self.assertIn("**Missing**\nSearched · ", text)
+        self.assertIn("| Searched | EUR 100.00 | 14 Sep |", text)
         self.assertNotIn("Unsearched", text)         # never looked for: not `missing`
         self.assertIn("3 transactions, 1 missing a document.", flat(text))
         # #98: an untagged payment is "not yet classified" — neither missing nor unsearched
         self.assertIn("1 new payment not checked yet", text)
-        self.assertIn("**Not classified yet**\nUnclassified", text)      # #106: named
+        self.assertIn("**Not classified yet**\n\n| Payment", text)      # #106: named
+        self.assertIn("| Unclassified | EUR 100.00 | 14 Sep | what is it? |", text)
 
     def test_a_week_spanning_the_boundary_is_one_view(self):
         a = self.add(counterparty="SeptCo", booking_date="2026-09-29")
@@ -301,10 +302,10 @@ class TestSheet(Base):
                                            " IS NULL").fetchone()[0], 0)
 
     def test_the_whole_list_pages_and_never_offers_itself_again(self):
-        for i in range(200):
+        for i in range(600):                # more than one message holds
             self.add(counterparty=f"Vend{i:03d}", amount_minor=1000 + i)
         capped = self.render("missing")
-        self.assertIn("+192 more not shown", capped["text"])
+        self.assertIn("+592 more not shown", capped["text"])
         self.assertEqual(capped["next"], {"view": "missing", "quarter": "2026-Q3", "page": 1,
                                           "prev": capped["render_id"]})
         for view in ("all", "missing"):
@@ -327,7 +328,7 @@ class TestSheet(Base):
                 self.assertIn(views.MORE_LINE, r["text"])
                 page, after = r["next"]["page"], r["next"]["after"]
             self.assertGreater(n, 1, view)
-            self.assertEqual(len(seen), 200, view)
+            self.assertEqual(len(seen), 600, view)
         self.assertIn("That is everything.",
                       views.build_review(self.conn, view="all", quarter="2026-Q3",
                                          page=99, after=[99, 0, 0])["text"])
@@ -343,7 +344,8 @@ class TestSheet(Base):
         # item prints whole and is bound (before, the whole text was cut and bound nothing)
         for r in (self.render(), self.render("item", pid=pid), self.render("all")):
             self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
-            self.assertIn("Adobe · EUR 100.00", r["text"])
+            # its table row, or its item view's headline
+            self.assertIn(views._norm("Adobe EUR 100.00"), views._norm(r["text"]))
             self.assertIn("https://adobe.example/xxx", r["text"])
             self.assertIn(views.CLIP_MARK, r["text"])
             self.assertEqual(r["printed"], 1)
@@ -355,7 +357,7 @@ class TestSheet(Base):
                                document_link="https://adobe.example/")
         with db.tx(self.conn):   # as an earlier version stored it: upsert now refuses it
             self.conn.execute("UPDATE counterparties SET document_link=? WHERE name=?",
-                              ("https://adobe.example/" + "x" * 5000, "Adobe"))
+                              ("https://adobe.example/" + "x" * 13000, "Adobe"))
         pid = self.add()
         with mock.patch.object(views, "LINK_MAX", 10 ** 6):
             for r in (self.render(), self.render("item", pid=pid), self.render("all")):
@@ -379,7 +381,7 @@ class TestSheet(Base):
         self.granted(work.stop_chasing_in_tx, "2026-Q3")
         text = self.render()["text"]
         # #99: one tight line per payment, its detail after it
-        self.assertIn("Dropped · EUR 100.00 · 14 Sep — No longer chased.", text)
+        self.assertIn("| Dropped | EUR 100.00 | 14 Sep | No longer chased. |", text)
         self.assertIn("2 transactions, 2 missing a document.", flat(text))
         self.assertNotIn("the next pass looks", text)
         self.assertNotIn("Not searched yet", text)
@@ -397,7 +399,8 @@ class TestSheet(Base):
                               (survivor, loser))
             lineage.settle(self.conn, survivor)
         text = self.render()["text"]
-        self.assertIn("**Missing**\nKept · ", text)
+        self.assertIn("**Missing**\n\n| Payment | Amount | Date | Note |", text)
+        self.assertIn("| Kept | EUR 100.00 | 14 Sep | No longer chased. |", text)
         self.assertNotIn("the next pass looks", text)
 
     def test_an_interrupted_pass_says_not_checked_once(self):
@@ -437,7 +440,7 @@ class TestSheet(Base):
         self.assertIn("+3 older not searched yet (Q2)", flat(text))
         older = self.render("older")["text"]
         for i in range(3):
-            self.assertIn(f"OldNew{i} · ", older)
+            self.assertIn(f"| OldNew{i} | ", older)
         self.assertEqual(older.count("Not searched yet."), 3)
 
     def test_older_missing_and_older_unsearched_are_kept_apart(self):
@@ -449,8 +452,8 @@ class TestSheet(Base):
         # the current quarter's line counts the current quarter only: nothing twice
         self.assertIn("1 new payment not checked yet — the next pass looks.", text)
         older = self.render("older")["text"]
-        self.assertIn("OldSeen · ", older)
-        self.assertIn("OldNew · ", older)
+        self.assertIn("| OldSeen | ", older)
+        self.assertIn("| OldNew | ", older)
         self.assertNotIn("NowNew", older)
 
     def test_degraded_counts_agree_with_coverage_and_skip_the_item_view(self):
@@ -476,7 +479,7 @@ class TestSheet(Base):
         self.add(counterparty="Big", amount_minor=100, booking_date="2026-07-01")
         for i in range(10):
             self.add(counterparty=f"Small{i}", amount_minor=200 + i)
-        for i in range(10, 200):
+        for i in range(10, 500):            # more than one message holds
             self.add(counterparty=f"Small{i}", amount_minor=200 + i)
         r = views.build_review(self.conn, view="missing", quarter="2026-Q3", page=1)
         self.assertLessEqual(views.utf16_len(r["text"]), views.BODY_LIMIT)
@@ -484,7 +487,7 @@ class TestSheet(Base):
         self.assertTrue(r["text"].endswith(views.MORE_LINE), r["text"][-80:])
         r2 = views.build_review(self.conn, view="missing", quarter="2026-Q3", **{
             k: r["next"][k] for k in ("page", "after")})
-        self.assertIn("Small199", r2["text"])
+        self.assertIn("Small499", r2["text"])
         self.assertIsNone(r2["next"])
 
 

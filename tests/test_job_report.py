@@ -16,7 +16,7 @@ class Report(StoreCase):
         # job_report's `texts` left with the tool (no server code
         # returns it); the per-page check is pinned on `receipt_pages`
         import tools, views
-        out = {"receipt_pages": ["ok", "x" * (views.TELEGRAM_LIMIT + 1)]}
+        out = {"receipt_pages": ["ok", "x" * (views.receipt_limit() + 1)]}
         with self.assertRaises(tools.Undeliverable):
             tools._deliverable("record_delivery", out)
         tools._deliverable("record_delivery", {"receipt_pages": ["ok", "ok"]})

@@ -64,26 +64,30 @@ def _limit(args, default):
 
 
 class Undeliverable(RuntimeError):
-    """An operator-facing text over Telegram's limit reached the tool boundary.
+    """An operator-facing text larger than Casa takes reached the tool boundary.
     A bug (every such text is produced through views.fit_lines), reported as
-    an error rather than handed on as a message that cannot be sent."""
+    an error rather than handed on as a message Casa would refuse or clip."""
 
 
 def _deliverable(tool: str, out):
-    """The final invariant: every text a tool returns — a view's
-    `text`, a `speak.text`, a `receipt` and each of its `receipt_pages` — is at most
-    TELEGRAM_LIMIT UTF-16 units; otherwise the call fails loudly (isError)."""
+    """The final invariant: every text a tool returns is one message Casa takes — a view's
+    `text` and a `speak.text` within views.fits_body (Casa's message bounds), a `receipt`
+    and each of its `receipt_pages` within RECEIPT_LIMIT too (Casa clips a tap's receipt
+    there); otherwise the call fails loudly (isError)."""
     if not isinstance(out, dict):
         return out
-    texts = [("text", out.get("text")), ("receipt", out.get("receipt"))]
-    texts += [(f"receipt_pages[{i}]", t) for i, t in enumerate(out.get("receipt_pages") or [])]
+    texts = [("text", out.get("text"), views.BODY_LIMIT),
+             ("receipt", out.get("receipt"), views.receipt_limit())]
+    texts += [(f"receipt_pages[{i}]", t, views.receipt_limit())
+              for i, t in enumerate(out.get("receipt_pages") or [])]
     speak = out.get("speak")
     if isinstance(speak, dict):
-        texts.append(("speak.text", speak.get("text")))
-    for key, text in texts:
-        if isinstance(text, str) and views.utf16_len(text) > views.TELEGRAM_LIMIT:
-            raise Undeliverable(f"{tool} produced {key} of {views.utf16_len(text)} UTF-16 units, "
-                                f"over Telegram's {views.TELEGRAM_LIMIT}; it cannot be sent — "
+        texts.append(("speak.text", speak.get("text"), views.BODY_LIMIT))
+    for key, text, limit in texts:
+        if isinstance(text, str) and not views.fits_body(text, limit):
+            raise Undeliverable(f"{tool} produced {key} of {views.utf16_len(text)} UTF-16 units "
+                                f"({views.prepared_bytes(text)} prepared bytes), over the "
+                                f"{limit} units Casa takes; it cannot be sent — "
                                 "this is a bug, report it")
     return out
 

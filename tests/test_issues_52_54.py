@@ -73,7 +73,7 @@ class NoHardWrap(StoreCase):
         lines = r["text"].split("\n")
         self.assertIn("Download the PDFs and email them to yourself, then ask me to check "
                       "emailed invoices.", lines)
-        heads = [ln for ln in lines if ln.startswith("A" * 50)]
+        heads = [ln for ln in lines if ln.startswith("| " + "A" * 50)]      # table rows
         self.assertEqual(len(heads), 3, lines)
         self.assertTrue(all("EUR" in ln and "14 Sep" in ln for ln in heads), heads)
 

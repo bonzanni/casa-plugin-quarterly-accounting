@@ -199,13 +199,20 @@ def _view_value(conn, r, lead=None):
 
 def _compose_list(conn, view, quarter, pid, page, after, prev) -> str:
     """#66: the whole list, page after page (each its own rendering, binding what it prints,
-    as a More page did), up to views.MAX_PAGES. One page is the card itself; more become
-    plain pages before one action card (views.list_card) that acts on all of them. Returns
-    the render id to post."""
-    page, ids = page or 1, []
+    as a More page did), up to views.MAX_PAGES pages and views.PAGES_VALUE_BYTES of them
+    (Casa takes a card's whole deposit up to 64 KiB). One page is the card itself; more
+    become plain pages before one action card (views.list_card) that acts on all of them, and
+    what does not fit is its "more". Returns the render id to post."""
+    page, ids, used, nxt = page or 1, [], 0, None
     while True:
         out = views.review_in_tx(conn, view, quarter, pid, page, after, prev=prev)
+        size = views.json_bytes(out["text"])
+        if ids and used + size > views.PAGES_VALUE_BYTES:
+            # this page is never posted (so never seen, never bound): the card's "more"
+            # composes it again, from the last page posted
+            break
         ids.append(out["render_id"])
+        used += size
         nxt = out["next"]
         if nxt is None or len(ids) == views.MAX_PAGES:
             break
@@ -263,6 +270,8 @@ def post_results(conn, render_ids) -> dict:
     return {"results": ref, "render_ids": ids}
 
 
+# A file's caption keeps Casa's old bound (result_broker.MAX_FILE_CAPTION_CHARS 1,024 for the
+# label line, a newline and the caption) and is sent as plain text, not as a rich message
 CAPTION_MAX = 900          # 1024 − views.LABEL_ALLOWANCE − 1, rounded down
 PKG_REFUSED = "the package could not be sent under its name — ask again"
 ALREADY_POSTED = "That package was already sent once — nothing was posted again."
@@ -493,7 +502,10 @@ def propose_reading(conn, ops, quoted=None) -> dict:
         if out["unresolved"]:
             body += ["", "Not included:"] + [f"· {x}" for x in out["unresolved"]]
         text_ = "\n".join(body)
-        if not views.fits_proposal(text_):
+        # its Apply's receipt says every operation again, and Casa clips a receipt at
+        # views.RECEIPT_LIMIT: a reading is held to that bound (views.receipt_limit)
+        if not (views.fits_proposal(text_)
+                and views.fits_body(views.deposit_safe(text_), views.receipt_limit())):
             raise db.Refusal(READING_TOO_LONG)
         now = db.now()
         # a newer reading supersedes an unanswered older one (`↻ replaced`)

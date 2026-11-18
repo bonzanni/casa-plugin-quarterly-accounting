@@ -27,10 +27,33 @@ import lineage
 import work
 
 CAP = 8
-TELEGRAM_LIMIT = 4096
+# What Casa (v0.376) takes in one post. Casa sends every text of this plugin as a Telegram
+# rich message (GitHub-flavoured Markdown) and splits a long one into several messages
+# itself, but it judges what it is handed:
+# - an operator_message body, and a proposal's text and each of its pages, is at most
+#   MAX_MESSAGE_CHARS 12,000 characters (result_broker._message_ok);
+# - a proposal's text and each page, under Casa's label line, is ONE rich message that
+#   leaves room for the line Casa adds when the card settles: RICH_BUDGET_BYTES 32,000 less
+#   PROPOSAL_SETTLE_RESERVE_BYTES 169 prepared UTF-8 bytes (result_broker.card_fits);
+# - a tap's receipt is clipped at STORED_CALL_RECEIPT_CHARS 4,000 characters
+#   (stored_call_settler).
+# A rendering is kept within one message, so a reply quoting its post binds it.
+CASA_MESSAGE_CHARS = 12_000
+CASA_CARD_BYTES = 32_000 - (2 + 3 + 1 + 5 * 32 + 3)          # 31,831
+CASA_RECEIPT_CHARS = 4_000
 LABEL_ALLOWANCE = 64       # Casa's "📊 <display name>" label line: the plugin cannot read it
-PROPOSAL_SETTLE_RESERVE = 1 + 2 + 2 * 32     # casa:result_broker.py, a83d6aa8
-BODY_LIMIT = TELEGRAM_LIMIT - PROPOSAL_SETTLE_RESERVE - LABEL_ALLOWANCE - 1   # 3964
+# A body's characters (measured in UTF-16 units, never fewer): Casa's 12,000 less the label
+# line — the same bound as job.POST_CHARS, so one rendering is always one post
+BODY_LIMIT = CASA_MESSAGE_CHARS - 100                          # 11,900
+# A body's prepared bytes (prepared_bytes): one rich message less the label line at its
+# worst (the glyph, a space, 64 characters of five bytes each) and the line break after it
+BODY_BYTES = CASA_CARD_BYTES - (4 + 1 + 5 * LABEL_ALLOWANCE) - 2       # 31,504
+RECEIPT_LIMIT = CASA_RECEIPT_CHARS     # a tap's receipt, whole
+# Casa's result_broker.MAX_VALUE_BYTES: a deposit's whole value is at most 64 KiB — for a card,
+# its text, its pages and its buttons as one JSON object. The pages a card brings are held to
+# that less room for the card's own text and buttons (json_bytes)
+CASA_VALUE_BYTES = 64 * 1024
+PAGES_VALUE_BYTES = CASA_VALUE_BYTES - 6 * 1024
 VIEWS = ("status", "missing", "check", "rest", "older", "all", "item", "quarter")
 KIND_WORD = {"invoice": "invoice", "sales-invoice": "sales invoice", "credit-note": "credit note",
              "payslip": "payslip", "statement": "statement", "receipt": "receipt",
@@ -43,6 +66,43 @@ FORBIDDEN = ("proposed", "conflicted", "revision", "projection", "CAS", "no-ref"
 
 def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
+
+
+def _char_bytes(ch: str) -> int:
+    """At most what one character of a body becomes in Casa's prepared rich message
+    (channels/tg_rich.prepare): "_" is sent as "&#95;", a "<" that opens no tag as "&lt;",
+    and a line break may carry the backslash that keeps it a break; anything else is its
+    UTF-8. An upper bound: an escaping backslash Casa drops is still counted."""
+    if ch == "_":
+        return 5
+    if ch == "<":
+        return 4
+    if ch == "\n":
+        return 2
+    return len(ch.encode("utf-8", "surrogatepass"))
+
+
+def prepared_bytes(text: str) -> int:
+    """An upper bound on the prepared UTF-8 bytes Casa measures `text` in (card_fits)."""
+    return sum(_char_bytes(ch) for ch in text)
+
+
+def receipt_limit() -> int:
+    """A tap's receipt, and a card that may stand in for one: one message, whole within
+    Casa's receipt clip (RECEIPT_LIMIT)."""
+    return min(BODY_LIMIT, RECEIPT_LIMIT)
+
+
+def json_bytes(text: str) -> int:
+    """`text`'s UTF-8 bytes as a JSON string inside a deposited value."""
+    return len(json.dumps(text, ensure_ascii=False).encode("utf-8", "surrogatepass"))
+
+
+def fits_body(text: str, limit: int | None = None) -> bool:
+    """`text` is one message Casa takes: at most `limit` characters (UTF-16 units; default
+    BODY_LIMIT) and BODY_BYTES prepared bytes."""
+    limit = BODY_LIMIT if limit is None else limit
+    return utf16_len(text) <= limit and prepared_bytes(text) <= BODY_BYTES
 
 
 # Only unbounded free-text FIELDS are clipped, each to its own bound: a payee / bank counterparty text, a document number or recipient, a
@@ -106,9 +166,9 @@ def tag_now() -> str:
     return f" {MARK} {dates.short_day(t.date().isoformat())} {t.strftime('%H:%M:%S')}"
 
 
-def _limit() -> int:
-    """The body budget a page is filled to: BODY_LIMIT less the tag line 1 will carry."""
-    return BODY_LIMIT - utf16_len(_TAG)
+def _fits_page(text: str) -> bool:
+    """A page's body fits one message with the tag its line 1 will carry."""
+    return fits_body(text + _TAG)
 
 
 def field_raw(text, units: int = FIELD_MAX) -> str:
@@ -123,7 +183,10 @@ def field(text, units: int = FIELD_MAX) -> str:
     return esc(field_raw(text, units))
 
 
-_ESC = set("\\`*_[]()!|#<>~-")
+# Casa sends "_" as an entity itself, and a backslash before it would stay inside a link,
+# so "_" is not escaped; "<" is, since "<b>" is a tag Telegram renders. "=" keeps vendor
+# text such as "==x==" from turning into a highlight, "+" from opening a list.
+_ESC = set("\\`*[]()!|#<>~-+=")
 _LEAD_NUM_DOT = re.compile(r"^(\d+)\.")
 
 
@@ -156,8 +219,9 @@ def unesc(text: str) -> str:
 
 
 # ---- #99: the house style, one place. A card or a view: a bold title line saying what it is
-# or what happened; a question on its own line; one tight line per item, blank lines only
-# between groups; bold labels; short names; no legend for the buttons; no empty section.
+# or what happened; a question on its own line; a list of payments as a narrow table (one row
+# each, amounts right-aligned), other items one tight line each, blank lines only between
+# groups; bold labels; short names; no legend for the buttons; no empty section.
 
 def title(text: str) -> str:
     """#99: a title or a question line (bold)."""
@@ -174,14 +238,85 @@ def groups(*blocks) -> list:
     return out
 
 
+# A list of payments is a GitHub-flavoured Markdown table, which Casa posts as a real table.
+# Its columns are what identifies a payment: the payee, the amount (right-aligned), the date,
+# then a note (the headline's other parts and the item's detail), left out when no row has one.
+TABLE_HEAD = ("Payment", "Amount", "Date", "Note")
+TABLE_ALIGN = ("---", "---:", "---", "---")
+
+
+def table_row(cells) -> str:
+    """One table row. Every dynamic cell is an escaped field (a "|" in it is "\\|"); an
+    empty cell holds a space, so no row ever reads "||" (a spoiler mark)."""
+    return "| " + " | ".join(c if c else " " for c in cells) + " |"
+
+
+def table_head(n: int) -> list:
+    """The header and delimiter rows of an n-column payment table."""
+    return [table_row(TABLE_HEAD[:n]), table_row(TABLE_ALIGN[:n])]
+
+
+def is_row(line: str) -> bool:
+    """A table line. Composed text starts a line with "|" only in a table: a field's "|" is
+    escaped."""
+    return line.startswith("|")
+
+
+def detach_tables(lines) -> list:
+    """`lines` with a blank line between a table and a line of text right after or before
+    it: Markdown would read that text as one more row, or the table as part of a paragraph."""
+    out = []
+    for ln in lines:
+        if out and ln and out[-1] and is_row(ln) != is_row(out[-1]):
+            out.append("")
+        out.append(ln)
+    return out
+
+
 _BOLD = re.compile(r"(?<!\\)\*\*")
+_DELIM_ROW = re.compile(r"^\|(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*$")
+_LIST_MARK = re.compile(r"^(?:\d{1,9}[.)]|[-+*])[ \t]+")
+
+
+def _cells(row: str) -> list:
+    """A table row's cells, as written: split at every "|" not escaped by an odd run of
+    backslashes, outer pipes dropped, each cell stripped."""
+    cells, cur, i = [], [], 0
+    while i < len(row):
+        ch = row[i]
+        if ch == "\\":
+            j = i
+            while j < len(row) and row[j] == "\\":
+                j += 1
+            cur.append(row[i:j + 1] if j < len(row) and (j - i) % 2 else row[i:j])
+            i = j + 1 if j < len(row) and (j - i) % 2 else j
+            continue
+        if ch == "|":
+            cells.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    cells.append("".join(cur))
+    if cells and not cells[0].strip():
+        cells = cells[1:]
+    if cells and not cells[-1].strip():
+        cells = cells[:-1]
+    return [c.strip() for c in cells]
 
 
 def displayed(text: str) -> str:
-    """#99: what the operator sees of a stored text — the house style's bold
-    markers (unescaped `**`) are formatting, not characters, then unesc. A quote is compared
-    with this."""
-    return unesc(_BOLD.sub("", text))
+    """#99: what the operator reads of a stored text, as a reply quoting its post carries it
+    (Casa reads a rich message back as its blocks' text, one per line): the house style's
+    bold markers (unescaped `**`) are formatting, not characters; a table is its rows, each
+    row's cells joined with " | ", without the delimiter row; a list item is its text
+    without its number or bullet; then unesc. A quote is compared with this."""
+    out = []
+    for ln in _BOLD.sub("", text).split("\n"):
+        if _DELIM_ROW.match(ln):
+            continue
+        out.append(" | ".join(_cells(ln)) if is_row(ln) else _LIST_MARK.sub("", ln, count=1))
+    return unesc("\n".join(out))
 
 
 _BOLD_SPAN = re.compile(r"(?<!\\)\*\*(.+?)(?<!\\)\*\*")
@@ -319,6 +454,13 @@ def headline(d: dict, view_quarter=None, payee=True) -> str:
     """`payee=False`: a vendor card's line — its head names the vendor once;
     the generated ref still tells two otherwise-equal payments apart (names_for is composed
     with the same `payee`)."""
+    return " · ".join(_headline_parts(d, view_quarter, payee))
+
+
+def _headline_parts(d: dict, view_quarter=None, payee=True) -> list:
+    """The headline's parts in order: the payee (unless `payee` is False), the amount, the
+    date, then what else tells the payment apart (its kind, pending, a generated ref, its
+    quarter in another quarter's view)."""
     parts = ([field(shown(d))] if payee else []) + [_money(d), _day(d["date"])]
     kind = d["expectation"]["kind"]
     if kind and kind not in ("invoice", "none"):
@@ -329,7 +471,16 @@ def headline(d: dict, view_quarter=None, payee=True) -> str:
         parts.append("ref " + _NAMES.pids[d["pid"]])
     if view_quarter and d.get("quarter") and d["quarter"] != view_quarter:
         parts.append(dates.quarter_label(d["quarter"]))
-    return " · ".join(parts)
+    return parts
+
+
+def row_cells(d: dict, view_quarter=None, detail=()) -> list:
+    """A payment's cells in a payment table (TABLE_HEAD): payee, amount, date, and the note —
+    the headline's other parts, then the item's detail. The cells are the headline's parts
+    in order, so the bind check finds the headline in the row (_norm drops the borders)."""
+    parts = _headline_parts(d, view_quarter)
+    note = " — ".join(x for x in [" · ".join(parts[3:]), *detail] if x)
+    return [*parts[:3], note]
 
 
 def _a(word: str) -> str:
@@ -656,12 +807,14 @@ def _degraded_block(gmail_down, interrupted, missing, unsearched, absent=False) 
 
 
 class _Block:
-    """One printed item: its lines, and what printing it binds on delivery."""
+    """One printed item: its lines (or, in a payment table, its row's `cells`), and what
+    printing it binds on delivery."""
     __slots__ = ("lines", "pid", "pairings", "residue", "amount", "order", "name", "guessed",
-                 "offer", "ident")
+                 "offer", "ident", "cells")
 
     def __init__(self, lines, *, pid=None, pairings=None, residue=None, amount=0, order=("", 0),
-                 name=None, guessed=False, offer=None, ident=None):
+                 name=None, guessed=False, offer=None, ident=None, cells=None):
+        self.cells = cells
         # `pairings`: match id -> the identity string printed for it; `ident`: the
         # payment's printed identity (its headline). Both are checked at bind time.
         self.lines, self.pid, self.residue = list(lines), pid, residue
@@ -671,8 +824,10 @@ class _Block:
 
 
 class _Section:
-    def __init__(self, title, blocks, *, gap=False, empty=None):
+    """`table`: the blocks are rows of one payment table (each block's `cells`)."""
+    def __init__(self, title, blocks, *, gap=False, empty=None, table=False):
         self.title, self.blocks, self.gap, self.empty = title, blocks, gap, empty
+        self.table = table
 
 
 def _residue_blocks(conn) -> tuple:
@@ -708,15 +863,14 @@ def _residue_blocks(conn) -> tuple:
     return blocks, silent
 
 
-def _item_blocks(ds, detail, q, shows_pairings=False, guessed=False, inline=False) -> list:
+def _item_blocks(ds, detail, q, shows_pairings=False, guessed=False, table=False) -> list:
     """`pairings` are the match ids whose proposition the text displays. Only
     those are bound for a later correction (a missing view
-    that bound candidates it never showed let "Adobe is wrong" reject them). `inline`
-    (#99): the detail follows the headline on its one line."""
-    def lines(d):
-        return [" — ".join([headline(d, q), *detail(d)])] if inline \
-            else [headline(d, q), *detail(d)]
-    return [_Block(lines(d), pid=d["pid"], ident=headline(d, q),
+    that bound candidates it never showed let "Adobe is wrong" reject them). `table`: each
+    payment is a row of its section's payment table, its detail in the note."""
+    return [_Block([] if table else [headline(d, q), *detail(d)],
+                   cells=row_cells(d, q, detail(d)) if table else None,
+                   pid=d["pid"], ident=headline(d, q),
                    pairings=pairings(d) if shows_pairings else {},
                    amount=abs(d["amount_minor"] or 0), order=(d["date"] or "", d["pid"]),
                    name=d["counterparty"], guessed=guessed)
@@ -819,19 +973,20 @@ def _compose(conn, view, q, items, members, lead):
                                          order=("", pkg_id), offer=pkg_id)
                                   for pkg_id, fname, status in delivery.offerable(conn, q)]))
     if view in ("status", "all", "missing", "quarter"):
-        # #99: one tight line per payment, its detail after it
+        # #99: one table row per payment, its detail in the note
         # #102: on the missing view the title already says it; no second heading
         secs.append(_Section(title("Missing") if view != "missing" else "",
-                             _item_blocks(missing, _missing_detail, q, inline=True),
-                             empty="Nothing is missing." if view == "missing" else None))
-        # #106: the payments not classified yet, each a bindable line, under their title;
-        # #111: each line asks what it is (the title is not said twice)
+                             _item_blocks(missing, _missing_detail, q, table=True),
+                             empty="Nothing is missing." if view == "missing" else None,
+                             table=True))
+        # #106: the payments not classified yet, each a bindable row, under their title;
+        # #111: each row asks what it is (the title is not said twice)
         secs.append(_Section(title("Not classified yet"), _item_blocks(
-            uncl, lambda d: [WHAT_IS_IT], q, inline=True)))
+            uncl, lambda d: [WHAT_IS_IT], q, table=True), table=True))
     if view in ("status", "all", "quarter"):
         # #117: the payments the cards count "waiting on the bank", under that title
         secs.append(_Section(title("Waiting on the bank"), _item_blocks(
-            waits, lambda d: [], q, inline=True)))
+            waits, lambda d: [], q, table=True), table=True))
     if view in ("status", "all"):
         secs.append(_Section(title("What is this?"), _item_blocks(
             conflicts, lambda d: ["The categories on it disagree — which is it?"], q)))
@@ -840,12 +995,13 @@ def _compose(conn, view, q, items, members, lead):
         secs.append(_Section("", _item_blocks(guessed, evidence, q, True, True),
                              empty="Nothing to check."))
     if view == "rest":
-        secs.append(_Section("", _item_blocks(nice, lambda d: [], q),
-                             empty="Nothing else is missing."))
+        secs.append(_Section("", _item_blocks(nice, lambda d: [], q, table=True),
+                             empty="Nothing else is missing.", table=True))
     if view == "older":
-        secs.append(_Section("", _item_blocks(older_open, _missing_detail, q)
-                             + _item_blocks(older_waits, lambda d: ["Waiting on the bank."], q),
-                             empty="Nothing older is open."))
+        secs.append(_Section("", _item_blocks(older_open, _missing_detail, q, table=True)
+                             + _item_blocks(older_waits, lambda d: ["Waiting on the bank."], q,
+                                            table=True),
+                             empty="Nothing older is open.", table=True))
 
     packages = []
     if view == "quarter":
@@ -921,10 +1077,14 @@ def _emit(parts, picks, *, announce, more=None, cap=None, all_sections_empty_msg
             out.append("")
             if sec.title:
                 out.append(sec.title)
+        if sec.table and blocks:
+            # the Note column only when a printed row has a note: a narrow table
+            n = 4 if any(b.cells[3] for b in blocks) else 3
+            out += [""] + table_head(n)
         for j, blk in enumerate(blocks):
             if j and sec.gap:
                 out.append("")
-            out.extend(blk.lines)
+            out.extend([table_row(blk.cells[:n])] if sec.table else blk.lines)
             chosen.append(blk)
             if blk.guessed:
                 printed_guessed.append(blk.name)
@@ -934,7 +1094,16 @@ def _emit(parts, picks, *, announce, more=None, cap=None, all_sections_empty_msg
         out += ["", more]
     else:
         out += parts["tail"](printed_guessed)
-    return out, chosen
+    return _tidy(detach_tables(out)), chosen
+
+
+def _tidy(lines) -> list:
+    """No two blank lines in a row, none first."""
+    out = []
+    for ln in lines:
+        if ln or (out and out[-1]):
+            out.append(ln)
+    return out
 
 
 def _capped(parts, cap):
@@ -987,7 +1156,7 @@ def _page(parts, after, first):
                      all_sections_empty_msgs=first)
 
     def fits(page, last):
-        return utf16_len(_text(emit(page, last)[0])) <= _limit()
+        return _fits_page(_text(emit(page, last)[0]))
 
     if not flat and not first:
         return list(parts["head"]) + ["", "That is everything."], [], None
@@ -1007,29 +1176,32 @@ FIT_CLOSING = "The rest did not fit in one message."
 CLIP_MARK = "\u2026"
 
 
-def clip(text: str, units: int) -> str:
-    """`text` cut to at most `units` UTF-16 units, ending in CLIP_MARK when it
-    was cut — for displayed detail with no natural bound (a probe's diagnostic,
-    a bank counterparty text). Cuts between code points, so a non-BMP
+def clip(text: str, units: int, nbytes: int | None = None) -> str:
+    """`text` cut to at most `units` UTF-16 units (and, when given, `nbytes` prepared bytes),
+    ending in CLIP_MARK when it was cut — for displayed detail with no natural bound (a
+    probe's diagnostic, a bank counterparty text). Cuts between code points, so a non-BMP
     character is never split into half a surrogate pair."""
-    if utf16_len(text) <= units:
+    if utf16_len(text) <= units and (nbytes is None or prepared_bytes(text) <= nbytes):
         return text
-    out, used = [], 0
+    out, used, size = [], 0, 0
     budget = units - utf16_len(CLIP_MARK)
+    room = None if nbytes is None else nbytes - prepared_bytes(CLIP_MARK)
     for ch in text:
-        n = utf16_len(ch)
-        if used + n > budget:
+        n, b = utf16_len(ch), _char_bytes(ch)
+        if used + n > budget or (room is not None and size + b > room):
             break
         out.append(ch)
-        used += n
+        used, size = used + n, size + b
     return "".join(out) + CLIP_MARK
 
 
-def fit_lines(lines, closing=None, always_close=False, tag="") -> tuple:
+def fit_lines(lines, closing=None, always_close=False, tag="", limit=None) -> tuple:
     """THE fit: every operator-facing message is produced
-    through here, and what it returns joins with "\n" to at most
-    BODY_LIMIT UTF-16 units — every separator and the closing line
-    included, whatever the inputs.
+    through here, and what it returns joins with "\n" to one message Casa takes: at most
+    `limit` UTF-16 units (BODY_LIMIT; RECEIPT_LIMIT for a tap's receipt) and BODY_BYTES
+    prepared bytes — every separator and the closing line included, whatever the inputs.
+    A closing line after a table row is set apart by a blank line, so it never reads as one
+    more row (composers set their own tables apart: detach_tables).
 
     Returns (out_lines, whole): `whole` is how many leading input lines are
     printed IN FULL — the only ones a caller may bind. When everything fits,
@@ -1041,35 +1213,41 @@ def fit_lines(lines, closing=None, always_close=False, tag="") -> tuple:
 
     `tag` ends line 1 and is counted inside the fit; it is never cut: a line 1
     that must be clipped is clipped before its tag."""
+    limit = BODY_LIMIT if limit is None else limit
     lines = list(lines)
     if tag:
         lines = [(lines[0] if lines else "") + tag] + lines[1:]
-    tail = [clip(closing, BODY_LIMIT)] if closing else []
-    if utf16_len("\n".join(lines + (tail if always_close else []))) <= BODY_LIMIT:
-        return lines + (tail if always_close else []), len(lines)
-    budget = BODY_LIMIT - (utf16_len(tail[0]) + 1 if tail else 0)
-    kept, used = [], 0
+    tail = [clip(closing, limit, BODY_BYTES)] if closing else []
+    gap = [""] if tail and lines and is_row(lines[-1]) else []
+    if fits_body("\n".join(lines + (gap + tail if always_close else [])), limit):
+        return lines + (gap + tail if always_close else []), len(lines)
+    # room for the closing line and the blank line that may set it apart from a table
+    units = limit - (utf16_len(tail[0]) + 2 if tail else 0)
+    room = BODY_BYTES - (prepared_bytes(tail[0]) + 4 if tail else 0)
+    kept, used, size = [], 0, 0
     for ln in lines:
-        need = utf16_len(ln) + (1 if kept else 0)
-        if used + need > budget:
+        need, b = utf16_len(ln) + (1 if kept else 0), prepared_bytes(ln) + (2 if kept else 0)
+        if used + need > units or size + b > room:
             break
         kept.append(ln)
-        used += need
+        used, size = used + need, size + b
     whole = len(kept)
-    if whole == 0 and lines and budget > utf16_len(CLIP_MARK) + utf16_len(tag):
+    if whole == 0 and lines and units > utf16_len(CLIP_MARK) + utf16_len(tag):
         head = lines[0][:len(lines[0]) - len(tag)] if tag else lines[0]
-        kept = [clip(head, budget - utf16_len(tag)) + tag]
+        kept = [clip(head, units - utf16_len(tag), room - prepared_bytes(tag)) + tag]
     if not kept and tail:
         return tail, 0
+    if tail and kept and is_row(kept[-1]):
+        kept.append("")
     return kept + tail, whole
 
 
-def fit_message(lines, closing=None, always_close=False) -> str:
+def fit_message(lines, closing=None, always_close=False, limit=None) -> str:
     """fit_lines, joined: a text that is always deliverable. `lines` may be
     a str (split at newlines)."""
     if isinstance(lines, str):
         lines = lines.split("\n")
-    return "\n".join(fit_lines(lines, closing, always_close)[0])
+    return "\n".join(fit_lines(lines, closing, always_close, limit=limit)[0])
 
 
 def _item_sentence(d) -> str:
@@ -1123,9 +1301,8 @@ def _item_page(d, after):
         return _item_block(d, [], False), None          # #117: nothing to page
     rest = [c for c in d["candidates"] if after is None or c["match_id"] > after[0]]
     n = 1 if rest else 0
-    while n < len(rest) and utf16_len(_text(_item_block(d, rest[:n + 1],
-                                                         n + 1 < len(rest)).lines)) \
-            <= _limit():
+    while n < len(rest) and _fits_page(_text(_item_block(d, rest[:n + 1],
+                                                         n + 1 < len(rest)).lines)):
         n += 1
     more = n < len(rest)
     return _item_block(d, rest[:n], more), ([rest[n - 1]["match_id"]] if more else None)
@@ -1253,7 +1430,7 @@ def _review(conn, view, quarter, pid, page, after, prev=None) -> dict:
             for cap in range(CAP, -1, -1):
                 lines, chosen = _capped(parts, cap)
                 text = _text(lines)
-                if utf16_len(text) <= _limit():
+                if _fits_page(text):
                     break
             if any(len(s.blocks) > sum(1 for c in chosen if c in s.blocks)
                    for s in parts["sections"]):
@@ -1343,10 +1520,9 @@ SHEET_VIEWS = ("check", "missing")
 
 
 def fits_proposal(text: str) -> bool:
-    """A stored rendering can be posted with buttons: its deposited body fits the
-    proposal budget, and Casa's proposal text bound."""
-    body = deposit_safe(text)
-    return utf16_len(body) <= BODY_LIMIT and len(body) <= 4000
+    """A stored rendering can be posted with buttons: its deposited body is one rich message
+    within Casa's proposal bounds (_message_ok, card_fits)."""
+    return fits_body(deposit_safe(text))
 
 
 def show_counts(conn, q) -> tuple:
@@ -1418,7 +1594,9 @@ def buttons_for(conn, r) -> list:
     return out[:5] + [CLOSE] if out else []
 
 
-MAX_PAGES = 6             # Casa v0.344.67: a card brings at most six plain pages before it
+# Casa's result_broker.PROPOSAL_MAX_PAGES: a card brings at most six pages before it, each one
+# rich message. A list longer than that continues from its card ("more")
+MAX_PAGES = 6
 
 
 def list_card(conn, page_ids, nxt) -> str:
@@ -1486,7 +1664,9 @@ def list_card(conn, page_ids, nxt) -> str:
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"[\s\u00b7]+", "", s)
+    """A text as the bind check reads it: no whitespace, no generated separator ("·"), no
+    table cell border ("|"), so a payment's headline is found in its table row too."""
+    return re.sub(r"[\s\u00b7|]+", "", s)
 
 
 def _bindable(chosen, text) -> dict:
@@ -1518,8 +1698,8 @@ def _bindable(chosen, text) -> dict:
     return out
 
 
-_LABEL_LINE = "\U0001f4ca "        # Casa's "📊 <display name>" label, first line of a post
-QUOTE_CAP = 2000                   # Casa quotes a post's first 2,000 characters
+_GLYPH = "\U0001f4ca"              # Casa's "📊 <display name>" label heads a labelled post
+QUOTE_CAP = 2000                   # a quote and a rendering agree over at most this much
 # The scope fields that decide what a reading or a tap binds — "same binding
 # facts" is equality of these, the kind and the rendering's render_items rows. A new read
 # by reply.py joins this list (an AST pin holds reply.py to it)
@@ -1538,33 +1718,59 @@ class QuoteRefusal(Exception):
 
 
 def _bnorm(s: str) -> str:
-    """A text as compared for binding: whitespace runs collapsed to one space, stripped.
-    A stored rendering's body is compared this way, whole — its first line is data (a
-    payee named "📊 Analytics" heads its item view), never Casa's label."""
-    return re.sub(r"\s+", " ", s).strip()
+    """A text as compared for binding: every whitespace character dropped — Telegram gives
+    a rich message back with its own line breaks and spacing, the words are what is
+    compared. A stored rendering's body is compared this way, whole — its first line is
+    data (a payee named "📊 Analytics" heads its item view), never Casa's label."""
+    return re.sub(r"\s+", "", s)
 
 
-# What Casa does to a post before it reaches the desk as `quoted` — undone, exactly, by
-# _qnorm (read at the Casa tree, bcebd66b):
-# - result_broker.py:147 POST_LABEL_GLYPH "📊", :363 post_label() -> "📊 <display name>",
-#   :372 compose_operator_message() -> f"{label}\n{body}": the label line heads the post;
-# - specialist_desk.py:48 DESK_QUOTE_CHARS = 2000, :52 CLIP = "[…]", :78-84 clip(): a text
-#   over the cap becomes text[:cap - len(CLIP)] + CLIP; :692 quotes the post through it.
-CASA_QUOTE_CHARS = 2000
+# What Casa (v0.376) does to a post before a reply to it reaches the specialist as the
+# quoted text — undone, exactly, by _qnorm:
+# - result_broker POST_LABEL_GLYPH "📊", post_label() -> "📊 <display name>",
+#   compose_operator_message() -> f"{label}\n{body}": the label line heads a labelled post;
+# - channels/telegram.quoted_text(): a rich message is read back as its blocks' text
+#   (tg_rich.flatten; `displayed` predicts it);
+# - channels/telegram REPLY_QUOTE_CHARS = 600 and chat_notes.clip() with CLIP = "[…]": a
+#   text over the cap becomes text[:cap - len(CLIP)] + CLIP.
+CASA_QUOTE_CHARS = 600
 CASA_CLIP = "[\u2026]"
 
 
 def _qnorm(s: str) -> str:
     """The incoming QUOTE as compared for binding: Casa's clip marker dropped when the quote
-    is exactly the clipped length (only then did Casa cut it), Casa's label line (which Casa
-    adds to the post, never to the stored body) dropped, then _bnorm. A shorter prefix
-    still binds by the whole-overlap rule."""
+    is exactly the clipped length (only then did Casa cut it), then _bnorm. Casa's label,
+    which it adds to the post and never to the stored body, is skipped when comparing
+    (_agrees). A shorter prefix still binds by the whole-overlap rule."""
     if len(s) == CASA_QUOTE_CHARS and s.endswith(CASA_CLIP):
         s = s[:-len(CASA_CLIP)]
-    lines = s.split("\n")
-    if lines and lines[0].startswith(_LABEL_LINE):
-        lines = lines[1:]
-    return _bnorm("\n".join(lines))
+    return _bnorm(s)
+
+
+_LEAD = 24          # the rendering's first characters looked for after a label
+
+
+def _agrees(t: str, q: str):
+    """Where in a quote `q` a stored rendering `t` (both normalised) agrees with it over
+    their whole overlap, or None — the quote read from its start (0), or, when it opens with
+    Casa's label (the glyph and a display name of at most LABEL_ALLOWANCE characters, on a
+    line of its own or run into the body's first line, however Telegram gave it back), from
+    where the rendering's own opening follows it. A payee named "📊 Analytics" heads its
+    item view: a body may open with the glyph too. The caller keeps the earliest: a short
+    first rendering of a joined post leaves the next one inside the label's reach."""
+    if not t or not q:
+        return None
+    starts = [0]
+    if q.startswith(_GLYPH):
+        lead = t[:_LEAD]
+        at = q.find(lead, len(_GLYPH), len(_GLYPH) + LABEL_ALLOWANCE + len(lead))
+        if at > 0:
+            starts.append(at)
+    for o in starts:
+        n = min(len(t), len(q) - o)
+        if n > 0 and t[:n] == q[o:o + n]:
+            return o
+    return None
 
 
 def binding_facts(conn, r) -> str:
@@ -1615,7 +1821,8 @@ def bound_rendering(conn, quoted):
     cannot change what commits. Several with differing facts raise QuoteRefusal (AMBIGUOUS:
     possible only among older renderings, the tag tells the rest apart); none raises it too
     (UNMATCHED) — an explicit quote never falls back. Recency never picks."""
-    q = _qnorm(quoted)[:QUOTE_CAP] if isinstance(quoted, str) else ""
+    q = _qnorm(quoted)[:QUOTE_CAP + len(_GLYPH) + LABEL_ALLOWANCE] \
+        if isinstance(quoted, str) else ""
     if not q:
         return db.last_delivered(conn)
     found = []
@@ -1626,11 +1833,13 @@ def bound_rendering(conn, quoted):
         # the body as posted: deposit_safe is the last step of every deposit, so a
         # older body's control characters are spaces in what the operator saw
         t = _bnorm(displayed(deposit_safe(r["text"] or "")))[:QUOTE_CAP]
-        n = min(len(t), len(q))
-        if db.seen_render(r) and n and t[:n] == q[:n]:
-            found.append(r)
+        at = _agrees(t, q) if db.seen_render(r) else None
+        if at is not None:
+            found.append((at, r))
     if not found:
         raise QuoteRefusal(UNMATCHED, {"view": "status"})
+    first = min(at for at, _ in found)
+    found = [r for at, r in found if at == first]
     found.sort(key=lambda r: _rid_order(r["render_id"]))
     if len({binding_facts(conn, r) for r in found}) == 1:
         return found[0]

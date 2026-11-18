@@ -15,9 +15,10 @@ class Wording(LoopCase):
         r = views.build_review(self.conn, "status", quarter="2026-Q3")
         lines = r["text"].split("\n")
         at = lines.index("**Not classified yet**")
-        self.assertTrue(lines[at + 1].startswith("Loonadministratie · EUR 1,480.00"), lines)
-        # #111: the line asks what it is; the title is not said twice
-        self.assertTrue(lines[at + 1].endswith(" — what is it?"), lines)
+        # a table under its title: a blank line, the header and delimiter rows, the row
+        self.assertTrue(lines[at + 4].startswith("| Loonadministratie | EUR 1,480.00"), lines)
+        # #111: the row asks what it is; the title is not said twice
+        self.assertTrue(lines[at + 4].endswith(" | what is it? |"), lines)
         self.assertEqual(r["text"].count("Not classified yet"), 1)
         # The named payment is bound to the view, so a reply about it binds
         self.assertIn(p, views.render_items(self.conn, r["render_id"]))
