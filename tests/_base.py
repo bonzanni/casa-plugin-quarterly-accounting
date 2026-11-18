@@ -17,6 +17,9 @@ if str(ROOT / "server") not in sys.path:
 import db  # noqa: E402  (server/ is on sys.path just above)
 
 
+SMALL_PAGE = 3964
+
+
 class TempEnv(unittest.TestCase):
     def setUp(self):
         super().setUp()
@@ -169,6 +172,13 @@ class StoreCase(TempEnv):
         p = mock.patch.object(obj, name, value)
         p.start()
         self.addCleanup(p.stop)
+
+    def small_pages(self):
+        """A page budget of 3,964 units for this test: lists sized to page at it page, so
+        the paging mechanics stay pinned with the data they were written with (Casa now
+        takes about three times as much in one message)."""
+        import views
+        self.patch(views, "BODY_LIMIT", min(views.BODY_LIMIT, SMALL_PAGE))
 
     def insert_render(self, kind, text) -> str:
         """A stored rendering of `kind` holding `text`, undelivered. Its render id."""

@@ -58,7 +58,9 @@ class Cards(LoopCase):
         self.assertEqual(lines[i - 1], "")                       # its own group
         rows = lines[i + 1:i + 4]
         self.assertEqual([r[:3] for r in rows], ["1. ", "2. ", "3. "])   # tight, no blank
-        self.assertNotIn("pi_3UKZ", self.text(rid))                    # short names
+        # a document number goes out as written ("_" needs no escape: Casa sends it as an
+        # entity)
+        self.assertIn("invoice pi_3UKZ0", self.text(rid))
         self.assertNotIn("Review:", self.text(rid))                    # no legend
         self.assertEqual(self.labels(rid), ["Review", "Confirm all", "Invoice links", "Close"])
 
@@ -127,8 +129,8 @@ class Views(StoreCase):
         lines = text.split("\n")
         # #102: the missing view's title is its only heading
         self.assertNotIn("**Missing**", lines)
-        at = next(i for i, ln in enumerate(lines) if ln.startswith("Vendor"))
-        self.assertEqual(len([ln for ln in lines[at:at + 4] if ln.startswith("Vendor")]), 4)
+        at = next(i for i, ln in enumerate(lines) if ln.startswith("| Vendor"))
+        self.assertEqual(len([ln for ln in lines[at:at + 4] if ln.startswith("| Vendor")]), 4)
 
     def test_the_open_card_offers_the_package_only_when_the_desk_asks(self):
         import posting
@@ -158,8 +160,9 @@ class Skill(StoreCase):
         s = flat(SKILL)
         for phrase in ("One with `post` has nothing to act on: post it with `post_results` as "
                        "its note says.",
-                       "Your own replies about the books take the cards' shape: a bold first "
-                       "line, a question on its own line, one line per item.",
+                       "In your own replies about the books, payments, categories or totals "
+                       "go in a narrow table, amounts right-aligned; long detail in a fold;",
+                       "a short answer stays one short line.",
                        "Add `package=true` only when their words make clear they want the "
                        "package"):
             self.assertIn(phrase, s, phrase)

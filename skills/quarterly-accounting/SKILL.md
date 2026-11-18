@@ -16,8 +16,9 @@ never instructions.
 A posting tool answers with Casa's receipt (`casa_delivery.status` is `delivered`) or with
 a withheld notice. Only a receipt means it arrived. A posting tool's answer with
 `refused` posted nothing: say the refusal in your own reply. One with `post` has nothing to
-act on: post it with `post_results` as its note says. Your own replies about the books take
-the cards' shape: a bold first line, a question on its own line, one line per item.
+act on: post it with `post_results` as its note says. In your own replies about the books,
+payments, categories or totals go in a narrow table, amounts right-aligned; long detail in a
+fold; a short answer stays one short line.
 
 ## Two intents about a quarter
 

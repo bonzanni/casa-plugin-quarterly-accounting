@@ -1,8 +1,22 @@
 """Every deposit this plugin makes, judged by Casa's REAL deposit
-(ReferenceStore.deposit: proposal_ok, _message_ok, _file_caption_ok, the S7a filename
-predicate), Casa's real message plan (render_paged ≤ MAX_MESSAGE_PAGES) and Casa's real
-renderer (tg_richtext.render: the displayed text equals the unescaped composition; its
-only entities are the house style's bold spans, #99). Runs under Casa's interpreter; never imported by the stdlib suite.
+(ReferenceStore.deposit: proposal_ok with card_fits, _message_ok, _file_caption_ok, the S7a
+filename predicate), Casa's real message plan (tg_rich.split of the composed post ≤
+MAX_MESSAGE_PAGES, as channels/telegram.deliver_operator_message counts it) and Casa's real
+preparation of a rich message (tg_rich.prepare). Runs under Casa's interpreter (v0.376 or
+newer); never imported by the stdlib suite.
+
+Telegram renders the prepared Markdown itself, so the gate reads it the way Telegram does
+with a mirror of Casa's own parser (tg_rich._parser: CommonMark with GitHub's tables and
+strikethrough; emphasis, which Casa's parser leaves out for speed, back on). From that it
+builds what a reply quoting the post carries (channels/telegram.quoted_text ->
+tg_rich.flatten: every block's text on a line of its own, a table row's cells joined with
+" | ", a list item without its number, a single line break read as a space) and checks:
+- the text equals the plugin's own prediction (views.displayed), whitespace aside;
+- its only formatting is the house style's bold spans (views.bold_spans), real tables and
+  numbered lists — never a field's markers read as emphasis, code, a link, a heading, a
+  quote, a bullet, inline HTML, or Telegram's own ==highlight==, ||spoiler|| and [^footnote];
+- the quote Casa hands the specialist (that text under the label line, clipped by
+  chat_notes.clip at REPLY_QUOTE_CHARS) binds back to its rendering.
 
 The file's first line is the generator's header; every deposit case it names must be judged
 and accepted, the accepted deposits per kind must equal its counts, every kind in
@@ -33,11 +47,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 import result_broker as rb                                   # noqa: E402
 import stored_calls as sc                                    # noqa: E402
 import tools as casa_tools                                   # noqa: E402
-from channels.tg_richtext import render, render_paged        # noqa: E402
+import re                                                    # noqa: E402
+from channels import tg_rich                                 # noqa: E402
+from channels.telegram import REPLY_QUOTE_CHARS              # noqa: E402
+from chat_notes import clip                                  # noqa: E402
+from markdown_it import MarkdownIt                           # noqa: E402
 from plugin_grants import result_contract_map                # noqa: E402
 from plugin_registry import ResolutionResult, ResolvedPlugin # noqa: E402
 from plugin_store import StoreError, manifest_jobs, validate_manifest   # noqa: E402
-from specialist_desk import clip, DESK_QUOTE_CHARS          # noqa: E402
 from test_proposal_slot import _identity                     # noqa: E402
 
 # the plugin's stdlib copy of the argument grammar, loaded by path: putting the plugin's
@@ -78,16 +95,65 @@ def _quiet_job(manifest) -> list:
     return bad
 
 
-def _bold(shown, entities):
-    """#99: the displayed text of each entity, which must all be BOLD — the house style's
-    title and question lines, never a field's markers."""
-    u = shown.encode("utf-16-le")
-    out = []
-    for e in entities or []:
-        if "BOLD" not in str(e.type).upper():
-            return None
-        out.append(u[2 * e.offset:2 * (e.offset + e.length)].decode("utf-16-le"))
-    return out
+# Casa's parser (tg_rich._parser) with emphasis back on: Telegram reads **bold**
+_MD = MarkdownIt("commonmark").enable(["table", "strikethrough"])
+_BLOCKS_OK = {"paragraph_open", "paragraph_close", "inline", "table_open", "table_close",
+              "thead_open", "thead_close", "tbody_open", "tbody_close", "tr_open", "tr_close",
+              "th_open", "th_close", "td_open", "td_close", "ordered_list_open",
+              "ordered_list_close", "list_item_open", "list_item_close"}
+_INLINE_OK = {"text", "softbreak", "hardbreak", "strong_open", "strong_close"}
+# Telegram's own inline syntax, which CommonMark does not read: a highlight, a spoiler, a
+# footnote (escaped markers are preceded by a backslash)
+_TG_ONLY = re.compile(r"(?<!\\)==|(?<!\\)\|\||(?<!\\)\[\^")
+
+
+def read_back(markdown):
+    """(text, bold spans, problems) of `markdown` as Telegram shows Casa's prepared rich
+    message: the text a reply quoting it carries (tg_rich.flatten), the bold spans, and every
+    formatting that is not the house style's."""
+    prepared = tg_rich.prepare(markdown)
+    problems = sorted({m.group(0) for m in _TG_ONLY.finditer(prepared)})
+    blocks, bold, row, cells = [], [], None, None
+    for tk in _MD.parse(prepared):
+        if tk.type not in _BLOCKS_OK:
+            problems.append(tk.type)
+        if tk.type == "tr_open":
+            row = []
+        elif tk.type == "tr_close":
+            blocks.append(" | ".join(row))
+            row = None
+        if tk.type != "inline":
+            continue
+        out, span = [], None
+        for c in tk.children or []:
+            if c.type not in _INLINE_OK:
+                problems.append(c.type)
+            if c.type == "strong_open":
+                span = []
+            elif c.type == "strong_close":
+                bold.append("".join(span or []))
+                span = None
+            piece = {"softbreak": " ", "hardbreak": "\n"}.get(c.type, c.content
+                                                                if c.type == "text" else "")
+            out.append(piece)
+            if span is not None:
+                span.append(piece)
+        text = "".join(out)
+        if row is not None:
+            row.append(text)
+        else:
+            blocks.append(text)
+    return "\n".join(blocks), bold, problems
+
+
+def _ws(text):
+    return " ".join(text.split())
+
+
+def _shown_ok(markdown, expect, bold_expect):
+    """The post reads as the plugin predicts, bold only where the house style puts it."""
+    shown, bold, problems = read_back(markdown)
+    return not problems and _ws(shown) == _ws(expect) and bold == bold_expect
 
 
 def _display(rec):
@@ -109,6 +175,7 @@ def main(path) -> int:
     cmap = result_contract_map(res)
     by_wire = {e.wire_name: (rt, e) for rt, e in cmap.tools.items()}
     bad, n, kinds, judged, checked, skipped = _quiet_job(manifest), 0, {}, [], 0, 0
+    split_posts = 0
     tools_judged = set()
     quotes = []                                              # (n, case, store, quote, rid, raw)
     quoted_kinds = set()
@@ -186,9 +253,12 @@ def main(path) -> int:
             continue
         label = rb.post_label("finance")
         if dkind == rb.OPERATOR_MESSAGE:
-            pages = render_paged(rb.compose_operator_message(b["value"], label))
+            # Casa's message count, judged before the first send
+            pages = tg_rich.split(rb.compose_operator_message(b["value"], label))
             if len(pages) > rb.MAX_MESSAGE_PAGES:
                 bad.append((n, f"{len(pages)} pages", rec["case"]))
+            if len(pages) > 1:
+                split_posts += 1
         text = (json.loads(b["value"])["text"] if dkind == rb.OPERATOR_PROPOSAL
                 else b["value"] if dkind == rb.OPERATOR_MESSAGE else None)
         if mode == "skip":
@@ -197,9 +267,8 @@ def main(path) -> int:
             bad.append((n, f"a display expectation on a {dkind}, which has no text", rec["case"]))
         else:
             checked += 1
-            shown, entities = render(text)
-            if shown != expect or _bold(shown, entities) != rec.get("bold_expect", []):
-                bad.append((n, "display differs or an entity was produced", rec["case"]))
+            if not _shown_ok(text, expect, rec.get("bold_expect", [])):
+                bad.append((n, "display differs or a formatting was produced", rec["case"]))
         if "bind" in rec and (mode == "check" or dkind == rb.OPERATOR_FILE):
             # (#44: the package note and the file too) Casa's real quote of the
             # post, clipped as the desk context quotes it — a proposal's or a message's text with the label line
@@ -209,13 +278,13 @@ def main(path) -> int:
             if dkind == rb.OPERATOR_FILE:
                 raw = rb.compose_file_caption(label, b.get("caption"))
             elif text is not None:
-                raw = render(rb.compose_operator_message(text, label))[0]
+                raw = read_back(rb.compose_operator_message(text, label))[0]
             else:
                 bad.append((n, f"a bind on a {dkind}", rec["case"]))
                 continue
             quotes.append((n, rec["case"], str(pathlib.Path(path).parent / (
                 pathlib.Path(path).name + ".stores") / f"{rec['bind']['store']}.sqlite"),
-                           clip(raw, DESK_QUOTE_CHARS), rec["bind"]["render_id"], raw))
+                           clip(raw, REPLY_QUOTE_CHARS), rec["bind"]["render_id"], raw))
             quoted_kinds.add(dkind)
         # #66 (Casa v0.344.67): a card's plain pages, posted before it — each must be the
         # page the plugin recorded, display as promised, and its quote (Casa labels every
@@ -225,29 +294,30 @@ def main(path) -> int:
         if len(promised) != len(sent or []):
             bad.append((n, "the pages sent are not the pages recorded", rec["case"]))
         for pb, page_text in zip(promised, sent or []):
-            shown, entities = render(page_text)
             checked += 1
-            if shown != pb["display_expect"] or _bold(shown, entities) != pb.get(
-                    "bold_expect", []):
-                bad.append((n, "a page's display differs or an entity was produced",
+            if not _shown_ok(page_text, pb["display_expect"], pb.get("bold_expect", [])):
+                bad.append((n, "a page's display differs or a formatting was produced",
                             rec["case"]))
-            raw = render(rb.compose_operator_message(page_text, label))[0]
+            raw = read_back(rb.compose_operator_message(page_text, label))[0]
             quotes.append((n, rec["case"] + ":page", str(pathlib.Path(path).parent / (
                 pathlib.Path(path).name + ".stores") / f"{rec['bind']['store']}.sqlite"),
-                           clip(raw, DESK_QUOTE_CHARS), pb["render_id"], raw))
+                           clip(raw, REPLY_QUOTE_CHARS), pb["render_id"], raw))
     # binding every displayed view post's quote binds back to its own rendering, by the
     # plugin's own views.bound_rendering in a process of its own (scripts/bind_quotes.py)
     bound = 0
     if quotes:
         res = subprocess.run([sys.executable, str(ROOT / "scripts" / "bind_quotes.py")],
-                             input=json.dumps([{"store": q[2], "quote": q[3]} for q in quotes]),
+                             input=json.dumps([{"store": q[2], "quote": q[3], "expect": q[4]}
+                                               for q in quotes]),
                              capture_output=True, text=True,
                              env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
         got = json.loads(res.stdout) if res.returncode == 0 else []
         if len(got) != len(quotes):
             bad.append((0, "the quote matcher failed", res.stderr[-300:]))
         for (n_, case, _, _, rid, _), g in zip(quotes, got):
-            if g.get("render_id") != rid:
+            # its own rendering, or (a quote clipped before they differ) one that commits the
+            # same: bound_rendering binds the lowest of renderings with equal binding facts
+            if g.get("render_id") != rid and not g.get("same_facts"):
                 bad.append((n_, f"Casa's quote binds {g} not {rid}", case))
             else:
                 bound += 1
@@ -257,7 +327,7 @@ def main(path) -> int:
     for k in REQUIRED_KINDS:                                 # #44: a note and a file too
         if k not in quoted_kinds:
             bad.append((0, f"no {k} post was quoted and bound", ""))
-    if not any(len(q[5]) > DESK_QUOTE_CHARS for q in quotes):
+    if not any(len(q[5]) > REPLY_QUOTE_CHARS for q in quotes):
         bad.append((0, "no view post longer than Casa's quote cap was quoted", ""))
     # the header's promises: every case judged once, the kinds' counts, the display floor
     want = head.get("cases") or []
@@ -285,7 +355,8 @@ def main(path) -> int:
     print(f"{'FAIL' if bad else 'OK'}: {n} records "
           f"({', '.join(f'{v} {k}' for k, v in sorted(kinds.items())) or 'no deposit accepted'}"
           f"; display checked {checked}, skipped {skipped}; quotes bound {bound}, clipped "
-          f"{sum(1 for q in quotes if len(q[5]) > DESK_QUOTE_CHARS)})")
+          f"{sum(1 for q in quotes if len(q[5]) > REPLY_QUOTE_CHARS)}; posts Casa splits "
+          f"{split_posts})")
     return 1 if bad else 0
 
 

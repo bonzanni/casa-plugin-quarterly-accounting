@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.14.0
+
+Needs Casa 0.376.0: an older Casa shows the tables as raw text and refuses the longer cards.
+Same store schema (17).
+
+- **Lists of payments are tables.** What is missing, not classified yet, waiting on the bank,
+  nice to have and older still open are each a narrow table: payment, amount (right-aligned),
+  date, and a note column only when a row has a note.
+- **One message holds about three times as much.** A list, a card's pages and the job's
+  notices fill Casa's 12,000-character message instead of Telegram's old 4,096-character
+  page, so a long list comes in far fewer messages. A card and its pages stay within the
+  64 KiB Casa takes in one post; the rest follows on "more", as before. Cards and tap
+  answers keep their 4,000-character bound, because Casa posts a tap's answer whole only up
+  to that.
+- **A reply to a post binds it again.** Casa quotes the post a reply answers in at most 600
+  characters, and may give a labelled post's label and title back on one line. Both are read
+  correctly, so "all good" or "Adobe is wrong" in reply to a list applies to that list.
+- **Your own replies about the books follow the formatting guide** Casa gives every agent:
+  payments, categories and totals in a narrow table, long detail in a fold, a short answer
+  in one short line.
+- Underscores in names and links are no longer escaped (Casa sends them safely itself), so a
+  download link with an underscore opens as written. `=` and `+` in a vendor's name are
+  escaped, so they never turn into a highlight or a list.
+
 ## 0.13.1
 
 Same store schema (17). Text and card fixes only.

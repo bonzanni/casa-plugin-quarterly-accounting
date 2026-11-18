@@ -178,7 +178,7 @@ class Cards(LoopCase):
             pids.append(q)
         from unittest import mock
         import views                       # #99: no legend reserve — a smaller card instead
-        self.enterContext(mock.patch.object(views, "BODY_LIMIT", views.BODY_LIMIT - 1200))
+        self.enterContext(mock.patch.object(views, "RECEIPT_LIMIT", views.RECEIPT_LIMIT - 1200))
         end = self.c(cards.compose_end, self.job_id, scheduled=False)
         r, scope = self.rendering(end)
         self.assert_binds_exactly_what_it_shows(end)
@@ -198,7 +198,7 @@ class Cards(LoopCase):
             self.propose(q, amount_minor=5000 + i, document_number="N" * 58 + "%02d" % i)
         from unittest import mock
         import views                       # #99: no legend reserve — a smaller card instead
-        self.enterContext(mock.patch.object(views, "BODY_LIMIT", views.BODY_LIMIT - 1200))
+        self.enterContext(mock.patch.object(views, "RECEIPT_LIMIT", views.RECEIPT_LIMIT - 1200))
         rid = self.c(cards.compose_open, "2026-Q3")
         r, scope = self.rendering(rid)
         self.assertTrue(r["text"].lstrip("*").startswith("Q3 · 30 payments** · "), r["text"])
@@ -244,7 +244,7 @@ class Cards(LoopCase):
         self.assertEqual(self.labels(first), ["No invoice needed for these", "Leave missing",
                                               "Next page", "Leave for now", "Close"])
 
-    WIDE = "*_" * 30          # 60 characters, every one escaped: the widest field there is
+    WIDE = "*_" * 30          # 60 characters, every "*" escaped ("_" goes as an entity)
 
     def test_a_vendor_page_fills_to_the_limit_before_its_line_cap(self):
         """Pages sized from their real lines: with the widest vendor name and every payment
@@ -384,13 +384,15 @@ class Cards(LoopCase):
     def test_the_measure_counts_the_worst_case_tag(self):
         import cards, views
         # #99: no legend line to reserve any more (the buttons say it)
-        line = "a" * (views.BODY_LIMIT - len(cards.TAG_WORST) - 4)        # 4: the bold title
+        # a card's bound: Casa's receipt clip (views.receipt_limit)
+        line = "a" * (views.receipt_limit() - len(cards.TAG_WORST) - 4)     # 4: the bold title
         self.assertTrue(cards._fits([line]))
         self.assertFalse(cards._fits([line + "a"]))
         self.assertTrue(views.fits_proposal(line + "a"))     # fits without the tag
 
     def test_confirm_all_is_left_out_when_any_proposal_line_is_dropped(self):
-        import cards
+        import cards, views
+        self.patch(views, "RECEIPT_LIMIT", 2900)          # 22 lines do not all fit
         for i in range(22):                                   # fewer than 25, too long
             q = self.pay(self.WIDE[:58] + "%02d" % i, 5000 + i)
             self.propose(q, amount_minor=5000 + i, document_number="N" * 58 + "%02d" % i)

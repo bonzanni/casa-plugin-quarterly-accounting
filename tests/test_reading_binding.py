@@ -1113,23 +1113,26 @@ class LabelOnlyOnTheQuote(_Q3):
             tap(b.proposal(), "Apply")
         self.assertEqual(self.operator_rows(), 1)
 
-    def test_the_label_is_dropped_only_from_the_quote(self):
+    def test_the_label_is_skipped_only_in_the_quote(self):
         import views
         body = "\U0001f4ca Analytics \u00b7 EUR 99.00 \u00b7 17 Sep \u00b7 12\nmore"
-        self.assertEqual(views._qnorm(LABEL + body), views._bnorm(body))
-        self.assertTrue(views._bnorm(body).startswith("\U0001f4ca Analytics"))
+        t = views._bnorm(body)
+        self.assertTrue(t.startswith("\U0001f4caAnalytics"))
+        self.assertIsNotNone(views._agrees(t, views._qnorm(LABEL + body)))      # labelled
+        self.assertEqual(views._agrees(t, views._qnorm(body)), 0)               # own chat
+        self.assertIsNone(views._agrees(t, views._qnorm(LABEL + "other text")))
 
 
 # ---------------------------------------------------------------------------------------
 # Casa's clip marker on a long quote is undone, like its label
 # ---------------------------------------------------------------------------------------
-CASA_QUOTE_CHARS = 2000      # casa specialist_desk.py:48 DESK_QUOTE_CHARS (bcebd66b)
-CASA_CLIP = "[\u2026]"       # casa specialist_desk.py:52 CLIP
+CASA_QUOTE_CHARS = 600       # casa channels/telegram.py REPLY_QUOTE_CHARS (v0.376)
+CASA_CLIP = "[\u2026]"       # casa chat_notes.py CLIP
 
 
 def casa_clip(text, limit=CASA_QUOTE_CHARS):
-    """A copy of casa specialist_desk.py:78-84 clip(): what Casa puts in the desk context
-    as the quoted post (692)."""
+    """A copy of casa chat_notes.clip(): what Casa puts in the note of a reply as the
+    quoted post's text."""
     text = text or ""
     if len(text) <= limit:
         return text
@@ -1137,8 +1140,8 @@ def casa_clip(text, limit=CASA_QUOTE_CHARS):
 
 
 class ClippedQuote(_Long):
-    """"all good" quoting a page over 2,000 characters — Casa sends
-    its first 1,997 characters and "[…]". It binds that page; 15 confirmations."""
+    """"all good" quoting a page over 600 characters — Casa sends
+    its first 597 characters and "[…]". It binds that page; 15 confirmations."""
 
     def test_a_clipped_quote_binds_its_page(self):
         import views
@@ -1179,8 +1182,9 @@ class ClippedQuote(_Long):
         import views
         body = "x" * 3000
         self.assertEqual(views._qnorm(casa_clip(body)), "x" * (CASA_QUOTE_CHARS - 3))
+        self.assertEqual(views.CASA_QUOTE_CHARS, CASA_QUOTE_CHARS)
         short = "a sheet that ends with [\u2026]"          # under the cap: text, kept
-        self.assertEqual(views._qnorm(short), short)
+        self.assertEqual(views._qnorm(short), views._bnorm(short))
 
 
 # ---------------------------------------------------------------------------------------

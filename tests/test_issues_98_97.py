@@ -196,6 +196,7 @@ class UnclassifiedEverywhere(_Loop):
                                  (end,)).fetchone()[0]
         self.assertIn("Q2 still open: 1 not classified yet", text)
         q2 = views.build_review(self.conn, "quarter", quarter="2026-Q2")["text"]
-        self.assertIn("**Not classified yet**\nBelastingdienst", q2)       # #106: named
+        self.assertIn("**Not classified yet**\n\n| Payment", q2)       # #106: named
+        self.assertIn("| Belastingdienst |", q2)
         status = views.build_review(self.conn, "status", quarter="2026-Q3")["text"]
         self.assertIn("+1 older not classified yet (Q2)", status)

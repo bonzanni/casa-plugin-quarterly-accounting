@@ -116,7 +116,7 @@ class TestViewsProperty(Base):
     def test_every_view_and_page_is_deliverable_and_binds_what_it_prints(self):
         rng = random.Random(7)
         names = {}
-        for i in range(rng.randint(25, 45)):
+        for i in range(rng.randint(90, 140)):          # more than one message holds
             name = _name(rng)
             link = ("https://x.example/" + _word(rng, 3000)) if rng.random() < 0.15 else None
             names[self.item(name, 100 + i, rng.random() < 0.5, link)] = name
@@ -138,11 +138,12 @@ class TestViewsProperty(Base):
                                     (view, r["text"][-120:]))
                 flat = _flat(r["text"])
                 for pid in views.render_items(self.conn, r["render_id"]):
-                    # every bound item prints what identifies it: amount and date
+                    # every bound item prints what identifies it: amount and date (in its
+                    # table row, or on its line)
                     d = work.describe(self.conn, pid)
-                    self.assertIn(views._money(d) + " · " + views._day(d["date"]), flat,
-                                  (view, pid))
-                    self.assertIn(names[pid][:20], flat, (view, pid))
+                    self.assertIn(views._norm(views._money(d) + views._day(d["date"])),
+                                  views._norm(flat), (view, pid))
+                    self.assertIn(_flat(names[pid][:20]), flat, (view, pid))
                     # and every pairing it binds is printed by its document's name
                     row = self.conn.execute("SELECT match_revisions_json FROM render_items"
                                             " WHERE render_id=? AND pid=?",
@@ -170,7 +171,7 @@ class TestAlertsProperty(Base):
             self.conn.execute("INSERT INTO packages(quarter, filename, path, built_at, partial,"
                               " digest, size, caption, manifest_json) VALUES ('2026-Q3',"
                               " 'books-2026-Q3-2026-10-14.zip','/x','x',0,'d',1,'c','{}')")
-        n = rng.randint(40, 120)
+        n = rng.randint(160, 360)          # more than one message holds
         for i in range(n):
             self.row(1000 + i, counterparty=_name(rng), amount_minor=100 + i,
                      booking_date="2026-07-14")
@@ -278,7 +279,8 @@ if __name__ == "__main__":
 
 
 def _norm(s):
-    return "".join(ch for ch in s if not ch.isspace() and ch != "·")
+    # as the bind check reads a text: a table row's borders are not part of what it shows
+    return "".join(ch for ch in s if not ch.isspace() and ch not in "·|")
 
 
 def _digest_collisions(prefix, k=6):

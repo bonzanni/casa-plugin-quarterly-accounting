@@ -516,7 +516,8 @@ LEGACY_4096 = [
       _units("*\x01_`[a](b) www.evil.example <b> 1. Ltd\n", 4096)],
      "legacy text is not re-escaped for the dialect (spec 7.6)"),
 ]
-ALERTS = 48               # hostile package notices: more than three full renderings hold
+ALERTS = 200              # hostile package notices: more than one full rendering holds
+ALERTS_SMALL = 10         # per rendering of the three-in-one post
 
 
 def _render(st, kind, text) -> str:
@@ -530,29 +531,44 @@ def _render(st, kind, text) -> str:
 
 
 def gen_post_results(sh, st, b):
-    """Item 5: three BODY_LIMIT renderings of hostile lines in one post (package notices
-    whose reasons are hostile, composed by alerts.pending_in_tx as the run's post composes
-    them, each leaving out the ones before); two legacy 4,096-unit renderings in one post,
-    plain and hostile."""
+    """Item 5: one BODY_LIMIT rendering of hostile lines in one post (package notices whose
+    reasons are hostile, composed by alerts.pending_in_tx as the run's post composes them) —
+    the largest post Casa takes; three renderings joined in one post, within POST_CHARS; two
+    legacy 4,096-unit renderings in one post, plain and hostile."""
     import alerts, db, views
-    with db.tx(st.conn):
-        for i in range(ALERTS):
-            # reasons kept to 150 characters: each rendering then fills to within the 400
-            # units the fullness check below allows (one escaped hostile notice is longer)
-            alerts.raise_package(st.conn, "package-not-sent", f"gate:{i}", quarter=QUARTER,
-                                 reason=hostile(i, "_")[:150], pass_id="")
-    rids, skip = [], set()
-    for _ in range(3):
+
+    def notices(start, n):
+        with db.tx(st.conn):
+            for i in range(start, start + n):
+                alerts.raise_package(st.conn, "package-not-sent", f"gate:{i}",
+                                     quarter=QUARTER, reason=hostile(i, "_")[:150], pass_id="")
+
+    def compose(skip):
         with db.tx(st.conn):
             r = alerts.pending_in_tx(st.conn, skip=skip)
-        units = views.utf16_len(r["text"])
-        if not views.BODY_LIMIT - 400 <= units <= views.BODY_LIMIT:
-            raise AssertionError(f"results: an alerts rendering of {units} units is not full")
-        rids.append(r["render_id"])
-        skip |= set(json.loads(st.conn.execute(
+        return r, set(json.loads(st.conn.execute(
             "SELECT scope_json FROM renders WHERE render_id=?",
             (r["render_id"],)).fetchone()[0])["alerts"])
-    sh.call(st, b, "results:three-full", "post_results", {"render_ids": rids})
+
+    # three renderings, each of the notices raised just before it, in one post
+    rids, skip = [], set()
+    for k in range(3):
+        notices(1000 * (k + 1), ALERTS_SMALL)
+        r, ids = compose(skip)
+        rids.append(r["render_id"])
+        skip |= ids
+    sh.call(st, b, "results:three", "post_results", {"render_ids": rids})
+    # one rendering filled to the message bound
+    notices(0, ALERTS)
+    r, _ = compose(skip)
+    # full: within 400 units of the character bound, or 2,000 bytes of the byte bound (the
+    # hostile reasons' "_" are five prepared bytes each)
+    units, size = views.utf16_len(r["text"]), views.prepared_bytes(r["text"])
+    if not (views.fits_body(r["text"]) and (units >= views.BODY_LIMIT - 400
+                                            or size >= views.BODY_BYTES - 2000)):
+        raise AssertionError(f"results: an alerts rendering of {units} units, {size} bytes "
+                             "is not full")
+    sh.call(st, b, "results:one-full", "post_results", {"render_ids": [r["render_id"]]})
     for case, texts, display in LEGACY_4096:
         if any(views.utf16_len(t) != 4096 for t in texts):
             raise AssertionError(f"{case}: a legacy rendering is not 4,096 units")

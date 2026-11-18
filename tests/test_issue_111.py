@@ -55,7 +55,7 @@ class NotClassified(_Uncl):
             text = views.displayed(views.build_review(self.conn, view=view,
                                                       quarter="2026-Q3")["text"])
             self.assertEqual(text.count("Not classified yet"), 1, (view, text))
-            self.assertIn("Loonadministratie NL · EUR 1,480.00 · 2 Sep — what is it?", text)
+            self.assertIn("Loonadministratie NL | EUR 1,480.00 | 2 Sep | what is it?", text)
 
     def test_the_status_card_names_the_payment(self):
         p = self.parked()

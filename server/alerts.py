@@ -316,7 +316,7 @@ def pending_in_tx(conn, must=None, skip=()):
     either left a window where both could SELECT the same undelivered alert
     and each INSERT a different render for it). One lock closes that window.
 
-    A rendering never exceeds Telegram's limit: it prints the
+    A rendering never exceeds what Casa takes in one message: it prints the
     first batch of undelivered occurrences that fits, closes with a line saying
     more follows, and binds ONLY the occurrences it prints (scope "alerts"), so
     once-per-occurrence holds and the rest are offered by the next rendering.
@@ -357,10 +357,9 @@ def pending_in_tx(conn, must=None, skip=()):
                          " delivered_at IS NULL", (rid,)).fetchone()
         # reused only if it is still deliverable: a rendering saved oversized by
         # earlier code is re-composed through the fit instead — measured
-        # against the deposit body's budget, so a older one up to Telegram's
-        # limit is re-fitted and three always join within job.POST_CHARS
+        # against the deposit body's budget (views.fits_body)
         if r is not None and json.loads(r["scope_json"]) == scope \
-                and views.utf16_len(r["text"]) <= views.BODY_LIMIT:
+                and views.fits_body(r["text"]):
             return {"render_id": rid, "text": r["text"]}
     rid = f"r{db.next_seq(conn)}"
     conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at, text,"

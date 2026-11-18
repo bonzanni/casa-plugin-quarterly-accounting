@@ -24,9 +24,10 @@ emailed. `job_status` answers, read-only, whether the job may end; `set_aside` c
 item no other write closes (an attachment that is no invoice, a row bank-feed still has).
 
 ## Requirements
-- **Casa v0.355.0 or newer.** Casa runs the job as one session from that version on, and the
-  job's manifest entry no longer declares batches; an older Casa refuses the manifest. Casa
-  has no minimum-version field and there is no fallback.
+- **Casa v0.376.0 or newer.** Casa posts the plugin's lists as Telegram rich messages from
+  that version on: real tables, and up to 12,000 characters in one message. An older Casa
+  shows the tables as raw text and refuses the longer cards. Casa has no minimum-version
+  field and there is no fallback.
 - The finance specialist ([casa-specialist-finance](https://github.com/bonzanni/casa-specialist-finance)),
   which brings bank-feed. bank-feed **0.20.0** or newer is required (it arrives with the
   specialist's v0.21.0); an older one's export is refused. The business account must be
@@ -53,6 +54,8 @@ The package name and the start quarter are defaulted and changeable by asking.
 
 ## Upgrade notes
 To update, ask the configurator to update the plugin to the latest version.
+- **0.13 → 0.14: needs Casa v0.376.0.** Update Casa first. The store schema (17) is
+  unchanged, and cards already posted keep working.
 - **0.11 → 0.12: needs Casa v0.355.0.** Not backward compatible: an accounting check running
   under the old version does not carry over; start it again after the upgrade. The store
   schema (17) is unchanged.

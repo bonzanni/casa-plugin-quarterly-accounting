@@ -82,8 +82,8 @@ class ShowView(_Q3):
         with db.tx(self.conn):
             self.conn.execute("INSERT INTO renders(render_id, kind, scope_json, created_at,"
                               " text, membership_json) VALUES ('r900','status','{}','x',?,'[]')",
-                              ("a" * 4050,))
-        self.assertFalse(views.fits_proposal("a" * 4050))
+                              ("a" * (views.BODY_LIMIT + 1),))
+        self.assertFalse(views.fits_proposal("a" * (views.BODY_LIMIT + 1)))
         import tools, qa_server  # noqa: F401
         with FakeBroker():
             out = qa_server.TOOLS["show_view"]["fn"]({"render_id": "r900"})
@@ -112,6 +112,7 @@ class PagedSheet(_Q3):
     previous one stopped."""
     def big_sheet(self, n=40):
         import db, matches
+        self.small_pages()                  # 40 items page, as at the old budget
         self.bind()
         token = self.pass_()
         with db.tx(self.conn):

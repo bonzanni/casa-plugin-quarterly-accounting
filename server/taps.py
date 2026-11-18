@@ -151,7 +151,8 @@ def verdict(conn, render_id, action, pid, key, doc_id=None) -> dict:
             return {"receipt": _all_good_receipt(scope, ds, lines, tail),
                     "applied": applied}
         lines += tail
-    return {"receipt": views.fit_message(lines), "applied": applied}
+    return {"receipt": views.fit_message(lines, limit=views.receipt_limit()),
+            "applied": applied}
 
 
 def _all_good_receipt(scope, ds, lines, tail) -> str:
@@ -171,7 +172,7 @@ def _all_good_receipt(scope, ds, lines, tail) -> str:
     head = [views.title(f"Confirmed {n} {'match' if n == 1 else 'matches'}")]
     for k in range(n, -1, -1):
         out = head + rows[:k] + ([f"… and {n - k} more confirmed."] if k < n else []) + tail
-        if views.utf16_len("\n".join(out)) <= views.BODY_LIMIT:
+        if views.fits_body("\n".join(out), views.receipt_limit()):
             return "\n".join(out)
     return head[0]
 
@@ -197,9 +198,10 @@ def _show(conn, render_id, view, pid=None) -> dict:
         # The receipt never reads like the card's opening: a quote of it binds
         # nothing it did not show
         return {"receipt": SHOW_RECEIPT[view], "next": json.loads(value), "in_place": True}
-    if pages:
-        # a list longer than one message cannot be one answer (a clipped one
-        # bound what it never showed); the desk posts it whole, page by page
+    if pages or not views.fits_body(lst["text"], views.receipt_limit()):
+        # a list longer than one message — or than the receipt Casa posts whole — cannot be
+        # one answer (a clipped one bound what it never showed); the desk posts it whole,
+        # page by page
         return {"receipt": f"Too long for one message — ask me to {SHOW_SAY[view]} and I'll "
                            "post it all."}
     conn.execute("UPDATE renders SET posted_seq=? WHERE render_id=?", (db.next_seq(conn), rid))
@@ -223,10 +225,11 @@ def _answer(conn, receipt, next_rid, in_place=False) -> dict:
             # one plain message (stamped posted, so a reply quoting it binds)
             # the rendering holds the whole message as sent, so a quote of
             # it binds
-            receipt, next_rid = views.fit_message(f"{receipt}\n\n{r['text']}"), None
+            receipt, next_rid = views.fit_message(f"{receipt}\n\n{r['text']}",
+                                                  limit=views.receipt_limit()), None
             conn.execute("UPDATE renders SET text=?, posted_seq=? WHERE render_id=?",
                          (receipt, db.next_seq(conn), r["render_id"]))
-    out = {"receipt": views.fit_message(receipt)}
+    out = {"receipt": views.fit_message(receipt, limit=views.receipt_limit())}
     if next_rid is not None:
         out["next"] = cards.deposit_of(conn, next_rid)
         if in_place:
@@ -502,7 +505,8 @@ def apply_reading(conn, reading_id, key) -> dict:
         conn.execute("UPDATE readings SET state='applied', settled_at=? WHERE reading_id=?",
                      (db.now(), reading_id))
         lines = out["receipt"] + reply.package_lines(conn, out["quarters"])
-    return {"receipt": views.fit_message(lines, views.FIT_CLOSING)}
+    return {"receipt": views.fit_message(lines, views.FIT_CLOSING,
+                                         limit=views.receipt_limit())}
 
 
 def cancel_reading(conn, reading_id, key) -> dict:

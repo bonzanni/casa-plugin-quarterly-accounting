@@ -51,8 +51,9 @@ class Bucketing(_Uncl):
                                                   quarter="2026-Q3")["text"])
         lines = text.split("\n")
         self.assertIn("Waiting on the bank", lines)
-        self.assertTrue(lines[lines.index("Waiting on the bank") + 1].startswith(
-            "Loonadministratie NL · EUR 1,480.00"), text)
+        # a table under its title: a blank line, the header row, then the payment's row
+        self.assertTrue(lines[lines.index("Waiting on the bank") + 3].startswith(
+            "Loonadministratie NL | EUR 1,480.00"), text)
         with db.tx(self.conn):
             rid = cards.compose_open(self.conn, "2026-Q3")
         card = views.displayed(self.render_text(rid))
@@ -73,7 +74,7 @@ class Bucketing(_Uncl):
                                                   quarter="2026-Q3")["text"])
         lines = text.split("\n")
         at = lines.index("Waiting on the bank")
-        self.assertEqual(sum(1 for ln in lines[at + 1:at + 3]
+        self.assertEqual(sum(1 for ln in lines[at + 3:at + 5]
                              if ln.startswith("Loonadministratie NL")), 2, text)
         self.assertNotIn("nice-to-have", text)
         self.assertNotIn("Everything matched cleanly.", text)
@@ -116,7 +117,7 @@ class Bucketing(_Uncl):
         self.assertNotIn("Everything matched cleanly.", text)
         older = views.displayed(views.build_review(self.conn, view="older",
                                                    quarter="2026-Q3")["text"])
-        self.assertIn("Old one · EUR 5.00 · 30 Jun · pending · Q2 2026", older)
+        self.assertIn("Old one | EUR 5.00 | 30 Jun | pending · Q2 2026", older)
         self.assertIn("Waiting on the bank.", older)
         self.assertNotIn("what is it?", older)
 
@@ -155,7 +156,7 @@ class Bucketing(_Uncl):
         self.assertNotIn("Everything matched cleanly.", text)
         older = views.displayed(views.build_review(self.conn, view="older",
                                                    quarter="2026-Q3")["text"])
-        self.assertIn("Old tax · EUR 5.00 · 30 Jun", older)
+        self.assertIn("Old tax | EUR 5.00 | 30 Jun", older)
         self.assertIn("Waiting on the bank.", older)
 
     def test_a_nice_to_have_is_not_everything(self):

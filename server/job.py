@@ -146,8 +146,10 @@ def next_unit(conn, token) -> dict:
 
 # --- the job posts its own results -------------------------------------------
 OFFER_MAX = 2              # hand-outs of one rendering per run (a broken channel)
-POST_MAX = 3               # renderings per post: 3 × BODY_LIMIT + label < 12,000
-POST_CHARS = 11_900        # a post's joined text: 12,000 minus the label
+POST_MAX = 3               # renderings one post may join, within POST_CHARS together
+# Casa's MAX_MESSAGE_CHARS 12,000 for an operator_message body, less room for the label line
+# (= views.BODY_LIMIT: one rendering always fits one post; longer joins are refused)
+POST_CHARS = 11_900
 
 
 def offers(conn, render_id, job_id) -> int:

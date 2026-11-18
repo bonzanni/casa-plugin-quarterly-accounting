@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """The plugin's side of the Casa gate's quote check: for each {"store",
-"quote"} read from stdin (JSON list), views.bound_rendering on that store copy; prints a
-JSON list of {"render_id"} or {"refused": <line>}. Stdlib only, run in a process of its own
-with only the plugin's server/ on the path (Casa's modules would shadow the plugin's)."""
+"quote", "expect"} read from stdin (JSON list), views.bound_rendering on that store copy;
+prints a JSON list of {"render_id", "same_facts"} or {"refused": <line>}. `same_facts`: the
+rendering bound has the binding facts of `expect` (views.binding_facts) — a quote Casa clipped
+before two renderings differ binds the lowest of them, which commits the same. Stdlib only,
+run in a process of its own with only the plugin's server/ on the path (Casa's modules would
+shadow the plugin's)."""
 import json
 import pathlib
 import sqlite3
@@ -19,7 +22,11 @@ def main() -> int:
         conn.row_factory = sqlite3.Row
         try:
             r = views.bound_rendering(conn, item["quote"])
-            out.append({"render_id": r["render_id"] if r is not None else None})
+            want = conn.execute("SELECT * FROM renders WHERE render_id=?",
+                                (item.get("expect"),)).fetchone()
+            out.append({"render_id": r["render_id"] if r is not None else None,
+                        "same_facts": r is not None and want is not None
+                        and views.binding_facts(conn, r) == views.binding_facts(conn, want)})
         except views.QuoteRefusal as exc:
             out.append({"refused": exc.line})
         finally:
