@@ -14,6 +14,8 @@ import db
 
 TOOLS: dict = {}
 PROTOCOL_VERSION = "2024-11-05"
+CALL_ID_META = "claudecode/toolUseId"
+CALL_ID_MAX = 128
 
 
 def register(name: str, description: str, schema: dict):
@@ -38,6 +40,14 @@ def _render(out) -> str:
     return budget.render(out)
 
 
+def _call_id(params: dict) -> str | None:
+    """The tool call's id from the request's metadata: a non-empty string of at most
+    CALL_ID_MAX characters, else None."""
+    meta = params.get("_meta")
+    found = meta.get(CALL_ID_META) if isinstance(meta, dict) else None
+    return found if isinstance(found, str) and 0 < len(found) <= CALL_ID_MAX else None
+
+
 def handle(req: dict) -> dict | None:
     method, id_ = req.get("method"), req.get("id")
     if method == "initialize":
@@ -58,6 +68,8 @@ def handle(req: dict) -> dict | None:
         if tool is None:
             return _error(id_, -32601, f"unknown tool {params.get('name')!r}")
         import budget
+        import casa_broker
+        casa_broker.CALL_ID = _call_id(params)     # this call's deposits name it
         try:
             out, is_error = tool["fn"](params.get("arguments") or {}), False
             content = (list(out) if isinstance(out, budget.Blocks)
@@ -67,6 +79,8 @@ def handle(req: dict) -> dict | None:
         except Exception as exc:                       # surfaced, never swallowed
             content = [{"type": "text", "text": f"error: {type(exc).__name__}: {exc}"}]
             is_error = True
+        finally:
+            casa_broker.CALL_ID = None
         payload = {"content": content}
         if is_error:
             payload["isError"] = True

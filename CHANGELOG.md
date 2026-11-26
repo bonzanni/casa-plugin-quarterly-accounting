@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.1
+
+Same store schema (17). Works with the Casa versions 0.14.0 works with.
+
+- **What the plugin hands to Casa says which tool call it belongs to.** Each value the
+  plugin deposits with Casa now names the call it was made in, so Casa can tell the calls
+  apart when several of its sessions use the plugin at the same time. A Casa that does not
+  read it ignores it, and a call that carries no id sends exactly what it sent before.
+
 ## 0.14.0
 
 Needs Casa 0.376.0: an older Casa shows the tables as raw text and refuses the longer cards.
