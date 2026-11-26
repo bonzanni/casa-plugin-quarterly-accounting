@@ -18,7 +18,9 @@ JSON string; a file as its path). Nothing Casa sends back is echoed: a reference
 must have Casa's exact shape, and an error must look like one of Casa's codes, or
 it is reported by a fixed label. `key` (Casa #1312): a delivery Casa already made under
 that key is not sent again — Casa answers the original receipt (an older Casa ignores the
-member). Standard library only.
+member). `tool_use_id`: the id of the tool call the deposit is made in, when the server
+has one (`CALL_ID`), so Casa can tell apart calls from several sessions at once (an older
+Casa ignores the member); without one the member is left out. Standard library only.
 """
 
 from __future__ import annotations
@@ -36,6 +38,10 @@ DEPOSIT_ROUTE = "/internal/broker/deposit"
 TIMEOUT_S = 10.0
 MAX_RESPONSE_BYTES = 64 * 1024
 _CODE_RE = re.compile(r"^[a-z][a-z_]{0,39}$")
+
+# The id of the tool call being handled, set by the server for that call only (calls are
+# handled one at a time); None outside a call or when the request carried none.
+CALL_ID: str | None = None
 
 
 class DepositFailed(Exception):
@@ -79,6 +85,8 @@ def deposit(slot: str, value: str, *, caption=None, label=None, kind=None,
                  ("filename", filename), ("key", key)):
         if v is not None:
             body[k] = v
+    if CALL_ID is not None:
+        body["tool_use_id"] = CALL_ID
     conn = _UnixHTTP(path)
     try:
         conn.request("POST", DEPOSIT_ROUTE,
